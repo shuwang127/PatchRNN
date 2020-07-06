@@ -1,0 +1,73 @@
+commit 7f9eabdd902678b82d9a043d931ca31e2e3c4f2f
+Author: Vitezslav Cizek <vcizek@suse.com>
+Date:   Mon Mar 4 19:40:54 2013 -0500
+
+    Fix possible DOS on specially crafted .htpasswd, CVE-2012-5640
+    
+    A local attacker with the ability to alter .htpasswd files could
+    cause a Denial of Service in thttpd by specially-crafting them,
+    with for exampe:
+    
+    $ echo 'foo:$2a$a875CeSLbja8w' >> .htpasswd
+    
+    Authenticating then triggers a seg fault in thttpd.
+    
+    X-opensuse-Bug: 783165
+    X-opensuse-Bug-URL: https://bugzilla.novell.com/show_bug.cgi?id=783165
+    Reported-by:  Matthias Weckbecker <mweckbecker@suse.com>
+    Patch-by: Vitezslav Cizek <vcizek@suse.com>
+    Signed-off-by: Anthony G. Basile <blueness@gentoo.org>
+
+diff --git a/extras/htpasswd.c b/extras/htpasswd.c
+index 8daf818..ce008ac 100644
+--- a/extras/htpasswd.c
++++ b/extras/htpasswd.c
+@@ -136,7 +136,10 @@ add_password( char* user, FILE* f )
+     (void) srandom( (int) time( (time_t*) 0 ) );
+     to64( &salt[0], random(), 2 );
+     cpw = crypt( pw, salt );
+-    (void) fprintf( f, "%s:%s\n", user, cpw );
++    if (cpw)
++        (void) fprintf( f, "%s:%s\n", user, cpw );
++    else
++        (void) fprintf( stderr, "crypt() returned NULL, sorry\n" );
+     }
+ 
+ static void usage(void) {
+diff --git a/src/libhttpd.c b/src/libhttpd.c
+index 3aebf72..6c02ac1 100644
+--- a/src/libhttpd.c
++++ b/src/libhttpd.c
+@@ -1017,6 +1017,7 @@ auth_check2( httpd_conn* hc, char* dirname  )
+     static size_t maxprevuser = 0;
+     static char* prevcryp;
+     static size_t maxprevcryp = 0;
++    char *crypt_result;
+ 
+     /* Construct auth filename. */
+     httpd_realloc_str(
+@@ -1063,7 +1064,10 @@ auth_check2( httpd_conn* hc, char* dirname  )
+ 	 strcmp( authinfo, prevuser ) == 0 )
+ 	{
+ 	/* Yes.  Check against the cached encrypted password. */
+-	if ( strcmp( crypt( authpass, prevcryp ), prevcryp ) == 0 )
++        crypt_result = crypt( authpass, prevcryp );
++        if ( ! crypt_result )
++            return -1;
++	if ( strcmp( crypt_result, prevcryp ) == 0 )
+ 	    {
+ 	    /* Ok! */
+ 	    httpd_realloc_str(
+@@ -1112,7 +1116,10 @@ auth_check2( httpd_conn* hc, char* dirname  )
+ 	    /* Yes. */
+ 	    (void) fclose( fp );
+ 	    /* So is the password right? */
+-	    if ( strcmp( crypt( authpass, cryp ), cryp ) == 0 )
++            crypt_result = crypt( authpass, cryp );
++            if ( ! crypt_result )
++                return -1;
++	    if ( strcmp( crypt_result, cryp ) == 0 )
+ 		{
+ 		/* Ok! */
+ 		httpd_realloc_str(
+

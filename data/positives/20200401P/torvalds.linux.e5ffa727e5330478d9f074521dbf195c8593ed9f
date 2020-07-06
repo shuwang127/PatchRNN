@@ -1,0 +1,104 @@
+commit e5ffa727e5330478d9f074521dbf195c8593ed9f
+Author: Thierry Reding <treding@nvidia.com>
+Date:   Mon Jan 30 21:03:07 2017 +0100
+
+    drm/nouveau/imem/gk20a: Turn instmem lock into mutex
+    
+    The gk20a implementation of instance memory uses vmap()/vunmap() to map
+    memory regions into the kernel's virtual address space. These functions
+    may sleep, so protecting them by a spin lock is not safe. This triggers
+    a warning if the DEBUG_ATOMIC_SLEEP Kconfig option is enabled. Fix this
+    by using a mutex instead.
+    
+    Signed-off-by: Thierry Reding <treding@nvidia.com>
+    Reviewed-by: Alexandre Courbot <acourbot@nvidia.com>
+    Tested-by: Alexandre Courbot <acourbot@nvidia.com>
+    Signed-off-by: Ben Skeggs <bskeggs@redhat.com>
+
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/instmem/gk20a.c b/drivers/gpu/drm/nouveau/nvkm/subdev/instmem/gk20a.c
+index 9dec58ec3d9f..cd5adbec5e57 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/instmem/gk20a.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/instmem/gk20a.c
+@@ -94,7 +94,7 @@ struct gk20a_instmem {
+ 	struct nvkm_instmem base;
+ 
+ 	/* protects vaddr_* and gk20a_instobj::vaddr* */
+-	spinlock_t lock;
++	struct mutex lock;
+ 
+ 	/* CPU mappings LRU */
+ 	unsigned int vaddr_use;
+@@ -184,11 +184,10 @@ gk20a_instobj_acquire_iommu(struct nvkm_memory *memory)
+ 	struct gk20a_instmem *imem = node->base.imem;
+ 	struct nvkm_ltc *ltc = imem->base.subdev.device->ltc;
+ 	const u64 size = nvkm_memory_size(memory);
+-	unsigned long flags;
+ 
+ 	nvkm_ltc_flush(ltc);
+ 
+-	spin_lock_irqsave(&imem->lock, flags);
++	mutex_lock(&imem->lock);
+ 
+ 	if (node->base.vaddr) {
+ 		if (!node->use_cpt) {
+@@ -216,7 +215,7 @@ gk20a_instobj_acquire_iommu(struct nvkm_memory *memory)
+ 
+ out:
+ 	node->use_cpt++;
+-	spin_unlock_irqrestore(&imem->lock, flags);
++	mutex_unlock(&imem->lock);
+ 
+ 	return node->base.vaddr;
+ }
+@@ -239,9 +238,8 @@ gk20a_instobj_release_iommu(struct nvkm_memory *memory)
+ 	struct gk20a_instobj_iommu *node = gk20a_instobj_iommu(memory);
+ 	struct gk20a_instmem *imem = node->base.imem;
+ 	struct nvkm_ltc *ltc = imem->base.subdev.device->ltc;
+-	unsigned long flags;
+ 
+-	spin_lock_irqsave(&imem->lock, flags);
++	mutex_lock(&imem->lock);
+ 
+ 	/* we should at least have one user to release... */
+ 	if (WARN_ON(node->use_cpt == 0))
+@@ -252,7 +250,7 @@ gk20a_instobj_release_iommu(struct nvkm_memory *memory)
+ 		list_add_tail(&node->vaddr_node, &imem->vaddr_lru);
+ 
+ out:
+-	spin_unlock_irqrestore(&imem->lock, flags);
++	mutex_unlock(&imem->lock);
+ 
+ 	wmb();
+ 	nvkm_ltc_invalidate(ltc);
+@@ -306,19 +304,18 @@ gk20a_instobj_dtor_iommu(struct nvkm_memory *memory)
+ 	struct gk20a_instmem *imem = node->base.imem;
+ 	struct device *dev = imem->base.subdev.device->dev;
+ 	struct nvkm_mm_node *r = node->base.mem.mem;
+-	unsigned long flags;
+ 	int i;
+ 
+ 	if (unlikely(!r))
+ 		goto out;
+ 
+-	spin_lock_irqsave(&imem->lock, flags);
++	mutex_lock(&imem->lock);
+ 
+ 	/* vaddr has already been recycled */
+ 	if (node->base.vaddr)
+ 		gk20a_instobj_iommu_recycle_vaddr(node);
+ 
+-	spin_unlock_irqrestore(&imem->lock, flags);
++	mutex_unlock(&imem->lock);
+ 
+ 	/* clear IOMMU bit to unmap pages */
+ 	r->offset &= ~BIT(imem->iommu_bit - imem->iommu_pgshift);
+@@ -571,7 +568,7 @@ gk20a_instmem_new(struct nvkm_device *device, int index,
+ 	if (!(imem = kzalloc(sizeof(*imem), GFP_KERNEL)))
+ 		return -ENOMEM;
+ 	nvkm_instmem_ctor(&gk20a_instmem, device, index, &imem->base);
+-	spin_lock_init(&imem->lock);
++	mutex_init(&imem->lock);
+ 	*pimem = &imem->base;
+ 
+ 	/* do not allow more than 1MB of CPU-mapped instmem */
+

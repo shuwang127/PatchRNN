@@ -1,0 +1,50 @@
+commit 858a13d06402d3d6e2dc683f6696c14192ad6b02
+Author: Stephan Bosch <stephan@rename-it.nl>
+Date:   Sun Sep 15 03:27:31 2013 +0300
+
+    lib-http: http-client: Fixed pipelining when payload synchronizatio (100-continue) is used.
+    Forgot to lock the connection output, which meant that new requests would
+    enqueued for the connection while waiting for 100 Continue. This would
+    cause an assert failure.
+
+diff --git a/src/lib-http/http-client-connection.c b/src/lib-http/http-client-connection.c
+index 7d8e92732..4ad020346 100644
+--- a/src/lib-http/http-client-connection.c
++++ b/src/lib-http/http-client-connection.c
+@@ -552,7 +552,7 @@ static void http_client_connection_input(struct connection *_conn)
+ 			if (conn->payload_continue) {
+ 				http_client_connection_debug(conn,
+ 					"Got 100-continue response after timeout");
+-				return;
++				continue;
+ 			}
+ 			conn->peer->no_payload_sync = FALSE;
+ 			conn->peer->seen_100_response = TRUE;
+@@ -583,11 +583,14 @@ static void http_client_connection_input(struct connection *_conn)
+ 		http_client_request_unref(&req);
+ 		
+ 		conn->close_indicated = response->connection_close;
++		if (req->payload_sync && !conn->payload_continue)
++			conn->output_locked = FALSE;	
+ 
+ 		if (!aborted) {
+ 			if (response->status == 417 && req->payload_sync) {
+ 				/* drop Expect: continue */
+ 				req->payload_sync = FALSE;
++				conn->output_locked = FALSE;
+ 				conn->peer->no_payload_sync = TRUE;
+ 				http_client_request_retry(req, response->status, response->reason);
+ 				return;
+diff --git a/src/lib-http/http-client-request.c b/src/lib-http/http-client-request.c
+index 9b4705914..0d01d42e3 100644
+--- a/src/lib-http/http-client-request.c
++++ b/src/lib-http/http-client-request.c
+@@ -415,6 +415,7 @@ static int http_client_request_send_real(struct http_client_request *req,
+ 				ret = -1;
+ 		} else {
+ 			http_client_request_debug(req, "Waiting for 100-continue");
++			conn->output_locked = TRUE;
+ 		}
+ 	} else {
+ 		req->state = HTTP_REQUEST_STATE_WAITING;
+

@@ -1,0 +1,99 @@
+commit 99fc1bc48f352185f1711795f0829bbf503c0712
+Author: Wentao Xu <wentaox@codeaurora.org>
+Date:   Mon Jun 22 11:53:42 2015 -0400
+
+    drm/msm: change to uninterruptible wait in atomic commit
+    
+    The atomic commit cannot easily undo and return an error once the
+    state is swapped. Change to uninterruptible wait, and ignore the
+    timeout error.
+    
+    Signed-off-by: Wentao Xu <wentaox@codeaurora.org>
+    Signed-off-by: Rob Clark <robdclark@gmail.com>
+
+diff --git a/drivers/gpu/drm/msm/msm_atomic.c b/drivers/gpu/drm/msm/msm_atomic.c
+index 1b22d8bfe142..1ceb4f22dd89 100644
+--- a/drivers/gpu/drm/msm/msm_atomic.c
++++ b/drivers/gpu/drm/msm/msm_atomic.c
+@@ -283,12 +283,8 @@ int msm_atomic_commit(struct drm_device *dev,
+ 
+ 	timeout = ktime_add_ms(ktime_get(), 1000);
+ 
+-	ret = msm_wait_fence_interruptable(dev, c->fence, &timeout);
+-	if (ret) {
+-		WARN_ON(ret);  // TODO unswap state back?  or??
+-		commit_destroy(c);
+-		return ret;
+-	}
++	/* uninterruptible wait */
++	msm_wait_fence(dev, c->fence, &timeout, false);
+ 
+ 	complete_commit(c);
+ 
+diff --git a/drivers/gpu/drm/msm/msm_drv.c b/drivers/gpu/drm/msm/msm_drv.c
+index b7ef56ed8d1c..d3467b115e04 100644
+--- a/drivers/gpu/drm/msm/msm_drv.c
++++ b/drivers/gpu/drm/msm/msm_drv.c
+@@ -637,8 +637,8 @@ static void msm_debugfs_cleanup(struct drm_minor *minor)
+  * Fences:
+  */
+ 
+-int msm_wait_fence_interruptable(struct drm_device *dev, uint32_t fence,
+-		ktime_t *timeout)
++int msm_wait_fence(struct drm_device *dev, uint32_t fence,
++		ktime_t *timeout , bool interruptible)
+ {
+ 	struct msm_drm_private *priv = dev->dev_private;
+ 	int ret;
+@@ -667,7 +667,12 @@ int msm_wait_fence_interruptable(struct drm_device *dev, uint32_t fence,
+ 			remaining_jiffies = timespec_to_jiffies(&ts);
+ 		}
+ 
+-		ret = wait_event_interruptible_timeout(priv->fence_event,
++		if (interruptible)
++			ret = wait_event_interruptible_timeout(priv->fence_event,
++				fence_completed(dev, fence),
++				remaining_jiffies);
++		else
++			ret = wait_event_timeout(priv->fence_event,
+ 				fence_completed(dev, fence),
+ 				remaining_jiffies);
+ 
+@@ -853,7 +858,7 @@ static int msm_ioctl_wait_fence(struct drm_device *dev, void *data,
+ 		return -EINVAL;
+ 	}
+ 
+-	return msm_wait_fence_interruptable(dev, args->fence, &timeout);
++	return msm_wait_fence(dev, args->fence, &timeout, true);
+ }
+ 
+ static const struct drm_ioctl_desc msm_ioctls[] = {
+diff --git a/drivers/gpu/drm/msm/msm_drv.h b/drivers/gpu/drm/msm/msm_drv.h
+index e7c5ea125d45..4ff0ec9c994b 100644
+--- a/drivers/gpu/drm/msm/msm_drv.h
++++ b/drivers/gpu/drm/msm/msm_drv.h
+@@ -164,8 +164,8 @@ int msm_atomic_commit(struct drm_device *dev,
+ 
+ int msm_register_mmu(struct drm_device *dev, struct msm_mmu *mmu);
+ 
+-int msm_wait_fence_interruptable(struct drm_device *dev, uint32_t fence,
+-		ktime_t *timeout);
++int msm_wait_fence(struct drm_device *dev, uint32_t fence,
++		ktime_t *timeout, bool interruptible);
+ int msm_queue_fence_cb(struct drm_device *dev,
+ 		struct msm_fence_cb *cb, uint32_t fence);
+ void msm_update_fence(struct drm_device *dev, uint32_t fence);
+diff --git a/drivers/gpu/drm/msm/msm_gem.c b/drivers/gpu/drm/msm/msm_gem.c
+index f211b80e3a1e..c76cc853b08a 100644
+--- a/drivers/gpu/drm/msm/msm_gem.c
++++ b/drivers/gpu/drm/msm/msm_gem.c
+@@ -460,7 +460,7 @@ int msm_gem_cpu_prep(struct drm_gem_object *obj, uint32_t op, ktime_t *timeout)
+ 		if (op & MSM_PREP_NOSYNC)
+ 			timeout = NULL;
+ 
+-		ret = msm_wait_fence_interruptable(dev, fence, timeout);
++		ret = msm_wait_fence(dev, fence, timeout, true);
+ 	}
+ 
+ 	/* TODO cache maintenance */
+

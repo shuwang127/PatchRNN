@@ -1,0 +1,97 @@
+commit 9d88883e68f404d5581bd391713ceef470ea53a9
+Author: NeilBrown <neilb@suse.de>
+Date:   Tue Nov 8 21:39:26 2005 -0800
+
+    [PATCH] md: teach raid5 the difference between 'check' and 'repair'.
+    
+    With this, raid5 can be asked to check parity without repairing it.  It also
+    keeps a count of the number of incorrect parity blocks found (mismatches) and
+    reports them through sysfs.
+    
+    Signed-off-by: Neil Brown <neilb@suse.de>
+    Cc: Greg KH <greg@kroah.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index 37400873b879..e58d61d9f31b 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -1758,16 +1758,29 @@ md_store_scan(mddev_t *mddev, const char *page, size_t len)
+ 	return len;
+ }
+ 
++static ssize_t
++md_show_mismatch(mddev_t *mddev, char *page)
++{
++	return sprintf(page, "%llu\n",
++		       (unsigned long long) mddev->resync_mismatches);
++}
++
+ static struct md_sysfs_entry md_scan_mode = {
+ 	.attr = {.name = "scan_mode", .mode = S_IRUGO|S_IWUSR },
+ 	.show = md_show_scan,
+ 	.store = md_store_scan,
+ };
+ 
++static struct md_sysfs_entry md_mismatches = {
++	.attr = {.name = "mismatch_cnt", .mode = S_IRUGO },
++	.show = md_show_mismatch,
++};
++
+ static struct attribute *md_default_attrs[] = {
+ 	&md_level.attr,
+ 	&md_raid_disks.attr,
+ 	&md_scan_mode.attr,
++	&md_mismatches.attr,
+ 	NULL,
+ };
+ 
+@@ -3888,12 +3901,13 @@ static void md_do_sync(mddev_t *mddev)
+ 		}
+ 	} while (mddev->curr_resync < 2);
+ 
+-	if (test_bit(MD_RECOVERY_SYNC, &mddev->recovery))
++	if (test_bit(MD_RECOVERY_SYNC, &mddev->recovery)) {
+ 		/* resync follows the size requested by the personality,
+ 		 * which defaults to physical size, but can be virtual size
+ 		 */
+ 		max_sectors = mddev->resync_max_sectors;
+-	else
++		mddev->resync_mismatches = 0;
++	} else
+ 		/* recovery follows the physical size of devices */
+ 		max_sectors = mddev->size << 1;
+ 
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index 121fbaa9ed59..ce154553aca5 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -1292,6 +1292,11 @@ static void handle_stripe(struct stripe_head *sh)
+ 			    !memcmp(pagea, pagea+4, STRIPE_SIZE-4)) {
+ 				/* parity is correct (on disc, not in buffer any more) */
+ 				set_bit(STRIPE_INSYNC, &sh->state);
++			} else {
++				conf->mddev->resync_mismatches += STRIPE_SECTORS;
++				if (test_bit(MD_RECOVERY_CHECK, &conf->mddev->recovery))
++					/* don't try to repair!! */
++					set_bit(STRIPE_INSYNC, &sh->state);
+ 			}
+ 		}
+ 		if (!test_bit(STRIPE_INSYNC, &sh->state)) {
+diff --git a/include/linux/raid/md_k.h b/include/linux/raid/md_k.h
+index efd04dca0abd..cb8b44d1588b 100644
+--- a/include/linux/raid/md_k.h
++++ b/include/linux/raid/md_k.h
+@@ -175,6 +175,10 @@ struct mddev_s
+ 	sector_t			resync_mark_cnt;/* blocks written at resync_mark */
+ 
+ 	sector_t			resync_max_sectors; /* may be set by personality */
++
++	sector_t			resync_mismatches; /* count of sectors where
++							    * parity/replica mismatch found
++							    */
+ 	/* recovery/resync flags 
+ 	 * NEEDED:   we might need to start a resync/recover
+ 	 * RUNNING:  a thread is running, or about to be started
+

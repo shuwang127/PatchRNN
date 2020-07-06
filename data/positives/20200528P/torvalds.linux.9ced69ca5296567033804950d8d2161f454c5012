@@ -1,0 +1,50 @@
+commit 9ced69ca5296567033804950d8d2161f454c5012
+Author: Sean Hefty <sean.hefty@intel.com>
+Date:   Tue Jan 10 23:53:41 2012 +0000
+
+    RDMA/ucma: Discard all events for new connections until accepted
+    
+    After reporting a new connection request to user space, the rdma_ucm
+    will discard subsequent events until the user has associated a user
+    space idenfier with the kernel cm_id.  This is needed to avoid
+    reporting a reject/disconnect event to the user for a request that
+    they may not have processed.
+    
+    The user space identifier is set once the user tries to accept the
+    connection request.  However, the following race exists in ucma_accept():
+    
+            ctx->uid = cmd.uid;
+            <events may be reported now>
+            ret = rdma_accept(ctx->cm_id, ...);
+    
+    Once ctx->uid has been set, new events may be reported to the user.
+    While the above mentioned race is avoided, there is an issue that the
+    user _may_ receive a reject/disconnect event if rdma_accept() fails,
+    depending on when the event is processed.  To simplify the use of
+    rdma_accept(), discard all events unless rdma_accept() succeeds.
+    
+    This problem was discovered based on questions from Roland Dreier
+    <roland@purestorage.com>.
+    
+    Signed-off-by: Sean Hefty <sean.hefty@intel.com>
+    Signed-off-by: Roland Dreier <roland@purestorage.com>
+
+diff --git a/drivers/infiniband/core/ucma.c b/drivers/infiniband/core/ucma.c
+index b37b0c02a7b9..5034a87cc72d 100644
+--- a/drivers/infiniband/core/ucma.c
++++ b/drivers/infiniband/core/ucma.c
+@@ -808,9 +808,12 @@ static ssize_t ucma_accept(struct ucma_file *file, const char __user *inbuf,
+ 		return PTR_ERR(ctx);
+ 
+ 	if (cmd.conn_param.valid) {
+-		ctx->uid = cmd.uid;
+ 		ucma_copy_conn_param(&conn_param, &cmd.conn_param);
++		mutex_lock(&file->mut);
+ 		ret = rdma_accept(ctx->cm_id, &conn_param);
++		if (!ret)
++			ctx->uid = cmd.uid;
++		mutex_unlock(&file->mut);
+ 	} else
+ 		ret = rdma_accept(ctx->cm_id, NULL);
+ 
+

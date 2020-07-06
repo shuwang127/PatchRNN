@@ -1,0 +1,61 @@
+commit 0f8450b2fb0f3f21a1829254b19bd61c46d09ead
+Author: Vladislav Vaintroub <wlad@montyprogram.com>
+Date:   Tue Nov 27 00:45:29 2012 +0100
+
+    MDEV-3885 - connection suicide via mysql_kill() causes assertion in server
+    
+    Assertion happened because sql_kill did not set OK status in diagnostic area
+    in the case of connection suicide (id to kill == thd->thread_id), issued
+    via  COM_PROCESS_KILL , e.g using mysql_kill()
+    
+    This patch ensures that diagnostic area is initialized in this specific case.
+
+diff --git a/sql/sql_parse.cc b/sql/sql_parse.cc
+index d2eb6ae8d1f..087c7903dc7 100644
+--- a/sql/sql_parse.cc
++++ b/sql/sql_parse.cc
+@@ -6717,7 +6717,7 @@ void sql_kill(THD *thd, ulong id, killed_state state)
+   uint error;
+   if (!(error= kill_one_thread(thd, id, state)))
+   {
+-    if (! thd->killed)
++    if ((!thd->killed) || (thd->thread_id == id))
+       my_ok(thd);
+   }
+   else
+diff --git a/tests/mysql_client_test.c b/tests/mysql_client_test.c
+index 95fc61f2b72..285e5fd0aee 100644
+--- a/tests/mysql_client_test.c
++++ b/tests/mysql_client_test.c
+@@ -18554,6 +18554,22 @@ static void test_progress_reporting()
+   mysql_close(conn);
+ }
+ 
++/**
++  MDEV-3885 - connection suicide via mysql_kill() causes assertion in server
++*/
++
++static void test_mdev3885() 
++{
++  int rc;
++  MYSQL *conn;
++
++  myheader("test_mdev3885");
++  conn= client_connect(0, MYSQL_PROTOCOL_TCP, 0);
++  rc= mysql_kill(conn, mysql_thread_id(conn));
++  DIE_UNLESS(rc == 0);
++  mysql_close(conn);
++}
++
+ 
+ /**
+   Bug#57058 SERVER_QUERY_WAS_SLOW not wired up.
+@@ -19056,6 +19072,7 @@ static struct my_tests_st my_tests[]= {
+   { "test_bug58036", test_bug58036 },
+   { "test_bug57058", test_bug57058 },
+   { "test_bug56976", test_bug56976 },
++  { "test_mdev3855", test_mdev3885 },
+   { "test_bug11766854", test_bug11766854 },
+   { "test_bug12337762", test_bug12337762 },
+   { "test_progress_reporting", test_progress_reporting },
+

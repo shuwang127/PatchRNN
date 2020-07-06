@@ -1,0 +1,52 @@
+commit 8501786929de4616b10b8059ad97abd304a7dddf
+Author: Eric Dumazet <edumazet@google.com>
+Date:   Wed Apr 6 22:07:34 2016 -0700
+
+    tcp/dccp: fix inet_reuseport_add_sock()
+    
+    David Ahern reported panics in __inet_hash() caused by my recent commit.
+    
+    The reason is inet_reuseport_add_sock() was still using
+    sk_nulls_for_each_rcu() instead of sk_for_each_rcu().
+    SO_REUSEPORT enabled listeners were causing an instant crash.
+    
+    While chasing this bug, I found that I forgot to clear SOCK_RCU_FREE
+    flag, as it is inherited from the parent at clone time.
+    
+    Fixes: 3b24d854cb35 ("tcp/dccp: do not touch listener sk_refcnt under synflood")
+    Signed-off-by: Eric Dumazet <edumazet@google.com>
+    Reported-by: David Ahern <dsa@cumulusnetworks.com>
+    Tested-by: David Ahern <dsa@cumulusnetworks.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv4/inet_connection_sock.c b/net/ipv4/inet_connection_sock.c
+index bc5196ea1bdf..ab69da2d2a77 100644
+--- a/net/ipv4/inet_connection_sock.c
++++ b/net/ipv4/inet_connection_sock.c
+@@ -661,6 +661,9 @@ struct sock *inet_csk_clone_lock(const struct sock *sk,
+ 		inet_sk(newsk)->inet_sport = htons(inet_rsk(req)->ir_num);
+ 		newsk->sk_write_space = sk_stream_write_space;
+ 
++		/* listeners have SOCK_RCU_FREE, not the children */
++		sock_reset_flag(newsk, SOCK_RCU_FREE);
++
+ 		newsk->sk_mark = inet_rsk(req)->ir_mark;
+ 		atomic64_set(&newsk->sk_cookie,
+ 			     atomic64_read(&inet_rsk(req)->ir_cookie));
+diff --git a/net/ipv4/inet_hashtables.c b/net/ipv4/inet_hashtables.c
+index 98ba03b6f87d..fcadb670f50b 100644
+--- a/net/ipv4/inet_hashtables.c
++++ b/net/ipv4/inet_hashtables.c
+@@ -439,10 +439,9 @@ static int inet_reuseport_add_sock(struct sock *sk,
+ 						     bool match_wildcard))
+ {
+ 	struct sock *sk2;
+-	struct hlist_nulls_node *node;
+ 	kuid_t uid = sock_i_uid(sk);
+ 
+-	sk_nulls_for_each_rcu(sk2, node, &ilb->head) {
++	sk_for_each_rcu(sk2, &ilb->head) {
+ 		if (sk2 != sk &&
+ 		    sk2->sk_family == sk->sk_family &&
+ 		    ipv6_only_sock(sk2) == ipv6_only_sock(sk) &&
+

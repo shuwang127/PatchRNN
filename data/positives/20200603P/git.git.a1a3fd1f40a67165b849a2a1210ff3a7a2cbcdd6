@@ -1,0 +1,41 @@
+commit a1a3fd1f40a67165b849a2a1210ff3a7a2cbcdd6
+Author: Jeff King <peff@peff.net>
+Date:   Mon May 16 02:52:57 2011 -0400
+
+    send-pack: avoid deadlock on git:// push with failed pack-objects
+    
+    Commit 09c9957c fixes a deadlock in which pack-objects
+    fails, the remote end is still waiting for pack data, and we
+    are still waiting for the remote end to say something (see
+    that commit for a much more in-depth explanation).
+    
+    We solved the problem there by making sure the output pipe
+    is closed on error; thus the remote sees EOF, and proceeds
+    to complain and close its end of the connection.
+    
+    However, in the special case of push over git://, we don't
+    have a pipe, but rather a full-duplex socket, with another
+    dup()-ed descriptor in place of the second half of the pipe.
+    In this case, closing the second descriptor signals nothing
+    to the remote end, and we still deadlock.
+    
+    This patch calls shutdown() explicitly to signal EOF to the
+    other side.
+    
+    Signed-off-by: Jeff King <peff@peff.net>
+    Signed-off-by: Junio C Hamano <gitster@pobox.com>
+
+diff --git a/builtin-send-pack.c b/builtin-send-pack.c
+index dfd3d1105..eef19cb60 100644
+--- a/builtin-send-pack.c
++++ b/builtin-send-pack.c
+@@ -520,6 +520,8 @@ int send_pack(struct send_pack_args *args,
+ 				ref->status = REF_STATUS_NONE;
+ 			if (args->stateless_rpc)
+ 				close(out);
++			if (git_connection_is_socket(conn))
++				shutdown(fd[0], SHUT_WR);
+ 			if (use_sideband)
+ 				finish_async(&demux);
+ 			return -1;
+

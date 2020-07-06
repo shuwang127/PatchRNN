@@ -1,0 +1,355 @@
+commit 9a47e0502dac815bd592ed6493b43f6ff2b1eeb6
+Author: Stefan Hacker <dd0t@users.sourceforge.net>
+Date:   Mon Nov 4 23:29:30 2013 +0100
+
+    Fix multi-track recordings going out of alignment on long recordings
+    
+    Previously the wall clock was used to align speakers. As this didn't
+    allow for reliable detection of silence between outputs a heuristic
+    was used which only started adding silence after 100ms.
+    
+    This patch makes the mixer keep track of the absolute number of samples
+    requested from it. This number is then forwarded to the recorder with
+    each addBuffer to allow for sample precise alignment.
+    
+    To get the absolute sample number when starting the recording a thread-safe
+    way to retrieve this counter from the outside was added using a new
+    mixer lock.
+
+diff --git a/src/mumble/AudioOutput.cpp b/src/mumble/AudioOutput.cpp
+index f4a4145c..c03d98d4 100644
+--- a/src/mumble/AudioOutput.cpp
++++ b/src/mumble/AudioOutput.cpp
+@@ -100,18 +100,26 @@ bool AudioOutputRegistrar::canExclusive() const {
+ 	return false;
+ }
+ 
+-AudioOutput::AudioOutput() {
+-	iFrameSize = SAMPLE_RATE / 100;
+-	bRunning = true;
+-
+-	iChannels = 0;
+-	fSpeakers = NULL;
+-	fSpeakerVolume = NULL;
+-	bSpeakerPositional = NULL;
+-
+-	iMixerFreq = 0;
+-	eSampleFormat = SampleFloat;
+-	iSampleSize = 0;
++AudioOutput::AudioOutput()
++    : fSpeakers(NULL)
++    , fSpeakerVolume(NULL)
++    , bSpeakerPositional(NULL)
++    
++    , mixedSampleCount(0)
++    , mixingMutex()
++    , eSampleFormat(SampleFloat)
++    
++    , bRunning(true)
++    
++    , iFrameSize(SAMPLE_RATE / 100)
++    , iMixerFreq(0)
++    , iChannels(0)
++    , iSampleSize(0)
++    
++    , qrwlOutputs()
++    , qmOutputs() {
++	
++	// Nothing
+ }
+ 
+ AudioOutput::~AudioOutput() {
+@@ -356,11 +364,15 @@ void AudioOutput::initializeMixer(const unsigned int *chanmasks, bool forceheadp
+ }
+ 
+ bool AudioOutput::mix(void *outbuff, unsigned int nsamp) {
++	QMutexLocker mixingMutexLocker(&mixingMutex);
++	
+ 	QList<AudioOutputUser *> qlMix;
+ 	QList<AudioOutputUser *> qlDel;
+-
+-	if (g.s.fVolume < 0.01f)
++	
++	if (g.s.fVolume < 0.01f) {
++		mixedSampleCount += nsamp;
+ 		return false;
++	}
+ 
+ 	const float adjustFactor = std::pow(10, -18.f / 20);
+ 	const float mul = g.s.fVolume;
+@@ -502,7 +514,7 @@ bool AudioOutput::mix(void *outbuff, unsigned int nsamp) {
+ 
+ 					if (!recorder->getMixDown()) {
+ 						if (aos) {
+-							recorder->addBuffer(aos->p, recbuff, nsamp);
++							recorder->addBuffer(aos->p, recbuff, nsamp, mixedSampleCount);
+ 						} else {
+ 							// this should be unreachable
+ 							Q_ASSERT(false);
+@@ -560,7 +572,7 @@ bool AudioOutput::mix(void *outbuff, unsigned int nsamp) {
+ 		}
+ 
+ 		if (recorder && recorder->getMixDown()) {
+-			recorder->addBuffer(NULL, recbuff, nsamp);
++			recorder->addBuffer(NULL, recbuff, nsamp, mixedSampleCount);
+ 		}
+ 
+ 		// Clip
+@@ -576,7 +588,9 @@ bool AudioOutput::mix(void *outbuff, unsigned int nsamp) {
+ 
+ 	foreach(AudioOutputUser *aop, qlDel)
+ 		removeBuffer(aop);
+-
++	
++	mixedSampleCount += nsamp;
++	
+ 	return (! qlMix.isEmpty());
+ }
+ 
+@@ -587,3 +601,8 @@ bool AudioOutput::isAlive() const {
+ unsigned int AudioOutput::getMixerFreq() const {
+ 	return iMixerFreq;
+ }
++
++quint64 AudioOutput::getMixedSampleCount() const {
++	QMutexLocker mixingMutexLocker(&mixingMutex);
++	return mixedSampleCount;
++}
+diff --git a/src/mumble/AudioOutput.h b/src/mumble/AudioOutput.h
+index 6954127d..febef1d9 100644
+--- a/src/mumble/AudioOutput.h
++++ b/src/mumble/AudioOutput.h
+@@ -102,6 +102,10 @@ class AudioOutput : public QThread {
+ 		float *fSpeakers;
+ 		float *fSpeakerVolume;
+ 		bool *bSpeakerPositional;
++		/// Total number of samples mixed by this thread
++		quint64 mixedSampleCount;
++		/// Locked while mixing to protect mixedSampleCount
++		mutable QMutex mixingMutex;
+ 	protected:
+ 		enum { SampleShort, SampleFloat } eSampleFormat;
+ 		volatile bool bRunning;
+@@ -129,6 +133,8 @@ class AudioOutput : public QThread {
+ 		const float *getSpeakerPos(unsigned int &nspeakers);
+ 		static float calcGain(float dotproduct, float distance);
+ 		unsigned int getMixerFreq() const;
++		/// Returns the total number of samples mixed by this output thread
++		quint64 getMixedSampleCount() const;
+ };
+ 
+ #endif
+diff --git a/src/mumble/VoiceRecorder.cpp b/src/mumble/VoiceRecorder.cpp
+index 76abed59..ad3f1baf 100644
+--- a/src/mumble/VoiceRecorder.cpp
++++ b/src/mumble/VoiceRecorder.cpp
+@@ -41,12 +41,23 @@
+ 
+ #include "../Timer.h"
+ 
+-VoiceRecorder::RecordBuffer::RecordBuffer(const ClientUser *cu,
+-        boost::shared_array<float> buffer, int samples, quint64 timestamp) :
+-		cuUser(cu), fBuffer(buffer), iSamples(samples), uiTimestamp(timestamp) {
++VoiceRecorder::RecordBuffer::RecordBuffer(
++        const ClientUser *cu,
++        boost::shared_array<float> buffer,
++        int samples,
++        quint64 absoluteStartSample)
++
++    : cuUser(cu)
++    , fBuffer(buffer)
++    , iSamples(samples)
++    , absoluteStartSample(absoluteStartSample) {
++	
++	// Nothing
+ }
+ 
+-VoiceRecorder::RecordInfo::RecordInfo() : sf(NULL), uiLastPosition(0) {
++VoiceRecorder::RecordInfo::RecordInfo(quint64 lastWrittenAbsoluteSample)
++    : sf(NULL)
++    , lastWrittenAbsoluteSample(lastWrittenAbsoluteSample) {
+ }
+ 
+ VoiceRecorder::RecordInfo::~RecordInfo() {
+@@ -56,9 +67,17 @@ VoiceRecorder::RecordInfo::~RecordInfo() {
+ 	}
+ }
+ 
+-VoiceRecorder::VoiceRecorder(QObject *p) : QThread(p), recordUser(new RecordUser()),
+-		tTimestamp(new Timer()), iSampleRate(0), bRecording(false), bMixDown(false),
+-		fmFormat(VoiceRecorderFormat::WAV), qdtRecordingStart(QDateTime::currentDateTime()) {
++VoiceRecorder::VoiceRecorder(QObject *p)
++    : QThread(p)
++    , recordUser(new RecordUser())
++    , tTimestamp(new Timer())
++    , iSampleRate(0)
++    , bRecording(false)
++    , bMixDown(false)
++    , fmFormat(VoiceRecorderFormat::WAV)
++    , qdtRecordingStart(QDateTime::currentDateTime()) {
++	
++	// Nothing
+ }
+ 
+ VoiceRecorder::~VoiceRecorder() {
+@@ -260,7 +279,7 @@ void VoiceRecorder::run() {
+ 
+ 			// Create the file for this RecordInfo instance if it's not yet open.
+ 			boost::shared_ptr<RecordInfo> ri = qhRecordInfo.value(index);
+-			if (!ri->sf) {
++			if (ri->sf == NULL) {
+ 				QString filename = expandTemplateVariables(qsFileName, rb);
+ 
+ 				// Try to find a unique filename.
+@@ -306,23 +325,23 @@ void VoiceRecorder::run() {
+ 			}
+ 
+ 			// Calculate the difference between the time of the current buffer and the time where we last wrote audio data for that user.
+-			// Writes silence if the number of |missingSamples| is larger than a threshold of 100ms (to account for processing delay).
+-			qint64 missingSamples = ((rb->uiTimestamp - ri->uiLastPosition) * iSampleRate) / 1000000 - rb->iSamples;
+-			if (missingSamples > iSampleRate / 10) {
++			// Writes silence for all the missing samples.
++			const qint64 missingSamples = rb->absoluteStartSample - ri->lastWrittenAbsoluteSample;
++			if (missingSamples > 0) {
+ 				// Write |missingSamples| samples of silence.
+-				boost::scoped_array<float> buffer(new float[1024]);
+-				memset(buffer.get(), 0, sizeof(float) * 1024);
++				const float buffer[1024] = {};
++				
+ 				qint64 rest = missingSamples;
+ 				for (; rest > 1024; rest -= 1024)
+-					sf_write_float(ri->sf, buffer.get(), 1024);
++					sf_write_float(ri->sf, buffer, 1024);
+ 
+ 				if (rest > 0)
+-					sf_write_float(ri->sf, buffer.get(), rest);
++					sf_write_float(ri->sf, buffer, rest);
+ 			}
+ 
+ 			// Write the audio buffer and update the timestamp in |ri|.
+ 			sf_write_float(ri->sf, rb->fBuffer.get(), rb->iSamples);
+-			ri->uiLastPosition = rb->uiTimestamp;
++			ri->lastWrittenAbsoluteSample = rb->absoluteStartSample + rb->iSamples;
+ 		}
+ 
+ 		qmSleepLock.unlock();
+@@ -338,20 +357,21 @@ void VoiceRecorder::stop() {
+ 	qwcSleep.wakeAll();
+ }
+ 
+-void VoiceRecorder::addBuffer(const ClientUser *cu, boost::shared_array<float> buffer, int samples) {
++void VoiceRecorder::addBuffer(const ClientUser *cu, boost::shared_array<float> buffer, int samples, quint64 absoluteSampleCount) {
+ 	Q_ASSERT(!bMixDown || cu == NULL);
+ 
+ 	// Create a new RecordInfo object if this is a new user.
+ 	int index = bMixDown ? 0 : cu->uiSession;
+ 	if (!qhRecordInfo.contains(index)) {
+-		boost::shared_ptr<RecordInfo> ri = boost::make_shared<RecordInfo>();
++		boost::shared_ptr<RecordInfo> ri = boost::make_shared<RecordInfo>(m_firstSampleAbsolute);
++		
+ 		qhRecordInfo.insert(index, ri);
+ 	}
+ 
+ 	{
+ 		// Save the buffer in |qlRecordBuffer|.
+ 		QMutexLocker l(&qmBufferLock);
+-		boost::shared_ptr<RecordBuffer> rb = boost::make_shared<RecordBuffer>(cu, buffer, samples, tTimestamp->elapsed());
++		boost::shared_ptr<RecordBuffer> rb = boost::make_shared<RecordBuffer>(cu, buffer, samples, absoluteSampleCount);
+ 		qlRecordBuffer << rb;
+ 	}
+ 
+@@ -365,6 +385,12 @@ void VoiceRecorder::setSampleRate(int sampleRate) {
+ 	iSampleRate = sampleRate;
+ }
+ 
++void VoiceRecorder::setFirstSampleAbsolute(quint64 firstSampleAbsolute) {
++	Q_ASSERT(!bRecording);
++	
++	m_firstSampleAbsolute = firstSampleAbsolute;
++}
++
+ int VoiceRecorder::getSampleRate() const {
+ 	return iSampleRate;
+ }
+diff --git a/src/mumble/VoiceRecorder.h b/src/mumble/VoiceRecorder.h
+index a8ca8a1d..b9fe1f25 100644
+--- a/src/mumble/VoiceRecorder.h
++++ b/src/mumble/VoiceRecorder.h
+@@ -81,7 +81,10 @@ class VoiceRecorder : public QThread {
+ 		// Stores information about a recording buffer.
+ 		struct RecordBuffer {
+ 			// Constructs a new RecordBuffer object.
+-			explicit RecordBuffer(const ClientUser *cu, boost::shared_array<float> buffer, int samples, quint64 timestamp);
++			explicit RecordBuffer(const ClientUser *cu,
++				                  boost::shared_array<float> buffer,
++				                  int samples,
++				                  quint64 absoluteStartSample);
+ 
+ 			// The user to which this buffer belongs.
+ 			const ClientUser *cuUser;
+@@ -92,20 +95,20 @@ class VoiceRecorder : public QThread {
+ 			// The number of samples in the buffer.
+ 			int iSamples;
+ 
+-			// Timestamp for the buffer.
+-			quint64 uiTimestamp;
++			/// Absolute sample number at the start of this buffer
++			quint64 absoluteStartSample;
+ 		};
+ 
+ 		// Keep the recording state for one user.
+ 		struct RecordInfo {
+-			explicit RecordInfo();
++			explicit RecordInfo(quint64 lastWrittenAbsoluteSample);
+ 			~RecordInfo();
+ 
+ 			// libsndfile's handle.
+ 			SNDFILE *sf;
+ 
+-			// The timestamp where we last wrote audio data for this user.
+-			quint64 uiLastPosition;
++			/// The last absolute sample we wrote for this users
++			quint64 lastWrittenAbsoluteSample;
+ 		};
+ 
+ 		// Hash which maps the |uiSession| of all users for which we have to keep a recording state to the corresponding RecordInfo object.
+@@ -145,6 +148,8 @@ class VoiceRecorder : public QThread {
+ 		// The timestamp where the recording started.
+ 		const QDateTime qdtRecordingStart;
+ 
++		/// Absolute sample number which to consider the start of the recording
++		quint64 m_firstSampleAbsolute;
+ 
+ 		// Removes invalid characters in a path component.
+ 		QString sanitizeFilenameOrPathComponent(const QString &str) const;
+@@ -166,11 +171,15 @@ class VoiceRecorder : public QThread {
+ 		// Stops the main loop.
+ 		void stop();
+ 
+-		// Adds an audio buffer which contains |samples| audio samples to the recorder.
+-		void addBuffer(const ClientUser *cu, boost::shared_array<float> buffer, int samples);
++		/// Adds an audio buffer which contains |samples| audio samples to the recorder.
++		/// The audio data will be aligned using the given |absoluteSampleCount|
++		void addBuffer(const ClientUser *cu, boost::shared_array<float> buffer, int samples, quint64 absoluteSampleCount);
+ 
+ 		// Sets the sample rate of the recorder. The sample rate can't change while the recoder is active.
+ 		void setSampleRate(int sampleRate);
++		
++		/// Sets the absolute sample number considered the first sample of the recording
++		void setFirstSampleAbsolute(quint64 firstSampleAbsolute);
+ 
+ 		// Returns the current sample rate of the encoder.
+ 		int getSampleRate() const;
+diff --git a/src/mumble/VoiceRecorderDialog.cpp b/src/mumble/VoiceRecorderDialog.cpp
+index ecede42f..430dfc18 100644
+--- a/src/mumble/VoiceRecorderDialog.cpp
++++ b/src/mumble/VoiceRecorderDialog.cpp
+@@ -202,6 +202,7 @@ void VoiceRecorderDialog::on_qpbStart_clicked() {
+ 
+ 	// Configure it
+ 	recorder->setSampleRate(ao->getMixerFreq());
++	recorder->setFirstSampleAbsolute(ao->getMixedSampleCount());
+ 	recorder->setFileName(dir.absoluteFilePath(basename + QLatin1Char('.') + suffix));
+ 	recorder->setMixDown(qrbDownmix->isChecked());
+ 	recorder->setFormat(static_cast<VoiceRecorderFormat::Format>(ifm));
+

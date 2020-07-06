@@ -1,0 +1,109 @@
+commit 15e869d86ee349f5510cf93f6b61e3a5e415c35f
+Author: Mohamed Abbas <mabbas@linux.intel.com>
+Date:   Thu Oct 25 17:15:46 2007 +0800
+
+    [PATCH] iwl3945: cancel scan on rxon command
+    
+    This patch fixes the following for 3945:
+    1. Make sure we cancel scan if RXON command is called.
+    2. Call scan abort on scan watchdog.
+    
+    Signed-off-by: Mohamed Abbas <mabbas@linux.intel.com>
+    Signed-off-by: Zhu Yi <yi.zhu@intel.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/iwlwifi/iwl3945-base.c b/drivers/net/wireless/iwlwifi/iwl3945-base.c
+index 83019d1d7ccc..f1e19393a5f3 100644
+--- a/drivers/net/wireless/iwlwifi/iwl3945-base.c
++++ b/drivers/net/wireless/iwlwifi/iwl3945-base.c
+@@ -6478,8 +6478,9 @@ static void iwl_bg_scan_check(struct work_struct *data)
+ 		IWL_DEBUG(IWL_DL_INFO | IWL_DL_SCAN,
+ 			  "Scan completion watchdog resetting adapter (%dms)\n",
+ 			  jiffies_to_msecs(IWL_SCAN_CHECK_WATCHDOG));
++
+ 		if (!test_bit(STATUS_EXIT_PENDING, &priv->status))
+-			queue_work(priv->workqueue, &priv->restart);
++			iwl_send_scan_abort(priv);
+ 	}
+ 	mutex_unlock(&priv->mutex);
+ }
+@@ -6575,7 +6576,7 @@ static void iwl_bg_request_scan(struct work_struct *data)
+ 		spin_unlock_irqrestore(&priv->lock, flags);
+ 
+ 		scan->suspend_time = 0;
+-		scan->max_out_time = cpu_to_le32(600 * 1024);
++		scan->max_out_time = cpu_to_le32(200 * 1024);
+ 		if (!interval)
+ 			interval = suspend_time;
+ 		/*
+@@ -6744,6 +6745,8 @@ static void iwl_bg_post_associate(struct work_struct *data)
+ 
+ 	mutex_lock(&priv->mutex);
+ 
++	iwl_scan_cancel_timeout(priv, 200);
++
+ 	conf = ieee80211_get_hw_conf(priv->hw);
+ 
+ 	priv->staging_rxon.filter_flags &= ~RXON_FILTER_ASSOC_MSK;
+@@ -7169,8 +7172,6 @@ static int iwl_mac_config_interface(struct ieee80211_hw *hw, int if_id,
+ 		if (priv->iw_mode == IEEE80211_IF_TYPE_AP)
+ 			iwl_config_ap(priv);
+ 		else {
+-			priv->staging_rxon.filter_flags |=
+-						RXON_FILTER_ASSOC_MSK;
+ 			rc = iwl_commit_rxon(priv);
+ 			if ((priv->iw_mode == IEEE80211_IF_TYPE_STA) && rc)
+ 				iwl_add_station(priv,
+@@ -7178,6 +7179,7 @@ static int iwl_mac_config_interface(struct ieee80211_hw *hw, int if_id,
+ 		}
+ 
+ 	} else {
++		iwl_scan_cancel_timeout(priv, 100);
+ 		priv->staging_rxon.filter_flags &= ~RXON_FILTER_ASSOC_MSK;
+ 		iwl_commit_rxon(priv);
+ 	}
+@@ -7238,6 +7240,7 @@ static int iwl_mac_hw_scan(struct ieee80211_hw *hw, u8 *ssid, size_t len)
+ 
+ 	IWL_DEBUG_MAC80211("enter\n");
+ 
++	mutex_lock(&priv->mutex);
+ 	spin_lock_irqsave(&priv->lock, flags);
+ 
+ 	if (!iwl_is_ready_rf(priv)) {
+@@ -7276,6 +7279,7 @@ static int iwl_mac_hw_scan(struct ieee80211_hw *hw, u8 *ssid, size_t len)
+ 
+ out_unlock:
+ 	spin_unlock_irqrestore(&priv->lock, flags);
++	mutex_unlock(&priv->mutex);
+ 
+ 	return rc;
+ }
+@@ -7310,6 +7314,8 @@ static int iwl_mac_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+ 
+ 	mutex_lock(&priv->mutex);
+ 
++	iwl_scan_cancel_timeout(priv, 100);
++
+ 	switch (cmd) {
+ 	case  SET_KEY:
+ 		rc = iwl_update_sta_key_info(priv, key, sta_id);
+@@ -7479,8 +7485,18 @@ static void iwl_mac_reset_tsf(struct ieee80211_hw *hw)
+ 
+ 	spin_unlock_irqrestore(&priv->lock, flags);
+ 
++	/* we are restarting association process
++	 * clear RXON_FILTER_ASSOC_MSK bit
++	*/
++	if (priv->iw_mode != IEEE80211_IF_TYPE_AP) {
++		iwl_scan_cancel_timeout(priv, 100);
++		priv->staging_rxon.filter_flags &= ~RXON_FILTER_ASSOC_MSK;
++		iwl_commit_rxon(priv);
++	}
++
+ 	/* Per mac80211.h: This is only used in IBSS mode... */
+ 	if (priv->iw_mode != IEEE80211_IF_TYPE_IBSS) {
++
+ 		IWL_DEBUG_MAC80211("leave - not in IBSS\n");
+ 		mutex_unlock(&priv->mutex);
+ 		return;
+

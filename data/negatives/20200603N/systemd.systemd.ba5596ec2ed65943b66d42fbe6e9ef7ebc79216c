@@ -1,0 +1,75 @@
+commit ba5596ec2ed65943b66d42fbe6e9ef7ebc79216c
+Author: Tom Gundersen <teg@jklm.no>
+Date:   Fri Mar 28 18:20:31 2014 +0100
+
+    networkd: netdev - improve logging  when setting ifindex
+
+diff --git a/src/network/networkd-manager.c b/src/network/networkd-manager.c
+index 684b1c7ad..b2cb0fab4 100644
+--- a/src/network/networkd-manager.c
++++ b/src/network/networkd-manager.c
+@@ -323,12 +323,8 @@ static int manager_rtnl_process_link(sd_rtnl *rtnl, sd_rtnl_message *message, vo
+                 NetDev *netdev;
+ 
+                 r = netdev_get(m, name, &netdev);
+-                if (r >= 0) {
+-                        r = netdev_set_ifindex(netdev, message);
+-                        if (r < 0)
+-                                log_debug("could not set ifindex of netdev '%s' to %d: %s",
+-                                          name, ifindex, strerror(-r));
+-                }
++                if (r >= 0)
++                        netdev_set_ifindex(netdev, message);
+         }
+ 
+         r = link_get(m, ifindex, &link);
+diff --git a/src/network/networkd-netdev.c b/src/network/networkd-netdev.c
+index 15a5d7cdf..762eff2f6 100644
+--- a/src/network/networkd-netdev.c
++++ b/src/network/networkd-netdev.c
+@@ -146,6 +146,9 @@ static int netdev_enter_ready(NetDev *netdev) {
+         assert(netdev);
+         assert(netdev->name);
+ 
++        if (netdev->state != NETDEV_STATE_CREATING)
++                return 0;
++
+         netdev->state = NETDEV_STATE_READY;
+ 
+         log_info_netdev(netdev, "netdev ready");
+@@ -385,11 +388,15 @@ int netdev_set_ifindex(NetDev *netdev, sd_rtnl_message *message) {
+         assert(message);
+ 
+         r = sd_rtnl_message_get_type(message, &type);
+-        if (r < 0)
++        if (r < 0) {
++                log_error_netdev(netdev, "Could not get rtnl message type");
+                 return r;
++        }
+ 
+-        if (type != RTM_NEWLINK)
++        if (type != RTM_NEWLINK) {
++                log_error_netdev(netdev, "Can not set ifindex from unexpected rtnl message type");
+                 return -EINVAL;
++        }
+ 
+         r = sd_rtnl_message_enter_container(message, IFLA_LINKINFO);
+         if (r < 0) {
+@@ -427,11 +434,11 @@ int netdev_set_ifindex(NetDev *netdev, sd_rtnl_message *message) {
+                 return r;
+         }
+ 
+-        if (netdev->ifindex > 0) {
+-                if (netdev->ifindex == ifindex)
+-                        return 0;
+-                else
+-                        return -EEXIST;
++        if (netdev->ifindex > 0 && netdev->ifindex != ifindex) {
++                log_error_netdev(netdev, "Could not set ifindex to %d, already set to %d",
++                                 ifindex, netdev->ifindex);
++                netdev_enter_failed(netdev);
++                return -EEXIST;
+         }
+ 
+         netdev->ifindex = ifindex;
+

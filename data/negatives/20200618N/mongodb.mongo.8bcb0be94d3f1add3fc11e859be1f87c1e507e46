@@ -1,0 +1,88 @@
+commit 8bcb0be94d3f1add3fc11e859be1f87c1e507e46
+Author: Scott Hernandez <scotthernandez@gmail.com>
+Date:   Tue Oct 1 14:54:15 2013 -0400
+
+    SERVER-9590 SERVER-8069: make sure to validate $sort number for $push and remove old invalid tests
+
+diff --git a/src/mongo/db/ops/modifier_push.cpp b/src/mongo/db/ops/modifier_push.cpp
+index 45c93a8eff..4da720fc06 100644
+--- a/src/mongo/db/ops/modifier_push.cpp
++++ b/src/mongo/db/ops/modifier_push.cpp
+@@ -343,6 +343,12 @@ namespace mongo {
+                 _sort = PatternElementCmp(sortElem.embeddedObject());
+             }
+             else {
++                // Ensure the sortElem number is valid.
++                if (!isPatternElement(sortElem)) {
++                    return Status(ErrorCodes::BadValue,
++                                  "$sort elements' must be either 1 or -1");
++                }
++
+                 _sort = PatternElementCmp(BSON("" << sortElem.number()));
+             }
+ 
+diff --git a/src/mongo/dbtests/updatetests.cpp b/src/mongo/dbtests/updatetests.cpp
+index 7ef59c9d11..2e9bd65804 100644
+--- a/src/mongo/dbtests/updatetests.cpp
++++ b/src/mongo/dbtests/updatetests.cpp
+@@ -1469,21 +1469,6 @@ namespace UpdateTests {
+         }
+     };
+ 
+-    class PushSortInvalidBaseArray : public SetBase {
+-    public:
+-        void run() {
+-            BSONObj expected = fromjson( "{'_id':0,x:[1,2]}" );
+-            client().insert( ns(), expected );
+-            // { $push : { x : { $each : [ {a:3} ], $slice:-2, $sort : {a:1} } } }
+-            BSONObj pushObj = BSON( "$each" << BSON_ARRAY( BSON( "a" << 3 ) ) <<
+-                                    "$slice" << -2 <<
+-                                    "$sort" << BSON( "a" << 1 ) );
+-            client().update( ns(), Query(), BSON( "$push" << BSON( "x" << pushObj ) ) );
+-            BSONObj result = client().findOne( ns(), Query() );
+-            ASSERT_EQUALS( result, expected );
+-        }
+-    };
+-
+     class PushSortInvalidSortType : public SetBase {
+     public:
+         void run() {
+@@ -1606,21 +1591,6 @@ namespace UpdateTests {
+         }
+     };
+ 
+-    class PushSortInvalidMissingSliceTo : public SetBase {
+-    public:
+-        void run() {
+-            BSONObj expected = fromjson( "{'_id':0,x:[{a:1},{a:3}]}" );
+-            client().insert( ns(), expected );
+-            // { $push : { x : { $each : [ {a:2} ], $sort : {a:1} } } }
+-            BSONObj pushObj = BSON( "$each" << BSON_ARRAY( BSON( "a" << 2 ) ) <<
+-                                    "$sort" << BSON( "a" << 1 ) );
+-            client().update( ns(), Query(), BSON( "$push" << BSON( "x" << pushObj ) ) );
+-            BSONObj result = client().findOne( ns(), Query() );
+-            ASSERT_EQUALS( result, expected );
+-
+-        }
+-    };
+-
+     class CantIncParent : public SetBase {
+     public:
+         void run() {
+@@ -2022,7 +1992,6 @@ namespace UpdateTests {
+             add< PushSortSortNestedFields >();
+             add< PushSortInvalidSortPattern >();
+             add< PushSortInvalidEachType >();
+-            add< PushSortInvalidBaseArray >();
+             add< PushSortInvalidSortType >();
+             add< PushSortInvalidSortValue >();
+             add< PushSortInvalidSortDouble >();
+@@ -2031,7 +2000,6 @@ namespace UpdateTests {
+             add< PushSortInvalidSortSortOrder >();
+             add< PushSortInvertedSortAndSlice >();
+             add< PushSortInvalidDuplicatedSort >();
+-            add< PushSortInvalidMissingSliceTo >();
+             add< CantIncParent >();
+             add< DontDropEmpty >();
+             add< InsertInEmpty >();
+

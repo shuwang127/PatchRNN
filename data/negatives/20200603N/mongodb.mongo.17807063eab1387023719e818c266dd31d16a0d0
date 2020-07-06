@@ -1,0 +1,32 @@
+commit 17807063eab1387023719e818c266dd31d16a0d0
+Author: Misha Tyulenev <misha@mongodb.com>
+Date:   Fri Apr 28 15:54:52 2017 -0400
+
+    SERVER-29016: make ShardRegistry::reload interruptible
+
+diff --git a/src/mongo/s/client/shard_registry.cpp b/src/mongo/s/client/shard_registry.cpp
+index 623801dd75..dd14458ad9 100644
+--- a/src/mongo/s/client/shard_registry.cpp
++++ b/src/mongo/s/client/shard_registry.cpp
+@@ -267,7 +267,11 @@ bool ShardRegistry::reload(OperationContext* opCtx) {
+         // simultaneously because there is no good way to determine which of the threads has the
+         // more recent version of the data.
+         do {
+-            _inReloadCV.wait(reloadLock);
++            auto waitStatus = opCtx->waitForConditionOrInterruptNoAssert(_inReloadCV, reloadLock);
++            if (!waitStatus.isOK()) {
++                LOG(1) << "ShardRegistry reload is interrupted due to: " << redact(waitStatus);
++                return false;
++            }
+         } while (_reloadState == ReloadState::Reloading);
+ 
+         if (_reloadState == ReloadState::Idle) {
+@@ -290,7 +294,6 @@ bool ShardRegistry::reload(OperationContext* opCtx) {
+         _inReloadCV.notify_all();
+     });
+ 
+-
+     ShardRegistryData currData(opCtx, _shardFactory.get());
+     currData.addConfigShard(_data.getConfigShard());
+     _data.swap(currData);
+

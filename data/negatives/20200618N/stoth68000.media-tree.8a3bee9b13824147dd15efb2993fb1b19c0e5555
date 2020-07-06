@@ -1,0 +1,66 @@
+commit 8a3bee9b13824147dd15efb2993fb1b19c0e5555
+Author: Shawn Lin <shawn.lin@rock-chips.com>
+Date:   Fri Sep 30 14:19:00 2016 +0800
+
+    mmc: sdhci-of-arasan: add sdhci_arasan_voltage_switch for arasan, 5.1
+    
+    Per the vendor's requirement, we shouldn't do any setting for
+    1.8V Signaling Enable, otherwise the interaction/behaviour between
+    phy and controller will be undefined. Mostly it works fine if we do
+    that, but we still see failures. Anyway, let's fix it to meet the
+    vendor's requirement. The error log looks like:
+    
+     [   93.405085] mmc1: unexpected status 0x800900 after switch
+     [   93.408474] mmc1: switch to bus width 1 failed
+     [   93.408482] mmc1: mmc_select_hs200 failed, error -110
+     [   93.408492] mmc1: error -110 during resume (card was removed?)
+     [   93.408705] PM: resume of devices complete after 213.453 msecs
+    
+    Signed-off-by: Shawn Lin <shawn.lin@rock-chips.com>
+    Acked-by: Adrian Hunter <adrian.hunter@intel.com>
+    Reviewed-by: Douglas Anderson <dianders@chromium.org>
+    Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
+
+diff --git a/drivers/mmc/host/sdhci-of-arasan.c b/drivers/mmc/host/sdhci-of-arasan.c
+index e263671abab8..410a55b1c25f 100644
+--- a/drivers/mmc/host/sdhci-of-arasan.c
++++ b/drivers/mmc/host/sdhci-of-arasan.c
+@@ -265,6 +265,28 @@ static void sdhci_arasan_reset(struct sdhci_host *host, u8 mask)
+ 	}
+ }
+ 
++static int sdhci_arasan_voltage_switch(struct mmc_host *mmc,
++				       struct mmc_ios *ios)
++{
++	switch (ios->signal_voltage) {
++	case MMC_SIGNAL_VOLTAGE_180:
++		/*
++		 * Plese don't switch to 1V8 as arasan,5.1 doesn't
++		 * actually refer to this setting to indicate the
++		 * signal voltage and the state machine will be broken
++		 * actually if we force to enable 1V8. That's something
++		 * like broken quirk but we could work around here.
++		 */
++		return 0;
++	case MMC_SIGNAL_VOLTAGE_330:
++	case MMC_SIGNAL_VOLTAGE_120:
++		/* We don't support 3V3 and 1V2 */
++		break;
++	}
++
++	return -EINVAL;
++}
++
+ static struct sdhci_ops sdhci_arasan_ops = {
+ 	.set_clock = sdhci_arasan_set_clock,
+ 	.get_max_clock = sdhci_pltfm_clk_get_max_clock,
+@@ -661,6 +683,8 @@ static int sdhci_arasan_probe(struct platform_device *pdev)
+ 
+ 		host->mmc_host_ops.hs400_enhanced_strobe =
+ 					sdhci_arasan_hs400_enhanced_strobe;
++		host->mmc_host_ops.start_signal_voltage_switch =
++					sdhci_arasan_voltage_switch;
+ 	}
+ 
+ 	ret = sdhci_add_host(host);
+

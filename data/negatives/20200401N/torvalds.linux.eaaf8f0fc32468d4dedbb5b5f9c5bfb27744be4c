@@ -1,0 +1,142 @@
+commit eaaf8f0fc32468d4dedbb5b5f9c5bfb27744be4c
+Author: Daniel Vetter <daniel.vetter@ffwll.ch>
+Date:   Wed Aug 28 15:19:23 2013 +0200
+
+    drm/pci: fold in irq_by_busid support
+    
+    This is a ums-only ioctl, and we've only ever supported ums (at least
+    in upstream) on pci devices. So no point in keeping that piece of
+    legacy logic abstracted within the drm bus driver.
+    
+    To keep things work without CONFIG_PCI also add a dummy ioctl.
+    
+    v2: Block the irq_by_busid ioctl for modeset drivers.
+    
+    v3: Spelling/whitespace polish (Thierry)
+    
+    Reviewed-by: Thierry Reding <treding@nvidia.com>
+    Reviewed-by: Laurent Pinchart <laurent.pinchart@ideasonboard.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/drm_irq.c b/drivers/gpu/drm/drm_irq.c
+index d4cc47690d65..e5920e7a4392 100644
+--- a/drivers/gpu/drm/drm_irq.c
++++ b/drivers/gpu/drm/drm_irq.c
+@@ -56,33 +56,6 @@
+  */
+ #define DRM_REDUNDANT_VBLIRQ_THRESH_NS 1000000
+ 
+-/**
+- * Get interrupt from bus id.
+- *
+- * \param inode device inode.
+- * \param file_priv DRM file private.
+- * \param cmd command.
+- * \param arg user argument, pointing to a drm_irq_busid structure.
+- * \return zero on success or a negative number on failure.
+- *
+- * Finds the PCI device with the specified bus id and gets its IRQ number.
+- * This IOCTL is deprecated, and will now return EINVAL for any busid not equal
+- * to that of the device that this DRM instance attached to.
+- */
+-int drm_irq_by_busid(struct drm_device *dev, void *data,
+-		     struct drm_file *file_priv)
+-{
+-	struct drm_irq_busid *p = data;
+-
+-	if (!dev->driver->bus->irq_by_busid)
+-		return -EINVAL;
+-
+-	if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ))
+-		return -EINVAL;
+-
+-	return dev->driver->bus->irq_by_busid(dev, p);
+-}
+-
+ /*
+  * Clear vblank timestamp buffer for a crtc.
+  */
+diff --git a/drivers/gpu/drm/drm_pci.c b/drivers/gpu/drm/drm_pci.c
+index 9c696a5ad74d..8d4221683af4 100644
+--- a/drivers/gpu/drm/drm_pci.c
++++ b/drivers/gpu/drm/drm_pci.c
+@@ -247,7 +247,6 @@ static int drm_pci_set_unique(struct drm_device *dev,
+ 	return ret;
+ }
+ 
+-
+ static int drm_pci_irq_by_busid(struct drm_device *dev, struct drm_irq_busid *p)
+ {
+ 	if ((p->busnum >> 8) != drm_get_pci_domain(dev) ||
+@@ -262,6 +261,37 @@ static int drm_pci_irq_by_busid(struct drm_device *dev, struct drm_irq_busid *p)
+ 	return 0;
+ }
+ 
++/**
++ * Get interrupt from bus id.
++ *
++ * \param inode device inode.
++ * \param file_priv DRM file private.
++ * \param cmd command.
++ * \param arg user argument, pointing to a drm_irq_busid structure.
++ * \return zero on success or a negative number on failure.
++ *
++ * Finds the PCI device with the specified bus id and gets its IRQ number.
++ * This IOCTL is deprecated, and will now return EINVAL for any busid not equal
++ * to that of the device that this DRM instance attached to.
++ */
++int drm_irq_by_busid(struct drm_device *dev, void *data,
++		     struct drm_file *file_priv)
++{
++	struct drm_irq_busid *p = data;
++
++	if (drm_core_check_feature(dev, DRIVER_MODESET))
++		return -EINVAL;
++
++	/* UMS was only ever support on PCI devices. */
++	if (WARN_ON(!dev->pdev))
++		return -EINVAL;
++
++	if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ))
++		return -EINVAL;
++
++	return drm_pci_irq_by_busid(dev, p);
++}
++
+ static void drm_pci_agp_init(struct drm_device *dev)
+ {
+ 	if (drm_core_check_feature(dev, DRIVER_USE_AGP)) {
+@@ -292,7 +322,6 @@ static struct drm_bus drm_pci_bus = {
+ 	.get_name = drm_pci_get_name,
+ 	.set_busid = drm_pci_set_busid,
+ 	.set_unique = drm_pci_set_unique,
+-	.irq_by_busid = drm_pci_irq_by_busid,
+ };
+ 
+ /**
+@@ -453,6 +482,12 @@ int drm_pci_init(struct drm_driver *driver, struct pci_driver *pdriver)
+ }
+ 
+ void drm_pci_agp_destroy(struct drm_device *dev) {}
++
++int drm_irq_by_busid(struct drm_device *dev, void *data,
++		     struct drm_file *file_priv)
++{
++	return -EINVAL;
++}
+ #endif
+ 
+ EXPORT_SYMBOL(drm_pci_init);
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index a7c2a862b4f4..6d7ca98d0143 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -737,7 +737,6 @@ struct drm_bus {
+ 	int (*set_busid)(struct drm_device *dev, struct drm_master *master);
+ 	int (*set_unique)(struct drm_device *dev, struct drm_master *master,
+ 			  struct drm_unique *unique);
+-	int (*irq_by_busid)(struct drm_device *dev, struct drm_irq_busid *p);
+ };
+ 
+ /**
+

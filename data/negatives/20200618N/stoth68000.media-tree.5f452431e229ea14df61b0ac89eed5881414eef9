@@ -1,0 +1,52 @@
+commit 5f452431e229ea14df61b0ac89eed5881414eef9
+Author: Fred Isaman <iisaman@netapp.com>
+Date:   Wed Mar 23 13:27:46 2011 +0000
+
+    NFSv4.1: add callback to nfs4_commit_done
+    
+    Add a callback that the pnfs layout driver can use to do its own
+    error handling of the data server's COMMIT response.
+    
+    Signed-off-by: Fred Isaman <iisaman@netapp.com>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/fs/nfs/nfs4proc.c b/fs/nfs/nfs4proc.c
+index 1d84e7088af9..bcc29bdc9bee 100644
+--- a/fs/nfs/nfs4proc.c
++++ b/fs/nfs/nfs4proc.c
+@@ -3195,12 +3195,9 @@ static void nfs4_proc_write_setup(struct nfs_write_data *data, struct rpc_messag
+ 	msg->rpc_proc = &nfs4_procedures[NFSPROC4_CLNT_WRITE];
+ }
+ 
+-static int nfs4_commit_done(struct rpc_task *task, struct nfs_write_data *data)
++static int nfs4_commit_done_cb(struct rpc_task *task, struct nfs_write_data *data)
+ {
+ 	struct inode *inode = data->inode;
+-	
+-	if (!nfs4_sequence_done(task, &data->res.seq_res))
+-		return -EAGAIN;
+ 
+ 	if (nfs4_async_handle_error(task, NFS_SERVER(inode), NULL) == -EAGAIN) {
+ 		nfs_restart_rpc(task, NFS_SERVER(inode)->nfs_client);
+@@ -3210,11 +3207,20 @@ static int nfs4_commit_done(struct rpc_task *task, struct nfs_write_data *data)
+ 	return 0;
+ }
+ 
++static int nfs4_commit_done(struct rpc_task *task, struct nfs_write_data *data)
++{
++	if (!nfs4_sequence_done(task, &data->res.seq_res))
++		return -EAGAIN;
++	return data->write_done_cb(task, data);
++}
++
+ static void nfs4_proc_commit_setup(struct nfs_write_data *data, struct rpc_message *msg)
+ {
+ 	struct nfs_server *server = NFS_SERVER(data->inode);
+ 	
+ 	data->args.bitmask = server->cache_consistency_bitmask;
++	if (!data->write_done_cb)
++		data->write_done_cb = nfs4_commit_done_cb;
+ 	data->res.server = server;
+ 	msg->rpc_proc = &nfs4_procedures[NFSPROC4_CLNT_COMMIT];
+ }
+

@@ -1,0 +1,204 @@
+commit 671880e651e611ec32dbb978e61c0bd4bc3e180e
+Author: ths <ths@c046a42c-6fe2-441c-8c8c-71466251a162>
+Date:   Sat Sep 29 19:21:36 2007 +0000
+
+    Supervisor mode implementation, by Aurelien Jarno.
+    
+    
+    git-svn-id: svn://svn.savannah.nongnu.org/qemu/trunk@3267 c046a42c-6fe2-441c-8c8c-71466251a162
+
+diff --git a/target-mips/exec.h b/target-mips/exec.h
+index 9ff3f08b59..b6300bd494 100644
+--- a/target-mips/exec.h
++++ b/target-mips/exec.h
+@@ -261,16 +261,21 @@ static inline void compute_hflags(CPUState *env)
+                      MIPS_HFLAG_FPU | MIPS_HFLAG_UM);
+     if (!(env->CP0_Status & (1 << CP0St_EXL)) &&
+         !(env->CP0_Status & (1 << CP0St_ERL)) &&
+-        !(env->hflags & MIPS_HFLAG_DM) &&
+-        (env->CP0_Status & (1 << CP0St_UM)))
+-        env->hflags |= MIPS_HFLAG_UM;
++        !(env->hflags & MIPS_HFLAG_DM)) {
++        if (env->CP0_Status & (1 << CP0St_UM))
++            env->hflags |= MIPS_HFLAG_UM;
++        if (env->CP0_Status & (1 << CP0St_R0))
++            env->hflags |= MIPS_HFLAG_SM;
++    }
+ #ifdef TARGET_MIPS64
+     if (!(env->hflags & MIPS_HFLAG_UM) ||
+         (env->CP0_Status & (1 << CP0St_PX)) ||
+         (env->CP0_Status & (1 << CP0St_UX)))
+         env->hflags |= MIPS_HFLAG_64;
+ #endif
+-    if ((env->CP0_Status & (1 << CP0St_CU0)) || !(env->hflags & MIPS_HFLAG_UM))
++    if ((env->CP0_Status & (1 << CP0St_CU0)) ||
++        (!(env->hflags & MIPS_HFLAG_UM) &&
++         !(env->hflags & MIPS_HFLAG_SM)))
+         env->hflags |= MIPS_HFLAG_CP0;
+     if (env->CP0_Status & (1 << CP0St_CU1))
+         env->hflags |= MIPS_HFLAG_FPU;
+diff --git a/target-mips/helper.c b/target-mips/helper.c
+index 8e4233ed7b..7424cda560 100644
+--- a/target-mips/helper.c
++++ b/target-mips/helper.c
+@@ -106,6 +106,8 @@ static int get_physical_address (CPUState *env, target_ulong *physical,
+ {
+     /* User mode can only access useg/xuseg */
+     int user_mode = (env->hflags & MIPS_HFLAG_MODE) == MIPS_HFLAG_UM;
++    int supervisor_mode = (env->hflags & MIPS_HFLAG_MODE) == MIPS_HFLAG_SM;
++    int kernel_mode = !user_mode && !supervisor_mode;
+ #ifdef TARGET_MIPS64
+     int UX = (env->CP0_Status & (1 << CP0St_UX)) != 0;
+     int SX = (env->CP0_Status & (1 << CP0St_SX)) != 0;
+@@ -120,14 +122,6 @@ static int get_physical_address (CPUState *env, target_ulong *physical,
+     }
+ #endif
+ 
+-#ifdef TARGET_MIPS64
+-    if (user_mode && address > 0x3FFFFFFFFFFFFFFFULL)
+-        return TLBRET_BADADDR;
+-#else
+-    if (user_mode && address > 0x7FFFFFFFUL)
+-        return TLBRET_BADADDR;
+-#endif
+-
+     if (address <= (int32_t)0x7FFFFFFFUL) {
+         /* useg */
+         if (env->CP0_Status & (1 << CP0St_ERL)) {
+@@ -150,16 +144,16 @@ static int get_physical_address (CPUState *env, target_ulong *physical,
+         }
+     } else if (address < 0x7FFFFFFFFFFFFFFFULL) {
+         /* xsseg */
+-	if (SX && address < (0x7FFFFFFFFFFFFFFFULL & env->SEGMask)) {
++	if ((supervisor_mode || kernel_mode) &&
++	    SX && address < (0x7FFFFFFFFFFFFFFFULL & env->SEGMask)) {
+             ret = env->tlb->map_address(env, physical, prot, address, rw, access_type);
+ 	} else {
+ 	    ret = TLBRET_BADADDR;
+         }
+     } else if (address < 0xBFFFFFFFFFFFFFFFULL) {
+         /* xkphys */
+-        /* XXX: check supervisor mode */
+-        if (KX && (address & 0x07FFFFFFFFFFFFFFULL) < 0X0000000FFFFFFFFFULL)
+-	{
++        if (kernel_mode && KX &&
++            (address & 0x07FFFFFFFFFFFFFFULL) < 0X0000000FFFFFFFFFULL) {
+             *physical = address & 0X0000000FFFFFFFFFULL;
+             *prot = PAGE_READ | PAGE_WRITE;
+ 	} else {
+@@ -167,8 +161,8 @@ static int get_physical_address (CPUState *env, target_ulong *physical,
+ 	}
+     } else if (address < 0xFFFFFFFF7FFFFFFFULL) {
+         /* xkseg */
+-        /* XXX: check supervisor mode */
+-	if (KX && address < (0xFFFFFFFF7FFFFFFFULL & env->SEGMask)) {
++	if (kernel_mode && KX &&
++	    address < (0xFFFFFFFF7FFFFFFFULL & env->SEGMask)) {
+             ret = env->tlb->map_address(env, physical, prot, address, rw, access_type);
+ 	} else {
+ 	    ret = TLBRET_BADADDR;
+@@ -176,22 +170,35 @@ static int get_physical_address (CPUState *env, target_ulong *physical,
+ #endif
+     } else if (address < (int32_t)0xA0000000UL) {
+         /* kseg0 */
+-        /* XXX: check supervisor mode */
+-        *physical = address - (int32_t)0x80000000UL;
+-        *prot = PAGE_READ | PAGE_WRITE;
++        if (kernel_mode) {
++            *physical = address - (int32_t)0x80000000UL;
++            *prot = PAGE_READ | PAGE_WRITE;
++        } else {
++            ret = TLBRET_BADADDR;
++        }
+     } else if (address < (int32_t)0xC0000000UL) {
+         /* kseg1 */
+-        /* XXX: check supervisor mode */
+-        *physical = address - (int32_t)0xA0000000UL;
+-        *prot = PAGE_READ | PAGE_WRITE;
++        if (kernel_mode) {
++            *physical = address - (int32_t)0xA0000000UL;
++            *prot = PAGE_READ | PAGE_WRITE;
++        } else {
++            ret = TLBRET_BADADDR;
++        }
+     } else if (address < (int32_t)0xE0000000UL) {
+-        /* kseg2 */
+-        ret = env->tlb->map_address(env, physical, prot, address, rw, access_type);
++        /* sseg */
++        if (supervisor_mode || kernel_mode) {
++            ret = env->tlb->map_address(env, physical, prot, address, rw, access_type);
++        } else {
++            ret = TLBRET_BADADDR;
++        }
+     } else {
+         /* kseg3 */
+-        /* XXX: check supervisor mode */
+         /* XXX: debug segment is not emulated */
+-        ret = env->tlb->map_address(env, physical, prot, address, rw, access_type);
++        if (kernel_mode) {
++            ret = env->tlb->map_address(env, physical, prot, address, rw, access_type);
++        } else {
++            ret = TLBRET_BADADDR;
++        }
+     }
+ #if 0
+     if (logfile) {
+@@ -369,7 +376,7 @@ void do_interrupt (CPUState *env)
+         }
+     enter_debug_mode:
+         env->hflags |= MIPS_HFLAG_DM | MIPS_HFLAG_64 | MIPS_HFLAG_CP0;
+-        env->hflags &= ~MIPS_HFLAG_UM;
++        env->hflags &= ~(MIPS_HFLAG_SM | MIPS_HFLAG_UM);
+         /* EJTAG probe trap enable is not implemented... */
+         if (!(env->CP0_Status & (1 << CP0St_EXL)))
+             env->CP0_Cause &= ~(1 << CP0Ca_BD);
+@@ -395,7 +402,7 @@ void do_interrupt (CPUState *env)
+         }
+         env->CP0_Status |= (1 << CP0St_ERL) | (1 << CP0St_BEV);
+         env->hflags |= MIPS_HFLAG_64 | MIPS_HFLAG_CP0;
+-        env->hflags &= ~MIPS_HFLAG_UM;
++        env->hflags &= ~(MIPS_HFLAG_SM | MIPS_HFLAG_UM);
+         if (!(env->CP0_Status & (1 << CP0St_EXL)))
+             env->CP0_Cause &= ~(1 << CP0Ca_BD);
+         env->PC[env->current_tc] = (int32_t)0xBFC00000;
+@@ -497,7 +504,7 @@ void do_interrupt (CPUState *env)
+             }
+             env->CP0_Status |= (1 << CP0St_EXL);
+             env->hflags |= MIPS_HFLAG_64 | MIPS_HFLAG_CP0;
+-            env->hflags &= ~MIPS_HFLAG_UM;
++            env->hflags &= ~(MIPS_HFLAG_SM | MIPS_HFLAG_UM);
+         }
+         env->hflags &= ~MIPS_HFLAG_BMASK;
+         if (env->CP0_Status & (1 << CP0St_BEV)) {
+diff --git a/target-mips/translate_init.c b/target-mips/translate_init.c
+index 6bea0c4d12..b9f3266564 100644
+--- a/target-mips/translate_init.c
++++ b/target-mips/translate_init.c
+@@ -141,7 +141,7 @@ static mips_def_t mips_defs[] =
+         .SYNCI_Step = 32,
+         .CCRes = 2,
+         /* No DSP implemented. */
+-        .CP0_Status_rw_bitmask = 0x1278FF17,
++        .CP0_Status_rw_bitmask = 0x1278FF1F,
+         .insn_flags = CPU_MIPS32R2 | ASE_MIPS16 | ASE_DSP,
+     },
+     {
+@@ -156,7 +156,7 @@ static mips_def_t mips_defs[] =
+         .SYNCI_Step = 32,
+         .CCRes = 2,
+         /* No DSP implemented. */
+-        .CP0_Status_rw_bitmask = 0x3678FF17,
++        .CP0_Status_rw_bitmask = 0x3678FF1F,
+         .CP1_fcr0 = (1 << FCR0_F64) | (1 << FCR0_L) | (1 << FCR0_W) |
+                     (1 << FCR0_D) | (1 << FCR0_S) | (0x93 << FCR0_PRID),
+         .insn_flags = CPU_MIPS32R2 | ASE_MIPS16 | ASE_DSP,
+@@ -173,7 +173,7 @@ static mips_def_t mips_defs[] =
+         .SYNCI_Step = 32,
+         .CCRes = 2,
+         /* No DSP implemented. */
+-        .CP0_Status_rw_bitmask = 0x3678FF17,
++        .CP0_Status_rw_bitmask = 0x3678FF1F,
+         /* No DSP implemented. */
+         .CP0_TCStatus_rw_bitmask = (0 << CP0TCSt_TCU3) | (0 << CP0TCSt_TCU2) |
+                     (1 << CP0TCSt_TCU1) | (1 << CP0TCSt_TCU0) |
+

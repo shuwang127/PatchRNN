@@ -1,0 +1,613 @@
+commit 0da8862a83d61da65dc084d83752a26f07546115
+Author: Srimanta Barua <srimanta.barua1@gmail.com>
+Date:   Tue May 30 01:06:42 2017 +0530
+
+    Add read reg/mem to gdbserver (#7625)
+    
+    * bug fixes in client, and adding kill signal for server without multiprocess support
+    * commented out currently unnecessary packets sent by client
+    * Corrections to client kill signal code
+    * More functionality for gdbserver. Read regs and memory
+
+diff --git a/libr/core/rtr.c b/libr/core/rtr.c
+index 4847ffaa2..b3d043f71 100644
+--- a/libr/core/rtr.c
++++ b/libr/core/rtr.c
+@@ -890,13 +890,108 @@ R_API int r_core_rtr_http(RCore *core, int launch, const char *path) {
+ 	return ret;
+ }
+ 
++static int r_core_rtr_gdb_cb(void *core_ptr, const char *cmd, char *out_buf, size_t max_len) {
++	int ret;
++	RList *list;
++	RListIter *iter;
++	RRegItem *reg_item;
++	int reg_size;
++	ut64 reg_value;
++	utX reg_value_big;
++	ut64 m_off;
++	if (!core_ptr || ! cmd) {
++		return -1;
++	}
++	RCore *core = (RCore*) core_ptr;
++	switch (cmd[0]) {
++	case 'd':
++		switch (cmd[1]) {
++		case 'p': // dp
++			switch (cmd[2]) {
++			case '\0': // dp
++				// TODO support multiprocess
++				snprintf (out_buf, max_len - 1, "QC%x", core->dbg->tid);
++				return 0;
++			case 't': // dpt
++				r_core_cmd (core, cmd, 0);
++				return 0;
++			}
++			break;
++		case 'r': // dr
++			if (!(list = r_reg_get_list (core->dbg->reg, R_REG_TYPE_GPR))) {
++				return -1;
++			}
++			ret = 0;
++			if ((reg_size = r_config_get_i (core->config, "asm.bits")) == 0) {
++				return -1;
++			}
++			r_list_foreach (list, iter, reg_item) {
++				// TODO thumb (ref. - dreg.c:140)
++				if (reg_item->size != reg_size) {
++					continue;
++				}
++				if (reg_size < 80) {
++					reg_value = r_reg_get_value (core->dbg->reg, reg_item);
++					if (!(r_config_get_i (core->config, "cfg.bigendian"))) {
++						reg_value = r_swap_ut64 (reg_value);
++					}
++					snprintf (out_buf + ret, max_len - ret - 1, "%016"PFMT64x, reg_value);
++				} else {
++					reg_value = r_reg_get_value_big (core->dbg->reg, reg_item, &reg_value_big);
++					switch (reg_size) {
++					case 80:
++						if (!(r_config_get_i (core->config, "cfg.bigendian"))) {
++							snprintf (out_buf + ret, max_len - ret - 1, "%016"PFMT64x"%04x",
++								  r_swap_ut64 (reg_value_big.v80.Low), r_swap_ut16 (reg_value_big.v80.High));
++							break;
++						}
++						snprintf (out_buf + ret, max_len - ret - 1, "%04x%016"PFMT64x,
++							  reg_value_big.v80.High, reg_value_big.v80.Low);
++						break;
++					case 96:
++						if (!(r_config_get_i (core->config, "cfg.bigendian"))) {
++							snprintf (out_buf + ret, max_len - ret - 1, "%016"PFMT64x"%08x",
++								  r_swap_ut64 (reg_value_big.v80.Low), r_swap_ut32 (reg_value_big.v80.High));
++							break;
++						}
++						snprintf (out_buf + ret, max_len - ret - 1, "%08x%016"PFMT64x,
++							  reg_value_big.v96.High, reg_value_big.v96.Low);
++						break;
++					case 128:
++						if (!(r_config_get_i (core->config, "cfg.bigendian"))) {
++							snprintf (out_buf + ret, max_len - ret - 1, "%016"PFMT64x"%016"PFMT64x,
++								  r_swap_ut64 (reg_value_big.v80.Low), r_swap_ut64 (reg_value_big.v80.High));
++							break;
++						}
++						snprintf (out_buf + ret, max_len - ret - 1, "%016"PFMT64x"%016"PFMT64x,
++							  reg_value_big.v128.High, reg_value_big.v128.Low);
++						break;
++					default:
++						return -1;
++					}
++				}
++				ret += reg_size / 4;
++				if (ret >= max_len) {
++					return -1;
++				}
++			}
++			return ret;
++		}
++		break;
++	case 'm':
++		sscanf (cmd + 1, "%"PFMT64x" %d", &m_off, &ret);
++		r_io_read_at (core->io, m_off, (ut8*) out_buf, ret);
++		return ret;
++	}
++	return -1;
++}
++
+ // path = "<port> <file_name>"
+ static int r_core_rtr_gdb_run(RCore *core, int launch, const char *path) {
+ 	RSocket *sock;
+-	int p;
++	int p, ret;
+ 	char port[10];
+ 	const char *file = NULL;
+-	char cmd_buf[64];
+ 	libgdbr_t *g;
+ 	RCoreFile *cf;
+ 
+@@ -958,19 +1053,12 @@ static int r_core_rtr_gdb_run(RCore *core, int launch, const char *path) {
+ 			break;
+ 		}
+ 		g->connected = 1;
+-		while (!gdbr_server_read (g, cmd_buf, sizeof (cmd_buf) - 1)) {
+-			if (!strncmp (cmd_buf, "q", sizeof (cmd_buf))) {
+-				break;
+-			}
+-			if (*cmd_buf) {
+-				cmd_buf[sizeof (cmd_buf) - 1] = '\0';
+-				eprintf ("cmd: %s\n", cmd_buf);
+-				r_core_cmd (core, cmd_buf, 0);
+-			}
+-		}
++		ret = gdbr_server_serve (g, r_core_rtr_gdb_cb, (void*) core);
++		r_socket_close (g->sock);
+ 		g->connected = 0;
+-		/* TODO: Wait for connections */
+-		break;
++		if (ret < 0) {
++			break;
++		}
+ 	}
+ 	core->gdbserver_up = 0;
+ 	gdbr_cleanup (g);
+diff --git a/shlr/gdb/include/gdbserver/core.h b/shlr/gdb/include/gdbserver/core.h
+index 8640c39aa..92147e8ec 100644
+--- a/shlr/gdb/include/gdbserver/core.h
++++ b/shlr/gdb/include/gdbserver/core.h
+@@ -4,11 +4,7 @@
+ #include <r_socket.h>
+ #include "../libgdbr.h"
+ 
+-// Read command from socket, parse into r2 debugger command in buffer. Return 0
+-// on success, failure code (currently -1) on failure
+-int gdbr_server_read(libgdbr_t *g, char *buf, size_t max_len);
++int gdbr_server_serve(libgdbr_t *g, int (*cmd_cb) (void*, const char*, char*, size_t), void *core_ptr);
+ 
+-// Send command to the remote gdb instance
+-int gdbr_server_send(libgdbr_t *g, const char *buf, size_t max_len);
+ 
+ #endif  // GDB_SERVER_CORE_H
+diff --git a/shlr/gdb/include/libgdbr.h b/shlr/gdb/include/libgdbr.h
+index e8f9d0d0d..c124f0b1d 100644
+--- a/shlr/gdb/include/libgdbr.h
++++ b/shlr/gdb/include/libgdbr.h
+@@ -132,8 +132,8 @@ typedef struct libgdbr_t {
+ 	uint8_t architecture;
+ 	registers_t *registers;
+ 	int last_code;
+-	ssize_t pid; // little endian
+-	ssize_t tid; // little endian
++	int pid; // little endian
++	int tid; // little endian
+ 	bool attached; // Remote server attached to process or created
+ 	libgdbr_stub_features_t stub_features;
+ 	char *exec_file_name;
+diff --git a/shlr/gdb/include/utils.h b/shlr/gdb/include/utils.h
+index 834fa24b9..7d151aa9c 100644
+--- a/shlr/gdb/include/utils.h
++++ b/shlr/gdb/include/utils.h
+@@ -11,7 +11,6 @@ uint64_t unpack_uint64(char *buff, int len);
+ uint64_t unpack_uint64_co(char* buff, int len);
+ int unpack_hex(char* src, ut64 len, char* dst);
+ int pack_hex(char* src, ut64 len, char* dst);
+-int pack_hex_uint64(ut64 src, char *dst);
+ int hex2int(int ch);
+ int int2hex(int i);
+ void hexdump(void* ptr, ut64 len, ut64 offset);
+diff --git a/shlr/gdb/src/gdbclient/core.c b/shlr/gdb/src/gdbclient/core.c
+index f4b790aa3..ba3075a3b 100644
+--- a/shlr/gdb/src/gdbclient/core.c
++++ b/shlr/gdb/src/gdbclient/core.c
+@@ -63,6 +63,7 @@ int gdbr_connect(libgdbr_t *g, const char *host, int port) {
+ 		//return ret;
+ 	}
+ 
++	/*
+ 	// Check if remote server attached to or created process
+ 	if (g->stub_features.multiprocess) {
+ 		char pid_buf[20] = { 0 };
+@@ -91,33 +92,30 @@ int gdbr_connect(libgdbr_t *g, const char *host, int port) {
+ 		if (ret < 0) {
+ 			return ret;
+ 		}
+-	}
+-	read_packet (g);
+-	ret = send_ack (g);
+-	if (!*g->data || g->data[0] != 'F' || g->data[1] == '-') {
+-		eprintf ("handle gF\n");
+-		return 0;
+-		return -1;
+-	}
+-	if (ret < 0) {
+-		eprintf ("handle gF\n");
+-		// return ret;
++		read_packet (g);
++		ret = send_ack (g);
++		if (ret < 0 || !*g->data || g->data[0] != 'F' || g->data[1] == '-') {
++			eprintf ("handle gF\n");
++			return -1;
++		}
+ 	}
+ 
+ 	// Get name of file being executed
+-	if (g->stub_features.multiprocess) {
+-		char pid_buf[20] = { 0 };
+-		pack_hex_uint64 (g->pid, pid_buf);
+-		snprintf (tmp.buf, sizeof (tmp.buf) - 1, "qXfer:exec-file:read:%s:0,fff", pid_buf);
+-		ret = send_msg (g, tmp.buf);
+-	} else {
+-		ret = send_msg (g, "qXfer:exec-file:read::0,fff");
+-	}
+-	if (ret < 0) {
+-		return ret;
++	if (g->stub_features.qXfer_exec_file_read) {
++		if (g->stub_features.multiprocess) {
++			char pid_buf[20] = { 0 };
++			pack_hex_uint64 (g->pid, pid_buf);
++			snprintf (tmp.buf, sizeof (tmp.buf) - 1, "qXfer:exec-file:read:%s:0,fff", pid_buf);
++			ret = send_msg (g, tmp.buf);
++		} else {
++			ret = send_msg (g, "qXfer:exec-file:read::0,fff");
++		}
++		if (ret < 0) {
++			return ret;
++		}
++		read_packet (g);
++		(void) handle_execFileRead (g);
+ 	}
+-	read_packet (g);
+-	(void) handle_execFileRead (g);
+ 
+ 	// Open the file
+ 	char *file_to_hex = calloc (2, strlen (g->exec_file_name) + 1);
+@@ -153,18 +151,13 @@ int gdbr_connect(libgdbr_t *g, const char *host, int port) {
+ 	if (ret < 0) {
+ 		return ret;
+ 	}
++	*/
+ 
+ 	// Set pid/thread for next operations
+ 	if (g->stub_features.multiprocess) {
+-		char pid_buf[20] = { 0 };
+-		char tid_buf[20] = { 0 };
+-		pack_hex_uint64 (g->pid, pid_buf);
+-		pack_hex_uint64 (g->tid, tid_buf);
+-		snprintf (tmp.buf, sizeof (tmp.buf) - 1, "Hgp%s.%s", pid_buf, tid_buf);
++		snprintf (tmp.buf, sizeof (tmp.buf) - 1, "Hgp%x.%x", (ut32) g->pid, (ut32) g->tid);
+ 	} else {
+-		char tid_buf[20] = { 0 };
+-		pack_hex_uint64 (g->tid, tid_buf);
+-		snprintf (tmp.buf, sizeof (tmp.buf) - 1, "Hg%s", tid_buf);
++		snprintf (tmp.buf, sizeof (tmp.buf) - 1, "Hg%x", (ut32) g->tid);
+ 	}
+ 	ret = send_msg (g, tmp.buf);
+ 	if (ret < 0) {
+@@ -190,15 +183,23 @@ int gdbr_disconnect(libgdbr_t *g) {
+ bool gdbr_kill(libgdbr_t *g) {
+ 	char buf[20];
+ 	int ret;
+-	char pid_buf[20] = { 0 };
+-	if (!g || !g->sock || !g->pid) {
++	if (!g || !g->sock) {
+ 		return false;
+ 	}
+-	pack_hex_uint64 (g->pid, pid_buf);
+-	snprintf (buf, sizeof (buf) - 1, "vKill;%s", pid_buf);
++	if (g->stub_features.multiprocess) {
++		if (!g->pid) {
++			return false;
++		}
++		snprintf (buf, sizeof (buf) - 1, "vKill;%x", g->pid);
++	} else {
++		snprintf (buf, sizeof (buf) - 1, "k");
++	}
+ 	if ((ret = send_msg (g, buf)) < 0) {
+ 		return false;
+ 	}
++	if (!g->stub_features.multiprocess) {
++		return true;
++	}
+ 	read_packet (g);
+ 	if ((ret = send_ack (g)) < 0) {
+ 		return false;
+diff --git a/shlr/gdb/src/gdbclient/responses.c b/shlr/gdb/src/gdbclient/responses.c
+index a06fa23f3..5af6cf658 100644
+--- a/shlr/gdb/src/gdbclient/responses.c
++++ b/shlr/gdb/src/gdbclient/responses.c
+@@ -89,11 +89,11 @@ int handle_qC(libgdbr_t *g) {
+ 			return -1;
+ 		} else {
+ 			t1++;
+-			g->pid = strtol (t1, NULL, 16);
++			g->pid = (int) strtol (t1, NULL, 16);
+ 			t2++;
+ 		}
+ 	}
+-	g->tid = strtol (t2, NULL, 16);
++	g->tid = (int) strtol (t2, NULL, 16);
+ 	return send_ack (g);
+ }
+ 
+diff --git a/shlr/gdb/src/gdbserver/core.c b/shlr/gdb/src/gdbserver/core.c
+index 98e136b34..5bbac5f15 100644
+--- a/shlr/gdb/src/gdbserver/core.c
++++ b/shlr/gdb/src/gdbserver/core.c
+@@ -1,7 +1,12 @@
++// Notes:
++// - This conversation (https://www.sourceware.org/ml/gdb/2009-02/msg00100.html) suggests that GDB clients usually ignore error codes
++// - Useful resource, though not to be blindly trusted - http://www.embecosm.com/appnotes/ean4/embecosm-howto-rsp-server-ean4-issue-2.html
++
+ #include "gdbserver/core.h"
+ #include "gdbr_common.h"
+ #include "libgdbr.h"
+ #include "packet.h"
++#include "utils.h"
+ #include "r_util/r_str.h"
+ 
+ static int _server_handle_qSupported(libgdbr_t *g) {
+@@ -11,68 +16,204 @@ static int _server_handle_qSupported(libgdbr_t *g) {
+ 		return -1;
+ 	}
+ 	snprintf (buf, 127, "PacketSize=%x", (ut32) (g->read_max - 1));
+-	ret = handle_qSupported (g);
+-	if (ret < 0) {
+-		return ret;
++	if ((ret = handle_qSupported (g)) < 0) {
++		return -1;
+ 	}
+-	int res = send_msg (g, buf);
++	ret = send_msg (g, buf);
+ 	free (buf);
+-	return res;
++	return ret;
+ }
+ 
+ static int _server_handle_qTStatus(libgdbr_t *g) {
+ 	int ret;
+ 	// Trace is not running, and was never run
+ 	const char *message = "T0;tnotrun:0";
+-	ret = send_ack (g);
+-	if (ret < 0) {
+-		return ret;
++	if ((ret = send_ack (g)) < 0) {
++		return -1;
+ 	}
+ 	return send_msg (g, message);
+ }
+ 
+-static int _server_handle_qC(libgdbr_t *g, char *buf, size_t max_len) {
+-	if (max_len <= 2) {
++static int _server_handle_qC(libgdbr_t *g, int (*cmd_cb) (void*, const char*, char*, size_t), void *core_ptr) {
++	char *buf;
++	int ret;
++	size_t buf_len = 80;
++	if ((ret = send_ack (g)) < 0) {
++		return -1;
++	}
++	if (!(buf = malloc (buf_len))) {
++		return -1;
++	}
++	if ((ret = cmd_cb (core_ptr, "dp", buf, buf_len)) < 0) {
++		free (buf);
+ 		return -1;
+ 	}
+-	strcpy (buf, "dp");
+-	return send_ack (g);
++	ret = send_msg (g, buf);
++	free (buf);
++	return ret;
+ }
+ 
+-int gdbr_server_read(libgdbr_t *g, char *buf, size_t max_len) {
+-	bool loop_continue;
+-	int ret = -1;
+-	if (!g) {
++static int _server_handle_k(libgdbr_t *g, int (*cmd_cb) (void*, const char*, char*, size_t), void *core_ptr) {
++	send_ack (g);
++	return -1;
++}
++
++static int _server_handle_vKill(libgdbr_t *g, int (*cmd_cb) (void*, const char*, char*, size_t), void *core_ptr) {
++	if (send_ack (g) < 0) {
++		return -1;
++	}
++	// TODO handle killing of pid
++	send_msg (g, "OK");
++	return -1;
++}
++
++static int _server_handle_qAttached(libgdbr_t *g, int (*cmd_cb) (void*, const char*, char*, size_t), void *core_ptr) {
++	if (send_ack (g) < 0) {
+ 		return -1;
+ 	}
+-	memset (buf, 0, max_len);
++	// TODO check if process was attached or created
++	// Right now, says that process was created
++	return send_msg (g, "0");
++}
++
++static int _server_handle_Hg(libgdbr_t *g, int (*cmd_cb) (void*, const char*, char*, size_t), void *core_ptr) {
++	// We don't yet support multiprocess. Client is not supposed to send Hgp. If we receive it anyway,
++	// send error
++	char cmd[32];
++	int tid;
++	if (send_ack (g) < 0) {
++		return -1;
++	}
++	if (g->data_len <= 2 || isalpha (g->data[2])) {
++		return send_msg (g, "E01");
++	}
++	sscanf (g->data + 2, "%x", &tid);
++	snprintf (cmd, sizeof (cmd) - 1, "dpt=%d", tid);
++	// Set thread for future operations
++	if (cmd_cb (core_ptr, cmd, NULL, 0) < 0) {
++		send_msg (g, "E01");
++		return -1;
++	}
++	return send_msg (g, "OK");
++}
+ 
+-	do {
+-		loop_continue = false;
++static int _server_handle_g(libgdbr_t *g, int (*cmd_cb) (void*, const char*, char*, size_t), void *core_ptr) {
++	char *buf;
++	// To be very safe
++	int buf_len = 4096;
++	int ret;
++	if (send_ack (g) < 0) {
++		return -1;
++	}
++	if (!(buf = malloc (buf_len))) {
++		send_msg (g, "E01");
++		return -1;
++	}
++	memset (buf, 0, buf_len);
++	if ((buf_len = cmd_cb (core_ptr, "dr", buf, buf_len)) < 0) {
++		free (buf);
++		send_msg (g, "E01");
++		return -1;
++	}
++	ret = send_msg (g, buf);
++	free (buf);
++	return ret;
++}
++
++static int _server_handle_m(libgdbr_t *g, int (*cmd_cb) (void*, const char*, char*, size_t), void *core_ptr) {
++	int ret;
++	ut64 addr;
++	int length;
++	char *buf1, *buf2, cmd[64];
++	int buf1_len, buf2_len;
++
++	if (send_ack (g) < 0) {
++		return -1;
++	}
++	g->data[g->data_len] = 0;
++	sscanf (g->data, "m%"PFMT64x",%d", &addr, &length);
++	if (g->data_len < 4 || !strchr (g->data, ',')) {
++		return send_msg (g, "E01");
++	}
++	buf1_len = length;
++	buf2_len = length * 2 + 1;
++	if (!(buf1 = malloc (buf1_len))) {
++		return -1;
++	}
++	if (!(buf2 = malloc (buf2_len))) {
++		free (buf1);
++		return -1;
++	}
++	memset (buf2, 0, buf2_len);
++	snprintf (cmd, sizeof (cmd) - 1, "m %"PFMT64x" %d", addr, length);
++	if ((buf1_len = cmd_cb (core_ptr, cmd, buf1, buf1_len)) < 0) {
++		free (buf1);
++		free (buf2);
++		send_msg (g, "E01");
++		return -1;
++	}
++	pack_hex (buf1, buf1_len, buf2);
++	ret = send_msg (g, buf2);
++	free (buf1);
++	free (buf2);
++	return ret;
++}
++
++int gdbr_server_serve(libgdbr_t *g, int (*cmd_cb) (void*, const char*, char*, size_t), void *core_ptr) {
++	int ret;
++	if (!g) {
++		return -1;
++	}
++	while (1) {
+ 		read_packet (g);
+-		while (!*g->data) {
+-			read_packet (g);
++		if (r_str_startswith (g->data, "k")) {
++			return _server_handle_k (g, cmd_cb, core_ptr);
++		}
++		if (r_str_startswith (g->data, "vKill")) {
++			return _server_handle_vKill (g, cmd_cb, core_ptr);
+ 		}
+-
+ 		if (r_str_startswith (g->data, "qSupported")) {
+-			loop_continue = true;
+ 			if ((ret = _server_handle_qSupported (g)) < 0) {
+ 				return ret;
+ 			}
+-		} else if (r_str_startswith (g->data, "qTStatus")) {
+-			loop_continue = true;
++			continue;
++		}
++		if (r_str_startswith (g->data, "qTStatus")) {
+ 			if ((ret = _server_handle_qTStatus (g)) < 0) {
+ 				return ret;
+ 			}
+-		} else if (r_str_startswith (g->data, "qC")) {
+-			if ((ret = _server_handle_qC (g, buf, max_len)) < 0) {
++			continue;
++		}
++		if (r_str_startswith (g->data, "qC") && g->data_len == 2) {
++			if ((ret = _server_handle_qC (g, cmd_cb, core_ptr)) < 0) {
++				return ret;
++			}
++			continue;
++		}
++		if (r_str_startswith (g->data, "qAttached")) {
++			if ((ret = _server_handle_qAttached (g, cmd_cb, core_ptr)) < 0) {
++				return ret;
++			}
++			continue;
++		}
++		if (r_str_startswith (g->data, "Hg")) {
++			if ((ret = _server_handle_Hg (g, cmd_cb, core_ptr)) < 0) {
+ 				return ret;
+ 			}
++			continue;
+ 		}
+-	} while (loop_continue);
++		if (r_str_startswith (g->data, "g") && g->data_len == 1) {
++			if ((ret = _server_handle_g (g, cmd_cb, core_ptr)) < 0) {
++				return ret;
++			}
++			continue;
++		}
++		if (r_str_startswith (g->data, "m")) {
++			if ((ret = _server_handle_m (g, cmd_cb, core_ptr)) < 0) {
++				return ret;
++			}
++			continue;
++		}
++	};
+ 	return ret;
+ }
+-
+-int gdbr_server_send(libgdbr_t *g, const char *buf, size_t max_len) {
+-	return 0;
+-}
+diff --git a/shlr/gdb/src/utils.c b/shlr/gdb/src/utils.c
+index cb8ea4d8f..9a4e06b39 100644
+--- a/shlr/gdb/src/utils.c
++++ b/shlr/gdb/src/utils.c
+@@ -114,24 +114,6 @@ int pack_hex(char *src, ut64 len, char *dst) {
+ 	return (len / 2);
+ }
+ 
+-int pack_hex_uint64(ut64 src, char *dst) {
+-	int len = 0;
+-	int i;
+-	char temp[16];
+-	do {
+-		temp[len++] = int2hex (src & 0x0F);
+-		src >>= 4;
+-	} while (src > 0);
+-	if (len > 0 && temp[len - 1] == '0') {
+-		len--;
+-	}
+-	for (i = 0; i < len; i++) {
+-		dst[i] = temp[len - 1 - i];
+-	}
+-	dst[len] = '\0';
+-	return len;
+-}
+-
+ void hexdump(void *ptr, ut64 len, ut64 offset) {
+ 	unsigned char *data = (unsigned char *) ptr;
+ 	int x = 0;
+

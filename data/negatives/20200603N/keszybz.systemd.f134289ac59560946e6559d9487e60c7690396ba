@@ -1,0 +1,51 @@
+commit f134289ac59560946e6559d9487e60c7690396ba
+Author: Evgeny Vereshchagin <evvers@ya.ru>
+Date:   Mon May 23 11:19:14 2016 +0300
+
+    resolved: don't stop handle messages after receiving a zero length UDP packet (#3323)
+    
+    Fixes:
+    
+    -bash-4.3# ss --udp -l -p
+    State      Recv-Q Send-Q Local Address:Port                 Peer Address:Port
+    UNCONN     0      0          *:5355                     *:* users:(("systemd-resolve",pid=601,fd=12))
+    UNCONN     0      0         :::5355                    :::* users:(("systemd-resolve",pid=601,fd=14))
+    
+    -bash-4.3# nping --udp -p 5355 --data-length 0 -c 1 localhost
+    
+    -bash-4.3# journalctl -u systemd-resolved -b --no-hostname
+    ...
+    May 21 14:59:22 systemd-resolved[601]: Event source llmnr-ipv4-udp (type io) returned error, disabling: Input/output error
+    ...
+    
+    -bash-4.3# nping --udp -p 5355 --data-length 1000 -c 1 localhost
+    
+    -bash-4.3# ss --udp -l
+    State      Recv-Q Send-Q Local Address:Port                 Peer Address:Port
+    UNCONN     2304   0          *:5355                     *:*
+    UNCONN     0      0         :::5355                    :::*
+
+diff --git a/src/resolve/resolved-manager.c b/src/resolve/resolved-manager.c
+index b3ff46b5d..9600bde1e 100644
+--- a/src/resolve/resolved-manager.c
++++ b/src/resolve/resolved-manager.c
+@@ -643,6 +643,8 @@ int manager_recv(Manager *m, int fd, DnsProtocol protocol, DnsPacket **ret) {
+         mh.msg_controllen = sizeof(control);
+ 
+         l = recvmsg(fd, &mh, 0);
++        if (l == 0)
++                return 0;
+         if (l < 0) {
+                 if (errno == EAGAIN || errno == EINTR)
+                         return 0;
+@@ -650,9 +652,6 @@ int manager_recv(Manager *m, int fd, DnsProtocol protocol, DnsPacket **ret) {
+                 return -errno;
+         }
+ 
+-        if (l <= 0)
+-                return -EIO;
+-
+         assert(!(mh.msg_flags & MSG_CTRUNC));
+         assert(!(mh.msg_flags & MSG_TRUNC));
+ 
+

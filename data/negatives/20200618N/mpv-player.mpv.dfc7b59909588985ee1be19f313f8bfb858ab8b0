@@ -1,0 +1,109 @@
+commit dfc7b59909588985ee1be19f313f8bfb858ab8b0
+Author: Niklas Haas <git@nand.wakku.to>
+Date:   Thu May 12 11:27:00 2016 +0200
+
+    vo_opengl: make the screen blue on shader errors
+    
+    This helps visually signify that somthing went wrong, and prevents
+    confusing shader compilation errors with other types of bugs.
+
+diff --git a/video/out/opengl/utils.c b/video/out/opengl/utils.c
+index d29d7b0bdb..5ef99ac599 100644
+--- a/video/out/opengl/utils.c
++++ b/video/out/opengl/utils.c
+@@ -485,6 +485,8 @@ struct gl_shader_cache {
+     struct sc_uniform uniforms[SC_UNIFORM_ENTRIES];
+     int num_uniforms;
+ 
++    bool error_state; // true if an error occurred
++
+     // temporary buffers (avoids frequent reallocations)
+     bstr tmp[5];
+ };
+@@ -532,6 +534,16 @@ void gl_sc_destroy(struct gl_shader_cache *sc)
+     talloc_free(sc);
+ }
+ 
++bool gl_sc_error_state(struct gl_shader_cache *sc)
++{
++    return sc->error_state;
++}
++
++void gl_sc_reset_error(struct gl_shader_cache *sc)
++{
++    sc->error_state = false;
++}
++
+ void gl_sc_enable_extension(struct gl_shader_cache *sc, char *name)
+ {
+     bstr_xappend_asprintf(sc, &sc->prelude_text, "#extension %s : enable\n", name);
+@@ -810,6 +822,9 @@ static void compile_attach_shader(struct gl_shader_cache *sc, GLuint program,
+ 
+     gl->AttachShader(program, shader);
+     gl->DeleteShader(shader);
++
++    if (!status)
++        sc->error_state = true;
+ }
+ 
+ static void link_shader(struct gl_shader_cache *sc, GLuint program)
+@@ -828,6 +843,9 @@ static void link_shader(struct gl_shader_cache *sc, GLuint program)
+         MP_MSG(sc, pri, "shader link log (status=%d): %s\n", status, logstr);
+         talloc_free(logstr);
+     }
++
++    if (!status)
++        sc->error_state = true;
+ }
+ 
+ static GLuint create_program(struct gl_shader_cache *sc, const char *vertex,
+diff --git a/video/out/opengl/utils.h b/video/out/opengl/utils.h
+index cec5a4b8e4..c7a72969f6 100644
+--- a/video/out/opengl/utils.h
++++ b/video/out/opengl/utils.h
+@@ -148,6 +148,8 @@ struct gl_shader_cache;
+ 
+ struct gl_shader_cache *gl_sc_create(GL *gl, struct mp_log *log);
+ void gl_sc_destroy(struct gl_shader_cache *sc);
++bool gl_sc_error_state(struct gl_shader_cache *sc);
++void gl_sc_reset_error(struct gl_shader_cache *sc);
+ void gl_sc_add(struct gl_shader_cache *sc, const char *text);
+ void gl_sc_addf(struct gl_shader_cache *sc, const char *textf, ...);
+ void gl_sc_hadd(struct gl_shader_cache *sc, const char *text);
+diff --git a/video/out/opengl/video.c b/video/out/opengl/video.c
+index 2a1d623f0b..ae1800821f 100644
+--- a/video/out/opengl/video.c
++++ b/video/out/opengl/video.c
+@@ -613,6 +613,8 @@ static void uninit_rendering(struct gl_video *p)
+ 
+     gl_video_reset_surfaces(p);
+     gl_video_reset_hooks(p);
++
++    gl_sc_reset_error(p->sc);
+ }
+ 
+ void gl_video_update_profile(struct gl_video *p)
+@@ -2500,6 +2502,8 @@ static void pass_render_frame(struct gl_video *p)
+ 
+ static void pass_draw_to_screen(struct gl_video *p, int fbo)
+ {
++    GL *gl = p->gl;
++
+     if (p->dumb_mode)
+         pass_render_frame_dumb(p, fbo);
+ 
+@@ -2525,6 +2529,13 @@ static void pass_draw_to_screen(struct gl_video *p, int fbo)
+ 
+     pass_dither(p);
+     finish_pass_direct(p, fbo, p->vp_w, p->vp_h, &p->dst_rect);
++
++    if (gl_sc_error_state(p->sc)) {
++        // Make the screen solid blue to make it visually clear that an
++        // error has occurred
++        gl->ClearColor(0.0, 0.05, 0.5, 1.0);
++        gl->Clear(GL_COLOR_BUFFER_BIT);
++    }
+ }
+ 
+ // Draws an interpolate frame to fbo, based on the frame timing in t
+

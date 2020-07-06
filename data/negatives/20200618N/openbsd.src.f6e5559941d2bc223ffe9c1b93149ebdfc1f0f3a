@@ -1,0 +1,802 @@
+commit f6e5559941d2bc223ffe9c1b93149ebdfc1f0f3a
+Author: itojun <itojun@openbsd.org>
+Date:   Thu Jul 6 10:11:21 2000 +0000
+
+    - more icmp6/ip6 stats.
+    - protect IPv6 ND from being hosed (due to neighbor unreachability detection
+      hint) by wrong tcp traffic.  still not sure if there's real attack, but
+      it is good to be cautious.
+    - avoid bitfield for router renumbering header decl.
+    - implement packet-per-sec limitation for icmp6 errors, turn interval
+      limit off (it is not very useful due to unix timer resolution).
+
+diff --git a/sys/netinet/icmp6.h b/sys/netinet/icmp6.h
+index a654c4a8405..6ad401438a3 100644
+--- a/sys/netinet/icmp6.h
++++ b/sys/netinet/icmp6.h
+@@ -1,5 +1,5 @@
+-/*	$OpenBSD: icmp6.h,v 1.6 2000/06/12 17:24:26 itojun Exp $	*/
+-/*	$KAME: icmp6.h,v 1.17 2000/06/11 17:23:40 jinmei Exp $	*/
++/*	$OpenBSD: icmp6.h,v 1.7 2000/07/06 10:11:21 itojun Exp $	*/
++/*	$KAME: icmp6.h,v 1.18 2000/07/03 02:51:08 itojun Exp $	*/
+ 
+ /*
+  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
+@@ -376,38 +376,24 @@ struct ni_reply_fqdn {
+ /*
+  * Router Renumbering. as router-renum-08.txt
+  */
+-#if BYTE_ORDER == BIG_ENDIAN /* net byte order */
+ struct icmp6_router_renum {	/* router renumbering header */
+ 	struct icmp6_hdr	rr_hdr;
+-	u_int8_t		rr_segnum;
+-	u_int8_t		rr_test : 1;
+-	u_int8_t		rr_reqresult : 1;
+-	u_int8_t		rr_forceapply : 1;
+-	u_int8_t		rr_specsite : 1;
+-	u_int8_t		rr_prevdone : 1;
+-	u_int8_t		rr_flags_reserved : 3;
+-	u_int16_t		rr_maxdelay;
+-	u_int32_t		rr_reserved;
++	u_int8_t	rr_segnum;
++	u_int8_t	rr_flags;
++	u_int16_t	rr_maxdelay;
++	u_int32_t	rr_reserved;
+ };
+-#elif BYTE_ORDER == LITTLE_ENDIAN
+-struct icmp6_router_renum {	/* router renumbering header */
+-	struct icmp6_hdr	rr_hdr;
+-	u_int8_t		rr_segnum;
+-	u_int8_t		rr_flags_reserved : 3;
+-	u_int8_t		rr_prevdone : 1;
+-	u_int8_t		rr_specsite : 1;
+-	u_int8_t		rr_forceapply : 1;
+-	u_int8_t		rr_reqresult : 1;
+-	u_int8_t		rr_test : 1;
+-	u_int16_t		rr_maxdelay;
+-	u_int32_t		rr_reserved;
+-};
+-#endif /* BYTE_ORDER */
+-
+-#define rr_type			rr_hdr.icmp6_type
+-#define rr_code			rr_hdr.icmp6_code
+-#define rr_cksum		rr_hdr.icmp6_cksum
+-#define rr_seqnum 		rr_hdr.icmp6_data32[0]
++#define ICMP6_RR_FLAGS_SEGNUM		0x80
++#define ICMP6_RR_FLAGS_TEST		0x40
++#define ICMP6_RR_FLAGS_REQRESULT	0x20
++#define ICMP6_RR_FLAGS_FORCEAPPLY	0x10
++#define ICMP6_RR_FLAGS_SPECSITE		0x08
++#define ICMP6_RR_FLAGS_PREVDONE		0x04
++
++#define rr_type		rr_hdr.icmp6_type
++#define rr_code		rr_hdr.icmp6_code
++#define rr_cksum	rr_hdr.icmp6_cksum
++#define rr_seqnum 	rr_hdr.icmp6_data32[0]
+ 
+ struct rr_pco_match {		/* match prefix part */
+ 	u_int8_t	rpm_code;
+@@ -417,7 +403,7 @@ struct rr_pco_match {		/* match prefix part */
+ 	u_int8_t	rpm_minlen;
+ 	u_int8_t	rpm_maxlen;
+ 	u_int16_t	rpm_reserved;
+-	struct in6_addr	rpm_prefix;
++	struct	in6_addr	rpm_prefix;
+ };
+ 
+ #define RPM_PCO_ADD		1
+@@ -425,67 +411,41 @@ struct rr_pco_match {		/* match prefix part */
+ #define RPM_PCO_SETGLOBAL	3
+ #define RPM_PCO_MAX		4
+ 
+-#if BYTE_ORDER == BIG_ENDIAN /* net byte order */
+ struct rr_pco_use {		/* use prefix part */
+ 	u_int8_t	rpu_uselen;
+ 	u_int8_t	rpu_keeplen;
+-	u_int8_t	rpu_mask_onlink : 1;
+-	u_int8_t	rpu_mask_autonomous : 1;
+-	u_int8_t	rpu_mask_reserved : 6;
+-	u_int8_t	rpu_onlink : 1;
+-	u_int8_t	rpu_autonomous : 1;
+-	u_int8_t	rpu_raflags_reserved : 6;
++	u_int8_t	rpu_ramask;
++	u_int8_t	rpu_raflags;
+ 	u_int32_t	rpu_vltime;
+ 	u_int32_t	rpu_pltime;
+-	u_int32_t	rpu_decr_vltime : 1;
+-	u_int32_t	rpu_decr_pltime : 1;
+-	u_int32_t	rpu_flags_reserved : 6;
+-	u_int32_t	rpu_reserved : 24;
+-	struct in6_addr rpu_prefix;
++	u_int32_t	rpu_flags;
++	struct	in6_addr rpu_prefix;
+ };
++#define ICMP6_RR_PCOUSE_RAFLAGS_ONLINK	0x80
++#define ICMP6_RR_PCOUSE_RAFLAGS_AUTO	0x40
++
++#if BYTE_ORDER == BIG_ENDIAN
++#define ICMP6_RR_PCOUSE_FLAGS_DECRVLTIME     0x80000000
++#define ICMP6_RR_PCOUSE_FLAGS_DECRPLTIME     0x40000000
+ #elif BYTE_ORDER == LITTLE_ENDIAN
+-struct rr_pco_use {		/* use prefix part */
+-	u_int8_t	rpu_uselen;
+-	u_int8_t	rpu_keeplen;
+-	u_int8_t	rpu_mask_reserved : 6;
+-	u_int8_t	rpu_mask_autonomous : 1;
+-	u_int8_t	rpu_mask_onlink : 1;
+-	u_int8_t	rpu_raflags_reserved : 6;
+-	u_int8_t	rpu_autonomous : 1;
+-	u_int8_t	rpu_onlink : 1;
+-	u_int32_t	rpu_vltime;
+-	u_int32_t	rpu_pltime;
+-	u_int32_t	rpu_flags_reserved : 6;
+-	u_int32_t	rpu_decr_pltime : 1;
+-	u_int32_t	rpu_decr_vltime : 1;
+-	u_int32_t	rpu_reserved : 24;
+-	struct in6_addr rpu_prefix;
+-};
+-#endif /* BYTE_ORDER */
++#define ICMP6_RR_PCOUSE_FLAGS_DECRVLTIME     0x80
++#define ICMP6_RR_PCOUSE_FLAGS_DECRPLTIME     0x40
++#endif
+ 
+-#if BYTE_ORDER == BIG_ENDIAN /* net byte order */
+ struct rr_result {		/* router renumbering result message */
+-	u_int8_t	rrr_reserved;
+-	u_int8_t	rrr_flags_reserved : 6;
+-	u_int8_t	rrr_outofbound : 1;
+-	u_int8_t	rrr_forbidden : 1;
++	u_int16_t	rrr_flags;
+ 	u_int8_t	rrr_ordinal;
+ 	u_int8_t	rrr_matchedlen;
+ 	u_int32_t	rrr_ifid;
+-	struct in6_addr rrr_prefix;
++	struct	in6_addr rrr_prefix;
+ };
++#if BYTE_ORDER == BIG_ENDIAN
++#define ICMP6_RR_RESULT_FLAGS_OOB		0x0002
++#define ICMP6_RR_RESULT_FLAGS_FORBIDDEN		0x0001
+ #elif BYTE_ORDER == LITTLE_ENDIAN
+-struct rr_result {		/* router renumbering result message */
+-	u_int8_t	rrr_reserved;
+-	u_int8_t	rrr_forbidden : 1;
+-	u_int8_t	rrr_outofbound : 1;
+-	u_int8_t	rrr_flags_reserved : 6;
+-	u_int8_t	rrr_ordinal;
+-	u_int8_t	rrr_matchedlen;
+-	u_int32_t	rrr_ifid;
+-	struct in6_addr rrr_prefix;
+-};
+-#endif /* BYTE_ORDER */
++#define ICMP6_RR_RESULT_FLAGS_OOB		0x02
++#define ICMP6_RR_RESULT_FLAGS_FORBIDDEN		0x01
++#endif
+ 
+ /*
+  * icmp6 filter structures.
+@@ -525,6 +485,22 @@ do {								\
+  * Variables related to this implementation
+  * of the internet control message protocol version 6.
+  */
++struct icmp6errstat {
++	u_quad_t icp6errs_dst_unreach_noroute;
++	u_quad_t icp6errs_dst_unreach_admin;
++	u_quad_t icp6errs_dst_unreach_beyondscope;
++	u_quad_t icp6errs_dst_unreach_addr;
++	u_quad_t icp6errs_dst_unreach_noport;
++	u_quad_t icp6errs_packet_too_big;
++	u_quad_t icp6errs_time_exceed_transit;
++	u_quad_t icp6errs_time_exceed_reassembly;
++	u_quad_t icp6errs_paramprob_header;
++	u_quad_t icp6errs_paramprob_nextheader;
++	u_quad_t icp6errs_paramprob_option;
++	u_quad_t icp6errs_redirect; /* we regard redirect as an error here */
++	u_quad_t icp6errs_unknown;
++};
++
+ struct icmp6stat {
+ /* statistics related to icmp6 packets generated */
+ 	u_quad_t icp6s_error;		/* # of calls to icmp6_error */
+@@ -539,6 +515,25 @@ struct icmp6stat {
+ 	u_quad_t icp6s_reflect;		/* number of responses */
+ 	u_quad_t icp6s_inhist[256];	
+ 	u_quad_t icp6s_nd_toomanyopt;	/* too many ND options */
++	struct icmp6errstat icp6s_outerrhist;
++#define icp6s_odst_unreach_noroute \
++	icp6s_outerrhist.icp6errs_dst_unreach_noroute
++#define icp6s_odst_unreach_admin icp6s_outerrhist.icp6errs_dst_unreach_admin
++#define icp6s_odst_unreach_beyondscope \
++	icp6s_outerrhist.icp6errs_dst_unreach_beyondscope
++#define icp6s_odst_unreach_addr icp6s_outerrhist.icp6errs_dst_unreach_addr
++#define icp6s_odst_unreach_noport icp6s_outerrhist.icp6errs_dst_unreach_noport
++#define icp6s_opacket_too_big icp6s_outerrhist.icp6errs_packet_too_big
++#define icp6s_otime_exceed_transit \
++	icp6s_outerrhist.icp6errs_time_exceed_transit
++#define icp6s_otime_exceed_reassembly \
++	icp6s_outerrhist.icp6errs_time_exceed_reassembly
++#define icp6s_oparamprob_header icp6s_outerrhist.icp6errs_paramprob_header
++#define icp6s_oparamprob_nextheader \
++	icp6s_outerrhist.icp6errs_paramprob_nextheader
++#define icp6s_oparamprob_option icp6s_outerrhist.icp6errs_paramprob_option
++#define icp6s_oredirect icp6s_outerrhist.icp6errs_redirect
++#define icp6s_ounknown icp6s_outerrhist.icp6errs_unknown
+ };
+ 
+ /*
+@@ -555,7 +550,9 @@ struct icmp6stat {
+ #define ICMPV6CTL_ND6_USELOOPBACK	11
+ /*#define ICMPV6CTL_ND6_PROXYALL	12	obsoleted, do not reuse here */
+ #define ICMPV6CTL_NODEINFO	13
+-#define ICMPV6CTL_MAXID		14
++#define ICMPV6CTL_ERRPPSLIMIT	14	/* ICMPv6 error pps limitation */
++#define ICMPV6CTL_ND6_MAXNUDHINT	15
++#define ICMPV6CTL_MAXID		16
+ 
+ #define ICMPV6CTL_NAMES { \
+ 	{ 0, 0 }, \
+@@ -572,6 +569,8 @@ struct icmp6stat {
+ 	{ "nd6_useloopback", CTLTYPE_INT }, \
+ 	{ 0, 0 }, \
+ 	{ "nodeinfo", CTLTYPE_INT }, \
++	{ "errppslimit", CTLTYPE_INT }, \
++	{ "nd6_maxnudhint", CTLTYPE_INT }, \
+ }
+ 
+ #define RTF_PROBEMTU	RTF_PROTO1
+diff --git a/sys/netinet/tcp_input.c b/sys/netinet/tcp_input.c
+index 2573758c63e..a992d9f6534 100644
+--- a/sys/netinet/tcp_input.c
++++ b/sys/netinet/tcp_input.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: tcp_input.c,v 1.63 2000/07/06 05:24:45 itojun Exp $	*/
++/*	$OpenBSD: tcp_input.c,v 1.64 2000/07/06 10:11:22 itojun Exp $	*/
+ /*	$NetBSD: tcp_input.c,v 1.23 1996/02/13 23:43:44 christos Exp $	*/
+ 
+ /*
+@@ -124,7 +124,7 @@ do { \
+ 	if (tp && tp->t_inpcb && (tp->t_inpcb->inp_flags & INP_IPV6) \
+ 	 && !(tp->t_inpcb->inp_flags & INP_IPV6_MAPPED) \
+ 	 && tp->t_inpcb->inp_route6.ro_rt) { \
+-		nd6_nud_hint(tp->t_inpcb->inp_route6.ro_rt, NULL); \
++		nd6_nud_hint(tp->t_inpcb->inp_route6.ro_rt, NULL, 0); \
+ 	} \
+ } while (0)
+ #else
+diff --git a/sys/netinet6/icmp6.c b/sys/netinet6/icmp6.c
+index 3594241b158..ac64e71b10d 100644
+--- a/sys/netinet6/icmp6.c
++++ b/sys/netinet6/icmp6.c
+@@ -1,5 +1,5 @@
+-/*	$OpenBSD: icmp6.c,v 1.18 2000/06/13 17:32:47 itojun Exp $	*/
+-/*	$KAME: icmp6.c,v 1.113 2000/06/12 09:24:41 itojun Exp $	*/
++/*	$OpenBSD: icmp6.c,v 1.19 2000/07/06 10:11:24 itojun Exp $	*/
++/*	$KAME: icmp6.c,v 1.119 2000/07/03 14:16:46 itojun Exp $	*/
+ 
+ /*
+  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
+@@ -109,10 +109,14 @@ struct icmp6stat icmp6stat;
+ 
+ extern struct in6pcb rawin6pcb;
+ extern struct timeval icmp6errratelim;
++static struct timeval icmp6errratelim_last;
++extern int icmp6errppslim;
++static int icmp6errpps_count = 0;
+ extern int icmp6_nodeinfo;
+ static struct rttimer_queue *icmp6_mtudisc_timeout_q = NULL;
+ extern int pmtu_expire;
+ 
++static void icmp6_errcount __P((struct icmp6errstat *, int, int));
+ static void icmp6_mtudisc_update __P((struct in6_addr *, struct icmp6_hdr *,
+ 				      struct mbuf *));
+ static int icmp6_ratelimit __P((const struct in6_addr *, const int, const int));
+@@ -139,6 +143,64 @@ icmp6_init()
+ 	icmp6_mtudisc_timeout_q = rt_timer_queue_create(pmtu_expire);
+ }
+ 
++static void
++icmp6_errcount(stat, type, code)
++	struct icmp6errstat *stat;
++	int type, code;
++{
++	switch(type) {
++	case ICMP6_DST_UNREACH:
++		switch (code) {
++		case ICMP6_DST_UNREACH_NOROUTE:
++			stat->icp6errs_dst_unreach_noroute++;
++			return;
++		case ICMP6_DST_UNREACH_ADMIN:
++			stat->icp6errs_dst_unreach_admin++;
++			return;
++		case ICMP6_DST_UNREACH_BEYONDSCOPE:
++			stat->icp6errs_dst_unreach_beyondscope++;
++			return;
++		case ICMP6_DST_UNREACH_ADDR:
++			stat->icp6errs_dst_unreach_addr++;
++			return;
++		case ICMP6_DST_UNREACH_NOPORT:
++			stat->icp6errs_dst_unreach_noport++;
++			return;
++		}
++		break;
++	case ICMP6_PACKET_TOO_BIG:
++		stat->icp6errs_packet_too_big++;
++		return;
++	case ICMP6_TIME_EXCEEDED:
++		switch(code) {
++		case ICMP6_TIME_EXCEED_TRANSIT:
++			stat->icp6errs_time_exceed_transit++;
++			return;
++		case ICMP6_TIME_EXCEED_REASSEMBLY:
++			stat->icp6errs_time_exceed_reassembly++;
++			return;
++		}
++		break;
++	case ICMP6_PARAM_PROB:
++		switch(code) {
++		case ICMP6_PARAMPROB_HEADER:
++			stat->icp6errs_paramprob_header++;
++			return;
++		case ICMP6_PARAMPROB_NEXTHEADER:
++			stat->icp6errs_paramprob_nextheader++;
++			return;
++		case ICMP6_PARAMPROB_OPTION:
++			stat->icp6errs_paramprob_option++;
++			return;
++		}
++		break;
++	case ND_REDIRECT:
++		stat->icp6errs_redirect++;
++		return;
++	}
++	stat->icp6errs_unknown++;
++}
++
+ /*
+  * Generate an error packet of type error in response to bad IP6 packet.
+  */
+@@ -155,6 +217,9 @@ icmp6_error(m, type, code, param)
+ 
+ 	icmp6stat.icp6s_error++;
+ 
++	/* count per-type-code statistics */
++	icmp6_errcount(&icmp6stat.icp6s_outerrhist, type, code);
++
+ #ifndef PULLDOWN_TEST
+ 	IP6_EXTHDR_CHECK(m, 0, sizeof(struct ip6_hdr), );
+ #else
+@@ -1633,6 +1698,10 @@ icmp6_reflect(m, off)
+ 	 * If there are extra headers between IPv6 and ICMPv6, strip
+ 	 * off that header first.
+ 	 */
++#ifdef DIAGNOSTIC
++	if (sizeof(struct ip6_hdr) + sizeof(struct icmp6_hdr) > MHLEN)
++		panic("assumption failed in icmp6_reflect");
++#endif
+ 	if (off > sizeof(struct ip6_hdr)) {
+ 		size_t l;
+ 		struct ip6_hdr nip6;
+@@ -1786,6 +1855,9 @@ icmp6_fasttimo()
+ {
+ 
+ 	mld6_fasttimeo();
++
++	/* reset ICMPv6 pps limit */
++	icmp6errpps_count = 0;
+ }
+ 
+ static const char *
+@@ -2022,6 +2094,8 @@ icmp6_redirect_output(m0, rt)
+ 	struct ifnet *outif = NULL;
+ 	struct sockaddr_in6 src_sa;
+ 
++	icmp6_errcount(&icmp6stat.icp6s_outerrhist, ND_REDIRECT, 0);
++
+ 	/* if we are not router, we don't send icmp6 redirect */
+ 	if (!ip6_forwarding || ip6_accept_rtadv)
+ 		goto fail;
+@@ -2168,6 +2242,8 @@ nolladdropt:;
+ 	m->m_pkthdr.len = m->m_len = p - (u_char *)ip6;
+ 
+ 	/* just to be safe */
++	if (p - (u_char *)ip6 > maxlen)
++		goto noredhdropt;
+ 
+     {
+ 	/* redirected header option */
+@@ -2238,6 +2314,7 @@ nolladdropt:;
+ 	m->m_next = m0;
+ 	m->m_pkthdr.len = m->m_len + m0->m_len;
+     }
++noredhdropt:;
+ 
+ 	if (IN6_IS_ADDR_LINKLOCAL(&sip6->ip6_src))
+ 		sip6->ip6_src.s6_addr16[1] = 0;
+@@ -2286,6 +2363,14 @@ fail:
+  * Returns 1 if the router SHOULD NOT send this icmp6 packet due to rate
+  * limitation.
+  *
++ * There are two limitations defined:
++ * - pps limit: ICMPv6 error packet cannot exceed defined packet-per-second.
++ *   we measure it every 0.2 second, since fasttimo works every 0.2 second.
++ * - rate limit: ICMPv6 error packet cannot appear more than once per
++ *   defined interval.
++ * In any case, if we perform rate limitation, we'll see jitter in the ICMPv6
++ * error packets.
++ *
+  * XXX per-destination/type check necessary?
+  */
+ static int
+@@ -2294,13 +2379,23 @@ icmp6_ratelimit(dst, type, code)
+ 	const int type;			/* not used at this moment */
+ 	const int code;			/* not used at this moment */
+ {
+-	static struct timeval icmp6errratelim_last;
++	int ret;
+ 
+-	/*
+-	 * ratecheck() returns true if it is okay to send.  We return
+-	 * true if it is not okay to send.
+-	 */
+-	return (ratecheck(&icmp6errratelim_last, &icmp6errratelim) == 0);
++	ret = 0;	/*okay to send*/
++
++	/* PPS limit */
++	icmp6errpps_count++;
++	if (icmp6errppslim && icmp6errpps_count > icmp6errppslim / 5) {
++		/* The packet is subject to pps limit */
++		ret++;
++	}
++
++	if (!ratecheck(&icmp6errratelim_last, &icmp6errratelim)) {
++		/* The packet is subject to rate limit */
++		ret++;
++	}
++
++	return ret;
+ }
+ 
+ static struct rtentry *
+@@ -2421,6 +2516,11 @@ icmp6_sysctl(name, namelen, oldp, oldlenp, newp, newlen)
+ 				&nd6_useloopback);
+ 	case ICMPV6CTL_NODEINFO:
+ 		return sysctl_int(oldp, oldlenp, newp, newlen, &icmp6_nodeinfo);
++	case ICMPV6CTL_ERRPPSLIMIT:
++		return sysctl_int(oldp, oldlenp, newp, newlen, &icmp6errppslim);
++	case ICMPV6CTL_ND6_MAXNUDHINT:
++		return sysctl_int(oldp, oldlenp, newp, newlen,
++				&nd6_maxnudhint);
+ 	default:
+ 		return ENOPROTOOPT;
+ 	}
+diff --git a/sys/netinet6/in6_proto.c b/sys/netinet6/in6_proto.c
+index 65424304f3d..244af2cec19 100644
+--- a/sys/netinet6/in6_proto.c
++++ b/sys/netinet6/in6_proto.c
+@@ -1,9 +1,10 @@
+-/*	$OpenBSD: in6_proto.c,v 1.22 2000/06/18 17:32:48 itojun Exp $	*/
++/*	$OpenBSD: in6_proto.c,v 1.23 2000/07/06 10:11:25 itojun Exp $	*/
++/*	$KAME: in6_proto.c,v 1.64 2000/06/20 16:20:27 itojun Exp $	*/
+ 
+ /*
+  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
+  * All rights reserved.
+- * 
++ *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+  * are met:
+@@ -15,7 +16,7 @@
+  * 3. Neither the name of the project nor the names of its contributors
+  *    may be used to endorse or promote products derived from this software
+  *    without specific prior written permission.
+- * 
++ *
+  * THIS SOFTWARE IS PROVIDED BY THE PROJECT AND CONTRIBUTORS ``AS IS'' AND
+  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+@@ -299,7 +300,8 @@ u_long	rip6_recvspace = RIPV6RCVQ;
+ /* ICMPV6 parameters */
+ int	icmp6_rediraccept = 1;		/* accept and process redirects */
+ int	icmp6_redirtimeout = 10 * 60;	/* 10 minutes */
+-struct timeval icmp6errratelim = { 0, 1000 };	/* 1000usec = 1msec */
++struct timeval icmp6errratelim = { 0, 0 };	/* no ratelimit */
++int	icmp6errppslim = 100;		/* 100pps */
+ int	icmp6_nodeinfo = 1;		/* enable/disable NI response */
+ 
+ #ifdef TCP6
+diff --git a/sys/netinet6/ip6_input.c b/sys/netinet6/ip6_input.c
+index 8381025c768..98f45003ac9 100644
+--- a/sys/netinet6/ip6_input.c
++++ b/sys/netinet6/ip6_input.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ip6_input.c,v 1.17 2000/07/02 10:10:55 itojun Exp $	*/
++/*	$OpenBSD: ip6_input.c,v 1.18 2000/07/06 10:11:25 itojun Exp $	*/
+ /*	$KAME: ip6_input.c,v 1.95 2000/07/02 07:49:37 jinmei Exp $	*/
+ 
+ /*
+@@ -428,13 +428,14 @@ ip6_input(m)
+ 	 *  Unicast check
+ 	 */
+ 	if (ip6_forward_rt.ro_rt != NULL &&
+-	    (ip6_forward_rt.ro_rt->rt_flags & RTF_UP) != 0 &&
++	    (ip6_forward_rt.ro_rt->rt_flags & RTF_UP) != 0 && 
+ 	    IN6_ARE_ADDR_EQUAL(&ip6->ip6_dst,
+ 			       &ip6_forward_rt.ro_dst.sin6_addr))
+-		; /* cache hit */
++		ip6stat.ip6s_forward_cachehit++;
+ 	else {
+ 		if (ip6_forward_rt.ro_rt) {
+ 			/* route is down or destination is different */
++			ip6stat.ip6s_forward_cachemiss++;
+ 			RTFREE(ip6_forward_rt.ro_rt);
+ 			ip6_forward_rt.ro_rt = 0;
+ 		}
+@@ -565,7 +566,7 @@ ip6_input(m)
+ 		ip6 = mtod(m, struct ip6_hdr *);
+ 
+ 		/*
+-		 * if the payload length field is 0 and the next header field
++		 * if the payload length field is 0 and the next header field  
+ 		 * indicates Hop-by-Hop Options header, then a Jumbo Payload
+ 		 * option MUST be included.
+ 		 */
+@@ -573,7 +574,7 @@ ip6_input(m)
+ 			/*
+ 			 * Note that if a valid jumbo payload option is
+ 			 * contained, ip6_hoptops_input() must set a valid
+-			 * (non-zero) payload length to the variable plen.
++			 * (non-zero) payload length to the variable plen. 
+ 			 */
+ 			ip6stat.ip6s_badoptions++;
+ 			in6_ifstat_inc(m->m_pkthdr.rcvif, ifs6_in_discard);
+@@ -650,6 +651,24 @@ ip6_input(m)
+ 		return;
+ 	}	
+ 
++	ip6 = mtod(m, struct ip6_hdr *);
++
++	/*
++	 * Malicious party may be able to use IPv4 mapped addr to confuse
++	 * tcp/udp stack and bypass security checks (act as if it was from
++	 * 127.0.0.1 by using IPv6 src ::ffff:127.0.0.1).  Be cautious.
++	 *
++	 * For SIIT end node behavior, you may want to disable the check.
++	 * However, you will  become vulnerable to attacks using IPv4 mapped
++	 * source.
++	 */
++	if (IN6_IS_ADDR_V4MAPPED(&ip6->ip6_src) ||
++	    IN6_IS_ADDR_V4MAPPED(&ip6->ip6_dst)) {
++		ip6stat.ip6s_badscope++;
++		in6_ifstat_inc(m->m_pkthdr.rcvif, ifs6_in_addrerr);
++		goto bad;
++	}
++
+ 	/*
+ 	 * Tell launch routine the next header
+ 	 */
+diff --git a/sys/netinet6/ip6_var.h b/sys/netinet6/ip6_var.h
+index 138c419f980..be445bbc42a 100644
+--- a/sys/netinet6/ip6_var.h
++++ b/sys/netinet6/ip6_var.h
+@@ -1,10 +1,10 @@
+-/*	$OpenBSD: ip6_var.h,v 1.9 2000/06/19 03:43:17 itojun Exp $	*/
+-/*	$KAME: ip6_var.h,v 1.28 2000/03/09 00:46:12 itojun Exp $	*/
++/*	$OpenBSD: ip6_var.h,v 1.10 2000/07/06 10:11:25 itojun Exp $	*/
++/*	$KAME: ip6_var.h,v 1.33 2000/06/11 14:59:20 jinmei Exp $	*/
+ 
+ /*
+  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
+  * All rights reserved.
+- * 
++ *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+  * are met:
+@@ -16,7 +16,7 @@
+  * 3. Neither the name of the project nor the names of its contributors
+  *    may be used to endorse or promote products derived from this software
+  *    without specific prior written permission.
+- * 
++ *
+  * THIS SOFTWARE IS PROVIDED BY THE PROJECT AND CONTRIBUTORS ``AS IS'' AND
+  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+@@ -208,6 +208,9 @@ struct	ip6stat {
+ 	u_quad_t ip6s_sources_otherscope[16];
+ 	/* number of times that an deprecated address is chosen */
+ 	u_quad_t ip6s_sources_deprecated[16];
++
++	u_quad_t ip6s_forward_cachehit;
++	u_quad_t ip6s_forward_cachemiss;
+ };
+ 
+ #ifdef _KERNEL
+@@ -225,10 +228,6 @@ extern int	ip6_forward_srcrt;	/* forward src-routed? */
+ extern int	ip6_use_deprecated;	/* allow deprecated addr as source */
+ extern int	ip6_rr_prune;		/* router renumbering prefix
+ 					 * walk list every 5 sec.    */
+-#ifdef MAPPED_ADDR_ENABLED
+-extern int	ip6_mapped_addr_on;
+-#endif /* MAPPED_ADDR_ENABLED */
+-
+ extern struct socket *ip6_mrouter; 	/* multicast routing daemon */
+ extern int	ip6_sendredirects;	/* send IP redirects when forwarding? */
+ extern int	ip6_maxfragpackets; /* Maximum packets in reassembly queue */
+diff --git a/sys/netinet6/nd6.c b/sys/netinet6/nd6.c
+index f8f2e44caea..6a9d7dc0c2e 100644
+--- a/sys/netinet6/nd6.c
++++ b/sys/netinet6/nd6.c
+@@ -1,5 +1,5 @@
+-/*	$OpenBSD: nd6.c,v 1.17 2000/06/16 21:47:17 provos Exp $	*/
+-/*	$KAME: nd6.c,v 1.63 2000/05/17 12:35:59 jinmei Exp $	*/
++/*	$OpenBSD: nd6.c,v 1.18 2000/07/06 10:11:26 itojun Exp $	*/
++/*	$KAME: nd6.c,v 1.68 2000/07/02 14:48:02 itojun Exp $	*/
+ 
+ /*
+  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
+@@ -91,6 +91,8 @@ int	nd6_useloopback = 1;	/* use loopback interface for local traffic */
+ /* preventing too many loops in ND option parsing */
+ int nd6_maxndopt = 10;	/* max # of ND options allowed */
+ 
++int nd6_maxnudhint = 0;	/* max # of subsequent upper layer hints */
++
+ /* for debugging? */
+ static int nd6_inuse, nd6_allocated;
+ 
+@@ -220,8 +222,7 @@ nd6_setmtu(ifp)
+ 				 */
+ 				if (in6_maxmtu < ndi->linkmtu)
+ 					in6_maxmtu = ndi->linkmtu;
+-			}
+-			else
++			} else
+ 				in6_setmaxmtu();
+ 		}
+ 	}
+@@ -462,8 +463,7 @@ nd6_timer(ignored_arg)
+ 				nd6_ns_output(ifp, &dst->sin6_addr,
+ 					      &dst->sin6_addr,
+ 					      ln, 0);
+-			}
+-			else
++			} else
+ 				ln->ln_state = ND6_LLINFO_STALE; /* XXX */
+ 			break;
+ 		case ND6_LLINFO_PROBE:
+@@ -704,8 +704,7 @@ nd6_lookup(addr6, create, ifp)
+ 					(struct llinfo_nd6 *)rt->rt_llinfo;
+ 				ln->ln_state = ND6_LLINFO_NOSTATE;
+ 			}
+-		}
+-		else
++		} else
+ 			return(NULL);
+ 	}
+ 	rt->rt_refcnt--;
+@@ -870,9 +869,10 @@ nd6_free(rt)
+  * XXX cost-effective metods?
+  */
+ void
+-nd6_nud_hint(rt, dst6)
++nd6_nud_hint(rt, dst6, force)
+ 	struct rtentry *rt;
+ 	struct in6_addr *dst6;
++	int force;
+ {
+ 	struct llinfo_nd6 *ln;
+ 	long time_second = time.tv_sec;
+@@ -888,11 +888,10 @@ nd6_nud_hint(rt, dst6)
+ 			return;
+ 	}
+ 
+-	if ((rt->rt_flags & RTF_GATEWAY)
+-	 || (rt->rt_flags & RTF_LLINFO) == 0
+-	 || !rt->rt_llinfo
+-	 || !rt->rt_gateway
+-	 || rt->rt_gateway->sa_family != AF_LINK) {
++	if ((rt->rt_flags & RTF_GATEWAY) != 0 ||
++	    (rt->rt_flags & RTF_LLINFO) == 0 ||
++	    !rt->rt_llinfo || !rt->rt_gateway ||
++	    rt->rt_gateway->sa_family != AF_LINK) {
+ 		/* This is not a host route. */
+ 		return;
+ 	}
+@@ -901,6 +900,16 @@ nd6_nud_hint(rt, dst6)
+ 	if (ln->ln_state < ND6_LLINFO_REACHABLE)
+ 		return;
+ 
++	/*
++	 * if we get upper-layer reachability confirmation many times,
++	 * it is possible we have false information.
++	 */
++	if (!force) {
++		ln->ln_byhint++;
++		if (ln->ln_byhint > nd6_maxnudhint)
++			return;
++	}
++
+ 	ln->ln_state = ND6_LLINFO_REACHABLE;
+ 	if (ln->ln_expire)
+ 		ln->ln_expire = time_second +
+@@ -1122,6 +1131,7 @@ nd6_rtrequest(req, rt, sa)
+ 			 * which is specified by ndp command.
+ 			 */
+ 			ln->ln_state = ND6_LLINFO_REACHABLE;
++			ln->ln_byhint = 0;
+ 		} else {
+ 		        /*
+ 			 * When req == RTM_RESOLVE, rt is created and
+@@ -1146,6 +1156,7 @@ nd6_rtrequest(req, rt, sa)
+ 			caddr_t macp = nd6_ifptomac(ifp);
+ 			ln->ln_expire = 0;
+ 			ln->ln_state = ND6_LLINFO_REACHABLE;
++			ln->ln_byhint = 0;
+ 			if (macp) {
+ 				Bcopy(macp, LLADDR(SDL(gate)), ifp->if_addrlen);
+ 				SDL(gate)->sdl_alen = ifp->if_addrlen;
+@@ -1169,6 +1180,7 @@ nd6_rtrequest(req, rt, sa)
+ 		} else if (rt->rt_flags & RTF_ANNOUNCE) {
+ 			ln->ln_expire = 0;
+ 			ln->ln_state = ND6_LLINFO_REACHABLE;
++			ln->ln_byhint = 0;
+ 
+ 			/* join solicited node multicast for proxy ND */
+ 			if (ifp->if_flags & IFF_MULTICAST) {
+@@ -1308,8 +1320,7 @@ nd6_ioctl(cmd, data, ifp)
+ 			if (IN6_IS_ADDR_LINKLOCAL(&drl->defrouter[i].rtaddr)) {
+ 				/* XXX: need to this hack for KAME stack */
+ 				drl->defrouter[i].rtaddr.s6_addr16[1] = 0;
+-			}
+-			else
++			} else
+ 				log(LOG_ERR,
+ 				    "default router list contains a "
+ 				    "non-linklocal address(%s)\n",
+@@ -1354,8 +1365,7 @@ nd6_ioctl(cmd, data, ifp)
+ 					if (IN6_IS_ADDR_LINKLOCAL(&RTRADDR)) {
+ 						/* XXX: hack for KAME */
+ 						RTRADDR.s6_addr16[1] = 0;
+-					}
+-					else
++					} else
+ 						log(LOG_ERR,
+ 						    "a router(%s) advertises "
+ 						    "a prefix with "
+diff --git a/sys/netinet6/nd6.h b/sys/netinet6/nd6.h
+index 49e5d0d9714..340f4c3f50e 100644
+--- a/sys/netinet6/nd6.h
++++ b/sys/netinet6/nd6.h
+@@ -1,5 +1,5 @@
+-/*	$OpenBSD: nd6.h,v 1.7 2000/05/19 13:55:17 itojun Exp $	*/
+-/*	$KAME: nd6.h,v 1.21 2000/05/17 12:35:59 jinmei Exp $	*/
++/*	$OpenBSD: nd6.h,v 1.8 2000/07/06 10:11:26 itojun Exp $	*/
++/*	$KAME: nd6.h,v 1.23 2000/06/04 12:54:57 itojun Exp $	*/
+ 
+ /*
+  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
+@@ -49,6 +49,7 @@ struct	llinfo_nd6 {
+ 	u_long	ln_expire;	/* lifetime for NDP state transition */
+ 	short	ln_state;	/* reachability state */
+ 	short	ln_router;	/* 2^0: ND6 router bit */
++	int	ln_byhint;	/* # of times we made it reachable by UL hint */
+ };
+ 
+ #define ND6_LLINFO_NOSTATE	-2
+@@ -230,6 +231,7 @@ extern int nd6_delay;
+ extern int nd6_umaxtries;
+ extern int nd6_mmaxtries;
+ extern int nd6_useloopback;
++extern int nd6_maxnudhint;
+ extern struct llinfo_nd6 llinfo_nd6;
+ extern struct nd_ifinfo *nd_ifinfo;
+ extern struct nd_drhead nd_defrouter;
+@@ -277,7 +279,7 @@ void nd6_setmtu __P((struct ifnet *));
+ void nd6_timer __P((void *));
+ void nd6_purge __P((struct ifnet *));
+ void nd6_free __P((struct rtentry *));
+-void nd6_nud_hint __P((struct rtentry *, struct in6_addr *));
++void nd6_nud_hint __P((struct rtentry *, struct in6_addr *, int));
+ int nd6_resolve __P((struct ifnet *, struct rtentry *,
+ 		     struct mbuf *, struct sockaddr *, u_char *));
+ #if defined(__bsdi__) && _BSDI_VERSION >= 199802
+

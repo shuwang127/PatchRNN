@@ -1,0 +1,47 @@
+commit 12c2ab09571e8aae3a87da2a4a452632a5fac1e5
+Author: Will Deacon <will.deacon@arm.com>
+Date:   Tue Dec 15 16:08:12 2015 +0000
+
+    iommu/io-pgtable-arm: Ensure we free the final level on teardown
+    
+    When tearing down page tables, we return early for the final level
+    since we know that we won't have any table pointers to follow.
+    Unfortunately, this also means that we forget to free the final level,
+    so we end up leaking memory.
+    
+    Fix the issue by always freeing the current level, but just don't bother
+    to iterate over the ptes if we're at the final level.
+    
+    Cc: <stable@vger.kernel.org>
+    Reported-by: Zhang Bo <zhangbo_a@xiaomi.com>
+    Signed-off-by: Will Deacon <will.deacon@arm.com>
+
+diff --git a/drivers/iommu/io-pgtable-arm.c b/drivers/iommu/io-pgtable-arm.c
+index 937ba23e48d7..8bbcbfe7695c 100644
+--- a/drivers/iommu/io-pgtable-arm.c
++++ b/drivers/iommu/io-pgtable-arm.c
+@@ -404,17 +404,18 @@ static void __arm_lpae_free_pgtable(struct arm_lpae_io_pgtable *data, int lvl,
+ 	arm_lpae_iopte *start, *end;
+ 	unsigned long table_size;
+ 
+-	/* Only leaf entries at the last level */
+-	if (lvl == ARM_LPAE_MAX_LEVELS - 1)
+-		return;
+-
+ 	if (lvl == ARM_LPAE_START_LVL(data))
+ 		table_size = data->pgd_size;
+ 	else
+ 		table_size = ARM_LPAE_GRANULE(data);
+ 
+ 	start = ptep;
+-	end = (void *)ptep + table_size;
++
++	/* Only leaf entries at the last level */
++	if (lvl == ARM_LPAE_MAX_LEVELS - 1)
++		end = ptep;
++	else
++		end = (void *)ptep + table_size;
+ 
+ 	while (ptep != end) {
+ 		arm_lpae_iopte pte = *ptep++;
+

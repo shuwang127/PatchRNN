@@ -1,0 +1,66 @@
+commit 514c485c01676927feb77c2a3e350bb3985fa11e
+Author: Jes Sorensen <Jes.Sorensen@redhat.com>
+Date:   Wed Apr 9 23:21:21 2014 +0200
+
+    staging: rtl8723au: Fix case where ethtype was never obtained and always be checked against 0
+    
+    Zero-initializing ether_type masked that the ether type would never be
+    obtained for 8021x packets and the comparition against eapol_type
+    would always fail.
+    
+    Signed-off-by: Jes Sorensen <Jes.Sorensen@redhat.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/rtl8723au/core/rtw_recv.c b/drivers/staging/rtl8723au/core/rtw_recv.c
+index 8ae191654a42..e448511d2f45 100644
+--- a/drivers/staging/rtl8723au/core/rtw_recv.c
++++ b/drivers/staging/rtl8723au/core/rtw_recv.c
+@@ -575,7 +575,7 @@ static struct recv_frame *portctrl(struct rtw_adapter *adapter,
+ 	struct sta_info *psta;
+ 	struct sta_priv *pstapriv ;
+ 	struct recv_frame *prtnframe;
+-	u16 ether_type = 0;
++	u16 ether_type;
+ 	u16 eapol_type = ETH_P_PAE;/* for Funia BD's WPA issue */
+ 	struct rx_pkt_attrib *pattrib;
+ 
+@@ -593,7 +593,12 @@ static struct recv_frame *portctrl(struct rtw_adapter *adapter,
+ 		 ("########portctrl:adapter->securitypriv.dot11AuthAlgrthm ="
+ 		  "%d\n", adapter->securitypriv.dot11AuthAlgrthm));
+ 
+-	if (auth_alg == 2) {
++	if (auth_alg == dot11AuthAlgrthm_8021X) {
++		/* get ether_type */
++		ptr = ptr + pfhdr->attrib.hdrlen + LLC_HEADER_SIZE;
++		memcpy(&ether_type, ptr, 2);
++		ether_type = ntohs((unsigned short)ether_type);
++
+ 		if ((psta != NULL) && (psta->ieee8021x_blocked)) {
+ 			/* blocked */
+ 			/* only accept EAPOL frame */
+@@ -601,13 +606,6 @@ static struct recv_frame *portctrl(struct rtw_adapter *adapter,
+ 				 ("########portctrl:psta->ieee8021x_blocked =="
+ 				  "1\n"));
+ 
+-			prtnframe = precv_frame;
+-
+-			/* get ether_type */
+-			ptr = ptr + pfhdr->attrib.hdrlen + LLC_HEADER_SIZE;
+-			memcpy(&ether_type, ptr, 2);
+-			ether_type = ntohs((unsigned short)ether_type);
+-
+ 		        if (ether_type == eapol_type) {
+ 				prtnframe = precv_frame;
+ 			} else {
+@@ -651,9 +649,7 @@ static struct recv_frame *portctrl(struct rtw_adapter *adapter,
+ 		prtnframe = precv_frame;
+ 	}
+ 
+-
+-
+-		return prtnframe;
++	return prtnframe;
+ }
+ 
+ int recv_decache(struct recv_frame *precv_frame, u8 bretry,
+

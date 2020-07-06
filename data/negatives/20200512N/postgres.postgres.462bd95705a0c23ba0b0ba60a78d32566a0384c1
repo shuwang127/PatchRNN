@@ -1,0 +1,83 @@
+commit 462bd95705a0c23ba0b0ba60a78d32566a0384c1
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+Date:   Thu Dec 11 21:02:25 2014 -0500
+
+    Fix planning of SELECT FOR UPDATE on child table with partial index.
+    
+    Ordinarily we can omit checking of a WHERE condition that matches a partial
+    index's condition, when we are using an indexscan on that partial index.
+    However, in SELECT FOR UPDATE we must include the "redundant" filter
+    condition in the plan so that it gets checked properly in an EvalPlanQual
+    recheck.  The planner got this mostly right, but improperly omitted the
+    filter condition if the index in question was on an inheritance child
+    table.  In READ COMMITTED mode, this could result in incorrectly returning
+    just-updated rows that no longer satisfy the filter condition.
+    
+    The cause of the error is using get_parse_rowmark() when get_plan_rowmark()
+    is what should be used during planning.  In 9.3 and up, also fix the same
+    mistake in contrib/postgres_fdw.  It's currently harmless there (for lack
+    of inheritance support) but wrong is wrong, and the incorrect code might
+    get copied to someplace where it's more significant.
+    
+    Report and fix by Kyotaro Horiguchi.  Back-patch to all supported branches.
+
+diff --git a/contrib/postgres_fdw/postgres_fdw.c b/contrib/postgres_fdw/postgres_fdw.c
+index c3039a6480..f00fdbfb23 100644
+--- a/contrib/postgres_fdw/postgres_fdw.c
++++ b/contrib/postgres_fdw/postgres_fdw.c
+@@ -822,7 +822,7 @@ postgresGetForeignPlan(PlannerInfo *root,
+ 	}
+ 	else
+ 	{
+-		RowMarkClause *rc = get_parse_rowmark(root->parse, baserel->relid);
++		PlanRowMark *rc = get_plan_rowmark(root->rowMarks, baserel->relid);
+ 
+ 		if (rc)
+ 		{
+@@ -835,15 +835,18 @@ postgresGetForeignPlan(PlannerInfo *root,
+ 			 * complete information about, and (b) it wouldn't work anyway on
+ 			 * older remote servers.  Likewise, we don't worry about NOWAIT.
+ 			 */
+-			switch (rc->strength)
++			switch (rc->markType)
+ 			{
+-				case LCS_FORKEYSHARE:
+-				case LCS_FORSHARE:
++				case ROW_MARK_EXCLUSIVE:
++				case ROW_MARK_NOKEYEXCLUSIVE:
++					appendStringInfoString(&sql, " FOR UPDATE");
++					break;
++				case ROW_MARK_SHARE:
++				case ROW_MARK_KEYSHARE:
+ 					appendStringInfoString(&sql, " FOR SHARE");
+ 					break;
+-				case LCS_FORNOKEYUPDATE:
+-				case LCS_FORUPDATE:
+-					appendStringInfoString(&sql, " FOR UPDATE");
++				default:
++					/* nothing needed */
+ 					break;
+ 			}
+ 		}
+diff --git a/src/backend/optimizer/plan/createplan.c b/src/backend/optimizer/plan/createplan.c
+index bf8dbe09db..8f9ae4f643 100644
+--- a/src/backend/optimizer/plan/createplan.c
++++ b/src/backend/optimizer/plan/createplan.c
+@@ -34,6 +34,7 @@
+ #include "optimizer/planmain.h"
+ #include "optimizer/planner.h"
+ #include "optimizer/predtest.h"
++#include "optimizer/prep.h"
+ #include "optimizer/restrictinfo.h"
+ #include "optimizer/subselect.h"
+ #include "optimizer/tlist.h"
+@@ -1231,7 +1232,7 @@ create_indexscan_plan(PlannerInfo *root,
+ 			if (best_path->indexinfo->indpred)
+ 			{
+ 				if (baserelid != root->parse->resultRelation &&
+-					get_parse_rowmark(root->parse, baserelid) == NULL)
++					get_plan_rowmark(root->rowMarks, baserelid) == NULL)
+ 					if (predicate_implied_by(clausel,
+ 											 best_path->indexinfo->indpred))
+ 						continue;		/* implied by index predicate */
+

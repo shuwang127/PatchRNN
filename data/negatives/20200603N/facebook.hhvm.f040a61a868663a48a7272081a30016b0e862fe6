@@ -1,0 +1,215 @@
+commit f040a61a868663a48a7272081a30016b0e862fe6
+Author: Herman Venter <hermanv@fb.com>
+Date:   Fri Sep 20 18:18:25 2013 -0700
+
+    Keep source location table in memory so that source line number to byte code offset lookups don't hit the SQL database
+    
+    Hitting the SQL database with at least two queries every time the debugger needs to map from source line number to byte code offset, or vice versa, makes no sense. This diff adds a table to Unit that can be used instead of the database. Note that when running in repo authoritative mode, the table will be empty because a) it is created lazily when a unit is loaded form the repo and b) in this mode, the repo does not contain the source line information needed for this table. This does not matter too much because we don't support debugging when running in repo authoritative mode.
+    
+    Note, this diff does not remove all uses of the SQL database. That will be done in a follow up diff.
+    
+    Reviewed By: @mikemag
+    
+    Differential Revision: D978834
+
+diff --git a/hphp/runtime/vm/unit.cpp b/hphp/runtime/vm/unit.cpp
+index 05e44f43df..a25bd6473d 100644
+--- a/hphp/runtime/vm/unit.cpp
++++ b/hphp/runtime/vm/unit.cpp
+@@ -1477,12 +1477,21 @@ Func* Unit::getMain(Class* cls /*= NULL*/) const {
+   return f;
+ }
+ 
++SourceLocTable Unit::getSourceLocTable() const {
++  if (m_sourceLocTable.size() > 0 || m_repoId == RepoIdInvalid) {
++    return m_sourceLocTable;
++  }
++  Lock lock(s_classesMutex);
++  UnitRepoProxy& urp = Repo::get().urp();
++  urp.getSourceLocTab(m_repoId).get(m_sn, ((Unit*)this)->m_sourceLocTable);
++  return m_sourceLocTable;
++}
++
+ // This uses range lookups so offsets in the middle of instructions are
+ // supported.
+ int Unit::getLineNumber(Offset pc) const {
+   LineEntry key = LineEntry(pc, -1);
+-  std::vector<LineEntry>::const_iterator it =
+-    upper_bound(m_lineTable.begin(), m_lineTable.end(), key);
++  auto it = upper_bound(m_lineTable.begin(), m_lineTable.end(), key);
+   if (it != m_lineTable.end()) {
+     assert(pc < it->pastOffset());
+     return it->val();
+@@ -1490,11 +1499,19 @@ int Unit::getLineNumber(Offset pc) const {
+   return -1;
+ }
+ 
++// Sets sLoc to the source location of the first source location
++// entry that contains pc in its range of source locations.
++// Returns
+ bool Unit::getSourceLoc(Offset pc, SourceLoc& sLoc) const {
+-  if (m_repoId == RepoIdInvalid) {
+-    return false;
++  auto sourceLocTable = this->getSourceLocTable();
++  SourceLocEntry key(pc, sLoc);
++  auto it = upper_bound(sourceLocTable.begin(), sourceLocTable.end(), key);
++  if (it != sourceLocTable.end()) {
++    assert(pc < it->pastOffset());
++    sLoc = it->val();
++    return true;
+   }
+-  return !Repo::get().urp().getSourceLoc(m_repoId).get(m_sn, pc, sLoc);
++  return false;
+ }
+ 
+ bool Unit::getOffsetRanges(int line, OffsetRangeVec& offsets) const {
+@@ -2078,6 +2095,42 @@ bool UnitRepoProxy::GetSourceLocStmt
+   return false;
+ }
+ 
++bool UnitRepoProxy::GetSourceLocTabStmt
++     ::get(int64_t unitSn, SourceLocTable& sourceLocTab) {
++  try {
++    RepoTxn txn(m_repo);
++    if (!prepared()) {
++      std::stringstream ssSelect;
++      ssSelect << "SELECT pastOffset,line0,char0,line1,char1 FROM "
++               << m_repo.table(m_repoId, "UnitSourceLoc")
++               << " WHERE unitSn == @unitSn"
++                  " ORDER BY pastOffset ASC;";
++      txn.prepare(*this, ssSelect.str());
++    }
++    RepoTxnQuery query(txn, *this);
++    query.bindInt64("@unitSn", unitSn);
++    do {
++      query.step();
++      if (!query.row()) {
++        return true;
++      }
++      Offset pastOffset;
++      query.getOffset(0, pastOffset);
++      SourceLoc sLoc;
++      query.getInt(1, sLoc.line0);
++      query.getInt(2, sLoc.char0);
++      query.getInt(3, sLoc.line1);
++      query.getInt(4, sLoc.char1);
++      SourceLocEntry entry(pastOffset, sLoc);
++      sourceLocTab.push_back(entry);
++    } while (!query.done());
++    txn.commit();
++  } catch (RepoExc& re) {
++    return true;
++  }
++  return false;
++}
++
+ bool UnitRepoProxy::GetSourceLocPastOffsetsStmt
+                   ::get(int64_t unitSn, int line, OffsetRangeVec& ranges) {
+   try {
+@@ -2426,8 +2479,9 @@ Func* UnitEmitter::newFunc(const FuncEmitter* fe, Unit& unit,
+   return f;
+ }
+ 
+-template<class SourceLocTable>
+-static LineTable createLineTable(SourceLocTable& srcLoc, Offset bclen) {
++static LineTable createLineTable(
++    std::vector<std::pair<Offset,SourceLoc> >& srcLoc,
++    Offset bclen) {
+   LineTable lines;
+   for (size_t i = 0; i < srcLoc.size(); ++i) {
+     Offset endOff = i < srcLoc.size() - 1 ? srcLoc[i + 1].first : bclen;
+@@ -2436,6 +2490,17 @@ static LineTable createLineTable(SourceLocTable& srcLoc, Offset bclen) {
+   return lines;
+ }
+ 
++static SourceLocTable createSourceLocTable(
++    std::vector<std::pair<Offset,SourceLoc> >& srcLoc,
++    Offset bclen) {
++  SourceLocTable locations;
++  for (size_t i = 0; i < srcLoc.size(); ++i) {
++    Offset endOff = i < srcLoc.size() - 1 ? srcLoc[i + 1].first : bclen;
++    locations.push_back(SourceLocEntry(endOff, srcLoc[i].second));
++  }
++  return locations;
++}
++
+ bool UnitEmitter::insert(UnitOrigin unitOrigin, RepoTxn& txn) {
+   Repo& repo = Repo::get();
+   UnitRepoProxy& urp = repo.urp();
+@@ -2447,7 +2512,7 @@ bool UnitEmitter::insert(UnitOrigin unitOrigin, RepoTxn& txn) {
+ 
+   try {
+     {
+-      LineTable lines = createLineTable(m_sourceLocTab, m_bclen);
++      auto lines = createLineTable(m_sourceLocTab, m_bclen);
+       urp.insertUnit(repoId).insert(txn, m_sn, m_md5, m_bc, m_bclen,
+                                     m_bc_meta, m_bc_meta_len,
+                                     &m_mainReturn, m_mergeOnly, lines,
+@@ -2649,6 +2714,7 @@ Unit* UnitEmitter::create() {
+   }
+   assert(ix == mi->m_mergeablesSize);
+   mi->mergeableObj(ix) = (void*)UnitMergeKindDone;
++  u->m_sourceLocTable = createSourceLocTable(m_sourceLocTab, m_bclen);
+   if (m_lineTable.size() == 0) {
+     u->m_lineTable = createLineTable(m_sourceLocTab, m_bclen);
+   } else {
+diff --git a/hphp/runtime/vm/unit.h b/hphp/runtime/vm/unit.h
+index 43fed4e020..375a98bc1e 100644
+--- a/hphp/runtime/vm/unit.h
++++ b/hphp/runtime/vm/unit.h
+@@ -236,6 +236,8 @@ class TableEntry {
+ 
+ typedef TableEntry<int> LineEntry;
+ typedef std::vector<LineEntry> LineTable;
++typedef TableEntry<SourceLoc> SourceLocEntry;
++typedef std::vector<SourceLocEntry> SourceLocTable;
+ typedef TableEntry<const Func*> FuncEntry;
+ typedef std::vector<FuncEntry> FuncTable;
+ 
+@@ -700,6 +702,11 @@ public: // Translator field access
+   static size_t bcOff() { return offsetof(Unit, m_bc); }
+ 
+ private:
++  // List of (offset, sourceLoc) where offset is the offset of the first byte
++  // code of the next source location if there is one, m_bclen otherwise.
++  // Sorted by offset. sourceLocs are not assumed to be unique.
++  SourceLocTable getSourceLocTable() const;
++
+   // pseudoMain's return value, or KindOfUninit if its not known.
+   TypedValue m_mainReturn;
+   int64_t m_sn;
+@@ -721,10 +728,11 @@ private:
+   uint8_t m_cacheMask;
+   bool m_mergeOnly;
+   bool m_interpretOnly;
+-  // list of (line, offset) where offset is the offset of the first byte code
++  // List of (line, offset) where offset is the offset of the first byte code
+   // of the next line if there is one, m_bclen otherwise.
+-  // sorted by offset. line values are not assumed to be unique.
++  // Sorted by offset. line values are not assumed to be unique.
+   LineTable m_lineTable;
++  SourceLocTable m_sourceLocTable;
+   FuncTable m_funcTable;
+   mutable PseudoMainCacheMap *m_pseudoMainCache;
+ };
+@@ -916,6 +924,7 @@ class UnitRepoProxy : public RepoProxy {
+   URP_GOP(UnitMergeables) \
+   URP_IOP(UnitSourceLoc) \
+   URP_GOP(SourceLoc) \
++  URP_GOP(SourceLocTab) \
+   URP_GOP(SourceLocPastOffsets) \
+   URP_GOP(SourceLocBaseOffset) \
+   URP_GOP(BaseOffsetAtPCLoc) \
+@@ -979,6 +988,11 @@ class UnitRepoProxy : public RepoProxy {
+     GetSourceLocStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
+     bool get(int64_t unitSn, Offset pc, SourceLoc& sLoc);
+   };
++  class GetSourceLocTabStmt : public RepoProxy::Stmt {
++   public:
++    GetSourceLocTabStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
++    bool get(int64_t unitSn, SourceLocTable& sourceLocTab);
++  };
+   class GetSourceLocPastOffsetsStmt : public RepoProxy::Stmt {
+    public:
+     GetSourceLocPastOffsetsStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
+

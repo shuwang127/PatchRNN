@@ -1,0 +1,43 @@
+commit 8500944765487e8fa3f9d635e63b190dc076950e
+Author: Nisha Gopalakrishnan <nisha.gopalakrishnan@oracle.com>
+Date:   Fri Feb 1 09:49:27 2013 +0530
+
+    BUG#16207679: MISSING ERROR WHEN RESIGNAL TO MYSQL_ERROR=5
+    
+    Analysis:
+    --------
+    
+    As part of the fix for Bug#11757464, the 'out of memory' error
+    condition was not pushed to the diagnostic area as it requires
+    memory allocation. However in cases of SIGNAL/RESIGNAL 'out of
+    memory' error, the server may not be out of memory. Hence it
+    would be good to report the error in such cases.
+    
+    Fix:
+    ---
+    
+    Push only non fatal 'out of memory' errors to the diagnostic area.
+    Since SIGNAL/RESIGNAL of 'out of memory' error may not be fatal,
+    the error is reported.
+
+diff --git a/sql/sql_class.cc b/sql/sql_class.cc
+index 556e7d66447..effdfc4d6d6 100644
+--- a/sql/sql_class.cc
++++ b/sql/sql_class.cc
+@@ -1137,10 +1137,12 @@ MYSQL_ERROR* THD::raise_condition(uint sql_errno,
+   query_cache_abort(&query_cache_tls);
+ 
+   /* 
+-     Avoid pushing a condition for out of memory errors as this will require
+-     memory allocation and therefore might fail.
++     Avoid pushing a condition for fatal out of memory errors as this will 
++     require memory allocation and therefore might fail. Non fatal out of 
++     memory errors can occur if raised by SIGNAL/RESIGNAL statement.
+   */
+-  if (sql_errno != EE_OUTOFMEMORY && sql_errno != ER_OUTOFMEMORY)
++  if (!(is_fatal_error && (sql_errno == EE_OUTOFMEMORY ||
++                           sql_errno == ER_OUTOFMEMORY)))
+   {
+     cond= warning_info->push_warning(this, sql_errno, sqlstate, level, msg);
+   }
+

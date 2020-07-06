@@ -1,0 +1,151 @@
+commit 02333eaa799425160abdf5aa2d6b7789fa54310e
+Author: Jan Janak <jan@iptel.org>
+Date:   Wed Sep 1 10:12:41 2004 +0000
+
+    The possibility to set independent destination URIs for branches.
+
+diff --git a/action.c b/action.c
+index 16ca40f86..ae18c5907 100644
+--- a/action.c
++++ b/action.c
+@@ -283,7 +283,7 @@ int do_action(struct action* a, struct sip_msg* msg)
+ 			}
+ 			ret=append_branch( msg, a->p1.string, 
+ 					   a->p1.string ? strlen(a->p1.string):0,
+-					   a->p2.number);
++					   0, 0, a->p2.number);
+ 			break;
+ 
+ 		/* jku begin: is_length_greater_than */
+diff --git a/dset.c b/dset.c
+index 85b191963..5077d7532 100644
+--- a/dset.c
++++ b/dset.c
+@@ -50,6 +50,11 @@ struct branch
+ {
+ 	char uri[MAX_URI_SIZE];
+ 	unsigned int len;
++
++	     /* Real destination of the request */
++	char dst_uri[MAX_URI_SIZE];
++	unsigned int dst_uri_len;
++
+ 	int q; /* Preference of the contact among
+ 		* contact within the array */
+ };
+@@ -87,7 +92,7 @@ void init_branch_iterator(void)
+  * array, 0 is returned if there are no
+  * more branches
+  */
+-char* next_branch(int* len, qvalue_t* q)
++char* next_branch(int* len, qvalue_t* q, char** dst_uri, int* dst_len)
+ {
+ 	unsigned int i;
+ 
+@@ -96,10 +101,18 @@ char* next_branch(int* len, qvalue_t* q)
+ 		branch_iterator++;
+ 		*len = branches[i].len;
+ 		*q = branches[i].q;
++		if (dst_uri && dst_len) {
++			*dst_uri = branches[i].dst_uri;
++			*dst_len = branches[i].dst_uri_len;
++		}
+ 		return branches[i].uri;
+ 	} else {
+ 		*len = 0;
+ 		*q = Q_UNSPECIFIED;
++		if (dst_uri && dst_len) {
++			*dst_uri = 0;
++			*dst_len = 0;
++		}
+ 		return 0;
+ 	}
+ }
+@@ -118,7 +131,7 @@ void clear_branches(void)
+ /* 
+  * Add a new branch to current transaction 
+  */
+-int append_branch(struct sip_msg* msg, char* uri, int uri_len, qvalue_t q)
++int append_branch(struct sip_msg* msg, char* uri, int uri_len, char* dst_uri, int dst_uri_len, qvalue_t q)
+ {
+ 	     /* if we have already set up the maximum number
+ 	      * of branches, don't try new ones 
+@@ -152,6 +165,12 @@ int append_branch(struct sip_msg* msg, char* uri, int uri_len, qvalue_t q)
+ 	branches[nr_branches].len = uri_len;
+ 	branches[nr_branches].q = q;
+ 	
++	if (dst_uri) {
++		memcpy(branches[nr_branches].dst_uri, dst_uri, dst_uri_len);
++		branches[nr_branches].dst_uri[dst_uri_len] = 0;
++		branches[nr_branches].dst_uri_len = dst_uri_len;
++	}
++
+ 	nr_branches++;
+ 	return 1;
+ }
+@@ -181,7 +200,7 @@ char* print_dset(struct sip_msg* msg, int* len)
+ 	}
+ 
+ 	init_branch_iterator();
+-	while ((uri.s = next_branch(&uri.len, &q))) {
++	while ((uri.s = next_branch(&uri.len, &q, 0, 0))) {
+ 		cnt++;
+ 		*len += uri.len;
+ 		if (q != Q_UNSPECIFIED) {
+@@ -222,7 +241,7 @@ char* print_dset(struct sip_msg* msg, int* len)
+ 	}
+ 
+ 	init_branch_iterator();
+-	while ((uri.s = next_branch(&uri.len, &q))) {
++	while ((uri.s = next_branch(&uri.len, &q, 0, 0))) {
+ 		if (i) {
+ 			memcpy(p, CONTACT_DELIM, CONTACT_DELIM_LEN);
+ 			p += CONTACT_DELIM_LEN;
+diff --git a/dset.h b/dset.h
+index 611773941..82b74bc51 100644
+--- a/dset.h
++++ b/dset.h
+@@ -35,7 +35,7 @@ struct sip_msg;
+ /* 
+  * Add a new branch to current transaction 
+  */
+-int append_branch(struct sip_msg* msg, char* uri, int uri_len, qvalue_t q);
++int append_branch(struct sip_msg* msg, char* uri, int uri_len, char* dst_uri, int dst_uri_len, qvalue_t q);
+ 
+ 
+ /* 
+@@ -47,7 +47,7 @@ void init_branch_iterator(void);
+ /*
+  * Get the next branch in the current transaction
+  */
+-char* next_branch(int* len, qvalue_t* q);
++char* next_branch(int* len, qvalue_t* q, char** dst_uri, int* dst_len);
+ 
+ 
+ /*
+diff --git a/modules/tm/t_fwd.c b/modules/tm/t_fwd.c
+index 133bcfe3f..7f1b87e84 100644
+--- a/modules/tm/t_fwd.c
++++ b/modules/tm/t_fwd.c
+@@ -407,6 +407,7 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
+ 	struct cell *t_invite;
+ 	int success_branch;
+ 	int try_new;
++	str dst_uri;
+ 
+ 	/* make -Wall happy */
+ 	current_uri.s=0;
+@@ -444,10 +445,10 @@ int t_forward_nonack( struct cell *t, struct sip_msg* p_msg ,
+ 	} else try_new=0;
+ 
+ 	init_branch_iterator();
+-	while((current_uri.s=next_branch( &current_uri.len, &q))) {
++	while((current_uri.s=next_branch( &current_uri.len, &q, &dst_uri.s, &dst_uri.len))) {
+ 		try_new++;
+ 		branch_ret=add_uac( t, p_msg, &current_uri, 
+-				    (p_msg->dst_uri.len) ? (&p_msg->dst_uri) : &current_uri, 
++				    (dst_uri.len) ? (&dst_uri) : &current_uri, 
+ 				    proxy, proto);
+ 		/* pick some of the errors in case things go wrong;
+ 		   note that picking lowest error is just as good as
+

@@ -1,0 +1,48 @@
+commit 49fd91fb7b180cdf320f302674860e15b44b3a9b
+Author: Ken Gaillot <kgaillot@redhat.com>
+Date:   Tue Jul 14 15:08:03 2015 -0500
+
+    Fix: libcluster: work around peer cache destruction in client status callbacks
+    
+    Client status callbacks for cluster membership shouldn't modify the peer
+    caches, but the CIB's callback can. Until that can be fixed, work around it
+    in libcluster.
+
+diff --git a/cib/main.c b/cib/main.c
+index 2a480545d..e20a2b6df 100644
+--- a/cib/main.c
++++ b/cib/main.c
+@@ -438,6 +438,13 @@ cib_peer_update_callback(enum crm_status_type type, crm_node_t * node, const voi
+ 
+     if (cib_shutdown_flag && crm_active_peers() < 2 && crm_hash_table_size(client_connections) == 0) {
+         crm_info("No more peers");
++        /* @TODO
++         * terminate_cib() calls crm_cluster_disconnect() which calls
++         * crm_peer_destroy() which destroys the peer caches, which a peer
++         * status callback shouldn't do. For now, there is a workaround in
++         * crm_update_peer_proc(), but CIB should be refactored to avoid
++         * destroying the peer caches here.
++         */
+         terminate_cib(__FUNCTION__, FALSE);
+     }
+ }
+diff --git a/lib/cluster/membership.c b/lib/cluster/membership.c
+index 28f41cb4b..b7958ebcf 100644
+--- a/lib/cluster/membership.c
++++ b/lib/cluster/membership.c
+@@ -734,6 +734,14 @@ crm_update_peer_proc(const char *source, crm_node_t * node, uint32_t flag, const
+         if (crm_status_callback) {
+             crm_status_callback(crm_status_processes, node, &last);
+         }
++
++        /* The client callback shouldn't touch the peer caches,
++         * but as a safety net, bail if the peer cache was destroyed.
++         */
++        if (crm_peer_cache == NULL) {
++            return NULL;
++        }
++
+         if (crm_autoreap) {
+             node = crm_update_peer_state(__FUNCTION__, node,
+                                          is_set(node->processes, crm_get_cluster_proc())?
+

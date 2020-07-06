@@ -1,0 +1,71 @@
+commit 6a985c6194017de2c062916ad1cd00dee0302c40
+Author: Christian Borntraeger <borntraeger@de.ibm.com>
+Date:   Mon Dec 7 12:52:11 2009 +0100
+
+    [S390] s390: use change recording override for kernel mapping
+    
+    We dont need the dirty bit if a write access is done via the kernel
+    mapping. In that case SetPageDirty and friends are used anyway, no
+    need to do that a second time. We can use the change-recording
+    overide function for the kernel mapping, if available.
+    
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+
+diff --git a/arch/s390/include/asm/pgtable.h b/arch/s390/include/asm/pgtable.h
+index 60a7b1a1702f..e2fa79cf0614 100644
+--- a/arch/s390/include/asm/pgtable.h
++++ b/arch/s390/include/asm/pgtable.h
+@@ -169,12 +169,13 @@ extern unsigned long VMALLOC_START;
+  * STL Segment-Table-Length:  Segment-table length (STL+1*16 entries -> up to 2048)
+  *
+  * A 64 bit pagetable entry of S390 has following format:
+- * |                     PFRA                         |0IP0|  OS  |
++ * |			 PFRA			      |0IPC|  OS  |
+  * 0000000000111111111122222222223333333333444444444455555555556666
+  * 0123456789012345678901234567890123456789012345678901234567890123
+  *
+  * I Page-Invalid Bit:    Page is not available for address-translation
+  * P Page-Protection Bit: Store access not possible for page
++ * C Change-bit override: HW is not required to set change bit
+  *
+  * A 64 bit segmenttable entry of S390 has following format:
+  * |        P-table origin                              |      TT
+@@ -218,6 +219,7 @@ extern unsigned long VMALLOC_START;
+  */
+ 
+ /* Hardware bits in the page table entry */
++#define _PAGE_CO	0x100		/* HW Change-bit override */
+ #define _PAGE_RO	0x200		/* HW read-only bit  */
+ #define _PAGE_INVALID	0x400		/* HW invalid bit    */
+ 
+diff --git a/arch/s390/mm/vmem.c b/arch/s390/mm/vmem.c
+index 5f91a38d7592..300ab012b0fd 100644
+--- a/arch/s390/mm/vmem.c
++++ b/arch/s390/mm/vmem.c
+@@ -70,8 +70,12 @@ static pte_t __ref *vmem_pte_alloc(void)
+ 		pte = alloc_bootmem(PTRS_PER_PTE * sizeof(pte_t));
+ 	if (!pte)
+ 		return NULL;
+-	clear_table((unsigned long *) pte, _PAGE_TYPE_EMPTY,
+-		    PTRS_PER_PTE * sizeof(pte_t));
++	if (MACHINE_HAS_HPAGE)
++		clear_table((unsigned long *) pte, _PAGE_TYPE_EMPTY | _PAGE_CO,
++			    PTRS_PER_PTE * sizeof(pte_t));
++	else
++		clear_table((unsigned long *) pte, _PAGE_TYPE_EMPTY,
++			    PTRS_PER_PTE * sizeof(pte_t));
+ 	return pte;
+ }
+ 
+@@ -112,7 +116,8 @@ static int vmem_add_mem(unsigned long start, unsigned long size, int ro)
+ 		if (MACHINE_HAS_HPAGE && !(address & ~HPAGE_MASK) &&
+ 		    (address + HPAGE_SIZE <= start + size) &&
+ 		    (address >= HPAGE_SIZE)) {
+-			pte_val(pte) |= _SEGMENT_ENTRY_LARGE;
++			pte_val(pte) |= _SEGMENT_ENTRY_LARGE |
++					_SEGMENT_ENTRY_CO;
+ 			pmd_val(*pm_dir) = pte_val(pte);
+ 			address += HPAGE_SIZE - PAGE_SIZE;
+ 			continue;
+

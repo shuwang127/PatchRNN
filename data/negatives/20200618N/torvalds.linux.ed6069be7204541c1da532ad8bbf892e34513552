@@ -1,0 +1,64 @@
+commit ed6069be7204541c1da532ad8bbf892e34513552
+Author: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+Date:   Thu Mar 17 09:03:24 2016 -0400
+
+    xen/apic: Provide Xen-specific version of cpu_present_to_apicid APIC op
+    
+    Currently Xen uses default_cpu_present_to_apicid() which will always
+    report BAD_APICID for PV guests since x86_bios_cpu_apic_id is initialised
+    to that value and is never updated.
+    
+    With commit 1f12e32f4cd5 ("x86/topology: Create logical package id"), this
+    op is now called by smp_init_package_map() when deciding whether to call
+    topology_update_package_map() which sets cpu_data(cpu).logical_proc_id.
+    The latter (as topology_logical_package_id(cpu)) may be used, for example,
+    by cpu_to_rapl_pmu() as an array index. Since uninitialized
+    logical_package_id is set to -1, the index will become 64K which is
+    obviously problematic.
+    
+    While RAPL code (and any other users of logical_package_id) should be
+    careful in their assumptions about id's validity, Xen's
+    cpu_present_to_apicid op should still provide value consistent with its
+    own xen_apic_read(APIC_ID).
+    
+    Signed-off-by: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+    Signed-off-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+
+diff --git a/arch/x86/xen/apic.c b/arch/x86/xen/apic.c
+index abf4901c917b..db52a7fafcc2 100644
+--- a/arch/x86/xen/apic.c
++++ b/arch/x86/xen/apic.c
+@@ -66,7 +66,7 @@ static u32 xen_apic_read(u32 reg)
+ 
+ 	ret = HYPERVISOR_platform_op(&op);
+ 	if (ret)
+-		return 0;
++		op.u.pcpu_info.apic_id = BAD_APICID;
+ 
+ 	return op.u.pcpu_info.apic_id << 24;
+ }
+@@ -142,6 +142,14 @@ static void xen_silent_inquire(int apicid)
+ {
+ }
+ 
++static int xen_cpu_present_to_apicid(int cpu)
++{
++	if (cpu_present(cpu))
++		return xen_get_apic_id(xen_apic_read(APIC_ID));
++	else
++		return BAD_APICID;
++}
++
+ static struct apic xen_pv_apic = {
+ 	.name 				= "Xen PV",
+ 	.probe 				= xen_apic_probe_pv,
+@@ -162,7 +170,7 @@ static struct apic xen_pv_apic = {
+ 
+ 	.ioapic_phys_id_map		= default_ioapic_phys_id_map, /* Used on 32-bit */
+ 	.setup_apic_routing		= NULL,
+-	.cpu_present_to_apicid		= default_cpu_present_to_apicid,
++	.cpu_present_to_apicid		= xen_cpu_present_to_apicid,
+ 	.apicid_to_cpu_present		= physid_set_mask_of_physid, /* Used on 32-bit */
+ 	.check_phys_apicid_present	= default_check_phys_apicid_present, /* smp_sanity_check needs it */
+ 	.phys_pkg_id			= xen_phys_pkg_id, /* detect_ht */
+

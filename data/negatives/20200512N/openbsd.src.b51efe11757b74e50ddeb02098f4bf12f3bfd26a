@@ -1,0 +1,211 @@
+commit b51efe11757b74e50ddeb02098f4bf12f3bfd26a
+Author: henning <henning@openbsd.org>
+Date:   Tue May 23 12:11:38 2006 +0000
+
+    allow bgpd to request a route refresh from a neighbor if that neighbor
+    announced route refresh capabilities
+
+diff --git a/usr.sbin/bgpd/bgpd.h b/usr.sbin/bgpd/bgpd.h
+index 25aba786b08..b35de4629da 100644
+--- a/usr.sbin/bgpd/bgpd.h
++++ b/usr.sbin/bgpd/bgpd.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: bgpd.h,v 1.199 2006/04/26 17:13:14 claudio Exp $ */
++/*	$OpenBSD: bgpd.h,v 1.200 2006/05/23 12:11:38 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -310,6 +310,7 @@ enum imsg_type {
+ 	IMSG_CTL_NEIGHBOR_UP,
+ 	IMSG_CTL_NEIGHBOR_DOWN,
+ 	IMSG_CTL_NEIGHBOR_CLEAR,
++	IMSG_CTL_NEIGHBOR_RREFRESH,
+ 	IMSG_CTL_KROUTE,
+ 	IMSG_CTL_KROUTE6,
+ 	IMSG_CTL_KROUTE_ADDR,
+@@ -344,7 +345,8 @@ struct imsg {
+ enum ctl_results {
+ 	CTL_RES_OK,
+ 	CTL_RES_NOSUCHPEER,
+-	CTL_RES_DENIED
++	CTL_RES_DENIED,
++	CTL_RES_NOCAP
+ };
+ 
+ /* needed for session.h parse prototype */
+diff --git a/usr.sbin/bgpd/control.c b/usr.sbin/bgpd/control.c
+index a22d3629cc4..27866a16c2c 100644
+--- a/usr.sbin/bgpd/control.c
++++ b/usr.sbin/bgpd/control.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: control.c,v 1.49 2006/01/24 15:28:03 henning Exp $ */
++/*	$OpenBSD: control.c,v 1.50 2006/05/23 12:11:38 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -279,6 +279,7 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
+ 		case IMSG_CTL_NEIGHBOR_UP:
+ 		case IMSG_CTL_NEIGHBOR_DOWN:
+ 		case IMSG_CTL_NEIGHBOR_CLEAR:
++		case IMSG_CTL_NEIGHBOR_RREFRESH:
+ 			if (imsg.hdr.len == IMSG_HEADER_SIZE +
+ 			    sizeof(struct ctl_neighbor)) {
+ 				neighbor = imsg.data;
+@@ -293,19 +294,28 @@ control_dispatch_msg(struct pollfd *pfd, u_int *ctl_cnt)
+ 				switch (imsg.hdr.type) {
+ 				case IMSG_CTL_NEIGHBOR_UP:
+ 					bgp_fsm(p, EVNT_START);
++					control_result(c, CTL_RES_OK);
+ 					break;
+ 				case IMSG_CTL_NEIGHBOR_DOWN:
+ 					bgp_fsm(p, EVNT_STOP);
++					control_result(c, CTL_RES_OK);
+ 					break;
+ 				case IMSG_CTL_NEIGHBOR_CLEAR:
+ 					bgp_fsm(p, EVNT_STOP);
+ 					p->IdleHoldTimer = time(NULL) +
+ 					    SESSION_CLEAR_DELAY;
++					control_result(c, CTL_RES_OK);
++					break;
++				case IMSG_CTL_NEIGHBOR_RREFRESH:
++					if (session_neighbor_rrefresh(p))
++						control_result(c,
++						    CTL_RES_NOCAP);
++					else
++						control_result(c, CTL_RES_OK);
+ 					break;
+ 				default:
+ 					fatal("king bula wants more humppa");
+ 				}
+-				control_result(c, CTL_RES_OK);
+ 			} else
+ 				log_warnx("got IMSG_CTL_NEIGHBOR_ with "
+ 				    "wrong length");
+diff --git a/usr.sbin/bgpd/log.h b/usr.sbin/bgpd/log.h
+index 61ad86f3c30..b99e757dd9a 100644
+--- a/usr.sbin/bgpd/log.h
++++ b/usr.sbin/bgpd/log.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: log.h,v 1.6 2006/01/24 10:03:44 henning Exp $ */
++/*	$OpenBSD: log.h,v 1.7 2006/05/23 12:11:38 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -107,5 +107,6 @@ static const char * const procnames[] = {
+ static const char * const ctl_res_strerror[] = {
+ 	"no error",
+ 	"no such neighbor",
+-	"permission denied"
++	"permission denied",
++	"neighbor does not have this capability"
+ };
+diff --git a/usr.sbin/bgpd/session.c b/usr.sbin/bgpd/session.c
+index 1f46322b205..5aa9a11676c 100644
+--- a/usr.sbin/bgpd/session.c
++++ b/usr.sbin/bgpd/session.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: session.c,v 1.246 2006/03/22 10:18:49 claudio Exp $ */
++/*	$OpenBSD: session.c,v 1.247 2006/05/23 12:11:38 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004, 2005 Henning Brauer <henning@openbsd.org>
+@@ -69,6 +69,7 @@ void	session_keepalive(struct peer *);
+ void	session_update(u_int32_t, void *, size_t);
+ void	session_notification(struct peer *, u_int8_t, u_int8_t, void *,
+ 	    ssize_t);
++void	session_rrefresh(struct peer *, u_int16_t, u_int8_t);
+ int	session_dispatch_msg(struct pollfd *, struct peer *);
+ int	parse_header(struct peer *, u_char *, u_int16_t *, u_int8_t *);
+ int	parse_open(struct peer *);
+@@ -1448,6 +1449,72 @@ session_notification(struct peer *peer, u_int8_t errcode, u_int8_t subcode,
+ 	peer->stats.last_sent_suberr = subcode;
+ }
+ 
++int
++session_neighbor_rrefresh(struct peer *p)
++{
++	if (!p->capa.peer.refresh)
++		return (-1);
++
++	if (p->capa.peer.mp_v4 != SAFI_NONE)
++		session_rrefresh(p, AFI_IPv4, p->capa.peer.mp_v4);
++	if (p->capa.peer.mp_v6 != SAFI_NONE)
++		session_rrefresh(p, AFI_IPv6, p->capa.peer.mp_v6);
++
++	return (0);
++}
++
++void
++session_rrefresh(struct peer *peer, u_int16_t afi, u_int8_t safi)
++{
++	struct msg_header	 msg;
++	struct buf		*buf;
++	struct mrt		*mrt;
++	ssize_t			 len;
++	int			 errs = 0;
++	u_int8_t		 null8 = 0;
++
++	len = MSGSIZE_RREFRESH;
++
++	memset(&msg.marker, 0xff, sizeof(msg.marker));
++	msg.len = htons(len);
++	msg.type = RREFRESH;
++
++	if ((buf = buf_open(len)) == NULL) {
++		bgp_fsm(peer, EVNT_CON_FATAL);
++		return;
++	}
++	errs += buf_add(buf, &msg.marker, sizeof(msg.marker));
++	errs += buf_add(buf, &msg.len, sizeof(msg.len));
++	errs += buf_add(buf, &msg.type, sizeof(msg.type));
++	errs += buf_add(buf, &afi, sizeof(afi));
++	errs += buf_add(buf, &null8, sizeof(null8));
++	errs += buf_add(buf, &safi, sizeof(safi));
++
++	if (errs > 0) {
++		buf_free(buf);
++		bgp_fsm(peer, EVNT_CON_FATAL);
++		return;
++	}
++
++	LIST_FOREACH(mrt, &mrthead, entry) {
++		if (mrt->type != MRT_ALL_OUT)
++			continue;
++		if ((mrt->peer_id == 0 && mrt->group_id == 0) ||
++		    mrt->peer_id == peer->conf.id ||
++		    mrt->group_id == peer->conf.groupid)
++			mrt_dump_bgp_msg(mrt, buf->buf, len, peer, conf);
++	}
++
++	if (buf_close(&peer->wbuf, buf) == -1) {
++		log_peer_warn(&peer->conf, "session_rrefresh buf_close");
++		buf_free(buf);
++		bgp_fsm(peer, EVNT_CON_FATAL);
++		return;
++	}
++
++	peer->stats.msg_sent_rrefresh++;
++}
++
+ int
+ session_dispatch_msg(struct pollfd *pfd, struct peer *p)
+ {
+diff --git a/usr.sbin/bgpd/session.h b/usr.sbin/bgpd/session.h
+index 0322a0ffcb4..6f9673bfbf0 100644
+--- a/usr.sbin/bgpd/session.h
++++ b/usr.sbin/bgpd/session.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: session.h,v 1.81 2006/01/24 10:03:44 henning Exp $ */
++/*	$OpenBSD: session.h,v 1.82 2006/05/23 12:11:38 henning Exp $ */
+ 
+ /*
+  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+@@ -189,6 +189,7 @@ pid_t		 session_main(struct bgpd_config *, struct peer *,
+ 		    struct network_head *, struct filter_head *,
+ 		    struct mrt_head *, int[2], int[2], int[2]);
+ void		 bgp_fsm(struct peer *, enum session_events);
++int		 session_neighbor_rrefresh(struct peer *p);
+ struct peer	*getpeerbyaddr(struct bgpd_addr *);
+ struct peer	*getpeerbydesc(const char *);
+ int		 imsg_compose_parent(int, pid_t, void *, u_int16_t);
+

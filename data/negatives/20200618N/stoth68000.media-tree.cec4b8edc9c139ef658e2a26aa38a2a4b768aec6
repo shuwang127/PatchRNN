@@ -1,0 +1,45 @@
+commit cec4b8edc9c139ef658e2a26aa38a2a4b768aec6
+Author: Samuel Ortiz <sameo@linux.intel.com>
+Date:   Wed Aug 21 15:12:06 2013 +0200
+
+    NFC: pn533: Start listen timer from start_poll
+    
+    If we start the polling loop from a listening cycle, we need to start
+    the corresponding timer as well.
+    This bug showed up after commit dfccd0f5 as it was impossible to start
+    from a listening cycle before it.
+    
+    Signed-off-by: Samuel Ortiz <sameo@linux.intel.com>
+
+diff --git a/drivers/nfc/pn533.c b/drivers/nfc/pn533.c
+index 8cffd73690b8..dbe962c47a56 100644
+--- a/drivers/nfc/pn533.c
++++ b/drivers/nfc/pn533.c
+@@ -2027,7 +2027,9 @@ static int pn533_start_poll(struct nfc_dev *nfc_dev,
+ 			    u32 im_protocols, u32 tm_protocols)
+ {
+ 	struct pn533 *dev = nfc_get_drvdata(nfc_dev);
++	struct pn533_poll_modulations *cur_mod;
+ 	u8 rand_mod;
++	int rc;
+ 
+ 	dev_dbg(&dev->interface->dev,
+ 		"%s: im protocols 0x%x tm protocols 0x%x\n",
+@@ -2060,7 +2062,15 @@ static int pn533_start_poll(struct nfc_dev *nfc_dev,
+ 	rand_mod %= dev->poll_mod_count;
+ 	dev->poll_mod_curr = rand_mod;
+ 
+-	return pn533_send_poll_frame(dev);
++	cur_mod = dev->poll_mod_active[dev->poll_mod_curr];
++
++	rc = pn533_send_poll_frame(dev);
++
++	/* Start listen timer */
++	if (!rc && cur_mod->len == 0 && dev->poll_mod_count > 1)
++		mod_timer(&dev->listen_timer, jiffies + PN533_LISTEN_TIME * HZ);
++
++	return rc;
+ }
+ 
+ static void pn533_stop_poll(struct nfc_dev *nfc_dev)
+

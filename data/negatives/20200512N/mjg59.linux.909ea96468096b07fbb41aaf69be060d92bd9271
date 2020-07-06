@@ -1,0 +1,457 @@
+commit 909ea96468096b07fbb41aaf69be060d92bd9271
+Author: Christoph Lameter <cl@linux.com>
+Date:   Wed Dec 8 16:22:55 2010 +0100
+
+    core: Replace __get_cpu_var with __this_cpu_read if not used for an address.
+    
+    __get_cpu_var() can be replaced with this_cpu_read and will then use a
+    single read instruction with implied address calculation to access the
+    correct per cpu instance.
+    
+    However, the address of a per cpu variable passed to __this_cpu_read()
+    cannot be determined (since it's an implied address conversion through
+    segment prefixes).  Therefore apply this only to uses of __get_cpu_var
+    where the address of the variable is not used.
+    
+    Cc: Pekka Enberg <penberg@cs.helsinki.fi>
+    Cc: Hugh Dickins <hughd@google.com>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Acked-by: H. Peter Anvin <hpa@zytor.com>
+    Signed-off-by: Christoph Lameter <cl@linux.com>
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+
+diff --git a/include/asm-generic/irq_regs.h b/include/asm-generic/irq_regs.h
+index 5ae1d07d4a12..6bf9355fa7eb 100644
+--- a/include/asm-generic/irq_regs.h
++++ b/include/asm-generic/irq_regs.h
+@@ -22,15 +22,15 @@ DECLARE_PER_CPU(struct pt_regs *, __irq_regs);
+ 
+ static inline struct pt_regs *get_irq_regs(void)
+ {
+-	return __get_cpu_var(__irq_regs);
++	return __this_cpu_read(__irq_regs);
+ }
+ 
+ static inline struct pt_regs *set_irq_regs(struct pt_regs *new_regs)
+ {
+-	struct pt_regs *old_regs, **pp_regs = &__get_cpu_var(__irq_regs);
++	struct pt_regs *old_regs;
+ 
+-	old_regs = *pp_regs;
+-	*pp_regs = new_regs;
++	old_regs = __this_cpu_read(__irq_regs);
++	__this_cpu_write(__irq_regs, new_regs);
+ 	return old_regs;
+ }
+ 
+diff --git a/include/linux/elevator.h b/include/linux/elevator.h
+index 4fd978e7eb83..4d857973d2c9 100644
+--- a/include/linux/elevator.h
++++ b/include/linux/elevator.h
+@@ -195,15 +195,9 @@ enum {
+ /*
+  * io context count accounting
+  */
+-#define elv_ioc_count_mod(name, __val)				\
+-	do {							\
+-		preempt_disable();				\
+-		__get_cpu_var(name) += (__val);			\
+-		preempt_enable();				\
+-	} while (0)
+-
+-#define elv_ioc_count_inc(name)	elv_ioc_count_mod(name, 1)
+-#define elv_ioc_count_dec(name)	elv_ioc_count_mod(name, -1)
++#define elv_ioc_count_mod(name, __val) this_cpu_add(name, __val)
++#define elv_ioc_count_inc(name)	this_cpu_inc(name)
++#define elv_ioc_count_dec(name)	this_cpu_dec(name)
+ 
+ #define elv_ioc_count_read(name)				\
+ ({								\
+diff --git a/include/linux/kernel_stat.h b/include/linux/kernel_stat.h
+index ad54c846911b..44e83ba12b5b 100644
+--- a/include/linux/kernel_stat.h
++++ b/include/linux/kernel_stat.h
+@@ -47,7 +47,7 @@ extern unsigned long long nr_context_switches(void);
+ 
+ #ifndef CONFIG_GENERIC_HARDIRQS
+ #define kstat_irqs_this_cpu(irq) \
+-	(kstat_this_cpu.irqs[irq])
++	(this_cpu_read(kstat.irqs[irq])
+ 
+ struct irq_desc;
+ 
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 676149a4ac5f..89c74861a3da 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -69,7 +69,7 @@ static void __unhash_process(struct task_struct *p, bool group_dead)
+ 
+ 		list_del_rcu(&p->tasks);
+ 		list_del_init(&p->sibling);
+-		__get_cpu_var(process_counts)--;
++		__this_cpu_dec(process_counts);
+ 	}
+ 	list_del_rcu(&p->thread_group);
+ }
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 3b159c5991b7..e05e27de67df 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1282,7 +1282,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
+ 			attach_pid(p, PIDTYPE_SID, task_session(current));
+ 			list_add_tail(&p->sibling, &p->real_parent->children);
+ 			list_add_tail_rcu(&p->tasks, &init_task.tasks);
+-			__get_cpu_var(process_counts)++;
++			__this_cpu_inc(process_counts);
+ 		}
+ 		attach_pid(p, PIDTYPE_PID, pid);
+ 		nr_threads++;
+diff --git a/kernel/hrtimer.c b/kernel/hrtimer.c
+index 72206cf5c6cf..29de5ae4ca95 100644
+--- a/kernel/hrtimer.c
++++ b/kernel/hrtimer.c
+@@ -497,7 +497,7 @@ static inline int hrtimer_is_hres_enabled(void)
+  */
+ static inline int hrtimer_hres_active(void)
+ {
+-	return __get_cpu_var(hrtimer_bases).hres_active;
++	return __this_cpu_read(hrtimer_bases.hres_active);
+ }
+ 
+ /*
+diff --git a/kernel/printk.c b/kernel/printk.c
+index 9a2264fc42ca..b032317f9964 100644
+--- a/kernel/printk.c
++++ b/kernel/printk.c
+@@ -1074,8 +1074,8 @@ static DEFINE_PER_CPU(int, printk_pending);
+ 
+ void printk_tick(void)
+ {
+-	if (__get_cpu_var(printk_pending)) {
+-		__get_cpu_var(printk_pending) = 0;
++	if (__this_cpu_read(printk_pending)) {
++		__this_cpu_write(printk_pending, 0);
+ 		wake_up_interruptible(&log_wait);
+ 	}
+ }
+diff --git a/kernel/rcutree.c b/kernel/rcutree.c
+index ccdc04c47981..aeebf772d6a2 100644
+--- a/kernel/rcutree.c
++++ b/kernel/rcutree.c
+@@ -367,8 +367,8 @@ void rcu_irq_exit(void)
+ 	WARN_ON_ONCE(rdtp->dynticks & 0x1);
+ 
+ 	/* If the interrupt queued a callback, get out of dyntick mode. */
+-	if (__get_cpu_var(rcu_sched_data).nxtlist ||
+-	    __get_cpu_var(rcu_bh_data).nxtlist)
++	if (__this_cpu_read(rcu_sched_data.nxtlist) ||
++	    __this_cpu_read(rcu_bh_data.nxtlist))
+ 		set_need_resched();
+ }
+ 
+diff --git a/kernel/softirq.c b/kernel/softirq.c
+index 18f4be0d5fe0..d0a0dda52c1a 100644
+--- a/kernel/softirq.c
++++ b/kernel/softirq.c
+@@ -70,7 +70,7 @@ char *softirq_to_name[NR_SOFTIRQS] = {
+ static void wakeup_softirqd(void)
+ {
+ 	/* Interrupts are disabled: no need to stop preemption */
+-	struct task_struct *tsk = __get_cpu_var(ksoftirqd);
++	struct task_struct *tsk = __this_cpu_read(ksoftirqd);
+ 
+ 	if (tsk && tsk->state != TASK_RUNNING)
+ 		wake_up_process(tsk);
+@@ -388,8 +388,8 @@ void __tasklet_schedule(struct tasklet_struct *t)
+ 
+ 	local_irq_save(flags);
+ 	t->next = NULL;
+-	*__get_cpu_var(tasklet_vec).tail = t;
+-	__get_cpu_var(tasklet_vec).tail = &(t->next);
++	*__this_cpu_read(tasklet_vec.tail) = t;
++	__this_cpu_write(tasklet_vec.tail, &(t->next));
+ 	raise_softirq_irqoff(TASKLET_SOFTIRQ);
+ 	local_irq_restore(flags);
+ }
+@@ -402,8 +402,8 @@ void __tasklet_hi_schedule(struct tasklet_struct *t)
+ 
+ 	local_irq_save(flags);
+ 	t->next = NULL;
+-	*__get_cpu_var(tasklet_hi_vec).tail = t;
+-	__get_cpu_var(tasklet_hi_vec).tail = &(t->next);
++	*__this_cpu_read(tasklet_hi_vec.tail) = t;
++	__this_cpu_write(tasklet_hi_vec.tail,  &(t->next));
+ 	raise_softirq_irqoff(HI_SOFTIRQ);
+ 	local_irq_restore(flags);
+ }
+@@ -414,8 +414,8 @@ void __tasklet_hi_schedule_first(struct tasklet_struct *t)
+ {
+ 	BUG_ON(!irqs_disabled());
+ 
+-	t->next = __get_cpu_var(tasklet_hi_vec).head;
+-	__get_cpu_var(tasklet_hi_vec).head = t;
++	t->next = __this_cpu_read(tasklet_hi_vec.head);
++	__this_cpu_write(tasklet_hi_vec.head, t);
+ 	__raise_softirq_irqoff(HI_SOFTIRQ);
+ }
+ 
+@@ -426,9 +426,9 @@ static void tasklet_action(struct softirq_action *a)
+ 	struct tasklet_struct *list;
+ 
+ 	local_irq_disable();
+-	list = __get_cpu_var(tasklet_vec).head;
+-	__get_cpu_var(tasklet_vec).head = NULL;
+-	__get_cpu_var(tasklet_vec).tail = &__get_cpu_var(tasklet_vec).head;
++	list = __this_cpu_read(tasklet_vec.head);
++	__this_cpu_write(tasklet_vec.head, NULL);
++	__this_cpu_write(tasklet_vec.tail, &__get_cpu_var(tasklet_vec).head);
+ 	local_irq_enable();
+ 
+ 	while (list) {
+@@ -449,8 +449,8 @@ static void tasklet_action(struct softirq_action *a)
+ 
+ 		local_irq_disable();
+ 		t->next = NULL;
+-		*__get_cpu_var(tasklet_vec).tail = t;
+-		__get_cpu_var(tasklet_vec).tail = &(t->next);
++		*__this_cpu_read(tasklet_vec.tail) = t;
++		__this_cpu_write(tasklet_vec.tail, &(t->next));
+ 		__raise_softirq_irqoff(TASKLET_SOFTIRQ);
+ 		local_irq_enable();
+ 	}
+@@ -461,9 +461,9 @@ static void tasklet_hi_action(struct softirq_action *a)
+ 	struct tasklet_struct *list;
+ 
+ 	local_irq_disable();
+-	list = __get_cpu_var(tasklet_hi_vec).head;
+-	__get_cpu_var(tasklet_hi_vec).head = NULL;
+-	__get_cpu_var(tasklet_hi_vec).tail = &__get_cpu_var(tasklet_hi_vec).head;
++	list = __this_cpu_read(tasklet_hi_vec.head);
++	__this_cpu_write(tasklet_hi_vec.head, NULL);
++	__this_cpu_write(tasklet_hi_vec.tail, &__get_cpu_var(tasklet_hi_vec).head);
+ 	local_irq_enable();
+ 
+ 	while (list) {
+@@ -484,8 +484,8 @@ static void tasklet_hi_action(struct softirq_action *a)
+ 
+ 		local_irq_disable();
+ 		t->next = NULL;
+-		*__get_cpu_var(tasklet_hi_vec).tail = t;
+-		__get_cpu_var(tasklet_hi_vec).tail = &(t->next);
++		*__this_cpu_read(tasklet_hi_vec.tail) = t;
++		__this_cpu_write(tasklet_hi_vec.tail, &(t->next));
+ 		__raise_softirq_irqoff(HI_SOFTIRQ);
+ 		local_irq_enable();
+ 	}
+@@ -802,16 +802,16 @@ static void takeover_tasklets(unsigned int cpu)
+ 
+ 	/* Find end, append list for that CPU. */
+ 	if (&per_cpu(tasklet_vec, cpu).head != per_cpu(tasklet_vec, cpu).tail) {
+-		*(__get_cpu_var(tasklet_vec).tail) = per_cpu(tasklet_vec, cpu).head;
+-		__get_cpu_var(tasklet_vec).tail = per_cpu(tasklet_vec, cpu).tail;
++		*__this_cpu_read(tasklet_vec.tail) = per_cpu(tasklet_vec, cpu).head;
++		this_cpu_write(tasklet_vec.tail, per_cpu(tasklet_vec, cpu).tail);
+ 		per_cpu(tasklet_vec, cpu).head = NULL;
+ 		per_cpu(tasklet_vec, cpu).tail = &per_cpu(tasklet_vec, cpu).head;
+ 	}
+ 	raise_softirq_irqoff(TASKLET_SOFTIRQ);
+ 
+ 	if (&per_cpu(tasklet_hi_vec, cpu).head != per_cpu(tasklet_hi_vec, cpu).tail) {
+-		*__get_cpu_var(tasklet_hi_vec).tail = per_cpu(tasklet_hi_vec, cpu).head;
+-		__get_cpu_var(tasklet_hi_vec).tail = per_cpu(tasklet_hi_vec, cpu).tail;
++		*__this_cpu_read(tasklet_hi_vec.tail) = per_cpu(tasklet_hi_vec, cpu).head;
++		__this_cpu_write(tasklet_hi_vec.tail, per_cpu(tasklet_hi_vec, cpu).tail);
+ 		per_cpu(tasklet_hi_vec, cpu).head = NULL;
+ 		per_cpu(tasklet_hi_vec, cpu).tail = &per_cpu(tasklet_hi_vec, cpu).head;
+ 	}
+diff --git a/kernel/time/tick-common.c b/kernel/time/tick-common.c
+index b6b898d2eeef..051bc80a0c43 100644
+--- a/kernel/time/tick-common.c
++++ b/kernel/time/tick-common.c
+@@ -49,7 +49,7 @@ struct tick_device *tick_get_device(int cpu)
+  */
+ int tick_is_oneshot_available(void)
+ {
+-	struct clock_event_device *dev = __get_cpu_var(tick_cpu_device).evtdev;
++	struct clock_event_device *dev = __this_cpu_read(tick_cpu_device.evtdev);
+ 
+ 	return dev && (dev->features & CLOCK_EVT_FEAT_ONESHOT);
+ }
+diff --git a/kernel/time/tick-oneshot.c b/kernel/time/tick-oneshot.c
+index aada0e52680a..5cbc101f908b 100644
+--- a/kernel/time/tick-oneshot.c
++++ b/kernel/time/tick-oneshot.c
+@@ -95,7 +95,7 @@ int tick_dev_program_event(struct clock_event_device *dev, ktime_t expires,
+  */
+ int tick_program_event(ktime_t expires, int force)
+ {
+-	struct clock_event_device *dev = __get_cpu_var(tick_cpu_device).evtdev;
++	struct clock_event_device *dev = __this_cpu_read(tick_cpu_device.evtdev);
+ 
+ 	return tick_dev_program_event(dev, expires, force);
+ }
+@@ -167,7 +167,7 @@ int tick_oneshot_mode_active(void)
+ 	int ret;
+ 
+ 	local_irq_save(flags);
+-	ret = __get_cpu_var(tick_cpu_device).mode == TICKDEV_MODE_ONESHOT;
++	ret = __this_cpu_read(tick_cpu_device.mode) == TICKDEV_MODE_ONESHOT;
+ 	local_irq_restore(flags);
+ 
+ 	return ret;
+diff --git a/kernel/watchdog.c b/kernel/watchdog.c
+index 6e3c41a4024c..8037a86106ed 100644
+--- a/kernel/watchdog.c
++++ b/kernel/watchdog.c
+@@ -116,12 +116,12 @@ static void __touch_watchdog(void)
+ {
+ 	int this_cpu = smp_processor_id();
+ 
+-	__get_cpu_var(watchdog_touch_ts) = get_timestamp(this_cpu);
++	__this_cpu_write(watchdog_touch_ts, get_timestamp(this_cpu));
+ }
+ 
+ void touch_softlockup_watchdog(void)
+ {
+-	__raw_get_cpu_var(watchdog_touch_ts) = 0;
++	__this_cpu_write(watchdog_touch_ts, 0);
+ }
+ EXPORT_SYMBOL(touch_softlockup_watchdog);
+ 
+@@ -165,12 +165,12 @@ void touch_softlockup_watchdog_sync(void)
+ /* watchdog detector functions */
+ static int is_hardlockup(void)
+ {
+-	unsigned long hrint = __get_cpu_var(hrtimer_interrupts);
++	unsigned long hrint = __this_cpu_read(hrtimer_interrupts);
+ 
+-	if (__get_cpu_var(hrtimer_interrupts_saved) == hrint)
++	if (__this_cpu_read(hrtimer_interrupts_saved) == hrint)
+ 		return 1;
+ 
+-	__get_cpu_var(hrtimer_interrupts_saved) = hrint;
++	__this_cpu_write(hrtimer_interrupts_saved, hrint);
+ 	return 0;
+ }
+ #endif
+@@ -203,8 +203,8 @@ static void watchdog_overflow_callback(struct perf_event *event, int nmi,
+ 	/* Ensure the watchdog never gets throttled */
+ 	event->hw.interrupts = 0;
+ 
+-	if (__get_cpu_var(watchdog_nmi_touch) == true) {
+-		__get_cpu_var(watchdog_nmi_touch) = false;
++	if (__this_cpu_read(watchdog_nmi_touch) == true) {
++		__this_cpu_write(watchdog_nmi_touch, false);
+ 		return;
+ 	}
+ 
+@@ -218,7 +218,7 @@ static void watchdog_overflow_callback(struct perf_event *event, int nmi,
+ 		int this_cpu = smp_processor_id();
+ 
+ 		/* only print hardlockups once */
+-		if (__get_cpu_var(hard_watchdog_warn) == true)
++		if (__this_cpu_read(hard_watchdog_warn) == true)
+ 			return;
+ 
+ 		if (hardlockup_panic)
+@@ -226,16 +226,16 @@ static void watchdog_overflow_callback(struct perf_event *event, int nmi,
+ 		else
+ 			WARN(1, "Watchdog detected hard LOCKUP on cpu %d", this_cpu);
+ 
+-		__get_cpu_var(hard_watchdog_warn) = true;
++		__this_cpu_write(hard_watchdog_warn, true);
+ 		return;
+ 	}
+ 
+-	__get_cpu_var(hard_watchdog_warn) = false;
++	__this_cpu_write(hard_watchdog_warn, false);
+ 	return;
+ }
+ static void watchdog_interrupt_count(void)
+ {
+-	__get_cpu_var(hrtimer_interrupts)++;
++	__this_cpu_inc(hrtimer_interrupts);
+ }
+ #else
+ static inline void watchdog_interrupt_count(void) { return; }
+@@ -244,7 +244,7 @@ static inline void watchdog_interrupt_count(void) { return; }
+ /* watchdog kicker functions */
+ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
+ {
+-	unsigned long touch_ts = __get_cpu_var(watchdog_touch_ts);
++	unsigned long touch_ts = __this_cpu_read(watchdog_touch_ts);
+ 	struct pt_regs *regs = get_irq_regs();
+ 	int duration;
+ 
+@@ -252,18 +252,18 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
+ 	watchdog_interrupt_count();
+ 
+ 	/* kick the softlockup detector */
+-	wake_up_process(__get_cpu_var(softlockup_watchdog));
++	wake_up_process(__this_cpu_read(softlockup_watchdog));
+ 
+ 	/* .. and repeat */
+ 	hrtimer_forward_now(hrtimer, ns_to_ktime(get_sample_period()));
+ 
+ 	if (touch_ts == 0) {
+-		if (unlikely(__get_cpu_var(softlockup_touch_sync))) {
++		if (unlikely(__this_cpu_read(softlockup_touch_sync))) {
+ 			/*
+ 			 * If the time stamp was touched atomically
+ 			 * make sure the scheduler tick is up to date.
+ 			 */
+-			__get_cpu_var(softlockup_touch_sync) = false;
++			__this_cpu_write(softlockup_touch_sync, false);
+ 			sched_clock_tick();
+ 		}
+ 		__touch_watchdog();
+@@ -279,7 +279,7 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
+ 	duration = is_softlockup(touch_ts);
+ 	if (unlikely(duration)) {
+ 		/* only warn once */
+-		if (__get_cpu_var(soft_watchdog_warn) == true)
++		if (__this_cpu_read(soft_watchdog_warn) == true)
+ 			return HRTIMER_RESTART;
+ 
+ 		printk(KERN_ERR "BUG: soft lockup - CPU#%d stuck for %us! [%s:%d]\n",
+@@ -294,9 +294,9 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
+ 
+ 		if (softlockup_panic)
+ 			panic("softlockup: hung tasks");
+-		__get_cpu_var(soft_watchdog_warn) = true;
++		__this_cpu_write(soft_watchdog_warn, true);
+ 	} else
+-		__get_cpu_var(soft_watchdog_warn) = false;
++		__this_cpu_write(soft_watchdog_warn, false);
+ 
+ 	return HRTIMER_RESTART;
+ }
+diff --git a/mm/slab.c b/mm/slab.c
+index b1e40dafbab3..316d75596f3c 100644
+--- a/mm/slab.c
++++ b/mm/slab.c
+@@ -829,12 +829,12 @@ static void init_reap_node(int cpu)
+ 
+ static void next_reap_node(void)
+ {
+-	int node = __get_cpu_var(slab_reap_node);
++	int node = __this_cpu_read(slab_reap_node);
+ 
+ 	node = next_node(node, node_online_map);
+ 	if (unlikely(node >= MAX_NUMNODES))
+ 		node = first_node(node_online_map);
+-	__get_cpu_var(slab_reap_node) = node;
++	__this_cpu_write(slab_reap_node, node);
+ }
+ 
+ #else
+@@ -1012,7 +1012,7 @@ static void __drain_alien_cache(struct kmem_cache *cachep,
+  */
+ static void reap_alien(struct kmem_cache *cachep, struct kmem_list3 *l3)
+ {
+-	int node = __get_cpu_var(slab_reap_node);
++	int node = __this_cpu_read(slab_reap_node);
+ 
+ 	if (l3->alien) {
+ 		struct array_cache *ac = l3->alien[node];
+

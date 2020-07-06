@@ -1,0 +1,50 @@
+commit 899649b7d4ead76c19e39251ca886eebe3f811a8
+Author: Alex Williamson <alex.williamson@redhat.com>
+Date:   Wed Oct 10 09:10:32 2012 -0600
+
+    vfio: Fix PCI INTx disable consistency
+    
+    The virq_disabled flag tracks the userspace view of INTx masking
+    across interrupt mode changes, but we're not consistently applying
+    this to the interrupt and masking handler notion of the device.
+    Currently if the user sets DisINTx while in MSI or MSIX mode, then
+    returns to INTx mode (ex. rebooting a qemu guest), the hardware has
+    DisINTx+, but the management of INTx thinks it's enabled, making it
+    impossible to actually clear DisINTx.  Fix this by updating the
+    handler state when INTx is re-enabled.
+    
+    Cc: stable@vger.kernel.org
+    Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+
+diff --git a/drivers/vfio/pci/vfio_pci_intrs.c b/drivers/vfio/pci/vfio_pci_intrs.c
+index c8139a598f84..3639371fa697 100644
+--- a/drivers/vfio/pci/vfio_pci_intrs.c
++++ b/drivers/vfio/pci/vfio_pci_intrs.c
+@@ -366,6 +366,17 @@ static int vfio_intx_enable(struct vfio_pci_device *vdev)
+ 		return -ENOMEM;
+ 
+ 	vdev->num_ctx = 1;
++
++	/*
++	 * If the virtual interrupt is masked, restore it.  Devices
++	 * supporting DisINTx can be masked at the hardware level
++	 * here, non-PCI-2.3 devices will have to wait until the
++	 * interrupt is enabled.
++	 */
++	vdev->ctx[0].masked = vdev->virq_disabled;
++	if (vdev->pci_2_3)
++		pci_intx(vdev->pdev, !vdev->ctx[0].masked);
++
+ 	vdev->irq_type = VFIO_PCI_INTX_IRQ_INDEX;
+ 
+ 	return 0;
+@@ -419,7 +430,7 @@ static int vfio_intx_set_signal(struct vfio_pci_device *vdev, int fd)
+ 	 * disable_irq won't.
+ 	 */
+ 	spin_lock_irqsave(&vdev->irqlock, flags);
+-	if (!vdev->pci_2_3 && (vdev->ctx[0].masked || vdev->virq_disabled))
++	if (!vdev->pci_2_3 && vdev->ctx[0].masked)
+ 		disable_irq_nosync(pdev->irq);
+ 	spin_unlock_irqrestore(&vdev->irqlock, flags);
+ 
+

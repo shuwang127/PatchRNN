@@ -1,0 +1,142 @@
+commit 1e489518da2a49604df2c3281034097274324be9
+Author: Heiko Carstens <heiko.carstens@de.ibm.com>
+Date:   Wed Apr 30 13:38:37 2008 +0200
+
+    [S390] Automatically detect added cpus.
+    
+    Signed-off-by: Heiko Carstens <heiko.carstens@de.ibm.com>
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+
+diff --git a/arch/s390/kernel/smp.c b/arch/s390/kernel/smp.c
+index 6bb5c050640f..0aeb290060d9 100644
+--- a/arch/s390/kernel/smp.c
++++ b/arch/s390/kernel/smp.c
+@@ -505,7 +505,7 @@ static int smp_rescan_cpus_sclp(cpumask_t avail)
+ 	return rc;
+ }
+ 
+-static int smp_rescan_cpus(void)
++static int __smp_rescan_cpus(void)
+ {
+ 	cpumask_t avail;
+ 
+@@ -570,7 +570,7 @@ static void __init smp_detect_cpus(void)
+ 	kfree(info);
+ 	printk(KERN_INFO "CPUs: %d configured, %d standby\n", c_cpus, s_cpus);
+ 	get_online_cpus();
+-	smp_rescan_cpus();
++	__smp_rescan_cpus();
+ 	put_online_cpus();
+ }
+ 
+@@ -1088,8 +1088,8 @@ static int __devinit smp_add_present_cpu(int cpu)
+ }
+ 
+ #ifdef CONFIG_HOTPLUG_CPU
+-static ssize_t __ref rescan_store(struct sys_device *dev,
+-				  const char *buf, size_t count)
++
++int smp_rescan_cpus(void)
+ {
+ 	cpumask_t newcpus;
+ 	int cpu;
+@@ -1098,7 +1098,7 @@ static ssize_t __ref rescan_store(struct sys_device *dev,
+ 	get_online_cpus();
+ 	mutex_lock(&smp_cpu_state_mutex);
+ 	newcpus = cpu_present_map;
+-	rc = smp_rescan_cpus();
++	rc = __smp_rescan_cpus();
+ 	if (rc)
+ 		goto out;
+ 	cpus_andnot(newcpus, cpu_present_map, newcpus);
+@@ -1113,6 +1113,15 @@ static ssize_t __ref rescan_store(struct sys_device *dev,
+ 	put_online_cpus();
+ 	if (!cpus_empty(newcpus))
+ 		topology_schedule_update();
++	return rc;
++}
++
++static ssize_t __ref rescan_store(struct sys_device *dev, const char *buf,
++				  size_t count)
++{
++	int rc;
++
++	rc = smp_rescan_cpus();
+ 	return rc ? rc : count;
+ }
+ static SYSDEV_ATTR(rescan, 0200, NULL, rescan_store);
+diff --git a/drivers/s390/char/sclp_config.c b/drivers/s390/char/sclp_config.c
+index b8f35bc52b7b..9e784d5f7f57 100644
+--- a/drivers/s390/char/sclp_config.c
++++ b/drivers/s390/char/sclp_config.c
+@@ -10,6 +10,7 @@
+ #include <linux/cpu.h>
+ #include <linux/sysdev.h>
+ #include <linux/workqueue.h>
++#include <asm/smp.h>
+ #include "sclp.h"
+ 
+ #define TAG	"sclp_config: "
+@@ -19,9 +20,11 @@ struct conf_mgm_data {
+ 	u8 ev_qualifier;
+ } __attribute__((packed));
+ 
++#define EV_QUAL_CPU_CHANGE	1
+ #define EV_QUAL_CAP_CHANGE	3
+ 
+ static struct work_struct sclp_cpu_capability_work;
++static struct work_struct sclp_cpu_change_work;
+ 
+ static void sclp_cpu_capability_notify(struct work_struct *work)
+ {
+@@ -37,13 +40,24 @@ static void sclp_cpu_capability_notify(struct work_struct *work)
+ 	put_online_cpus();
+ }
+ 
++static void sclp_cpu_change_notify(struct work_struct *work)
++{
++	smp_rescan_cpus();
++}
++
+ static void sclp_conf_receiver_fn(struct evbuf_header *evbuf)
+ {
+ 	struct conf_mgm_data *cdata;
+ 
+ 	cdata = (struct conf_mgm_data *)(evbuf + 1);
+-	if (cdata->ev_qualifier == EV_QUAL_CAP_CHANGE)
++	switch (cdata->ev_qualifier) {
++	case EV_QUAL_CPU_CHANGE:
++		schedule_work(&sclp_cpu_change_work);
++		break;
++	case EV_QUAL_CAP_CHANGE:
+ 		schedule_work(&sclp_cpu_capability_work);
++		break;
++	}
+ }
+ 
+ static struct sclp_register sclp_conf_register =
+@@ -57,6 +71,7 @@ static int __init sclp_conf_init(void)
+ 	int rc;
+ 
+ 	INIT_WORK(&sclp_cpu_capability_work, sclp_cpu_capability_notify);
++	INIT_WORK(&sclp_cpu_change_work, sclp_cpu_change_notify);
+ 
+ 	rc = sclp_register(&sclp_conf_register);
+ 	if (rc) {
+diff --git a/include/asm-s390/smp.h b/include/asm-s390/smp.h
+index 6f3821a6a902..8376b195a1b6 100644
+--- a/include/asm-s390/smp.h
++++ b/include/asm-s390/smp.h
+@@ -108,5 +108,11 @@ static inline void smp_send_stop(void)
+ #define smp_cpu_not_running(cpu)	1
+ #endif
+ 
++#ifdef CONFIG_HOTPLUG_CPU
++extern int smp_rescan_cpus(void);
++#else
++static inline int smp_rescan_cpus(void) { return 0; }
++#endif
++
+ extern union save_area *zfcpdump_save_areas[NR_CPUS + 1];
+ #endif
+

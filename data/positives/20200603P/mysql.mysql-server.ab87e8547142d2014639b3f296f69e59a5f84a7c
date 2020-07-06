@@ -1,0 +1,65 @@
+commit ab87e8547142d2014639b3f296f69e59a5f84a7c
+Author: Marc Alff <marc.alff@oracle.com>
+Date:   Tue Apr 2 13:24:38 2013 +0200
+
+    Bug#16552425 MIN_TIMER_WAIT IN EVENTS_WAITS_SUMMARY_GLOBAL_BY_EVENT_NAME
+    OVERFLOWS
+    
+    Before this fix, performance schema statistics,
+    when only counting events but not timing them,
+    would report column MIN_TIMER_WAIT as a large number
+    instead or 0 (incorrect).
+    
+    The root cause is that PFS_single_stat is initialized with:
+    - min = ULONGLONGMAX
+    - max = 0
+    which is a special marker to indicate that no timed
+    statistics have been recorded yet,
+    but this special marker is not checked when computing
+    the MIN_TIMER_WAIT value to display.
+    
+    This fix changed PFS_stat_row::set() to account
+    for statistics that are only counted and not timed.
+
+diff --git a/storage/perfschema/pfs_stat.h b/storage/perfschema/pfs_stat.h
+index 2a255a9e5b2..13a32d0e3ad 100644
+--- a/storage/perfschema/pfs_stat.h
++++ b/storage/perfschema/pfs_stat.h
+@@ -1,4 +1,4 @@
+-/* Copyright (c) 2008, 2011, Oracle and/or its affiliates. All rights reserved.
++/* Copyright (c) 2008, 2013, Oracle and/or its affiliates. All rights reserved.
+ 
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+@@ -58,6 +58,11 @@ struct PFS_single_stat
+     m_max= 0;
+   }
+ 
++  inline bool has_timed_stats() const
++  {
++    return (m_min <= m_max);
++  }
++
+   inline void aggregate(const PFS_single_stat *stat)
+   {
+     m_count+= stat->m_count;
+diff --git a/storage/perfschema/table_helper.h b/storage/perfschema/table_helper.h
+index e2e12607cfe..d0da579f899 100644
+--- a/storage/perfschema/table_helper.h
++++ b/storage/perfschema/table_helper.h
+@@ -1,4 +1,4 @@
+-/* Copyright (c) 2008, 2011, Oracle and/or its affiliates. All rights reserved.
++/* Copyright (c) 2008, 2013, Oracle and/or its affiliates. All rights reserved.
+ 
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+@@ -222,7 +222,7 @@ struct PFS_stat_row
+   {
+     m_count= stat->m_count;
+ 
+-    if (m_count)
++    if ((m_count != 0) && stat->has_timed_stats())
+     {
+       m_sum= normalizer->wait_to_pico(stat->m_sum);
+       m_min= normalizer->wait_to_pico(stat->m_min);
+

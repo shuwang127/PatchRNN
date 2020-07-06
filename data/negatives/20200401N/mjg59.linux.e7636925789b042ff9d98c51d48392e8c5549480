@@ -1,0 +1,89 @@
+commit e7636925789b042ff9d98c51d48392e8c5549480
+Author: Jaroslav Kysela <perex@perex.cz>
+Date:   Tue Jan 26 17:08:24 2010 +0100
+
+    ALSA: pcm_lib - return back hw_ptr_interrupt
+    
+    Clemens Ladisch noted for hw_ptr_removal in "cleanup & merge hw_ptr
+    update functions" commit:
+    
+    "It is possible for the status/delay ioctls to be called when the sound
+    card's pointer register alreay shows a position at the beginning of the
+    new period, but immediately before the interrupt is actually executed.
+    (This happens regularly on a SMP machine with mplayer.)  When that
+    happens, the code thinks that the position must be at least one period
+    ahead of the current position and drops an entire buffer of data."
+    
+    Return back the hw_ptr_interrupt variable. The last interrupt pointer
+    is always computed from the latest hw_ptr instead of tracking it
+    separately (in this case all hw_ptr checks and modifications might
+    influence also hw_ptr_interrupt and it is difficult to keep it
+    consistent).
+    
+    Signed-off-by: Jaroslav Kysela <perex@perex.cz>
+
+diff --git a/include/sound/pcm.h b/include/sound/pcm.h
+index 3bc9bca771ec..13bc83ca35fb 100644
+--- a/include/sound/pcm.h
++++ b/include/sound/pcm.h
+@@ -271,6 +271,7 @@ struct snd_pcm_runtime {
+ 	int overrange;
+ 	snd_pcm_uframes_t avail_max;
+ 	snd_pcm_uframes_t hw_ptr_base;	/* Position at buffer restart */
++	snd_pcm_uframes_t hw_ptr_interrupt; /* Position at interrupt time */
+ 	unsigned long hw_ptr_jiffies;	/* Time when hw_ptr is updated */
+ 	snd_pcm_sframes_t delay;	/* extra delay; typically FIFO size */
+ 
+diff --git a/sound/core/oss/pcm_oss.c b/sound/core/oss/pcm_oss.c
+index 255ad910077a..82d4e3329b3d 100644
+--- a/sound/core/oss/pcm_oss.c
++++ b/sound/core/oss/pcm_oss.c
+@@ -635,8 +635,7 @@ static long snd_pcm_alsa_frames(struct snd_pcm_substream *substream, long bytes)
+ static inline
+ snd_pcm_uframes_t get_hw_ptr_period(struct snd_pcm_runtime *runtime)
+ {
+-	snd_pcm_uframes_t ptr = runtime->status->hw_ptr;
+-	return ptr - (ptr % runtime->period_size);
++	return runtime->hw_ptr_interrupt;
+ }
+ 
+ /* define extended formats in the recent OSS versions (if any) */
+diff --git a/sound/core/pcm_lib.c b/sound/core/pcm_lib.c
+index e2a817eac2a9..aa54195ef3b0 100644
+--- a/sound/core/pcm_lib.c
++++ b/sound/core/pcm_lib.c
+@@ -325,8 +325,7 @@ static int snd_pcm_update_hw_ptr0(struct snd_pcm_substream *substream,
+ 	if (in_interrupt) {
+ 		/* we know that one period was processed */
+ 		/* delta = "expected next hw_ptr" for in_interrupt != 0 */
+-		delta = old_hw_ptr - (old_hw_ptr % runtime->period_size)
+-			+ runtime->period_size;
++		delta = runtime->hw_ptr_interrupt + runtime->period_size;
+ 		if (delta > new_hw_ptr) {
+ 			hw_base += runtime->buffer_size;
+ 			if (hw_base >= runtime->boundary)
+@@ -437,6 +436,10 @@ static int snd_pcm_update_hw_ptr0(struct snd_pcm_substream *substream,
+ 	    runtime->silence_size > 0)
+ 		snd_pcm_playback_silence(substream, new_hw_ptr);
+ 
++	if (in_interrupt) {
++		runtime->hw_ptr_interrupt = new_hw_ptr -
++				(new_hw_ptr % runtime->period_size);
++	}
+ 	runtime->hw_ptr_base = hw_base;
+ 	runtime->status->hw_ptr = new_hw_ptr;
+ 	runtime->hw_ptr_jiffies = jiffies;
+diff --git a/sound/core/pcm_native.c b/sound/core/pcm_native.c
+index 56ec35e8510b..7a002db512b4 100644
+--- a/sound/core/pcm_native.c
++++ b/sound/core/pcm_native.c
+@@ -1252,6 +1252,8 @@ static int snd_pcm_do_reset(struct snd_pcm_substream *substream, int state)
+ 	if (err < 0)
+ 		return err;
+ 	runtime->hw_ptr_base = 0;
++	runtime->hw_ptr_interrupt = runtime->status->hw_ptr -
++		runtime->status->hw_ptr % runtime->period_size;
+ 	runtime->silence_start = runtime->status->hw_ptr;
+ 	runtime->silence_filled = 0;
+ 	return 0;
+

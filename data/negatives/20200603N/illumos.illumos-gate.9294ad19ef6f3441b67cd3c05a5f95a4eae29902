@@ -1,0 +1,141 @@
+commit 9294ad19ef6f3441b67cd3c05a5f95a4eae29902
+Author: Sowmini Varadhan <Sowmini.Varadhan@Sun.COM>
+Date:   Sun Apr 5 21:37:20 2009 -0400
+
+    6782947 IRE_BROADCAST IREs can hook up with non-NCE_F_BCAST NCEs
+    6798033 bogus ASSERT in ip_wput_nondata()
+    6825641 Adding a duplicate IPv6 address will trash the existing active one as well.
+
+diff --git a/usr/src/uts/common/inet/ip.h b/usr/src/uts/common/inet/ip.h
+index 5150c1ee3c..f39eff0246 100644
+--- a/usr/src/uts/common/inet/ip.h
++++ b/usr/src/uts/common/inet/ip.h
+@@ -1278,7 +1278,8 @@ typedef struct ipif_s {
+ 		ipif_was_dup : 1,	/* DAD had failed */
+ 
+ 		ipif_joined_allhosts : 1, /* allhosts joined */
+-		ipif_pad_to_31 : 27;
++		ipif_added_nce:1,	/* nce added for local address */
++		ipif_pad_to_31 : 26;
+ 
+ 	uint_t	ipif_seqid;		/* unique index across all ills */
+ 	uint_t	ipif_state_flags;	/* See IPIF_* flag defs above */
+diff --git a/usr/src/uts/common/inet/ip/ip.c b/usr/src/uts/common/inet/ip/ip.c
+index 1b002ee721..a231f1a4f0 100644
+--- a/usr/src/uts/common/inet/ip/ip.c
++++ b/usr/src/uts/common/inet/ip/ip.c
+@@ -27849,7 +27849,6 @@ nak:
+ 		nce = ire->ire_nce;
+ 		DTRACE_PROBE2(ire__arpresolve__type,
+ 		    ire_t *, ire, nce_t *, nce);
+-		ASSERT(nce->nce_state != ND_INITIAL);
+ 		mutex_enter(&nce->nce_lock);
+ 		nce->nce_last = TICK_TO_MSEC(lbolt64);
+ 		if (nce->nce_state == ND_REACHABLE) {
+diff --git a/usr/src/uts/common/inet/ip/ip6_if.c b/usr/src/uts/common/inet/ip/ip6_if.c
+index 3dbc4559d8..92c1eed048 100644
+--- a/usr/src/uts/common/inet/ip/ip6_if.c
++++ b/usr/src/uts/common/inet/ip/ip6_if.c
+@@ -1565,11 +1565,13 @@ ipif_ndp_up(ipif_t *ipif, boolean_t initial)
+ 			flags |= NCE_F_UNSOL_ADV;
+ 		}
+ 		/*
+-		 * NOTE: for IPMP, local addresses are always associated with
+-		 * the ill they're bound to, so don't match across the illgrp.
++		 * Create an nce for the local address. We pass a match_illgrp
++		 * of B_TRUE because the local address must be unique across
++		 * the illgrp, and the existence of an nce with nce_ill set
++		 * to any ill in the group is indicative of a duplicate address
+ 		 */
+ 		err = ndp_lookup_then_add_v6(bound_ill,
+-		    B_FALSE,
++		    B_TRUE,
+ 		    hw_addr,
+ 		    &ipif->ipif_v6lcl_addr,
+ 		    &ipv6_all_ones,
+@@ -1583,10 +1585,12 @@ ipif_ndp_up(ipif_t *ipif, boolean_t initial)
+ 			ip1dbg(("ipif_ndp_up: NCE created for %s\n",
+ 			    ill->ill_name));
+ 			ipif->ipif_addr_ready = 1;
++			ipif->ipif_added_nce = 1;
+ 			break;
+ 		case EINPROGRESS:
+ 			ip1dbg(("ipif_ndp_up: running DAD now for %s\n",
+ 			    ill->ill_name));
++			ipif->ipif_added_nce = 1;
+ 			break;
+ 		case EEXIST:
+ 			NCE_REFRELE(nce);
+@@ -1635,15 +1639,16 @@ ipif_ndp_down(ipif_t *ipif)
+ 		else
+ 			bound_ill = ill;
+ 
+-		if (bound_ill != NULL) {
++		if (bound_ill != NULL && ipif->ipif_added_nce) {
+ 			nce = ndp_lookup_v6(bound_ill,
+-			    B_FALSE,	/* see comment in ipif_ndp_up() */
++			    B_TRUE,
+ 			    &ipif->ipif_v6lcl_addr,
+ 			    B_FALSE);
+ 			if (nce != NULL) {
+ 				ndp_delete(nce);
+ 				NCE_REFRELE(nce);
+ 			}
++			ipif->ipif_added_nce = 0;
+ 		}
+ 
+ 		/*
+@@ -3214,6 +3219,10 @@ ipif_up_done_v6(ipif_t *ipif)
+ 		 * ip_addr_availability_check() identifies this case for us and
+ 		 * returns EADDRINUSE; we need to turn it into EADDRNOTAVAIL
+ 		 * which is the expected error code.
++		 *
++		 * Note that, for the non-XRESOLV case, ipif_ndp_down() will
++		 * only delete an nce in the case when one was actually created
++		 * by ipif_ndp_up(), as indicated by the ipif_added_nce bit.
+ 		 */
+ 		if (err == EADDRINUSE) {
+ 			if (ipif->ipif_ill->ill_flags & ILLF_XRESOLV) {
+diff --git a/usr/src/uts/common/inet/ip/ip_ire.c b/usr/src/uts/common/inet/ip/ip_ire.c
+index 5113405cbf..8613790c53 100644
+--- a/usr/src/uts/common/inet/ip/ip_ire.c
++++ b/usr/src/uts/common/inet/ip/ip_ire.c
+@@ -5639,7 +5639,24 @@ retry_nce:
+ 		DTRACE_PROBE2(nce__init__fail, ill_t *, ire_ill, int, err);
+ 		return (EINVAL);
+ 	}
++	/*
++	 * IRE_BROADCAST ire's must be linked to NCE_F_BCAST nce's and
++	 * vice-versa (IRE_CACHE <-> unicast nce entries). We may have found an
++	 * existing unicast (or bcast) nce when trying to add a BROADCAST (or
++	 * unicast) ire, e.g., when address/netmask modifications were in
++	 * progress, and the ipif_ndp_down() call to quiesce existing state
++	 * during the addr/mask modification may have skipped the ndp_delete()
++	 * because the ipif being affected was not the last one on the ill.  We
++	 * recover from the missed ndp_delete() now, by deleting the old nce and
++	 * adding a new one with the correct NCE_F_BCAST state.
++	 */
+ 	if (ire->ire_type == IRE_BROADCAST) {
++		if ((nce->nce_flags & NCE_F_BCAST) == 0) {
++			/* IRE_BROADCAST needs NCE_F_BCAST */
++			ndp_delete(nce);
++			NCE_REFRELE(nce);
++			goto retry_nce;
++		}
+ 		/*
+ 		 * Two bcast ires are created for each interface;
+ 		 * 1. loopback copy (which does not  have an
+@@ -5661,6 +5678,12 @@ retry_nce:
+ 		 */
+ 		NCE_REFHOLD_TO_REFHOLD_NOTR(ire->ire_nce);
+ 	} else {
++		if ((nce->nce_flags & NCE_F_BCAST) != 0) {
++			/* IRE_CACHE needs unicast nce */
++			ndp_delete(nce);
++			NCE_REFRELE(nce);
++			goto retry_nce;
++		}
+ 		/*
+ 		 * We are not using this nce_t just yet so release
+ 		 * the ref taken in ndp_lookup_then_add_v4()
+

@@ -1,0 +1,70 @@
+commit 503716b92be91b3a5153373df42d4d1706c57123
+Author: Richard Russon <rich@flatcap.org>
+Date:   Mon Apr 3 18:31:53 2017 +0100
+
+    bug: don't pass large object by value
+    
+    imap_delete_mailbox was passed an IMAP_MBOX object by value.
+    
+    The object is >500 bytes so it would be better as a pointer.
+    Passing by value also led to a potential double-free.
+
+diff --git a/browser.c b/browser.c
+index 0b072cfa9..5f99cb889 100644
+--- a/browser.c
++++ b/browser.c
+@@ -1532,7 +1532,7 @@ void _mutt_select_file (char *f, size_t flen, int flags, char ***files, int *num
+             mx.mbox);
+ 	  if (mutt_yesorno (msg, MUTT_NO) == MUTT_YES)
+           {
+-	    if (!imap_delete_mailbox (Context, mx))
++	    if (!imap_delete_mailbox (Context, &mx))
+             {
+ 	      /* free the mailbox from the browser */
+ 	      FREE (&((state.entry)[nentry].name));
+diff --git a/imap/imap.c b/imap/imap.c
+index 3de81d187..2facfa4ff 100644
+--- a/imap/imap.c
++++ b/imap/imap.c
+@@ -143,23 +143,23 @@ int imap_rename_mailbox (IMAP_DATA* idata, IMAP_MBOX* mx, const char* newname)
+   return 0;
+ }
+ 
+-int imap_delete_mailbox (CONTEXT* ctx, IMAP_MBOX mx)
++int imap_delete_mailbox (CONTEXT* ctx, IMAP_MBOX *mx)
+ {
+   char buf[LONG_STRING], mbox[LONG_STRING];
+   IMAP_DATA *idata = NULL;
+ 
+   if (!ctx || !ctx->data) {
+-    if (!(idata = imap_conn_find (&mx.account,
++    if (!(idata = imap_conn_find (&mx->account,
+           option (OPTIMAPPASSIVE) ? MUTT_IMAP_CONN_NONEW : 0)))
+     {
+-      FREE (&mx.mbox);
++      FREE (&mx->mbox);
+       return -1;
+     }
+   } else {
+     idata = ctx->data;
+   }
+ 
+-  imap_munge_mbox_name (idata, mbox, sizeof (mbox), mx.mbox);
++  imap_munge_mbox_name (idata, mbox, sizeof (mbox), mx->mbox);
+   snprintf (buf, sizeof (buf), "DELETE %s", mbox);
+ 
+   if (imap_exec (idata, buf, 0) != 0)
+diff --git a/imap/imap.h b/imap/imap.h
+index 53a7a1ef1..4ffd50d9f 100644
+--- a/imap/imap.h
++++ b/imap/imap.h
+@@ -33,7 +33,7 @@ typedef struct
+ /* imap.c */
+ int imap_access (const char*, int);
+ int imap_check_mailbox (CONTEXT* ctx, int force);
+-int imap_delete_mailbox (CONTEXT* ctx, IMAP_MBOX mx);
++int imap_delete_mailbox (CONTEXT* ctx, IMAP_MBOX *mx);
+ int imap_sync_mailbox (CONTEXT *ctx, int expunge);
+ int imap_close_mailbox (CONTEXT *ctx);
+ int imap_buffy_check (int force, int check_stats);
+

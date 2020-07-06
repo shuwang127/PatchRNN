@@ -1,0 +1,449 @@
+commit 4b558a53f61005b0ca49665d2da92303f6e14872
+Author: Jonathan Beck <jonabeck@gmail.com>
+Date:   Mon Aug 4 22:31:43 2008 +0200
+
+    Store certificates and private keys as PEM files instead of storing them in config file. Added functions to generate proper pairing request.
+    
+    Signed-off-by: Matt Colyer <matt@colyer.name>
+
+diff --git a/src/initconf.c b/src/initconf.c
+index 7d6aa28..960fb6b 100644
+--- a/src/initconf.c
++++ b/src/initconf.c
+@@ -93,25 +93,15 @@ int main(int argc, char *argv[]) {
+ 	gnutls_x509_crt_export (root_cert, GNUTLS_X509_FMT_PEM,  root_cert_pem.data, &root_cert_pem.size);
+ 	gnutls_x509_crt_export (host_cert, GNUTLS_X509_FMT_PEM,  host_cert_pem.data, &host_cert_pem.size);
+ 
+-	/* encode in base64 for storage */
+-	char* root_key_b64 = g_base64_encode (root_key_pem.data,root_key_pem.size);
+-	char* host_key_b64 = g_base64_encode (host_key_pem.data,host_key_pem.size);
+-
+-	char* root_cert_b64 = g_base64_encode (root_cert_pem.data,root_cert_pem.size);
+-	char* host_cert_b64 = g_base64_encode (host_cert_pem.data,host_cert_pem.size);
+ 
+ 	/* store values in config file */
+ 	
+-	init_config_file(host_id, root_key_b64, host_key_b64, root_cert_b64, host_cert_b64);
++	init_config_file(host_id, &root_key_pem, &host_key_pem, &root_cert_pem, &host_cert_pem);
+ 
+ 	gnutls_free(root_key_pem.data);
+ 	gnutls_free(host_key_pem.data);
+ 	gnutls_free(root_cert_pem.data);
+ 	gnutls_free(host_cert_pem.data);
+-	g_free(root_key_b64);
+-	g_free(host_key_b64);
+-	g_free(root_cert_b64);
+-	g_free(host_cert_b64);
+ 
+ 	return 0;
+ }
+diff --git a/src/lockdown.c b/src/lockdown.c
+index d5149a9..095b2b4 100644
+--- a/src/lockdown.c
++++ b/src/lockdown.c
+@@ -263,8 +263,8 @@ int lockdownd_pair_device(lockdownd_client *control, char *public_key_b64, char
+ 
+ 	/* Setup Pair request plist */
+ 	dict = add_child_to_plist(plist, "dict", "\n", NULL, 0);
+-	add_key_str_dict_element(plist, dict, "Key", "PairRecord", 1);
+-	dictRecord = add_child_to_plist(plist, "dict", "\n", NULL, 1);
++	dictRecord = add_key_dict_node(plist, dict, "PairRecord", "\n", 1);
++	//dictRecord = add_child_to_plist(plist, "dict", "\n", NULL, 1);
+ 	add_key_data_dict_element(plist, dictRecord, "DeviceCertificate", device_cert_b64, 2);
+ 	add_key_data_dict_element(plist, dictRecord, "HostCertificate", host_cert_b64, 2);
+ 	add_key_str_dict_element(plist, dictRecord, "HostID", host_id, 2);
+@@ -273,6 +273,8 @@ int lockdownd_pair_device(lockdownd_client *control, char *public_key_b64, char
+ 
+ 	xmlDocDumpMemory(plist, (xmlChar**)&XML_content, &length);
+ 
++	printf("XML Pairing request : %s\n",XML_content);
++
+ 	/* send to iPhone */
+ 	bytes = lockdownd_send(control, XML_content, length);
+ 	
+@@ -366,34 +368,34 @@ int lockdownd_gen_pair_cert(char *public_key_b64, char **device_cert_b64, char *
+ 		gnutls_datum_t essentially_null = {strdup("abababababababab"), strlen("abababababababab")};
+ 	
+ 		gnutls_x509_privkey_t fake_privkey, root_privkey;
+-		gnutls_x509_crt_t dev_cert, root_cert;
++		gnutls_x509_crt_t dev_cert, root_cert, host_cert;
+ 	
+ 		gnutls_x509_privkey_init(&fake_privkey);
+ 		gnutls_x509_crt_init(&dev_cert);
+ 		gnutls_x509_crt_init(&root_cert);
++		gnutls_x509_crt_init(&host_cert);
+ 
+ 		if ( GNUTLS_E_SUCCESS == gnutls_x509_privkey_import_rsa_raw(fake_privkey, &modulus, &exponent, &essentially_null, &essentially_null, &essentially_null, &essentially_null) ) {
+ 		
+ 			gnutls_x509_privkey_init(&root_privkey);
+ 			
+-			/* get certificate stored in config */
+-			*host_cert_b64 = get_host_certificate();
+-			*root_cert_b64 = get_root_certificate();
+-
++			/* get root cert */
+ 			gnutls_datum_t pem_root_cert = {NULL, 0};
+-			pem_root_cert.data = g_base64_decode (*root_cert_b64, &pem_root_cert.size);
+-
++			ret = get_root_certificate(&pem_root_cert);
+ 			ret = gnutls_x509_crt_import (root_cert, &pem_root_cert, GNUTLS_X509_FMT_PEM);
+-			gnutls_free(pem_root_cert.data);
++			
+ 
++			/* get host cert */
++			gnutls_datum_t pem_host_cert = {NULL, 0};
++			ret = get_host_certificate(&pem_host_cert);
++			ret = gnutls_x509_crt_import (host_cert, &pem_host_cert, GNUTLS_X509_FMT_PEM);
++			
+ 
+ 			/* get root private key */
+-			char *root_priv_b64 = get_root_private_key();
+ 			gnutls_datum_t pem_root_priv = {NULL, 0};
+-			pem_root_priv.data = g_base64_decode (root_priv_b64, &pem_root_priv.size);
+-
++			ret = get_root_private_key(&pem_root_priv);
+ 			ret = gnutls_x509_privkey_import (root_privkey, &pem_root_priv, GNUTLS_X509_FMT_PEM);
+-			gnutls_free(pem_root_priv.data);
++			
+ 
+ 			/* generate device certificate */
+ 			
+@@ -418,8 +420,13 @@ int lockdownd_gen_pair_cert(char *public_key_b64, char **device_cert_b64, char *
+ 
+ 				/* now encode certificates for output */
+ 				*device_cert_b64 = g_base64_encode(dev_pem.data, dev_pem.size);
++				*host_cert_b64 = g_base64_encode(pem_host_cert.data, pem_host_cert.size);
++				*root_cert_b64 = g_base64_encode(pem_root_cert.data, pem_root_cert.size);
+ 				ret = 1;
+ 			}
++			gnutls_free(pem_root_priv.data);
++			gnutls_free(pem_root_cert.data);
++			gnutls_free(pem_host_cert.data);
+ 		}
+ 	}
+ 
+diff --git a/src/plist.c b/src/plist.c
+index 2d2a832..73cdffc 100644
+--- a/src/plist.c
++++ b/src/plist.c
+@@ -29,6 +29,29 @@ const char *plist_base = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+ <plist version=\"1.0\">\n\
+ </plist>\0";
+ 
++char* format_string(char* buf, int cols, int depth)
++{
++	int colw = depth + cols + 1; //new buf cols width
++	int len = strlen(buf);
++	//int nlines = ceil((float)len / (float)cols);
++	int nlines = len / cols + 1;
++ 	char* new_buf = (char*)malloc(nlines * colw + depth + 1);
++	int i = 0;
++	int j = 0;
++	for (i = 0; i < nlines; i++){
++		new_buf[i * colw] = '\n';
++		for (j = 0; j < depth; j++)
++			new_buf[i * colw + 1 + j] = '\t';
++		memcpy(new_buf + i * colw + 1 + depth, buf + i * cols, cols);
++	}
++	new_buf[len+(1+depth)*nlines] = '\n';
++	for (j = 0; j < depth; j++)
++		new_buf[len+(1+depth)*nlines + 1 + j] = '\t';
++	new_buf[len+(1+depth)*nlines+depth+1] = '\0';
++	free(buf);
++	return new_buf;
++}
++
+ xmlDocPtr new_plist() {
+ 	char *plist = strdup(plist_base);
+ 	xmlDocPtr plist_xml = xmlReadMemory(plist, strlen(plist), NULL, NULL, 0);
+@@ -62,10 +85,17 @@ xmlNode *add_key_str_dict_element(xmlDocPtr plist, xmlNode *dict, const char *ke
+ 	return keyPtr;
+ }
+ 
++xmlNode *add_key_dict_node(xmlDocPtr plist, xmlNode *dict, const char *key, const char *value, int depth) {
++	xmlNode *child;
++	add_child_to_plist(plist, "key", key, dict, depth);
++	child = add_child_to_plist(plist, "dict", value, dict, depth);
++	return child;
++}
++
+ xmlNode *add_key_data_dict_element(xmlDocPtr plist, xmlNode *dict, const char *key, const char *value, int depth) {
+ 	xmlNode *keyPtr;
+ 	keyPtr = add_child_to_plist(plist, "key", key, dict, depth);
+-	add_child_to_plist(plist, "data", value, dict, depth);
++	add_child_to_plist(plist, "data", format_string(value, 60, depth), dict, depth);
+ 	return keyPtr;
+ }
+ 
+diff --git a/src/plist.h b/src/plist.h
+index 64ff4d3..a2f558e 100644
+--- a/src/plist.h
++++ b/src/plist.h
+@@ -25,6 +25,7 @@
+ #include <libxml/parser.h>
+ #include <libxml/tree.h>
+ 
++xmlNode *add_key_dict_node(xmlDocPtr plist, xmlNode *dict, const char *key, const char *value, int depth);
+ xmlNode *add_key_str_dict_element(xmlDocPtr plist, xmlNode *dict, const char *key, const char *value, int depth);
+ xmlNode *add_key_data_dict_element(xmlDocPtr plist, xmlNode *dict, const char *key, const char *value, int depth);
+ xmlNode *add_child_to_plist(xmlDocPtr plist, const char *name, const char *content, xmlNode *to_node, int depth);
+diff --git a/src/userpref.c b/src/userpref.c
+index f93cff4..12ff8f3 100644
+--- a/src/userpref.c
++++ b/src/userpref.c
+@@ -24,9 +24,16 @@
+ #include <string.h>
+ #include "userpref.h"
+ 
++
+ #define LIBIPHONE_CONF_DIR  "libiphone"
+ #define LIBIPHONE_CONF_FILE "libiphonerc"
+ 
++#define LIBIPHONE_ROOT_PRIVKEY  "RootPrivateKey.pem"
++#define LIBIPHONE_HOST_PRIVKEY  "HostPrivateKey.pem"
++#define LIBIPHONE_ROOT_CERTIF  "RootCertificate.pem"
++#define LIBIPHONE_HOST_CERTIF  "HostCertificate.pem"
++
++
+ extern int debug;
+ 
+ inline void create_config_dir() {
+@@ -145,99 +152,59 @@ int store_device_public_key(char* public_key)
+ 	return 1;
+ }
+ 
+-
+-char* get_root_private_key()
++int read_file_in_confdir(char* file, gnutls_datum_t* data)
+ {
+-	char* private_key = NULL;
+-
+-	/* first get config file */
+-	gchar* config_file = g_build_path(G_DIR_SEPARATOR_S,  g_get_user_config_dir(), LIBIPHONE_CONF_DIR,  LIBIPHONE_CONF_FILE, NULL);
+-	if (g_file_test(config_file, (G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR))) {
+-
+-		/* now parse file to get knwon devices list */
+-		GKeyFile* key_file = g_key_file_new ();
+-		if( g_key_file_load_from_file (key_file, config_file, G_KEY_FILE_KEEP_COMMENTS, NULL) ) {
++	if (NULL == file || NULL == data)
++		return 0;
+ 
+-			gchar* loc_private_key = g_key_file_get_value(key_file, "Global", "RootPrivateKey", NULL);
+-			if (loc_private_key)
+-				private_key = strdup((char*)loc_private_key);
+-			g_free(loc_private_key);
+-		}
+-		g_key_file_free(key_file);
++	gchar* filepath = g_build_path(G_DIR_SEPARATOR_S,  g_get_user_config_dir(), LIBIPHONE_CONF_DIR,  file, NULL);
++	if (g_file_test(filepath, (G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR))) {
++
++		FILE * pFile;
++		long lSize;
++		
++		pFile = fopen ( filepath , "rb" );
++		if (pFile==NULL)
++			return 0;
++
++		fseek (pFile , 0 , SEEK_END);
++		data->size = ftell (pFile);
++		rewind (pFile);
++		
++		data->data = (char*)gnutls_malloc(data->size);
++		if (data->data == NULL)
++			return 0;
++		
++		// copy the file into the buffer:
++		fread (data->data,1,data->size,pFile);	
++		fclose (pFile);
+ 	}
+-	return private_key;
++	return 1;
+ }
+ 
+-char* get_host_private_key()
++int get_root_private_key(gnutls_datum_t* root_privkey)
+ {
+-	char* private_key = NULL;
+-
+-	/* first get config file */
+-	gchar* config_file = g_build_path(G_DIR_SEPARATOR_S,  g_get_user_config_dir(), LIBIPHONE_CONF_DIR,  LIBIPHONE_CONF_FILE, NULL);
+-	if (g_file_test(config_file, (G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR))) {
+-
+-		/* now parse file to get knwon devices list */
+-		GKeyFile* key_file = g_key_file_new ();
+-		if( g_key_file_load_from_file (key_file, config_file, G_KEY_FILE_KEEP_COMMENTS, NULL) ) {
+-
+-			gchar* loc_private_key = g_key_file_get_value(key_file, "Global", "HostPrivateKey", NULL);
+-			if (loc_private_key)
+-				private_key = strdup((char*)loc_private_key);
+-			g_free(loc_private_key);
+-		}
+-		g_key_file_free(key_file);
+-	}
+-	return private_key;
++	return read_file_in_confdir(LIBIPHONE_ROOT_PRIVKEY, root_privkey);
+ }
+ 
+-
+-char* get_root_certificate()
++int get_host_private_key(gnutls_datum_t* host_privkey)
+ {
+-	char* cert = NULL;
+-
+-	/* first get config file */
+-	gchar* config_file = g_build_path(G_DIR_SEPARATOR_S,  g_get_user_config_dir(), LIBIPHONE_CONF_DIR,  LIBIPHONE_CONF_FILE, NULL);
+-	if (g_file_test(config_file, (G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR))) {
+-
+-		/* now parse file to get knwon devices list */
+-		GKeyFile* key_file = g_key_file_new ();
+-		if( g_key_file_load_from_file (key_file, config_file, G_KEY_FILE_KEEP_COMMENTS, NULL) ) {
+-
+-			gchar* loc_cert = g_key_file_get_value(key_file, "Global", "RootCertificate", NULL);
+-			if (loc_cert)
+-				cert = strdup((char*)loc_cert);
+-			g_free(loc_cert);
+-		}
+-		g_key_file_free(key_file);
+-	}
+-	return cert;
++	return read_file_in_confdir(LIBIPHONE_HOST_PRIVKEY, host_privkey);
+ }
+ 
+-char* get_host_certificate()
++int get_root_certificate(gnutls_datum_t* root_cert)
+ {
+-	char* cert = NULL;
+-
+-	/* first get config file */
+-	gchar* config_file = g_build_path(G_DIR_SEPARATOR_S,  g_get_user_config_dir(), LIBIPHONE_CONF_DIR,  LIBIPHONE_CONF_FILE, NULL);
+-	if (g_file_test(config_file, (G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR))) {
+-
+-		/* now parse file to get knwon devices list */
+-		GKeyFile* key_file = g_key_file_new ();
+-		if( g_key_file_load_from_file (key_file, config_file, G_KEY_FILE_KEEP_COMMENTS, NULL) ) {
++	return read_file_in_confdir(LIBIPHONE_ROOT_CERTIF, root_cert);
++}
+ 
+-			gchar* loc_cert = g_key_file_get_value(key_file, "Global", "HostCertificate", NULL);
+-			if (loc_cert)
+-				cert = strdup((char*)loc_cert);
+-			g_free(loc_cert);
+-		}
+-		g_key_file_free(key_file);
+-	}
+-	return cert;
++int get_host_certificate(gnutls_datum_t* host_cert)
++{
++	return read_file_in_confdir(LIBIPHONE_HOST_CERTIF, host_cert);
+ }
+ 
+-int init_config_file(char* host_id, char* root_private_key, char* host_private_key, char* root_cert, char* host_cert)
++int init_config_file(char* host_id, gnutls_datum_t* root_key, gnutls_datum_t* host_key, gnutls_datum_t* root_cert, gnutls_datum_t* host_cert)
+ {
+-	if (!host_id || !root_private_key || !host_private_key || !root_cert || !host_cert)
++	if (!host_id || !root_key || !host_key || !root_cert || !host_cert)
+ 		return 0;
+ 
+ 	gchar* config_file =  g_build_path(G_DIR_SEPARATOR_S,  g_get_user_config_dir(), LIBIPHONE_CONF_DIR,  LIBIPHONE_CONF_FILE, NULL);
+@@ -249,10 +216,6 @@ int init_config_file(char* host_id, char* root_private_key, char* host_private_k
+ 
+ 	/* store in config file */
+ 	g_key_file_set_value (key_file, "Global", "HostID", host_id);
+-	g_key_file_set_value (key_file, "Global", "RootPrivateKey", root_private_key);
+-	g_key_file_set_value (key_file, "Global", "HostPrivateKey", host_private_key);
+-	g_key_file_set_value (key_file, "Global", "RootCertificate", root_cert);
+-	g_key_file_set_value (key_file, "Global", "HostCertificate", host_cert);
+ 
+ 	/* write config file on disk */
+ 	gsize length;
+@@ -263,5 +226,28 @@ int init_config_file(char* host_id, char* root_private_key, char* host_private_k
+ 
+ 	g_key_file_free(key_file);
+ 
++	//now write keys and certifs to disk
++	FILE * pFile;
++	gchar* pem;
++	pem = g_build_path(G_DIR_SEPARATOR_S,  g_get_user_config_dir(), LIBIPHONE_CONF_DIR, LIBIPHONE_ROOT_PRIVKEY, NULL);
++	pFile = fopen ( pem , "wb" );
++	fwrite ( root_key->data, 1 , root_key->size , pFile );
++	fclose (pFile);
++
++	pem = g_build_path(G_DIR_SEPARATOR_S,  g_get_user_config_dir(), LIBIPHONE_CONF_DIR, LIBIPHONE_HOST_PRIVKEY, NULL);
++	pFile = fopen ( pem , "wb" );
++	fwrite ( host_key->data, 1 , host_key->size , pFile );
++	fclose (pFile);
++
++	pem = g_build_path(G_DIR_SEPARATOR_S,  g_get_user_config_dir(), LIBIPHONE_CONF_DIR, LIBIPHONE_ROOT_CERTIF, NULL);
++	pFile = fopen ( pem , "wb" );
++	fwrite ( root_cert->data, 1 , root_cert->size , pFile );
++	fclose (pFile);
++
++	pem = g_build_path(G_DIR_SEPARATOR_S,  g_get_user_config_dir(), LIBIPHONE_CONF_DIR, LIBIPHONE_HOST_CERTIF, NULL);
++	pFile = fopen ( pem , "wb" );
++	fwrite ( host_cert->data, 1 , host_cert->size , pFile );
++	fclose (pFile);
++
+ 	return 1;
+ }
+diff --git a/src/userpref.h b/src/userpref.h
+index cef0bed..441c7be 100644
+--- a/src/userpref.h
++++ b/src/userpref.h
+@@ -22,6 +22,7 @@
+ #ifndef USERPREF_H
+ #define USERPREF_H
+ 
++#include <gnutls/gnutls.h>
+ /**
+ * \fn char* get_host_id() 
+ *  method to get user's HostID. Caller must free returned buffer.
+@@ -43,34 +44,34 @@ int is_device_known(char* public_key);
+ int store_device_public_key(char* public_key);
+ 
+ /**
+-* \fn char* get_root_private_key()
+-* \return RootPrivateKey if exists. Returns NULL otherwise.
++* \fn int get_root_private_key(gnutls_datum_t* root_privkey)
++* \return 1 if everything went well. Returns 0 otherwise.
+ */
+-char* get_root_private_key();
++int get_root_private_key(gnutls_datum_t* root_privkey);
+ 
+ /**
+-* \fn char* get_host_private_key()
+-* \return HostPrivateKey if exists. Returns NULL otherwise.
++* \fn int get_host_private_key(gnutls_datum_t* host_privkey)
++* \return 1 if everything went well. Returns 0 otherwise.
+ */
+-char* get_host_private_key();
++int get_host_private_key(gnutls_datum_t* host_privkey);
+ 
+ /**
+-* \fn char* get_root_certificate()
+-* \return RootCertificate if exists. Returns NULL otherwise.
++* \fn int get_root_certificate(gnutls_datum_t* root_cert)
++* \return 1 if everything went well. Returns 0 otherwise.
+ */
+-char* get_root_certificate();
++int get_root_certificate(gnutls_datum_t* root_cert);
+ 
+ /**
+-* \fn char* get_host_certificate()
+-* \return HostCertificate if exists. Returns NULL otherwise.
++* \fn int get_host_certificate(gnutls_datum_t* host_cert)
++* \return 1 if everything went well. Returns 0 otherwise.
+ */
+-char* get_host_certificate();
++int get_host_certificate(gnutls_datum_t* host_cert);
+ 
+ /**
+-* \fn int init_config_file(char* host_id, char* root_private_key, char* host_private_key, char* root_cert, char* host_cert)
++* \fn int init_config_file(char* host_id, gnutls_datum_t* root_key, gnutls_datum_t* host_key, gnutls_datum_t* root_cert, gnutls_datum_t* host_cert)
+ * setup a brand new config file.
+ * \return 1 if everything went well. Returns 0 otherwise.
+ */
+-int init_config_file(char* host_id, char* root_private_key, char* host_private_key, char* root_cert, char* host_cert);
++int init_config_file(char* host_id, gnutls_datum_t* root_key, gnutls_datum_t* host_key, gnutls_datum_t* root_cert, gnutls_datum_t* host_cert);
+ #endif
+ 
+

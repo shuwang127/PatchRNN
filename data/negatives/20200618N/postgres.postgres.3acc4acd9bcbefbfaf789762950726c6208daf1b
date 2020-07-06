@@ -1,0 +1,83 @@
+commit 3acc4acd9bcbefbfaf789762950726c6208daf1b
+Author: Andres Freund <andres@anarazel.de>
+Date:   Wed Jul 25 16:31:49 2018 -0700
+
+    LLVMJIT: Release JIT context after running ExprContext shutdown callbacks.
+    
+    Due to inlining it previously was possible that an ExprContext's
+    shutdown callback pointed to a JITed function. As the JIT context
+    previously was shut down before the shutdown callbacks were called,
+    that could lead to segfaults.  Fix the ordering.
+    
+    Reported-By: Dmitry Dolgov
+    Author: Andres Freund
+    Discussion: https://postgr.es/m/CA+q6zcWO7CeAJtHBxgcHn_hj+PenM=tvG0RJ93X1uEJ86+76Ug@mail.gmail.com
+    Backpatch: 11-, where JIT compilation was added
+
+diff --git a/src/backend/executor/execMain.c b/src/backend/executor/execMain.c
+index 8026fe2438..01e1a46180 100644
+--- a/src/backend/executor/execMain.c
++++ b/src/backend/executor/execMain.c
+@@ -47,7 +47,6 @@
+ #include "commands/trigger.h"
+ #include "executor/execdebug.h"
+ #include "foreign/fdwapi.h"
+-#include "jit/jit.h"
+ #include "mb/pg_wchar.h"
+ #include "miscadmin.h"
+ #include "optimizer/clauses.h"
+@@ -498,10 +497,6 @@ standard_ExecutorEnd(QueryDesc *queryDesc)
+ 	UnregisterSnapshot(estate->es_snapshot);
+ 	UnregisterSnapshot(estate->es_crosscheck_snapshot);
+ 
+-	/* release JIT context, if allocated */
+-	if (estate->es_jit)
+-		jit_release_context(estate->es_jit);
+-
+ 	/*
+ 	 * Must switch out of context before destroying it
+ 	 */
+diff --git a/src/backend/executor/execUtils.c b/src/backend/executor/execUtils.c
+index b963cae730..5b3eaec80b 100644
+--- a/src/backend/executor/execUtils.c
++++ b/src/backend/executor/execUtils.c
+@@ -45,6 +45,7 @@
+ #include "access/relscan.h"
+ #include "access/transam.h"
+ #include "executor/executor.h"
++#include "jit/jit.h"
+ #include "mb/pg_wchar.h"
+ #include "nodes/nodeFuncs.h"
+ #include "parser/parsetree.h"
+@@ -174,11 +175,11 @@ CreateExecutorState(void)
+  *
+  *		Release an EState along with all remaining working storage.
+  *
+- * Note: this is not responsible for releasing non-memory resources,
+- * such as open relations or buffer pins.  But it will shut down any
+- * still-active ExprContexts within the EState.  That is sufficient
+- * cleanup for situations where the EState has only been used for expression
+- * evaluation, and not to run a complete Plan.
++ * Note: this is not responsible for releasing non-memory resources, such as
++ * open relations or buffer pins.  But it will shut down any still-active
++ * ExprContexts within the EState and deallocate associated JITed expressions.
++ * That is sufficient cleanup for situations where the EState has only been
++ * used for expression evaluation, and not to run a complete Plan.
+  *
+  * This can be called in any memory context ... so long as it's not one
+  * of the ones to be freed.
+@@ -204,6 +205,13 @@ FreeExecutorState(EState *estate)
+ 		/* FreeExprContext removed the list link for us */
+ 	}
+ 
++	/* release JIT context, if allocated */
++	if (estate->es_jit)
++	{
++		jit_release_context(estate->es_jit);
++		estate->es_jit = NULL;
++	}
++
+ 	/*
+ 	 * Free the per-query memory context, thereby releasing all working
+ 	 * memory, including the EState node itself.
+

@@ -1,0 +1,58 @@
+commit 51dfacdef38b1dd6fc58b03dd1725d517516b115
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Sat Oct 16 22:34:39 2010 +0200
+
+    jbd2: Convert jbd2_slab_create_sem to mutex
+    
+    jbd2_slab_create_sem is used as a mutex, so make it one.
+    
+    [ akpm muttered: We may as well make it local to
+    jbd2_journal_create_slab() also. ]
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Ted Ts'o <tytso@mit.edu>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    LKML-Reference: <alpine.LFD.2.00.1010162231480.2496@localhost6.localdomain6>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/fs/jbd2/journal.c b/fs/jbd2/journal.c
+index 538417c1fdbb..c590d155c095 100644
+--- a/fs/jbd2/journal.c
++++ b/fs/jbd2/journal.c
+@@ -1838,7 +1838,6 @@ size_t journal_tag_bytes(journal_t *journal)
+  */
+ #define JBD2_MAX_SLABS 8
+ static struct kmem_cache *jbd2_slab[JBD2_MAX_SLABS];
+-static DECLARE_MUTEX(jbd2_slab_create_sem);
+ 
+ static const char *jbd2_slab_names[JBD2_MAX_SLABS] = {
+ 	"jbd2_1k", "jbd2_2k", "jbd2_4k", "jbd2_8k",
+@@ -1859,6 +1858,7 @@ static void jbd2_journal_destroy_slabs(void)
+ 
+ static int jbd2_journal_create_slab(size_t size)
+ {
++	static DEFINE_MUTEX(jbd2_slab_create_mutex);
+ 	int i = order_base_2(size) - 10;
+ 	size_t slab_size;
+ 
+@@ -1870,16 +1870,16 @@ static int jbd2_journal_create_slab(size_t size)
+ 
+ 	if (unlikely(i < 0))
+ 		i = 0;
+-	down(&jbd2_slab_create_sem);
++	mutex_lock(&jbd2_slab_create_mutex);
+ 	if (jbd2_slab[i]) {
+-		up(&jbd2_slab_create_sem);
++		mutex_unlock(&jbd2_slab_create_mutex);
+ 		return 0;	/* Already created */
+ 	}
+ 
+ 	slab_size = 1 << (i+10);
+ 	jbd2_slab[i] = kmem_cache_create(jbd2_slab_names[i], slab_size,
+ 					 slab_size, 0, NULL);
+-	up(&jbd2_slab_create_sem);
++	mutex_unlock(&jbd2_slab_create_mutex);
+ 	if (!jbd2_slab[i]) {
+ 		printk(KERN_EMERG "JBD2: no memory for jbd2_slab cache\n");
+ 		return -ENOMEM;
+

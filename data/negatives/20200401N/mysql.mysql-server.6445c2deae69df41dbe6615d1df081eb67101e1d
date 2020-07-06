@@ -1,0 +1,57 @@
+commit 6445c2deae69df41dbe6615d1df081eb67101e1d
+Author: Vladislav Vaintroub <vvaintroub@mysql.com>
+Date:   Mon Sep 1 20:04:17 2008 +0200
+
+    Bug#37226 Explicit call of my_thread_init() on Windows for every new thread.
+    Bug#33031 app linked to libmysql.lib crash if run as service in vista under
+    localsystem
+    
+    
+    There are some problems using DllMain hook functions on Windows that
+    automatically do global and per-thread initialization for libmysqld.dll
+    
+    1)per-thread initialization(DLL_THREAD_ATTACH)
+    MySQL internally counts number of active threads that and causes a delay in in
+    my_end() if not all threads are exited. But,there are threads that can be
+    started either by Windows internally (often in TCP/IP scenarios) or by user
+    himself - those threads are not necessarily using libmysql.dll functionality,
+    but nonetheless the contribute to the count of open threads.
+    
+    2)process-initialization (DLL_PROCESS_ATTACH)
+    my_init() calls WSAStartup that itself loads DLLs and can lead to a deadlock in
+    Windows loader.
+    
+    Fix is to remove dll initialization code from libmysql.dll in general case. I
+    still leave an environment variable LIBMYSQL_DLLINIT, which if set to any value
+    will cause the old behavior (DLL init hooks will be called). This env.variable
+    exists only to prevent breakage of existing Windows-only applications that
+    don't do mysql_thread_init() and work ok today. Use of LIBMYSQL_DLLINIT is
+    discouraged and it will be removed in 6.0
+
+diff --git a/libmysql/dll.c b/libmysql/dll.c
+index 7aa3b5bf96f..8fcf41c792c 100644
+--- a/libmysql/dll.c
++++ b/libmysql/dll.c
+@@ -89,9 +89,20 @@ BOOL APIENTRY LibMain(HANDLE hInst,DWORD ul_reason_being_called,
+   UNREFERENCED_PARAMETER(lpReserved);
+ } /* LibMain */
+ 
++
++static BOOL do_libmain;
+ int __stdcall DllMain(HANDLE hInst,DWORD ul_reason_being_called,LPVOID lpReserved)
+ {
+-  return LibMain(hInst,ul_reason_being_called,lpReserved);
++  /*
++    Unless environment variable LIBMYSQL_DLLINIT is set, do nothing.
++    The environment variable is checked once, during the first call to DllMain()
++    (in DLL_PROCESS_ATTACH hook).
++  */
++  if (ul_reason_being_called == DLL_PROCESS_ATTACH)
++    do_libmain = (getenv("LIBMYSQL_DLLINIT") != NULL);
++  if (do_libmain)
++    return LibMain(hInst,ul_reason_being_called,lpReserved);
++  return TRUE;
+ }
+ 
+ #elif defined(WINDOWS)
+

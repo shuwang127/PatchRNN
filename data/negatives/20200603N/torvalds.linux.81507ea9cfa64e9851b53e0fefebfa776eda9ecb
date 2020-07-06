@@ -1,0 +1,93 @@
+commit 81507ea9cfa64e9851b53e0fefebfa776eda9ecb
+Author: Bjorn Helgaas <bjorn.helgaas@hp.com>
+Date:   Tue Mar 28 17:04:00 2006 -0500
+
+    ACPI: request correct fixed hardware resource type (MMIO vs I/O port)
+    
+    ACPI supports fixed hardware (PM_TMR, GPE blocks, etc) in either I/O port
+    or MMIO space, but used to always request the regions from I/O space
+    because it didn't check the address_space_id.
+    
+    Sample ACPI fixed hardware in MMIO space (HP rx2600), was incorrectly
+    reported in /proc/ioports, now reported in /proc/iomem:
+    
+        ff5c1004-ff5c1007 : PM_TMR
+        ff5c1008-ff5c100b : PM1a_EVT_BLK
+        ff5c100c-ff5c100d : PM1a_CNT_BLK
+        ff5c1010-ff5c1013 : GPE0_BLK
+        ff5c1014-ff5c1017 : GPE1_BLK
+    
+    Signed-off-by: Bjorn Helgaas <bjorn.helgaas@hp.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Len Brown <len.brown@intel.com>
+
+diff --git a/drivers/acpi/motherboard.c b/drivers/acpi/motherboard.c
+index 468244147ec1..14ffe68a094e 100644
+--- a/drivers/acpi/motherboard.c
++++ b/drivers/acpi/motherboard.c
+@@ -123,41 +123,46 @@ static struct acpi_driver acpi_motherboard_driver2 = {
+ 		},
+ };
+ 
++static void __init acpi_request_region (struct acpi_generic_address *addr,
++	unsigned int length, char *desc)
++{
++	if (!addr->address || !length)
++		return;
++
++	if (addr->address_space_id == ACPI_ADR_SPACE_SYSTEM_IO)
++		request_region(addr->address, length, desc);
++	else if (addr->address_space_id == ACPI_ADR_SPACE_SYSTEM_MEMORY)
++		request_mem_region(addr->address, length, desc);
++}
++
+ static void __init acpi_reserve_resources(void)
+ {
+-	if (acpi_gbl_FADT->xpm1a_evt_blk.address && acpi_gbl_FADT->pm1_evt_len)
+-		request_region(acpi_gbl_FADT->xpm1a_evt_blk.address,
++	acpi_request_region(&acpi_gbl_FADT->xpm1a_evt_blk,
+ 			       acpi_gbl_FADT->pm1_evt_len, "PM1a_EVT_BLK");
+ 
+-	if (acpi_gbl_FADT->xpm1b_evt_blk.address && acpi_gbl_FADT->pm1_evt_len)
+-		request_region(acpi_gbl_FADT->xpm1b_evt_blk.address,
++	acpi_request_region(&acpi_gbl_FADT->xpm1b_evt_blk,
+ 			       acpi_gbl_FADT->pm1_evt_len, "PM1b_EVT_BLK");
+ 
+-	if (acpi_gbl_FADT->xpm1a_cnt_blk.address && acpi_gbl_FADT->pm1_cnt_len)
+-		request_region(acpi_gbl_FADT->xpm1a_cnt_blk.address,
++	acpi_request_region(&acpi_gbl_FADT->xpm1a_cnt_blk,
+ 			       acpi_gbl_FADT->pm1_cnt_len, "PM1a_CNT_BLK");
+ 
+-	if (acpi_gbl_FADT->xpm1b_cnt_blk.address && acpi_gbl_FADT->pm1_cnt_len)
+-		request_region(acpi_gbl_FADT->xpm1b_cnt_blk.address,
++	acpi_request_region(&acpi_gbl_FADT->xpm1b_cnt_blk,
+ 			       acpi_gbl_FADT->pm1_cnt_len, "PM1b_CNT_BLK");
+ 
+-	if (acpi_gbl_FADT->xpm_tmr_blk.address && acpi_gbl_FADT->pm_tm_len == 4)
+-		request_region(acpi_gbl_FADT->xpm_tmr_blk.address, 4, "PM_TMR");
++	if (acpi_gbl_FADT->pm_tm_len == 4)
++		acpi_request_region(&acpi_gbl_FADT->xpm_tmr_blk, 4, "PM_TMR");
+ 
+-	if (acpi_gbl_FADT->xpm2_cnt_blk.address && acpi_gbl_FADT->pm2_cnt_len)
+-		request_region(acpi_gbl_FADT->xpm2_cnt_blk.address,
++	acpi_request_region(&acpi_gbl_FADT->xpm2_cnt_blk,
+ 			       acpi_gbl_FADT->pm2_cnt_len, "PM2_CNT_BLK");
+ 
+ 	/* Length of GPE blocks must be a non-negative multiple of 2 */
+ 
+-	if (acpi_gbl_FADT->xgpe0_blk.address && acpi_gbl_FADT->gpe0_blk_len &&
+-	    !(acpi_gbl_FADT->gpe0_blk_len & 0x1))
+-		request_region(acpi_gbl_FADT->xgpe0_blk.address,
++	if (!(acpi_gbl_FADT->gpe0_blk_len & 0x1))
++		acpi_request_region(&acpi_gbl_FADT->xgpe0_blk,
+ 			       acpi_gbl_FADT->gpe0_blk_len, "GPE0_BLK");
+ 
+-	if (acpi_gbl_FADT->xgpe1_blk.address && acpi_gbl_FADT->gpe1_blk_len &&
+-	    !(acpi_gbl_FADT->gpe1_blk_len & 0x1))
+-		request_region(acpi_gbl_FADT->xgpe1_blk.address,
++	if (!(acpi_gbl_FADT->gpe1_blk_len & 0x1))
++		acpi_request_region(&acpi_gbl_FADT->xgpe1_blk,
+ 			       acpi_gbl_FADT->gpe1_blk_len, "GPE1_BLK");
+ }
+ 
+

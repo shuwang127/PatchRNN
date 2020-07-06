@@ -1,0 +1,129 @@
+commit f75e3471c4f6f65092a6a7be77f3b155fbc25a1e
+Author: Jörn Heusipp <manxorist@users.sourceforge.net>
+Date:   Sun Oct 20 08:21:58 2013 +0000
+
+    [Ref] sounddev: Split API name from device name.
+    
+    git-svn-id: https://source.openmpt.org/svn/openmpt/trunk/OpenMPT@2942 56274372-70c3-4bfc-bfc3-4c3a0b034d27
+
+diff --git a/mptrack/Mpdlgs.cpp b/mptrack/Mpdlgs.cpp
+index 30b1486b6..9ce9f3782 100644
+--- a/mptrack/Mpdlgs.cpp
++++ b/mptrack/Mpdlgs.cpp
+@@ -224,12 +224,16 @@ void COptionsSoundcard::UpdateEverything()
+ 			}
+ 
+ 			{
+-				mpt::String::Copy(s, mpt::String::Encode(it->name, mpt::CharsetLocale));
++				std::string name = mpt::String::Encode(it->name, mpt::CharsetLocale);
+ 				cbi.mask = CBEIF_IMAGE | CBEIF_LPARAM | CBEIF_TEXT | CBEIF_SELECTEDIMAGE | CBEIF_OVERLAY;
+ 				cbi.iItem = iItem;
+ 				cbi.cchTextMax = 0;
+ 				switch(it->id.GetType())
+ 				{
++				case SNDDEV_WAVEOUT:
++				case SNDDEV_PORTAUDIO_WMME:
++					cbi.iImage = IMAGE_WAVEOUT;
++					break;
+ 				case SNDDEV_DSOUND:
+ 				case SNDDEV_PORTAUDIO_DS:
+ 					cbi.iImage = IMAGE_DIRECTX;
+@@ -238,13 +242,22 @@ void COptionsSoundcard::UpdateEverything()
+ 				case SNDDEV_PORTAUDIO_ASIO:
+ 					cbi.iImage = IMAGE_ASIO;
+ 					break;
++				case SNDDEV_PORTAUDIO_WASAPI:
++				case SNDDEV_PORTAUDIO_WDMKS:
++					cbi.iImage = IMAGE_WAVEOUT;
++					// No image available for now,
++					// prepend API name to name.
++					name = mpt::String::Encode(it->apiName, mpt::CharsetLocale) + " - " + name;
++					break;
+ 				default:
+ 					cbi.iImage = IMAGE_WAVEOUT;
++					break;
+ 				}
+ 				cbi.iSelectedImage = cbi.iImage;
+ 				cbi.iOverlay = cbi.iImage;
+ 				cbi.iIndent = 0;
+ 				cbi.lParam = it->id.GetIdRaw();
++				mpt::String::Copy(s, name);
+ 				cbi.pszText = s;
+ 				int pos = m_CbnDevice.InsertItem(&cbi);
+ 				if(cbi.lParam == m_nSoundDevice.GetIdRaw())
+diff --git a/sounddev/SoundDevice.h b/sounddev/SoundDevice.h
+index b7b03eabb..749982fd2 100644
+--- a/sounddev/SoundDevice.h
++++ b/sounddev/SoundDevice.h
+@@ -285,11 +285,13 @@ struct SoundDeviceInfo
+ {
+ 	SoundDeviceID id;
+ 	std::wstring name;
++	std::wstring apiName;
+ 	std::wstring internalID;
+ 	SoundDeviceInfo() { }
+-	SoundDeviceInfo(SoundDeviceID id, const std::wstring &name, const std::wstring &internalID = std::wstring())
++	SoundDeviceInfo(SoundDeviceID id, const std::wstring &name, const std::wstring &apiName, const std::wstring &internalID = std::wstring())
+ 		: id(id)
+ 		, name(name)
++		, apiName(apiName)
+ 		, internalID(internalID)
+ 	{
+ 		return;
+diff --git a/sounddev/SoundDeviceASIO.cpp b/sounddev/SoundDeviceASIO.cpp
+index 00aa59ea4..abf6fd565 100644
+--- a/sounddev/SoundDeviceASIO.cpp
++++ b/sounddev/SoundDeviceASIO.cpp
+@@ -134,7 +134,7 @@ std::vector<SoundDeviceInfo>  CASIODevice::EnumerateDevices()
+ 				if(SoundDeviceIndexIsValid(devices.size()))
+ 				{
+ 					// everything ok
+-					devices.push_back(SoundDeviceInfo(SoundDeviceID(SNDDEV_ASIO, static_cast<SoundDeviceIndex>(devices.size())), mpt::String::Decode(description, mpt::CharsetLocale), internalID));
++					devices.push_back(SoundDeviceInfo(SoundDeviceID(SNDDEV_ASIO, static_cast<SoundDeviceIndex>(devices.size())), mpt::String::Decode(description, mpt::CharsetLocale), L"ASIO", internalID));
+ 				}
+ 
+ 			}
+diff --git a/sounddev/SoundDeviceDirectSound.cpp b/sounddev/SoundDeviceDirectSound.cpp
+index c89cbd267..a89905da5 100644
+--- a/sounddev/SoundDeviceDirectSound.cpp
++++ b/sounddev/SoundDeviceDirectSound.cpp
+@@ -73,6 +73,7 @@ static BOOL WINAPI DSEnumCallbackW(GUID * lpGuid, LPCWSTR lpstrDescription, LPCW
+ 	SoundDeviceInfo info;
+ 	info.id = SoundDeviceID(SNDDEV_DSOUND, static_cast<SoundDeviceIndex>(devices.size()));
+ 	info.name = lpstrDescription;
++	info.apiName = L"DirectSound";
+ 	if(lpGuid)
+ 	{
+ 		info.internalID = GuidToString(*lpGuid);
+diff --git a/sounddev/SoundDevicePortAudio.cpp b/sounddev/SoundDevicePortAudio.cpp
+index fa8d841ab..6aae51a53 100644
+--- a/sounddev/SoundDevicePortAudio.cpp
++++ b/sounddev/SoundDevicePortAudio.cpp
+@@ -322,12 +322,12 @@ bool CPortaudioDevice::EnumerateDevices(SoundDeviceInfo &result, SoundDeviceInde
+ 		return false;
+ 	result.id = SoundDeviceID(HostApiToSndDevType(hostapi), index);
+ 	result.name = mpt::String::Decode(
+-		mpt::String::Format("%s - %s%s",
+-			HostApiToString(Pa_GetDeviceInfo(dev)->hostApi).c_str(),
++		mpt::String::Format("%s%s",
+ 			Pa_GetDeviceInfo(dev)->name,
+ 			Pa_GetHostApiInfo(Pa_GetDeviceInfo(dev)->hostApi)->defaultOutputDevice == (PaDeviceIndex)dev ? " (Default)" : ""
+ 		),
+ 		mpt::CharsetUTF8);
++	result.apiName = mpt::String::Decode(HostApiToString(Pa_GetDeviceInfo(dev)->hostApi).c_str(), mpt::CharsetUTF8);
+ 	return true;
+ }
+ 
+diff --git a/sounddev/SoundDeviceWaveout.cpp b/sounddev/SoundDeviceWaveout.cpp
+index d19f621f7..1062e1257 100644
+--- a/sounddev/SoundDeviceWaveout.cpp
++++ b/sounddev/SoundDeviceWaveout.cpp
+@@ -235,6 +235,7 @@ std::vector<SoundDeviceInfo> CWaveDevice::EnumerateDevices()
+ 		}
+ 		SoundDeviceInfo info;
+ 		info.id = SoundDeviceID(SNDDEV_WAVEOUT, static_cast<SoundDeviceIndex>(index));
++		info.apiName = L"WaveOut";
+ 		if(index == 0)
+ 		{
+ 			info.name = L"Auto (Wave Mapper)";
+

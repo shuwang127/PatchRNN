@@ -1,0 +1,112 @@
+commit b09249dee27f9586c4809a22f909725921eb82db
+Author: Josh Durgin <jdurgin@redhat.com>
+Date:   Thu Jul 13 14:44:21 2017 -0400
+
+    PGLog, PrimaryLogPG: rebuild the missing set when the OSDMap flag is set
+    
+    The recovery_deletes flag will only be set once, by the 'ceph osd
+    require-osd-release luminous' command.
+    
+    This matches how we rebuild the missing set when reading it off disk in
+    read_log_and_missing().
+    
+    Signed-off-by: Josh Durgin <jdurgin@redhat.com>
+
+diff --git a/src/osd/PGLog.cc b/src/osd/PGLog.cc
+index 99bbedf6ef..a54faafbe2 100644
+--- a/src/osd/PGLog.cc
++++ b/src/osd/PGLog.cc
+@@ -696,3 +696,60 @@ void PGLog::_write_log_and_missing(
+   if (!to_remove.empty())
+     t.omap_rmkeys(coll, log_oid, to_remove);
+ }
++
++void PGLog::rebuild_missing_set_with_deletes(ObjectStore *store,
++					     coll_t pg_coll,
++					     const pg_info_t &info)
++{
++  // save entries not generated from the current log (e.g. added due
++  // to repair, EIO handling, or divergent_priors).
++  map<hobject_t, pg_missing_item> extra_missing;
++  for (const auto& p : missing.get_items()) {
++    if (!log.logged_object(p.first)) {
++      dout(20) << __func__ << " extra missing entry: " << p.first
++	       << " " << p.second << dendl;
++      extra_missing[p.first] = p.second;
++    }
++  }
++  missing.clear();
++  missing.may_include_deletes = true;
++
++  // go through the log and add items that are not present or older
++  // versions on disk, just as if we were reading the log + metadata
++  // off disk originally
++  set<hobject_t> did;
++  for (list<pg_log_entry_t>::reverse_iterator i = log.log.rbegin();
++       i != log.log.rend();
++       ++i) {
++    if (i->version <= info.last_complete)
++      break;
++    if (i->soid > info.last_backfill ||
++	i->is_error() ||
++	did.find(i->soid) != did.end())
++      continue;
++    did.insert(i->soid);
++
++    bufferlist bv;
++    int r = store->getattr(
++	pg_coll,
++	ghobject_t(i->soid, ghobject_t::NO_GEN, info.pgid.shard),
++	OI_ATTR,
++	bv);
++    dout(20) << __func__ << " check for log entry: " << *i << " = " << r << dendl;
++
++    if (r >= 0) {
++      object_info_t oi(bv);
++      dout(20) << __func__ << " store version = " << oi.version << dendl;
++      if (oi.version < i->version) {
++	missing.add(i->soid, i->version, oi.version, i->is_delete());
++      }
++    } else {
++      missing.add(i->soid, i->version, eversion_t(), i->is_delete());
++    }
++  }
++
++  for (const auto& p : extra_missing) {
++    missing.add(p.first, p.second.need, p.second.have, p.second.is_delete());
++  }
++  rebuilt_missing_with_deletes = true;
++}
+diff --git a/src/osd/PGLog.h b/src/osd/PGLog.h
+index 25a794605c..d910bc7f56 100644
+--- a/src/osd/PGLog.h
++++ b/src/osd/PGLog.h
+@@ -705,6 +705,10 @@ public:
+ 			const pg_log_t &olog,
+ 			pg_missing_t& omissing, pg_shard_t from) const;
+ 
++  void rebuild_missing_set_with_deletes(ObjectStore *store,
++					coll_t pg_coll,
++					const pg_info_t &info);
++
+ protected:
+   static void split_by_object(
+     mempool::osd_pglog::list<pg_log_entry_t> &entries,
+diff --git a/src/osd/PrimaryLogPG.cc b/src/osd/PrimaryLogPG.cc
+index d8efc4f609..dd6e4ef852 100644
+--- a/src/osd/PrimaryLogPG.cc
++++ b/src/osd/PrimaryLogPG.cc
+@@ -10819,6 +10819,12 @@ void PrimaryLogPG::on_activate()
+ 
+ void PrimaryLogPG::_on_new_interval()
+ {
++  dout(20) << __func__ << "checking missing set deletes flag. missing = " << pg_log.get_missing() << dendl;
++  if (!pg_log.get_missing().may_include_deletes &&
++      get_osdmap()->test_flag(CEPH_OSDMAP_RECOVERY_DELETES)) {
++    pg_log.rebuild_missing_set_with_deletes(osd->store, coll, info);
++  }
++  assert(pg_log.get_missing().may_include_deletes == get_osdmap()->test_flag(CEPH_OSDMAP_RECOVERY_DELETES));
+ }
+ 
+ void PrimaryLogPG::on_change(ObjectStore::Transaction *t)
+

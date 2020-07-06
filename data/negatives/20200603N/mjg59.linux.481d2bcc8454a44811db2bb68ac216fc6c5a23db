@@ -1,0 +1,62 @@
+commit 481d2bcc8454a44811db2bb68ac216fc6c5a23db
+Author: Andrey Smetanin <asmetanin@virtuozzo.com>
+Date:   Mon Dec 14 18:33:05 2015 +0300
+
+    kvm/x86: Remove Hyper-V SynIC timer stopping
+    
+    It's possible that guest send us Hyper-V EOM at the middle
+    of Hyper-V SynIC timer running, so we start processing of Hyper-V
+    SynIC timers in vcpu context and stop the Hyper-V SynIC timer
+    unconditionally:
+    
+        host                                       guest
+        ------------------------------------------------------------------------------
+                                               start periodic stimer
+        start periodic timer
+        timer expires after 15ms
+        send expiration message into guest
+        restart periodic timer
+        timer expires again after 15 ms
+        msg slot is still not cleared so
+        setup ->msg_pending
+    (1) restart periodic timer
+                                               process timer msg and clear slot
+                                               ->msg_pending was set:
+                                                   send EOM into host
+        received EOM
+          kvm_make_request(KVM_REQ_HV_STIMER)
+    
+        kvm_hv_process_stimers():
+            ...
+            stimer_stop()
+            if (time_now >= stimer->exp_time)
+                    stimer_expiration(stimer);
+    
+    Because the timer was rearmed at (1), time_now < stimer->exp_time
+    and stimer_expiration is not called.  The timer then never fires.
+    
+    The patch fixes such situation by not stopping Hyper-V SynIC timer
+    at all, because it's safe to restart it without stop in vcpu context
+    and timer callback always returns HRTIMER_NORESTART.
+    
+    Signed-off-by: Andrey Smetanin <asmetanin@virtuozzo.com>
+    CC: Gleb Natapov <gleb@kernel.org>
+    CC: Paolo Bonzini <pbonzini@redhat.com>
+    CC: Roman Kagan <rkagan@virtuozzo.com>
+    CC: Denis V. Lunev <den@openvz.org>
+    CC: qemu-devel@nongnu.org
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/hyperv.c b/arch/x86/kvm/hyperv.c
+index 8ff88293b906..f34f666778b2 100644
+--- a/arch/x86/kvm/hyperv.c
++++ b/arch/x86/kvm/hyperv.c
+@@ -598,7 +598,6 @@ void kvm_hv_process_stimers(struct kvm_vcpu *vcpu)
+ 	for (i = 0; i < ARRAY_SIZE(hv_vcpu->stimer); i++)
+ 		if (test_and_clear_bit(i, hv_vcpu->stimer_pending_bitmap)) {
+ 			stimer = &hv_vcpu->stimer[i];
+-			stimer_stop(stimer);
+ 			if (stimer->config & HV_STIMER_ENABLE) {
+ 				time_now = get_time_ref_counter(vcpu->kvm);
+ 				if (time_now >= stimer->exp_time)
+

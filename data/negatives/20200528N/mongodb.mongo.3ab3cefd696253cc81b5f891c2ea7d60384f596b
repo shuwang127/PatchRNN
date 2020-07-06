@@ -1,0 +1,93 @@
+commit 3ab3cefd696253cc81b5f891c2ea7d60384f596b
+Author: Geert Bosch <geert@mongodb.com>
+Date:   Fri Sep 26 13:55:13 2014 -0400
+
+    SERVER-14668: Use SimpleMutex instead of SpinLock for LockManager
+    
+    There can be contention on these, so spin locks are not appropriate.
+
+diff --git a/src/mongo/db/concurrency/lock_mgr_new.cpp b/src/mongo/db/concurrency/lock_mgr_new.cpp
+index 0d2d7eb392..3cb4b1f6d1 100644
+--- a/src/mongo/db/concurrency/lock_mgr_new.cpp
++++ b/src/mongo/db/concurrency/lock_mgr_new.cpp
+@@ -235,7 +235,7 @@ namespace mongo {
+                 LockConflictsTable[mode]);
+ 
+         LockBucket* bucket = _getBucket(resId);
+-        scoped_spinlock scopedLock(bucket->mutex);
++        SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+ 
+         LockHead* lock;
+ 
+@@ -350,7 +350,7 @@ namespace mongo {
+         LockHead* lock = request->lock;
+ 
+         LockBucket* bucket = _getBucket(lock->resourceId);
+-        scoped_spinlock scopedLock(bucket->mutex);
++        SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+ 
+         invariant(lock->grantedQueue != NULL);
+         invariant(lock->grantedModes != 0);
+@@ -409,7 +409,7 @@ namespace mongo {
+         LockHead* lock = request->lock;
+ 
+         LockBucket* bucket = _getBucket(lock->resourceId);
+-        scoped_spinlock scopedLock(bucket->mutex);
++        SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+ 
+         invariant(lock->grantedQueue != NULL);
+         invariant(lock->grantedModes != 0);
+@@ -424,7 +424,7 @@ namespace mongo {
+     void LockManager::cleanupUnusedLocks() {
+         for (unsigned i = 0; i < _numLockBuckets; i++) {
+             LockBucket* bucket = &_lockBuckets[i];
+-            scoped_spinlock scopedLock(bucket->mutex);
++            SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+ 
+             LockHeadMap::iterator it = bucket->data.begin();
+             while (it != bucket->data.end()) {
+@@ -532,7 +532,7 @@ namespace mongo {
+ 
+         for (unsigned i = 0; i < _numLockBuckets; i++) {
+             LockBucket* bucket = &_lockBuckets[i];
+-            scoped_spinlock scopedLock(bucket->mutex);
++            SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+ 
+             _dumpBucket(bucket);
+         }
+diff --git a/src/mongo/db/concurrency/lock_mgr_new.h b/src/mongo/db/concurrency/lock_mgr_new.h
+index 18083c5353..56bee259e2 100644
+--- a/src/mongo/db/concurrency/lock_mgr_new.h
++++ b/src/mongo/db/concurrency/lock_mgr_new.h
+@@ -36,7 +36,7 @@
+ #include "mongo/platform/compiler.h"
+ #include "mongo/platform/cstdint.h"
+ #include "mongo/platform/unordered_map.h"
+-#include "mongo/util/concurrency/spin_lock.h"
++#include "mongo/util/concurrency/mutex.h"
+ #include "mongo/util/timer.h"
+ 
+ 
+@@ -238,7 +238,8 @@ namespace mongo {
+         typedef LockHeadMap::value_type LockHeadPair;
+ 
+         struct LockBucket {
+-            SpinLock mutex;
++            LockBucket() : mutex("LockManager") { }
++            SimpleMutex mutex;
+             LockHeadMap data;
+         };
+ 
+diff --git a/src/mongo/db/concurrency/lock_state.h b/src/mongo/db/concurrency/lock_state.h
+index 9207905b74..4f9aa25683 100644
+--- a/src/mongo/db/concurrency/lock_state.h
++++ b/src/mongo/db/concurrency/lock_state.h
+@@ -31,6 +31,7 @@
+ #include <queue>
+ 
+ #include "mongo/db/concurrency/fast_map_noalloc.h"
++#include "mongo/util/concurrency/spin_lock.h"
+ #include "mongo/db/concurrency/locker.h"
+ 
+ namespace mongo {
+

@@ -1,0 +1,99 @@
+commit d4920165fe753751aaa274fdc568927d26284eea
+Author: Tom Gundersen <teg@jklm.no>
+Date:   Fri May 16 19:43:12 2014 +0200
+
+    networkd: network - store DNS servers in List rather than Set
+    
+    This way we preserve the order of preference.
+
+diff --git a/src/network/networkd-address.c b/src/network/networkd-address.c
+index e6e3f8f06..6977fe794 100644
+--- a/src/network/networkd-address.c
++++ b/src/network/networkd-address.c
+@@ -313,7 +313,8 @@ int config_parse_dns(const char *unit,
+                 const char *rvalue,
+                 void *data,
+                 void *userdata) {
+-        Set **dns = data;
++        Network *network = userdata;
++        Address *tail;
+         _cleanup_address_free_ Address *n = NULL;
+         int r;
+ 
+@@ -321,7 +322,7 @@ int config_parse_dns(const char *unit,
+         assert(section);
+         assert(lvalue);
+         assert(rvalue);
+-        assert(data);
++        assert(network);
+ 
+         r = address_new_dynamic(&n);
+         if (r < 0)
+@@ -334,7 +335,8 @@ int config_parse_dns(const char *unit,
+                 return 0;
+         }
+ 
+-        set_put(*dns, n);
++        LIST_FIND_TAIL(addresses, network->dns, tail);
++        LIST_INSERT_AFTER(addresses, network->dns, tail, n);
+         n = NULL;
+ 
+         return 0;
+diff --git a/src/network/networkd-manager.c b/src/network/networkd-manager.c
+index 1b14e9d4f..013b1dc97 100644
+--- a/src/network/networkd-manager.c
++++ b/src/network/networkd-manager.c
+@@ -525,9 +525,8 @@ int manager_update_resolv_conf(Manager *m) {
+         HASHMAP_FOREACH(link, m->links, i) {
+                 if (link->network && link->network->dns) {
+                         Address *address;
+-                        Iterator j;
+ 
+-                        SET_FOREACH(address, link->network->dns, j) {
++                        LIST_FOREACH(addresses, address, link->network->dns) {
+                                 append_dns(f, &address->in_addr.in,
+                                            address->family, &count);
+                         }
+diff --git a/src/network/networkd-network.c b/src/network/networkd-network.c
+index 2a68d3ec5..12107c940 100644
+--- a/src/network/networkd-network.c
++++ b/src/network/networkd-network.c
+@@ -77,10 +77,6 @@ static int network_load_one(Manager *manager, const char *filename) {
+         if (!network->routes_by_section)
+                 return log_oom();
+ 
+-        network->dns = set_new(NULL, NULL);
+-        if (!network->dns)
+-                return log_oom();
+-
+         network->filename = strdup(filename);
+         if (!network->filename)
+                 return log_oom();
+@@ -164,10 +160,10 @@ void network_free(Network *network) {
+ 
+         free(network->description);
+ 
+-        SET_FOREACH(address, network->dns, i)
++        while ((address = network->dns)) {
++                LIST_REMOVE(addresses, network->dns, address);
+                 address_free(address);
+-
+-        set_free(network->dns);
++        }
+ 
+         netdev_unref(network->bridge);
+ 
+diff --git a/src/network/networkd.h b/src/network/networkd.h
+index 3b29842f1..ebb307553 100644
+--- a/src/network/networkd.h
++++ b/src/network/networkd.h
+@@ -150,7 +150,7 @@ struct Network {
+         Hashmap *addresses_by_section;
+         Hashmap *routes_by_section;
+ 
+-        Set *dns;
++        LIST_HEAD(Address, dns);
+ 
+         LIST_FIELDS(Network, networks);
+ };
+

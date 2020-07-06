@@ -1,0 +1,69 @@
+commit dc88c70c60b04155cbf88137acca13735c8a03af
+Author: Nikos Tsipinakis <nikos@tsipinakis.com>
+Date:   Tue Jul 12 16:49:25 2016 +0300
+
+    Fix assert fail with mark-as-read-on-hover
+    
+    While processing mark-as-read-on-hover invalidate(), which only supported one
+    call per update, was called twice which caused the assert call to fail. This
+    commit removes that restriction by making invalidate() able to store multiple
+    item positions in a vector.
+
+diff --git a/include/itemlist_formaction.h b/include/itemlist_formaction.h
+index 5e36924..c1c0fcf 100644
+--- a/include/itemlist_formaction.h
++++ b/include/itemlist_formaction.h
+@@ -94,20 +94,12 @@ class itemlist_formaction : public formaction {
+ 		}
+ 
+ 		inline void invalidate(const unsigned int pos) {
+-			/* This function should never be called when itemlist is partially
+-			 * invalidated.
+-			 *
+-			 * Theoretically, we could just work around that by upgrading
+-			 * invalidation mode to "complete", but that will open up
+-			 * a possibility for inadvertently degrading performance by calling
+-			 * invalidate() two times in a row */
+-			assert(invalidated == false ||
+-			    (invalidated == true &&
+-			    invalidation_mode == InvalidationMode::COMPLETE));
++			if (invalidated == true && invalidation_mode == InvalidationMode::COMPLETE)
++				return;
+ 
+ 			invalidated = true;
+ 			invalidation_mode = InvalidationMode::PARTIAL;
+-			invalidated_itempos = pos;
++			invalidated_itempos.push_back(pos);
+ 		}
+ 
+ 		std::string item2formatted_line(const itemptr_pos_pair& item,
+@@ -139,7 +131,7 @@ class itemlist_formaction : public formaction {
+ 
+ 		bool invalidated;
+ 		InvalidationMode invalidation_mode;
+-		unsigned int invalidated_itempos;
++		std::vector<unsigned int> invalidated_itempos;
+ 
+ 		listformatter listfmt;
+ };
+diff --git a/src/itemlist_formaction.cpp b/src/itemlist_formaction.cpp
+index f60b309..99a8b32 100644
+--- a/src/itemlist_formaction.cpp
++++ b/src/itemlist_formaction.cpp
+@@ -677,9 +677,12 @@ void itemlist_formaction::prepare() {
+ 				listfmt.add_line(line, item.second);
+ 			}
+ 		} else if (invalidation_mode == InvalidationMode::PARTIAL) {
+-			auto item = visible_items[invalidated_itempos];
+-			auto line = item2formatted_line(item, width, itemlist_format, datetime_format);
+-			listfmt.set_line(invalidated_itempos, line, item.second);
++			for (auto itempos : invalidated_itempos) {
++				auto item = visible_items[itempos];
++				auto line = item2formatted_line(item, width, itemlist_format, datetime_format);
++				listfmt.set_line(itempos, line, item.second);
++			}
++			invalidated_itempos.clear();
+ 		} else {
+ 			LOG(LOG_ERROR, "invalidation_mode is neither COMPLETE nor PARTIAL");
+ 		}
+

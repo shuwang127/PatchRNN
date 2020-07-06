@@ -1,0 +1,48 @@
+commit dd7da132f7f04f34074efd134847a818ea29ddd7
+Author: Kent Yoder <key@linux.vnet.ibm.com>
+Date:   Wed Jul 25 14:14:02 2012 -0500
+
+    tpm: fix double write race and tpm_release free issue
+    
+    Moved the atomic_set of the data_pending variable until after the
+    tpm_read has completed processing. The existing code had a window of
+    time where a second write to the driver could clobber the tpm command
+    buffer.
+    
+    Also fixed an issue where if close was called on the tpm device before a
+    read completed, the tpm command buffer would be returned to the OS,
+    which could contain sensitive information.
+    
+    Signed-off-by: Kent Yoder <key@linux.vnet.ibm.com>
+
+diff --git a/drivers/char/tpm/tpm.c b/drivers/char/tpm/tpm.c
+index 36e43e50dcef..0a75638e3e56 100644
+--- a/drivers/char/tpm/tpm.c
++++ b/drivers/char/tpm/tpm.c
+@@ -1171,7 +1171,7 @@ int tpm_release(struct inode *inode, struct file *file)
+ 	flush_work_sync(&chip->work);
+ 	file->private_data = NULL;
+ 	atomic_set(&chip->data_pending, 0);
+-	kfree(chip->data_buffer);
++	kzfree(chip->data_buffer);
+ 	clear_bit(0, &chip->is_open);
+ 	put_device(chip->dev);
+ 	return 0;
+@@ -1223,7 +1223,6 @@ ssize_t tpm_read(struct file *file, char __user *buf,
+ 	del_singleshot_timer_sync(&chip->user_read_timer);
+ 	flush_work_sync(&chip->work);
+ 	ret_size = atomic_read(&chip->data_pending);
+-	atomic_set(&chip->data_pending, 0);
+ 	if (ret_size > 0) {	/* relay data */
+ 		ssize_t orig_ret_size = ret_size;
+ 		if (size < ret_size)
+@@ -1238,6 +1237,8 @@ ssize_t tpm_read(struct file *file, char __user *buf,
+ 		mutex_unlock(&chip->buffer_mutex);
+ 	}
+ 
++	atomic_set(&chip->data_pending, 0);
++
+ 	return ret_size;
+ }
+ EXPORT_SYMBOL_GPL(tpm_read);
+

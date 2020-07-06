@@ -1,0 +1,64 @@
+commit fc7a5800ad13fa14529b38d2255fa87f11db626b
+Author: Hu Tao <hutao@cn.fujitsu.com>
+Date:   Tue Sep 9 13:28:01 2014 +0800
+
+    exec: add parameter errp to gethugepagesize
+    
+    Add parameter errp to gethugepagesize thus callers can handle errors.
+    
+    If user adds a memory-backend-file object using object_add command,
+    specifying a non-existing directory for property mem-path, qemu will
+    core dump with message:
+    
+      /nonexistingdir: No such file or directory
+      Bad ram offset fffffffffffff000
+      Aborted (core dumped)
+    
+    This patch fixes the problem. With this patch, qemu reports an error
+    message like:
+    
+      qemu-system-x86_64: -object memory-backend-file,mem-path=/nonexistingdir,id=mem-file0,size=128M:
+      failed to get page size of file /nonexistingdir: No such file or directory
+    
+    Signed-off-by: Hu Tao <hutao@cn.fujitsu.com>
+    Reviewed-by: Peter Crosthwaite <peter.crosthwaite@xilinx.com>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/exec.c b/exec.c
+index 1100208760..dd1e57660a 100644
+--- a/exec.c
++++ b/exec.c
+@@ -1031,7 +1031,7 @@ void qemu_mutex_unlock_ramlist(void)
+ 
+ #define HUGETLBFS_MAGIC       0x958458f6
+ 
+-static long gethugepagesize(const char *path)
++static long gethugepagesize(const char *path, Error **errp)
+ {
+     struct statfs fs;
+     int ret;
+@@ -1041,7 +1041,8 @@ static long gethugepagesize(const char *path)
+     } while (ret != 0 && errno == EINTR);
+ 
+     if (ret != 0) {
+-        perror(path);
++        error_setg_errno(errp, errno, "failed to get page size of file %s",
++                         path);
+         return 0;
+     }
+ 
+@@ -1062,9 +1063,11 @@ static void *file_ram_alloc(RAMBlock *block,
+     void *area = NULL;
+     int fd;
+     uint64_t hpagesize;
++    Error *local_err = NULL;
+ 
+-    hpagesize = gethugepagesize(path);
+-    if (!hpagesize) {
++    hpagesize = gethugepagesize(path, &local_err);
++    if (local_err) {
++        error_propagate(errp, local_err);
+         goto error;
+     }
+ 
+

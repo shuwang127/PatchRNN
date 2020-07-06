@@ -1,0 +1,67 @@
+commit 72d6e5a08a8ba2105b3f36e32285e8fbfbed1f71
+Author: Avi Kivity <avi@qumranet.com>
+Date:   Tue Jun 5 16:15:51 2007 +0300
+
+    KVM: Emulate hlt on real mode for Intel
+    
+    This has two use cases: the bios can't boot from disk, and guest smp
+    bootstrap.
+    
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/drivers/kvm/kvm.h b/drivers/kvm/kvm.h
+index ac358b8d3de8..d49b16cae27a 100644
+--- a/drivers/kvm/kvm.h
++++ b/drivers/kvm/kvm.h
+@@ -347,6 +347,7 @@ struct kvm_vcpu {
+ 			u32 ar;
+ 		} tr, es, ds, fs, gs;
+ 	} rmode;
++	int halt_request; /* real mode on Intel only */
+ 
+ 	int cpuid_nent;
+ 	struct kvm_cpuid_entry cpuid_entries[KVM_MAX_CPUID_ENTRIES];
+diff --git a/drivers/kvm/vmx.c b/drivers/kvm/vmx.c
+index 90abd3c58c65..a1f51b9d482d 100644
+--- a/drivers/kvm/vmx.c
++++ b/drivers/kvm/vmx.c
+@@ -1608,8 +1608,13 @@ static int handle_exception(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 
+ 	if (vcpu->rmode.active &&
+ 	    handle_rmode_exception(vcpu, intr_info & INTR_INFO_VECTOR_MASK,
+-								error_code))
++								error_code)) {
++		if (vcpu->halt_request) {
++			vcpu->halt_request = 0;
++			return kvm_emulate_halt(vcpu);
++		}
+ 		return 1;
++	}
+ 
+ 	if ((intr_info & (INTR_INFO_INTR_TYPE_MASK | INTR_INFO_VECTOR_MASK)) == (INTR_TYPE_EXCEPTION | 1)) {
+ 		kvm_run->exit_reason = KVM_EXIT_DEBUG;
+diff --git a/drivers/kvm/x86_emulate.c b/drivers/kvm/x86_emulate.c
+index 6123c0292b22..a4a84817b274 100644
+--- a/drivers/kvm/x86_emulate.c
++++ b/drivers/kvm/x86_emulate.c
+@@ -143,7 +143,8 @@ static u8 opcode_table[256] = {
+ 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+ 	/* 0xF0 - 0xF7 */
+ 	0, 0, 0, 0,
+-	0, 0, ByteOp | DstMem | SrcNone | ModRM, DstMem | SrcNone | ModRM,
++	ImplicitOps, 0,
++	ByteOp | DstMem | SrcNone | ModRM, DstMem | SrcNone | ModRM,
+ 	/* 0xF8 - 0xFF */
+ 	0, 0, 0, 0,
+ 	0, 0, ByteOp | DstMem | SrcNone | ModRM, DstMem | SrcNone | ModRM
+@@ -1149,6 +1150,9 @@ x86_emulate_memop(struct x86_emulate_ctxt *ctxt, struct x86_emulate_ops *ops)
+ 	case 0xae ... 0xaf:	/* scas */
+ 		DPRINTF("Urk! I don't handle SCAS.\n");
+ 		goto cannot_emulate;
++	case 0xf4:              /* hlt */
++		ctxt->vcpu->halt_request = 1;
++		goto done;
+ 	}
+ 	goto writeback;
+ 
+

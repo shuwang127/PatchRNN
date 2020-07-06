@@ -1,0 +1,136 @@
+commit d67f5489d8d9be09bc8e1615ec6c57c3120a731d
+Author: Ron Rindjunsky <ron.rindjunsky@intel.com>
+Date:   Mon May 5 10:22:49 2008 +0800
+
+    iwlwifi: handle shared memory Rx index access
+    
+    This patch splits ucode's and driver's shared memory Rx index access to
+    match 4965 and 5000 offsets.
+    
+    Signed-off-by: Ron Rindjunsky <ron.rindjunsky@intel.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/iwlwifi/iwl-4965.c b/drivers/net/wireless/iwlwifi/iwl-4965.c
+index 866a93e3de91..a475ecea9003 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-4965.c
++++ b/drivers/net/wireless/iwlwifi/iwl-4965.c
+@@ -2006,7 +2006,7 @@ void iwl4965_hw_build_tx_cmd_rate(struct iwl_priv *priv,
+ 	tx->rate_n_flags = iwl4965_hw_set_rate_n_flags(rate_plcp, rate_flags);
+ }
+ 
+-int iwl4965_hw_get_rx_read(struct iwl_priv *priv)
++static int iwl4965_shared_mem_rx_idx(struct iwl_priv *priv)
+ {
+ 	struct iwl4965_shared *s = priv->shared_virt;
+ 	return le32_to_cpu(s->rb_closed) & 0xFFF;
+@@ -2093,6 +2093,8 @@ static int iwl4965_alloc_shared_mem(struct iwl_priv *priv)
+ 
+ 	memset(priv->shared_virt, 0, sizeof(struct iwl4965_shared));
+ 
++	priv->rb_closed_offset = offsetof(struct iwl4965_shared, rb_closed);
++
+ 	return 0;
+ }
+ 
+@@ -3824,6 +3826,7 @@ static struct iwl_lib_ops iwl4965_lib = {
+ 	.set_hw_params = iwl4965_hw_set_hw_params,
+ 	.alloc_shared_mem = iwl4965_alloc_shared_mem,
+ 	.free_shared_mem = iwl4965_free_shared_mem,
++	.shared_mem_rx_idx = iwl4965_shared_mem_rx_idx,
+ 	.txq_update_byte_cnt_tbl = iwl4965_txq_update_byte_cnt_tbl,
+ 	.disable_tx_fifo = iwl4965_disable_tx_fifo,
+ 	.rx_handler_setup = iwl4965_rx_handler_setup,
+diff --git a/drivers/net/wireless/iwlwifi/iwl-5000.c b/drivers/net/wireless/iwlwifi/iwl-5000.c
+index feffcafe1495..d6b91f7e0b1b 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-5000.c
++++ b/drivers/net/wireless/iwlwifi/iwl-5000.c
+@@ -362,6 +362,8 @@ static int iwl5000_alloc_shared_mem(struct iwl_priv *priv)
+ 
+ 	memset(priv->shared_virt, 0, sizeof(struct iwl5000_shared));
+ 
++	priv->rb_closed_offset = offsetof(struct iwl5000_shared, rb_closed);
++
+ 	return 0;
+ }
+ 
+@@ -374,6 +376,12 @@ static void iwl5000_free_shared_mem(struct iwl_priv *priv)
+ 				    priv->shared_phys);
+ }
+ 
++static int iwl5000_shared_mem_rx_idx(struct iwl_priv *priv)
++{
++	struct iwl5000_shared *s = priv->shared_virt;
++	return le32_to_cpu(s->rb_closed) & 0xFFF;
++}
++
+ /**
+  * iwl5000_txq_update_byte_cnt_tbl - Set up entry in Tx byte-count array
+  */
+@@ -466,6 +474,7 @@ static struct iwl_lib_ops iwl5000_lib = {
+ 	.set_hw_params = iwl5000_hw_set_hw_params,
+ 	.alloc_shared_mem = iwl5000_alloc_shared_mem,
+ 	.free_shared_mem = iwl5000_free_shared_mem,
++	.shared_mem_rx_idx = iwl5000_shared_mem_rx_idx,
+ 	.txq_update_byte_cnt_tbl = iwl5000_txq_update_byte_cnt_tbl,
+ 	.disable_tx_fifo = iwl5000_disable_tx_fifo,
+ 	.apm_ops = {
+diff --git a/drivers/net/wireless/iwlwifi/iwl-core.h b/drivers/net/wireless/iwlwifi/iwl-core.h
+index 08eccdefd72e..77428db6a21d 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-core.h
++++ b/drivers/net/wireless/iwlwifi/iwl-core.h
+@@ -103,6 +103,7 @@ struct iwl_lib_ops {
+ 	/* ucode shared memory */
+ 	int (*alloc_shared_mem)(struct iwl_priv *priv);
+ 	void (*free_shared_mem)(struct iwl_priv *priv);
++	int (*shared_mem_rx_idx)(struct iwl_priv *priv);
+ 	void (*txq_update_byte_cnt_tbl)(struct iwl_priv *priv,
+ 					struct iwl4965_tx_queue *txq,
+ 					u16 byte_cnt);
+diff --git a/drivers/net/wireless/iwlwifi/iwl-dev.h b/drivers/net/wireless/iwlwifi/iwl-dev.h
+index 25dce14c87d8..1683bee800d1 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-dev.h
++++ b/drivers/net/wireless/iwlwifi/iwl-dev.h
+@@ -697,7 +697,6 @@ extern int iwl4965_hw_txq_attach_buf_to_tfd(struct iwl_priv *priv, void *tfd,
+ extern int iwl4965_hw_get_temperature(struct iwl_priv *priv);
+ extern unsigned int iwl4965_hw_get_beacon_cmd(struct iwl_priv *priv,
+ 				 struct iwl4965_frame *frame, u8 rate);
+-extern int iwl4965_hw_get_rx_read(struct iwl_priv *priv);
+ extern void iwl4965_hw_build_tx_cmd_rate(struct iwl_priv *priv,
+ 				     struct iwl_cmd *cmd,
+ 				     struct ieee80211_tx_control *ctrl,
+@@ -1138,6 +1137,7 @@ struct iwl_priv {
+ 	struct iwl_hw_params hw_params;
+ 	/* driver/uCode shared Tx Byte Counts and Rx status */
+ 	void *shared_virt;
++	int rb_closed_offset;
+ 	/* Physical Pointer to Tx Byte Counts and Rx status */
+ 	dma_addr_t shared_phys;
+ 
+diff --git a/drivers/net/wireless/iwlwifi/iwl-rx.c b/drivers/net/wireless/iwlwifi/iwl-rx.c
+index 171751e417d5..a2eb90d40b7e 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-rx.c
++++ b/drivers/net/wireless/iwlwifi/iwl-rx.c
+@@ -399,8 +399,7 @@ int iwl_rx_init(struct iwl_priv *priv, struct iwl_rx_queue *rxq)
+ 
+ 	/* Tell device where in DRAM to update its Rx status */
+ 	iwl_write_direct32(priv, FH_RSCSR_CHNL0_STTS_WPTR_REG,
+-			   (priv->shared_phys +
+-			    offsetof(struct iwl4965_shared, rb_closed)) >> 4);
++			   (priv->shared_phys + priv->rb_closed_offset) >> 4);
+ 
+ 	/* Enable Rx DMA, enable host interrupt, Rx buffer size 4k, 256 RBDs */
+ 	iwl_write_direct32(priv, FH_MEM_RCSR_CHNL0_CONFIG_REG,
+diff --git a/drivers/net/wireless/iwlwifi/iwl4965-base.c b/drivers/net/wireless/iwlwifi/iwl4965-base.c
+index 88f3554c0fbc..09f2a6383d2d 100644
+--- a/drivers/net/wireless/iwlwifi/iwl4965-base.c
++++ b/drivers/net/wireless/iwlwifi/iwl4965-base.c
+@@ -3095,7 +3095,7 @@ void iwl_rx_handle(struct iwl_priv *priv)
+ 
+ 	/* uCode's read index (stored in shared DRAM) indicates the last Rx
+ 	 * buffer that the driver may process (last buffer filled by ucode). */
+-	r = iwl4965_hw_get_rx_read(priv);
++	r = priv->cfg->ops->lib->shared_mem_rx_idx(priv);
+ 	i = rxq->read;
+ 
+ 	/* Rx interrupt, but nothing sent from uCode */
+

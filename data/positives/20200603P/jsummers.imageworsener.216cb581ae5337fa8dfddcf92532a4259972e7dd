@@ -1,0 +1,86 @@
+commit 216cb581ae5337fa8dfddcf92532a4259972e7dd
+Author: Jason Summers <jason1@pobox.com>
+Date:   Tue Apr 18 11:26:12 2017 -0400
+
+    Fixed a systematic memory leak that could happen if a decoder fails
+
+diff --git a/src/imagew-jpeg.c b/src/imagew-jpeg.c
+index 96715c6..43bf946 100644
+--- a/src/imagew-jpeg.c
++++ b/src/imagew-jpeg.c
+@@ -496,6 +496,8 @@ IW_IMPL(int) iw_read_jpeg_file(struct iw_context *ctx, struct iw_iodescr *iodesc
+ 	handle_exif_density(&rctx, &img);
+ 
+ 	iw_set_input_image(ctx, &img);
++	// The contents of img no longer belong to us.
++	img.pixels = NULL;
+ 
+ 	if(rctx.exif_orientation>=2 && rctx.exif_orientation<=8) {
+ 		static const unsigned int exif_orient_to_transform[9] =
+@@ -515,6 +517,7 @@ IW_IMPL(int) iw_read_jpeg_file(struct iw_context *ctx, struct iw_iodescr *iodesc
+ 	retval=1;
+ 
+ done:
++	iw_free(ctx, img.pixels);
+ 	if(cinfo_valid) jpeg_destroy_decompress(&cinfo);
+ 	if(rctx.buffer) iw_free(ctx,rctx.buffer);
+ 	if(tmprow) iw_free(ctx,tmprow);
+diff --git a/src/imagew-miff.c b/src/imagew-miff.c
+index a09bce5..ef2f99d 100644
+--- a/src/imagew-miff.c
++++ b/src/imagew-miff.c
+@@ -589,6 +589,7 @@ IW_IMPL(int) iw_read_miff_file(struct iw_context *ctx, struct iw_iodescr *iodesc
+ done:
+ 	if(!retval) {
+ 		iw_set_error(ctx,"Failed to read MIFF file");
++		iw_free(ctx, img.pixels);
+ 	}
+ 	return retval;
+ }
+diff --git a/src/imagew-png.c b/src/imagew-png.c
+index cdbc6e9..a405d20 100644
+--- a/src/imagew-png.c
++++ b/src/imagew-png.c
+@@ -408,6 +408,7 @@ IW_IMPL(int) iw_read_png_file(struct iw_context *ctx, struct iw_iodescr *iodescr
+ done:
+ 	if(!retval) {
+ 		iw_set_error(ctx,"Read failed");
++		iw_free(ctx, img.pixels);
+ 	}
+ 	if(png_ptr) {
+ 		png_destroy_read_struct(&png_ptr, &info_ptr, (png_infopp)NULL);
+diff --git a/src/imagew-pnm.c b/src/imagew-pnm.c
+index b05dc0a..fed07f8 100644
+--- a/src/imagew-pnm.c
++++ b/src/imagew-pnm.c
+@@ -466,10 +466,16 @@ IW_IMPL(int) iw_read_pnm_file(struct iw_context *ctx, struct iw_iodescr *iodescr
+ 	if(!iwpnm_read_pnm_bitmap(rctx)) goto done;
+ 
+ 	iw_set_input_image(ctx, img);
++	// The contents of img no longer belong to us.
++	img->pixels = NULL;
++
+ 	retval = 1;
+ 
+ done:
+-	if(img) iw_free(ctx, img);
++	if(img) {
++		iw_free(ctx, img->pixels);
++		iw_free(ctx, img);
++	}
+ 	if(rctx) iw_free(ctx, rctx);
+ 	return retval;
+ }
+diff --git a/src/imagew-webp.c b/src/imagew-webp.c
+index d4e5420..a95615a 100644
+--- a/src/imagew-webp.c
++++ b/src/imagew-webp.c
+@@ -556,6 +556,7 @@ IW_IMPL(int) iw_read_webp_file(struct iw_context *ctx, struct iw_iodescr *iodesc
+ done:
+ 	if(!retval) {
+ 		iw_set_error(ctx,"Failed to read WebP file");
++		iw_free(ctx, img.pixels);
+ 	}
+ 	return retval;
+ }
+

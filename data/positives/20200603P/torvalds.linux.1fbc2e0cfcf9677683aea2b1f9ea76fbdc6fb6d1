@@ -1,0 +1,94 @@
+commit 1fbc2e0cfcf9677683aea2b1f9ea76fbdc6fb6d1
+Author: Daniel Borkmann <daniel@iogearbox.net>
+Date:   Sat Jun 2 23:06:37 2018 +0200
+
+    bpf: make sure to clear unused fields in tunnel/xfrm state fetch
+    
+    Since the remaining bits are not filled in struct bpf_tunnel_key
+    resp. struct bpf_xfrm_state and originate from uninitialized stack
+    space, we should make sure to clear them before handing control
+    back to the program.
+    
+    Also add a padding element to struct bpf_xfrm_state for future use
+    similar as we have in struct bpf_tunnel_key and clear it as well.
+    
+      struct bpf_xfrm_state {
+          __u32                      reqid;            /*     0     4 */
+          __u32                      spi;              /*     4     4 */
+          __u16                      family;           /*     8     2 */
+    
+          /* XXX 2 bytes hole, try to pack */
+    
+          union {
+              __u32              remote_ipv4;          /*           4 */
+              __u32              remote_ipv6[4];       /*          16 */
+          };                                           /*    12    16 */
+    
+          /* size: 28, cachelines: 1, members: 4 */
+          /* sum members: 26, holes: 1, sum holes: 2 */
+          /* last cacheline: 28 bytes */
+      };
+    
+    Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+    Acked-by: Alexei Starovoitov <ast@kernel.org>
+    Acked-by: Song Liu <songliubraving@fb.com>
+    Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+
+diff --git a/include/uapi/linux/bpf.h b/include/uapi/linux/bpf.h
+index 661318141f72..f0b6608b1f1c 100644
+--- a/include/uapi/linux/bpf.h
++++ b/include/uapi/linux/bpf.h
+@@ -2268,7 +2268,7 @@ struct bpf_tunnel_key {
+ 	};
+ 	__u8 tunnel_tos;
+ 	__u8 tunnel_ttl;
+-	__u16 tunnel_ext;
++	__u16 tunnel_ext;	/* Padding, future use. */
+ 	__u32 tunnel_label;
+ };
+ 
+@@ -2279,6 +2279,7 @@ struct bpf_xfrm_state {
+ 	__u32 reqid;
+ 	__u32 spi;	/* Stored in network byte order */
+ 	__u16 family;
++	__u16 ext;	/* Padding, future use. */
+ 	union {
+ 		__u32 remote_ipv4;	/* Stored in network byte order */
+ 		__u32 remote_ipv6[4];	/* Stored in network byte order */
+diff --git a/net/core/filter.c b/net/core/filter.c
+index edbfaa613b6d..28e864777c0f 100644
+--- a/net/core/filter.c
++++ b/net/core/filter.c
+@@ -3445,6 +3445,7 @@ BPF_CALL_4(bpf_skb_get_tunnel_key, struct sk_buff *, skb, struct bpf_tunnel_key
+ 	to->tunnel_id = be64_to_cpu(info->key.tun_id);
+ 	to->tunnel_tos = info->key.tos;
+ 	to->tunnel_ttl = info->key.ttl;
++	to->tunnel_ext = 0;
+ 
+ 	if (flags & BPF_F_TUNINFO_IPV6) {
+ 		memcpy(to->remote_ipv6, &info->key.u.ipv6.src,
+@@ -3452,6 +3453,8 @@ BPF_CALL_4(bpf_skb_get_tunnel_key, struct sk_buff *, skb, struct bpf_tunnel_key
+ 		to->tunnel_label = be32_to_cpu(info->key.label);
+ 	} else {
+ 		to->remote_ipv4 = be32_to_cpu(info->key.u.ipv4.src);
++		memset(&to->remote_ipv6[1], 0, sizeof(__u32) * 3);
++		to->tunnel_label = 0;
+ 	}
+ 
+ 	if (unlikely(size != sizeof(struct bpf_tunnel_key)))
+@@ -4047,11 +4050,14 @@ BPF_CALL_5(bpf_skb_get_xfrm_state, struct sk_buff *, skb, u32, index,
+ 	to->reqid = x->props.reqid;
+ 	to->spi = x->id.spi;
+ 	to->family = x->props.family;
++	to->ext = 0;
++
+ 	if (to->family == AF_INET6) {
+ 		memcpy(to->remote_ipv6, x->props.saddr.a6,
+ 		       sizeof(to->remote_ipv6));
+ 	} else {
+ 		to->remote_ipv4 = x->props.saddr.a4;
++		memset(&to->remote_ipv6[1], 0, sizeof(__u32) * 3);
+ 	}
+ 
+ 	return 0;
+

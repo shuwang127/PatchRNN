@@ -1,0 +1,58 @@
+commit 0e6c7f746ea99089fb3263709075c20485a479ae
+Author: Kautuk Consul <consul.kautuk@gmail.com>
+Date:   Mon Sep 19 16:53:12 2011 -0700
+
+    xhci-mem.c: Check for ring->first_seg != NULL
+    
+    There are 2 situations wherein the xhci_ring* might not get freed:
+    - When xhci_ring_alloc() -> xhci_segment_alloc() returns NULL and
+      we goto the fail: label in xhci_ring_alloc. In this case, the ring
+      will not get kfreed.
+    - When the num_segs argument to xhci_ring_alloc is passed as 0 and
+      we try to free the rung after that.
+      ( This doesn't really happen as of now in the code but we seem to
+        be entertaining num_segs=0 in xhci_ring_alloc )
+    
+    This should be backported to kernels as old as 2.6.31.
+    
+    Signed-off-by: Kautuk Consul <consul.kautuk@gmail.com>
+    Signed-off-by: Sarah Sharp <sarah.a.sharp@linux.intel.com>
+    Cc: stable@kernel.org
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/usb/host/xhci-mem.c b/drivers/usb/host/xhci-mem.c
+index 94a8b28d602e..e4513ab015b4 100644
+--- a/drivers/usb/host/xhci-mem.c
++++ b/drivers/usb/host/xhci-mem.c
+@@ -112,18 +112,20 @@ void xhci_ring_free(struct xhci_hcd *xhci, struct xhci_ring *ring)
+ 	struct xhci_segment *seg;
+ 	struct xhci_segment *first_seg;
+ 
+-	if (!ring || !ring->first_seg)
++	if (!ring)
+ 		return;
+-	first_seg = ring->first_seg;
+-	seg = first_seg->next;
+-	xhci_dbg(xhci, "Freeing ring at %p\n", ring);
+-	while (seg != first_seg) {
+-		struct xhci_segment *next = seg->next;
+-		xhci_segment_free(xhci, seg);
+-		seg = next;
++	if (ring->first_seg) {
++		first_seg = ring->first_seg;
++		seg = first_seg->next;
++		xhci_dbg(xhci, "Freeing ring at %p\n", ring);
++		while (seg != first_seg) {
++			struct xhci_segment *next = seg->next;
++			xhci_segment_free(xhci, seg);
++			seg = next;
++		}
++		xhci_segment_free(xhci, first_seg);
++		ring->first_seg = NULL;
+ 	}
+-	xhci_segment_free(xhci, first_seg);
+-	ring->first_seg = NULL;
+ 	kfree(ring);
+ }
+ 
+

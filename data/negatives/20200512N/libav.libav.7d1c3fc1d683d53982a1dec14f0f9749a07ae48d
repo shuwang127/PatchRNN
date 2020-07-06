@@ -1,0 +1,834 @@
+commit 7d1c3fc1d683d53982a1dec14f0f9749a07ae48d
+Author: Michael Niedermayer <michaelni@gmx.at>
+Date:   Tue Jul 29 02:09:12 2003 +0000
+
+    rate distortion mb decision support
+    fix decoding of old %16!=0 divx
+    fix assertion failure in motion_est.c
+    
+    Originally committed as revision 2094 to svn://svn.ffmpeg.org/ffmpeg/trunk
+
+diff --git a/ffmpeg.c b/ffmpeg.c
+index f3e1e41b2..6332a9c80 100644
+--- a/ffmpeg.c
++++ b/ffmpeg.c
+@@ -113,7 +113,7 @@ static int video_disable = 0;
+ static int video_codec_id = CODEC_ID_NONE;
+ static int same_quality = 0;
+ static int b_frames = 0;
+-static int use_hq = 0;
++static int mb_decision = FF_MB_DECISION_SIMPLE;
+ static int use_4mv = 0;
+ /* Fx */
+ static int use_aic = 0;
+@@ -1751,6 +1751,11 @@ static void opt_b_frames(const char *arg)
+     }
+ }
+ 
++static void opt_mb_decision(const char *arg)
++{
++    mb_decision = atoi(arg);
++}
++
+ static void opt_qscale(const char *arg)
+ {
+     video_qscale = atoi(arg);
+@@ -2222,9 +2227,8 @@ static void opt_output_file(const char *filename)
+                 if(bitexact)
+                     video_enc->flags |= CODEC_FLAG_BITEXACT;
+ 
+-                if (use_hq) {
+-                    video_enc->flags |= CODEC_FLAG_HQ;
+-                }
++                video_enc->mb_decision = mb_decision;
++                
+            	/* Fx */ 
+                 if (use_umv) {
+                     video_enc->flags |= CODEC_FLAG_H263P_UMV;
+@@ -2234,7 +2238,7 @@ static void opt_output_file(const char *filename)
+                 }
+            	/* /Fx */ 
+                 if (use_4mv) {
+-                    video_enc->flags |= CODEC_FLAG_HQ;
++                    video_enc->mb_decision = FF_MB_DECISION_BITS; //FIXME remove
+                     video_enc->flags |= CODEC_FLAG_4MV;
+                 }
+             
+@@ -2679,7 +2683,8 @@ const OptionDef options[] = {
+     { "er", HAS_ARG | OPT_EXPERT, {(void*)opt_error_resilience}, "set error resilience",  "" },
+     { "ec", HAS_ARG | OPT_EXPERT, {(void*)opt_error_concealment}, "set error concealment",  "" },
+     { "bf", HAS_ARG | OPT_EXPERT, {(void*)opt_b_frames}, "use 'frames' B frames (only MPEG-4)", "frames" },
+-    { "hq", OPT_BOOL | OPT_EXPERT, {(void*)&use_hq}, "activate high quality settings" },
++    { "hq", OPT_BOOL | OPT_EXPERT, {(void*)&mb_decision}, "activate high quality settings" },
++    { "mbd", HAS_ARG | OPT_EXPERT, {(void*)opt_mb_decision}, "macroblock decision", "mode" },
+     { "4mv", OPT_BOOL | OPT_EXPERT, {(void*)&use_4mv}, "use four motion vector by macroblock (only MPEG-4)" },
+     { "part", OPT_BOOL | OPT_EXPERT, {(void*)&use_part}, "use data partitioning (only MPEG-4)" },
+     { "bug", HAS_ARG | OPT_EXPERT, {(void*)opt_workaround_bugs}, "workaround not auto detected encoder bugs", "param" },
+diff --git a/ffserver.c b/ffserver.c
+index d48c7c7a7..04b3bfc62 100644
+--- a/ffserver.c
++++ b/ffserver.c
+@@ -4220,11 +4220,11 @@ static int parse_ffconfig(const char *filename)
+             }
+         } else if (!strcasecmp(cmd, "VideoHighQuality")) {
+             if (stream) {
+-                video_enc.flags |= CODEC_FLAG_HQ;
++                video_enc.mb_decision = FF_MB_DECISION_BITS;
+             }
+         } else if (!strcasecmp(cmd, "Video4MotionVector")) {
+             if (stream) {
+-                video_enc.flags |= CODEC_FLAG_HQ;
++                video_enc.mb_decision = FF_MB_DECISION_BITS; //FIXME remove
+                 video_enc.flags |= CODEC_FLAG_4MV;
+             }
+         } else if (!strcasecmp(cmd, "VideoQDiff")) {
+diff --git a/libavcodec/avcodec.h b/libavcodec/avcodec.h
+index e61dd43a4..889c3147a 100644
+--- a/libavcodec/avcodec.h
++++ b/libavcodec/avcodec.h
+@@ -15,8 +15,8 @@ extern "C" {
+ 
+ #define LIBAVCODEC_VERSION_INT 0x000406
+ #define LIBAVCODEC_VERSION     "0.4.6"
+-#define LIBAVCODEC_BUILD       4672
+-#define LIBAVCODEC_BUILD_STR   "4672"
++#define LIBAVCODEC_BUILD       4673
++#define LIBAVCODEC_BUILD_STR   "4673"
+ 
+ #define LIBAVCODEC_IDENT	"FFmpeg" LIBAVCODEC_VERSION "b" LIBAVCODEC_BUILD_STR
+ 
+@@ -169,7 +169,6 @@ static const int Motion_Est_QTab[] = { ME_ZERO, ME_PHODS, ME_LOG,
+    Note: note not everything is supported yet 
+ */
+ 
+-#define CODEC_FLAG_HQ     0x0001  ///< brute force MB-type decission mode (slow) 
+ #define CODEC_FLAG_QSCALE 0x0002  ///< use fixed qscale 
+ #define CODEC_FLAG_4MV    0x0004  ///< 4 MV per MB allowed 
+ #define CODEC_FLAG_QPEL   0x0010  ///< use qpel MC 
+@@ -1173,7 +1172,17 @@ typedef struct AVCodecContext {
+      * - decoding: set by decoder
+      */
+     int xvmc_acceleration;
+-
++    
++    /**
++     * macroblock decision mode
++     * - encoding: set by user.
++     * - decoding: unused
++     */
++    int mb_decision;
++#define FF_MB_DECISION_SIMPLE 0        ///< uses mb_cmp
++#define FF_MB_DECISION_BITS   1        ///< chooses the one which needs the fewest bits
++#define FF_MB_DECISION_RD     2        ///< rate distoration
++    
+ } AVCodecContext;
+ 
+ 
+diff --git a/libavcodec/error_resilience.c b/libavcodec/error_resilience.c
+index fd7eb3773..b13eea2f7 100644
+--- a/libavcodec/error_resilience.c
++++ b/libavcodec/error_resilience.c
+@@ -30,6 +30,14 @@
+ #include "mpegvideo.h"
+ #include "common.h"
+ 
++static void decode_mb(MpegEncContext *s){
++    s->dest[0] = s->current_picture.data[0] + (s->mb_y * 16* s->linesize  ) + s->mb_x * 16;
++    s->dest[1] = s->current_picture.data[1] + (s->mb_y * 8 * s->uvlinesize) + s->mb_x * 8;
++    s->dest[2] = s->current_picture.data[2] + (s->mb_y * 8 * s->uvlinesize) + s->mb_x * 8;
++
++    MPV_decode_mb(s, s->block);    
++}
++
+ /**
+  * replaces the current MB with a flat dc only version.
+  */
+@@ -346,7 +354,7 @@ static void guess_mv(MpegEncContext *s){
+                 s->mb_y= mb_y;
+                 s->mv[0][0][0]= 0;
+                 s->mv[0][0][1]= 0;
+-                MPV_decode_mb(s, s->block);
++                decode_mb(s);
+             }
+         }
+         return;
+@@ -480,7 +488,7 @@ int score_sum=0;
+                         s->motion_val[mot_index][0]= s->mv[0][0][0]= mv_predictor[j][0];
+                         s->motion_val[mot_index][1]= s->mv[0][0][1]= mv_predictor[j][1];
+ 
+-                        MPV_decode_mb(s, s->block);
++                        decode_mb(s);
+                         
+                         if(mb_x>0 && fixed[mb_xy-1]){
+                             int k;
+@@ -513,7 +521,7 @@ score_sum+= best_score;
+                     s->motion_val[mot_index][0]= s->mv[0][0][0]= mv_predictor[best_pred][0];
+                     s->motion_val[mot_index][1]= s->mv[0][0][1]= mv_predictor[best_pred][1];
+ 
+-                    MPV_decode_mb(s, s->block);
++                    decode_mb(s);
+ 
+                     
+                     if(s->mv[0][0][0] != prev_x || s->mv[0][0][1] != prev_y){
+@@ -848,7 +856,7 @@ void ff_er_frame_end(MpegEncContext *s){
+ 
+             s->mb_x= mb_x;
+             s->mb_y= mb_y;
+-            MPV_decode_mb(s, s->block);
++            decode_mb(s);
+         }
+     }
+ 
+@@ -888,7 +896,7 @@ void ff_er_frame_end(MpegEncContext *s){
+                 s->dsp.clear_blocks(s->block[0]);
+                 s->mb_x= mb_x;
+                 s->mb_y= mb_y;
+-                MPV_decode_mb(s, s->block);
++                decode_mb(s);
+             }
+         }
+     }else
+diff --git a/libavcodec/h263.c b/libavcodec/h263.c
+index b48c86648..67321cf3f 100644
+--- a/libavcodec/h263.c
++++ b/libavcodec/h263.c
+@@ -512,6 +512,53 @@ int ff_mpeg4_set_direct_mv(MpegEncContext *s, int mx, int my){
+     }
+ }
+ 
++void ff_h263_update_motion_val(MpegEncContext * s){
++    const int mb_xy = s->mb_y * s->mb_stride + s->mb_x;
++               //FIXME a lot of thet is only needed for !low_delay
++    const int wrap = s->block_wrap[0];
++    const int xy = s->block_index[0];
++    
++    s->current_picture.mbskip_table[mb_xy]= s->mb_skiped; 
++
++    if(s->mv_type != MV_TYPE_8X8){
++        int motion_x, motion_y;
++        if (s->mb_intra) {
++            motion_x = 0;
++            motion_y = 0;
++        } else if (s->mv_type == MV_TYPE_16X16) {
++            motion_x = s->mv[0][0][0];
++            motion_y = s->mv[0][0][1];
++        } else /*if (s->mv_type == MV_TYPE_FIELD)*/ {
++            int i;
++            motion_x = s->mv[0][0][0] + s->mv[0][1][0];
++            motion_y = s->mv[0][0][1] + s->mv[0][1][1];
++            motion_x = (motion_x>>1) | (motion_x&1);
++            for(i=0; i<2; i++){
++                s->field_mv_table[mb_xy][i][0]= s->mv[0][i][0];
++                s->field_mv_table[mb_xy][i][1]= s->mv[0][i][1];
++                s->field_select_table[mb_xy][i]= s->field_select[0][i];
++            }
++        }
++        
++        /* no update if 8X8 because it has been done during parsing */
++        s->motion_val[xy][0] = motion_x;
++        s->motion_val[xy][1] = motion_y;
++        s->motion_val[xy + 1][0] = motion_x;
++        s->motion_val[xy + 1][1] = motion_y;
++        s->motion_val[xy + wrap][0] = motion_x;
++        s->motion_val[xy + wrap][1] = motion_y;
++        s->motion_val[xy + 1 + wrap][0] = motion_x;
++        s->motion_val[xy + 1 + wrap][1] = motion_y;
++    }
++
++    if(s->encoding){ //FIXME encoding MUST be cleaned up
++        if (s->mv_type == MV_TYPE_8X8) 
++            s->current_picture.mb_type[mb_xy]= MB_TYPE_L0 | MB_TYPE_8x8;
++        else
++            s->current_picture.mb_type[mb_xy]= MB_TYPE_L0 | MB_TYPE_16x16;
++    }
++}
++
+ #ifdef CONFIG_ENCODERS
+ void mpeg4_encode_mb(MpegEncContext * s,
+ 		    DCTELEM block[6][64],
+diff --git a/libavcodec/h263dec.c b/libavcodec/h263dec.c
+index 01defcd72..332eb3b3b 100644
+--- a/libavcodec/h263dec.c
++++ b/libavcodec/h263dec.c
+@@ -209,6 +209,9 @@ static int decode_slice(MpegEncContext *s){
+ //printf("%d %d %06X\n", ret, get_bits_count(&s->gb), show_bits(&s->gb, 24));
+             ret= s->decode_mb(s, s->block);
+ 
++            if (s->pict_type!=B_TYPE)
++                ff_h263_update_motion_val(s);
++
+             if(ret<0){
+                 const int xy= s->mb_x + s->mb_y*s->mb_stride;
+                 if(ret==SLICE_END){
+@@ -533,6 +536,9 @@ retry:
+         if(s->divx_version && s->divx_version<500){
+             s->workaround_bugs|= FF_BUG_EDGE;
+         }
++        
++        if(s->avctx->codec_tag == ff_get_fourcc("DIVX") && s->divx_version==0 && s->lavc_build==0 && s->xvid_build==0 && s->vo_type==0 && s->vol_control_parameters==0 && s->low_delay)
++            s->workaround_bugs|= FF_BUG_EDGE;
+ 
+ #if 0
+         if(s->divx_version==500)
+diff --git a/libavcodec/motion_est.c b/libavcodec/motion_est.c
+index 47cb4141c..505a97d83 100644
+--- a/libavcodec/motion_est.c
++++ b/libavcodec/motion_est.c
+@@ -1083,7 +1083,7 @@ void ff_estimate_p_frame_motion(MpegEncContext * s,
+     printf("varc=%4d avg_var=%4d (sum=%4d) vard=%4d mx=%2d my=%2d\n",
+ 	   varc, s->avg_mb_var, sum, vard, mx - xx, my - yy);
+ #endif
+-    if(s->flags&CODEC_FLAG_HQ){
++    if(s->avctx->mb_decision > FF_MB_DECISION_SIMPLE){
+         if (vard <= 64 || vard < varc)
+             s->scene_change_score+= ff_sqrt(vard) - ff_sqrt(varc);
+         else
+@@ -1315,8 +1315,8 @@ static inline int check_bidir_mv(MpegEncContext * s,
+         dxy = ((motion_fy & 3) << 2) | (motion_fx & 3);
+         src_x = mb_x * 16 + (motion_fx >> 2);
+         src_y = mb_y * 16 + (motion_fy >> 2);
+-        assert(src_x >=-16 && src_x<=s->width);
+-        assert(src_y >=-16 && src_y<=s->height);
++        assert(src_x >=-16 && src_x<=s->h_edge_pos);
++        assert(src_y >=-16 && src_y<=s->v_edge_pos);
+ 
+         ptr = s->last_picture.data[0] + (src_y * s->linesize) + src_x;
+         s->dsp.put_qpel_pixels_tab[0][dxy](dest_y    , ptr    , s->linesize);
+@@ -1324,8 +1324,8 @@ static inline int check_bidir_mv(MpegEncContext * s,
+         dxy = ((motion_by & 3) << 2) | (motion_bx & 3);
+         src_x = mb_x * 16 + (motion_bx >> 2);
+         src_y = mb_y * 16 + (motion_by >> 2);
+-        assert(src_x >=-16 && src_x<=s->width);
+-        assert(src_y >=-16 && src_y<=s->height);
++        assert(src_x >=-16 && src_x<=s->h_edge_pos);
++        assert(src_y >=-16 && src_y<=s->v_edge_pos);
+     
+         ptr = s->next_picture.data[0] + (src_y * s->linesize) + src_x;
+         s->dsp.avg_qpel_pixels_tab[0][dxy](dest_y    , ptr    , s->linesize);
+@@ -1333,8 +1333,8 @@ static inline int check_bidir_mv(MpegEncContext * s,
+         dxy = ((motion_fy & 1) << 1) | (motion_fx & 1);
+         src_x = mb_x * 16 + (motion_fx >> 1);
+         src_y = mb_y * 16 + (motion_fy >> 1);
+-        assert(src_x >=-16 && src_x<=s->width);
+-        assert(src_y >=-16 && src_y<=s->height);
++        assert(src_x >=-16 && src_x<=s->h_edge_pos);
++        assert(src_y >=-16 && src_y<=s->v_edge_pos);
+ 
+         ptr = s->last_picture.data[0] + (src_y * s->linesize) + src_x;
+         s->dsp.put_pixels_tab[0][dxy](dest_y    , ptr    , s->linesize, 16);
+@@ -1342,8 +1342,8 @@ static inline int check_bidir_mv(MpegEncContext * s,
+         dxy = ((motion_by & 1) << 1) | (motion_bx & 1);
+         src_x = mb_x * 16 + (motion_bx >> 1);
+         src_y = mb_y * 16 + (motion_by >> 1);
+-        assert(src_x >=-16 && src_x<=s->width);
+-        assert(src_y >=-16 && src_y<=s->height);
++        assert(src_x >=-16 && src_x<=s->h_edge_pos);
++        assert(src_y >=-16 && src_y<=s->v_edge_pos);
+     
+         ptr = s->next_picture.data[0] + (src_y * s->linesize) + src_x;
+         s->dsp.avg_pixels_tab[0][dxy](dest_y    , ptr    , s->linesize, 16);
+@@ -1523,7 +1523,7 @@ void ff_estimate_b_frame_motion(MpegEncContext * s,
+         s->current_picture.mc_mb_var[mb_y*s->mb_stride + mb_x] = score; //FIXME use SSE
+     }
+ 
+-    if(s->flags&CODEC_FLAG_HQ){
++    if(s->avctx->mb_decision > FF_MB_DECISION_SIMPLE){
+         type= MB_TYPE_FORWARD | MB_TYPE_BACKWARD | MB_TYPE_BIDIR | MB_TYPE_DIRECT; //FIXME something smarter
+         if(dmin>256*256*16) type&= ~MB_TYPE_DIRECT; //dont try direct mode if its invalid for this MB
+     }
+diff --git a/libavcodec/mpeg12.c b/libavcodec/mpeg12.c
+index 4f007ca3c..f15b336d2 100644
+--- a/libavcodec/mpeg12.c
++++ b/libavcodec/mpeg12.c
+@@ -1924,6 +1924,7 @@ static int mpeg_decode_slice(AVCodecContext *avctx,
+     s->resync_mb_x= s->mb_x;
+     s->resync_mb_y= s->mb_y = start_code;
+     s->mb_skip_run= 0;
++    ff_init_block_index(s);
+ 
+     for(;;) {
+ 	s->dsp.clear_blocks(s->block[0]);
+@@ -1959,8 +1960,12 @@ static int mpeg_decode_slice(AVCodecContext *avctx,
+             s->motion_val[xy + 1 + wrap][1] = motion_y;
+         }
+         
+-        MPV_decode_mb(s, s->block);
++        s->dest[0] += 16;
++        s->dest[1] += 8;
++        s->dest[2] += 8;
+ 
++        MPV_decode_mb(s, s->block);
++        
+         if (++s->mb_x >= s->mb_width) {
+             if(s->avctx->codec_tag == ff_get_fourcc("VCR2"))
+                 exchange_uv((AVFrame*)s->current_picture_ptr);
+@@ -1983,6 +1988,8 @@ static int mpeg_decode_slice(AVCodecContext *avctx,
+                 }else
+                     goto eos;
+             }
++            
++            ff_init_block_index(s);
+         }
+ 
+         /* skip mb handling */
+diff --git a/libavcodec/mpegvideo.c b/libavcodec/mpegvideo.c
+index af6dd611e..6a3b5c718 100644
+--- a/libavcodec/mpegvideo.c
++++ b/libavcodec/mpegvideo.c
+@@ -50,6 +50,7 @@ static void draw_edges_c(uint8_t *buf, int wrap, int width, int height, int w);
+ #ifdef CONFIG_ENCODERS
+ static int dct_quantize_c(MpegEncContext *s, DCTELEM *block, int n, int qscale, int *overflow);
+ static int dct_quantize_trellis_c(MpegEncContext *s, DCTELEM *block, int n, int qscale, int *overflow);
++static int sse_mb(MpegEncContext *s);
+ #endif //CONFIG_ENCODERS
+ 
+ #ifdef HAVE_XVMC
+@@ -2425,50 +2426,6 @@ void MPV_decode_mb(MpegEncContext *s, DCTELEM block[6][64])
+     else if (s->h263_pred || s->h263_aic)
+         s->mbintra_table[mb_xy]=1;
+ 
+-    /* update motion predictor, not for B-frames as they need the motion_val from the last P/S-Frame */
+-    if (s->out_format == FMT_H263 && s->pict_type!=B_TYPE) { //FIXME move into h263.c if possible, format specific stuff shouldnt be here
+-        //FIXME a lot of thet is only needed for !low_delay
+-        const int wrap = s->block_wrap[0];
+-        const int xy = s->block_index[0];
+-        if(s->mv_type != MV_TYPE_8X8){
+-            int motion_x, motion_y;
+-            if (s->mb_intra) {
+-                motion_x = 0;
+-                motion_y = 0;
+-            } else if (s->mv_type == MV_TYPE_16X16) {
+-                motion_x = s->mv[0][0][0];
+-                motion_y = s->mv[0][0][1];
+-            } else /*if (s->mv_type == MV_TYPE_FIELD)*/ {
+-                int i;
+-                motion_x = s->mv[0][0][0] + s->mv[0][1][0];
+-                motion_y = s->mv[0][0][1] + s->mv[0][1][1];
+-                motion_x = (motion_x>>1) | (motion_x&1);
+-                for(i=0; i<2; i++){
+-                    s->field_mv_table[mb_xy][i][0]= s->mv[0][i][0];
+-                    s->field_mv_table[mb_xy][i][1]= s->mv[0][i][1];
+-                    s->field_select_table[mb_xy][i]= s->field_select[0][i];
+-                }
+-            }
+-            
+-            /* no update if 8X8 because it has been done during parsing */
+-            s->motion_val[xy][0] = motion_x;
+-            s->motion_val[xy][1] = motion_y;
+-            s->motion_val[xy + 1][0] = motion_x;
+-            s->motion_val[xy + 1][1] = motion_y;
+-            s->motion_val[xy + wrap][0] = motion_x;
+-            s->motion_val[xy + wrap][1] = motion_y;
+-            s->motion_val[xy + 1 + wrap][0] = motion_x;
+-            s->motion_val[xy + 1 + wrap][1] = motion_y;
+-        }
+-
+-        if(s->encoding){ //FIXME encoding MUST be cleaned up
+-            if (s->mv_type == MV_TYPE_8X8) 
+-                s->current_picture.mb_type[mb_xy]= MB_TYPE_L0 | MB_TYPE_8x8;
+-            else
+-                s->current_picture.mb_type[mb_xy]= MB_TYPE_L0 | MB_TYPE_16x16;
+-        }
+-    }
+-    
+     if ((s->flags&CODEC_FLAG_PSNR) || !(s->encoding && (s->intra_only || s->pict_type==B_TYPE))) { //FIXME precalc
+         uint8_t *dest_y, *dest_cb, *dest_cr;
+         int dct_linesize, dct_offset;
+@@ -2478,10 +2435,6 @@ void MPV_decode_mb(MpegEncContext *s, DCTELEM block[6][64])
+         const int uvlinesize= s->current_picture.linesize[1];
+ 
+         /* avoid copy if macroblock skipped in last frame too */
+-        if (s->pict_type != B_TYPE) {
+-            s->current_picture.mbskip_table[mb_xy]= s->mb_skiped;
+-        }
+-
+         /* skip only during decoding as we might trash the buffers during encoding a bit */
+         if(!s->encoding){
+             uint8_t *mbskip_ptr = &s->mbskip_table[mb_xy];
+@@ -2506,17 +2459,6 @@ void MPV_decode_mb(MpegEncContext *s, DCTELEM block[6][64])
+             } else{
+                 *mbskip_ptr = 0; /* not skipped */
+             }
+-        }else
+-            s->mb_skiped= 0;
+-
+-        if(s->pict_type==B_TYPE && s->avctx->draw_horiz_band && s->picture_structure==PICT_FRAME){ //FIXME precalc
+-            dest_y  = s->current_picture.data[0] + mb_x * 16;
+-            dest_cb = s->current_picture.data[1] + mb_x * 8;
+-            dest_cr = s->current_picture.data[2] + mb_x * 8;
+-        }else{
+-            dest_y  = s->current_picture.data[0] + (mb_y * 16* linesize  ) + mb_x * 16;
+-            dest_cb = s->current_picture.data[1] + (mb_y * 8 * uvlinesize) + mb_x * 8;
+-            dest_cr = s->current_picture.data[2] + (mb_y * 8 * uvlinesize) + mb_x * 8;
+         }
+ 
+         if (s->interlaced_dct) {
+@@ -2526,11 +2468,15 @@ void MPV_decode_mb(MpegEncContext *s, DCTELEM block[6][64])
+             dct_linesize = linesize;
+             dct_offset = linesize * 8;
+         }
++        
++        dest_y=  s->dest[0];
++        dest_cb= s->dest[1];
++        dest_cr= s->dest[2];
+ 
+         if (!s->mb_intra) {
+             /* motion handling */
+             /* decoding or more than one mb_type (MC was allready done otherwise) */
+-            if((!s->encoding) || (s->mb_type[mb_xy]&(s->mb_type[mb_xy]-1))){
++            if(!s->encoding){
+                 if ((!s->no_rounding) || s->pict_type==B_TYPE){                
+ 		    op_pix = s->dsp.put_pixels_tab;
+                     op_qpix= s->dsp.put_qpel_pixels_tab;
+@@ -2791,6 +2737,28 @@ void ff_draw_horiz_band(MpegEncContext *s, int y, int h){
+     }
+ }
+ 
++void ff_init_block_index(MpegEncContext *s){ //FIXME maybe rename
++    const int linesize= s->current_picture.linesize[0]; //not s->linesize as this woulnd be wrong for field pics
++    const int uvlinesize= s->current_picture.linesize[1];
++        
++    s->block_index[0]= s->block_wrap[0]*(s->mb_y*2 + 1) - 1 + s->mb_x*2;
++    s->block_index[1]= s->block_wrap[0]*(s->mb_y*2 + 1)     + s->mb_x*2;
++    s->block_index[2]= s->block_wrap[0]*(s->mb_y*2 + 2) - 1 + s->mb_x*2;
++    s->block_index[3]= s->block_wrap[0]*(s->mb_y*2 + 2)     + s->mb_x*2;
++    s->block_index[4]= s->block_wrap[4]*(s->mb_y + 1)                    + s->block_wrap[0]*(s->mb_height*2 + 2) + s->mb_x;
++    s->block_index[5]= s->block_wrap[4]*(s->mb_y + 1 + s->mb_height + 2) + s->block_wrap[0]*(s->mb_height*2 + 2) + s->mb_x;
++    
++    if(s->pict_type==B_TYPE && s->avctx->draw_horiz_band && s->picture_structure==PICT_FRAME){
++        s->dest[0] = s->current_picture.data[0] + s->mb_x * 16 - 16;
++        s->dest[1] = s->current_picture.data[1] + s->mb_x * 8 - 8;
++        s->dest[2] = s->current_picture.data[2] + s->mb_x * 8 - 8;
++    }else{
++        s->dest[0] = s->current_picture.data[0] + (s->mb_y * 16* linesize  ) + s->mb_x * 16 - 16;
++        s->dest[1] = s->current_picture.data[1] + (s->mb_y * 8 * uvlinesize) + s->mb_x * 8 - 8;
++        s->dest[2] = s->current_picture.data[2] + (s->mb_y * 8 * uvlinesize) + s->mb_x * 8 - 8;
++    }    
++}
++
+ #ifdef CONFIG_ENCODERS
+ 
+ static void encode_mb(MpegEncContext *s, int motion_x, int motion_y)
+@@ -2885,9 +2853,9 @@ static void encode_mb(MpegEncContext *s, int motion_x, int motion_y)
+         int wrap_y, wrap_c;
+         int emu=0;
+ 
+-        dest_y  = s->current_picture.data[0] + (mb_y * 16 * s->linesize    ) + mb_x * 16;
+-        dest_cb = s->current_picture.data[1] + (mb_y * 8  * (s->uvlinesize)) + mb_x * 8;
+-        dest_cr = s->current_picture.data[2] + (mb_y * 8  * (s->uvlinesize)) + mb_x * 8;
++        dest_y  = s->dest[0];
++        dest_cb = s->dest[1];
++        dest_cr = s->dest[2];
+         wrap_y = s->linesize;
+         wrap_c = s->uvlinesize;
+         ptr_y  = s->new_picture.data[0] + (mb_y * 16 * wrap_y) + mb_x * 16;
+@@ -3161,7 +3129,7 @@ static inline void copy_context_before_encode(MpegEncContext *d, MpegEncContext
+     d->misc_bits= s->misc_bits;
+     d->last_bits= 0;
+ 
+-    d->mb_skiped= s->mb_skiped;
++    d->mb_skiped= 0;
+     d->qscale= s->qscale;
+ }
+ 
+@@ -3206,7 +3174,8 @@ static inline void encode_mb_hq(MpegEncContext *s, MpegEncContext *backup, MpegE
+                            PutBitContext pb[2], PutBitContext pb2[2], PutBitContext tex_pb[2],
+                            int *dmin, int *next_block, int motion_x, int motion_y)
+ {
+-    int bits_count;
++    int score;
++    uint8_t *dest_backup[3];
+     
+     copy_context_before_encode(s, backup, type);
+ 
+@@ -3216,24 +3185,44 @@ static inline void encode_mb_hq(MpegEncContext *s, MpegEncContext *backup, MpegE
+         s->pb2   = pb2   [*next_block];
+         s->tex_pb= tex_pb[*next_block];
+     }
++    
++    if(*next_block){
++        memcpy(dest_backup, s->dest, sizeof(s->dest));
++        s->dest[0] = s->me.scratchpad;
++        s->dest[1] = s->me.scratchpad + 16;
++        s->dest[2] = s->me.scratchpad + 16 + 8;
++        assert(2*s->uvlinesize == s->linesize); //should be no prob for encoding
++        assert(s->linesize >= 64); //FIXME
++    }
+ 
+     encode_mb(s, motion_x, motion_y);
+-
+-    bits_count= get_bit_count(&s->pb);
++    
++    score= get_bit_count(&s->pb);
+     if(s->data_partitioning){
+-        bits_count+= get_bit_count(&s->pb2);
+-        bits_count+= get_bit_count(&s->tex_pb);
++        score+= get_bit_count(&s->pb2);
++        score+= get_bit_count(&s->tex_pb);
+     }
++   
++    if(s->avctx->mb_decision == FF_MB_DECISION_RD){
++        MPV_decode_mb(s, s->block);
+ 
+-    if(bits_count<*dmin){
+-        *dmin= bits_count;
++        score *= s->qscale * s->qscale * 109;
++        score += sse_mb(s) << 7;
++    }
++    
++    if(*next_block){
++        memcpy(s->dest, dest_backup, sizeof(s->dest));
++    }
++
++    if(score<*dmin){
++        *dmin= score;
+         *next_block^=1;
+ 
+         copy_context_after_encode(best, s, type);
+     }
+ }
+                 
+-static inline int sse(MpegEncContext *s, uint8_t *src1, uint8_t *src2, int w, int h, int stride){
++static int sse(MpegEncContext *s, uint8_t *src1, uint8_t *src2, int w, int h, int stride){
+     uint32_t *sq = squareTbl + 256;
+     int acc=0;
+     int x,y;
+@@ -3254,6 +3243,23 @@ static inline int sse(MpegEncContext *s, uint8_t *src1, uint8_t *src2, int w, in
+     return acc;
+ }
+ 
++static int sse_mb(MpegEncContext *s){
++    int w= 16;
++    int h= 16;
++
++    if(s->mb_x*16 + 16 > s->width ) w= s->width - s->mb_x*16;
++    if(s->mb_y*16 + 16 > s->height) h= s->height- s->mb_y*16;
++
++    if(w==16 && h==16)
++        return  s->dsp.sse[0](NULL, s->new_picture.data[0] + s->mb_x*16 + s->mb_y*s->linesize*16, s->dest[0], s->linesize)
++               +s->dsp.sse[1](NULL, s->new_picture.data[1] + s->mb_x*8  + s->mb_y*s->uvlinesize*8,s->dest[1], s->uvlinesize)
++               +s->dsp.sse[1](NULL, s->new_picture.data[2] + s->mb_x*8  + s->mb_y*s->uvlinesize*8,s->dest[2], s->uvlinesize);
++    else
++        return  sse(s, s->new_picture.data[0] + s->mb_x*16 + s->mb_y*s->linesize*16, s->dest[0], w, h, s->linesize)
++               +sse(s, s->new_picture.data[1] + s->mb_x*8  + s->mb_y*s->uvlinesize*8,s->dest[1], w>>1, h>>1, s->uvlinesize)
++               +sse(s, s->new_picture.data[2] + s->mb_x*8  + s->mb_y*s->uvlinesize*8,s->dest[2], w>>1, h>>1, s->uvlinesize);
++}
++
+ static void encode_picture(MpegEncContext *s, int picture_number)
+ {
+     int mb_x, mb_y, pdif = 0;
+@@ -3508,29 +3514,21 @@ static void encode_picture(MpegEncContext *s, int picture_number)
+     s->first_slice_line = 1;
+     s->ptr_lastgob = s->pb.buf;
+     for(mb_y=0; mb_y < s->mb_height; mb_y++) {
++        s->mb_x=0;
++        s->mb_y= mb_y;
++
+         s->y_dc_scale= s->y_dc_scale_table[ s->qscale ];
+         s->c_dc_scale= s->c_dc_scale_table[ s->qscale ];
++        ff_init_block_index(s);
+         
+-        s->block_index[0]= s->block_wrap[0]*(mb_y*2 + 1) - 1;
+-        s->block_index[1]= s->block_wrap[0]*(mb_y*2 + 1);
+-        s->block_index[2]= s->block_wrap[0]*(mb_y*2 + 2) - 1;
+-        s->block_index[3]= s->block_wrap[0]*(mb_y*2 + 2);
+-        s->block_index[4]= s->block_wrap[4]*(mb_y + 1)                    + s->block_wrap[0]*(s->mb_height*2 + 2);
+-        s->block_index[5]= s->block_wrap[4]*(mb_y + 1 + s->mb_height + 2) + s->block_wrap[0]*(s->mb_height*2 + 2);
+         for(mb_x=0; mb_x < s->mb_width; mb_x++) {
+             const int xy= mb_y*s->mb_stride + mb_x;
+             int mb_type= s->mb_type[xy];
+ //            int d;
+-            int dmin=10000000;
++            int dmin= INT_MAX;
+ 
+             s->mb_x = mb_x;
+-            s->mb_y = mb_y;
+-            s->block_index[0]+=2;
+-            s->block_index[1]+=2;
+-            s->block_index[2]+=2;
+-            s->block_index[3]+=2;
+-            s->block_index[4]++;
+-            s->block_index[5]++;
++            ff_update_block_index(s);
+ 
+             /* write gob / video packet header  */
+ #ifdef CONFIG_RISKY
+@@ -3588,6 +3586,8 @@ static void encode_picture(MpegEncContext *s, int picture_number)
+                 s->first_slice_line=0; 
+             }
+ 
++            s->mb_skiped=0;
++
+             if(mb_type & (mb_type-1)){ // more than 1 MB type possible
+                 int next_block=0;
+                 int pb_bits_count, pb2_bits_count, tex_pb_bits_count;
+@@ -3670,9 +3670,12 @@ static void encode_picture(MpegEncContext *s, int picture_number)
+                     s->mv[0][0][1] = 0;
+                     encode_mb_hq(s, &backup_s, &best_s, MB_TYPE_INTRA, pb, pb2, tex_pb, 
+                                  &dmin, &next_block, 0, 0);
+-                    /* force cleaning of ac/dc pred stuff if needed ... */
+-                    if(s->h263_pred || s->h263_aic)
+-                        s->mbintra_table[mb_x + mb_y*s->mb_stride]=1;
++                    if(s->h263_pred || s->h263_aic){
++                        if(best_s.mb_intra)
++                            s->mbintra_table[mb_x + mb_y*s->mb_stride]=1;
++                        else
++                            ff_clean_intra_table_entries(s); //old mode?
++                    }
+                 }
+                 copy_context_after_encode(s, &best_s, -1);
+                 
+@@ -3693,12 +3696,24 @@ static void encode_picture(MpegEncContext *s, int picture_number)
+                     s->tex_pb= backup_s.tex_pb;
+                 }
+                 s->last_bits= get_bit_count(&s->pb);
++                
++                if (s->out_format == FMT_H263 && s->pict_type!=B_TYPE)
++                    ff_h263_update_motion_val(s);
++        
++                if(next_block==0){
++                    s->dsp.put_pixels_tab[0][0](s->dest[0], s->me.scratchpad     , s->linesize  ,16);
++                    s->dsp.put_pixels_tab[1][0](s->dest[1], s->me.scratchpad + 16, s->uvlinesize, 8);
++                    s->dsp.put_pixels_tab[1][0](s->dest[2], s->me.scratchpad + 24, s->uvlinesize, 8);
++                }
++
++                if(s->avctx->mb_decision == FF_MB_DECISION_BITS)
++                    MPV_decode_mb(s, s->block);
+             } else {
+                 int motion_x, motion_y;
+                 int intra_score;
+                 int inter_score= s->current_picture.mb_cmp_score[mb_x + mb_y*s->mb_stride];
+                 
+-              if(!(s->flags&CODEC_FLAG_HQ) && s->pict_type==P_TYPE){
++              if(s->avctx->mb_decision==FF_MB_DECISION_SIMPLE && s->pict_type==P_TYPE){ //FIXME check if the mess is usefull at all
+                 /* get luma score */
+                 if((s->avctx->mb_cmp&0xFF)==FF_CMP_SSE){
+                     intra_score= (s->current_picture.mb_var[mb_x + mb_y*s->mb_stride]<<8) - 500; //FIXME dont scale it down so we dont have to fix it
+@@ -3846,6 +3861,11 @@ static void encode_picture(MpegEncContext *s, int picture_number)
+ 
+                 // RAL: Update last macrobloc type
+                 s->last_mv_dir = s->mv_dir;
++            
++                if (s->out_format == FMT_H263 && s->pict_type!=B_TYPE)
++                    ff_h263_update_motion_val(s);
++
++                MPV_decode_mb(s, s->block);
+             }
+ 
+             /* clean the MV table in IPS frames for direct mode in B frames */
+@@ -3853,8 +3873,6 @@ static void encode_picture(MpegEncContext *s, int picture_number)
+                 s->p_mv_table[xy][0]=0;
+                 s->p_mv_table[xy][1]=0;
+             }
+-
+-            MPV_decode_mb(s, s->block);
+             
+             if(s->flags&CODEC_FLAG_PSNR){
+                 int w= 16;
+@@ -3864,20 +3882,14 @@ static void encode_picture(MpegEncContext *s, int picture_number)
+                 if(s->mb_y*16 + 16 > s->height) h= s->height- s->mb_y*16;
+ 
+                 s->current_picture_ptr->error[0] += sse(
+-                    s,
+-                    s->new_picture    .data[0] + s->mb_x*16 + s->mb_y*s->linesize*16,
+-                    s->current_picture.data[0] + s->mb_x*16 + s->mb_y*s->linesize*16,
+-                    w, h, s->linesize);
++                    s, s->new_picture.data[0] + s->mb_x*16 + s->mb_y*s->linesize*16,
++                    s->dest[0], w, h, s->linesize);
+                 s->current_picture_ptr->error[1] += sse(
+-                    s,
+-                    s->new_picture    .data[1] + s->mb_x*8  + s->mb_y*s->uvlinesize*8,
+-                    s->current_picture.data[1] + s->mb_x*8  + s->mb_y*s->uvlinesize*8,
+-                    w>>1, h>>1, s->uvlinesize);
++                    s, s->new_picture.data[1] + s->mb_x*8  + s->mb_y*s->uvlinesize*8,
++                    s->dest[1], w>>1, h>>1, s->uvlinesize);
+                 s->current_picture_ptr->error[2] += sse(
+-                    s,
+-                    s->new_picture    .data[2] + s->mb_x*8  + s->mb_y*s->uvlinesize*8,
+-                    s->current_picture.data[2] + s->mb_x*8  + s->mb_y*s->uvlinesize*8,
+-                    w>>1, h>>1, s->uvlinesize);
++                    s, s->new_picture    .data[2] + s->mb_x*8  + s->mb_y*s->uvlinesize*8,
++                    s->dest[2], w>>1, h>>1, s->uvlinesize);
+             }
+ //printf("MB %d %d bits\n", s->mb_x+s->mb_y*s->mb_stride, get_bit_count(&s->pb));
+         }
+@@ -4402,7 +4414,6 @@ static void dct_unquantize_h263_c(MpegEncContext *s,
+ static const AVOption mpeg4_options[] =
+ {
+     AVOPTION_CODEC_INT("bitrate", "desired video bitrate", bit_rate, 4, 240000000, 800000),
+-    AVOPTION_CODEC_FLAG("vhq", "very high quality", flags, CODEC_FLAG_HQ, 0),
+     AVOPTION_CODEC_INT("ratetol", "number of bits the bitstream is allowed to diverge from the reference"
+ 		       "the reference can be CBR (for CBR pass1) or VBR (for pass2)",
+ 		       bit_rate_tolerance, 4, 240000000, 8000),
+diff --git a/libavcodec/mpegvideo.h b/libavcodec/mpegvideo.h
+index 3546d85a3..a0f5d4c0b 100644
+--- a/libavcodec/mpegvideo.h
++++ b/libavcodec/mpegvideo.h
+@@ -430,6 +430,7 @@ typedef struct MpegEncContext {
+ 
+     int block_index[6]; ///< index to current MB in block based arrays with edges
+     int block_wrap[6];
++    uint8_t *dest[3];
+     
+     int *mb_index2xy;        ///< mb_index -> mb_x + mb_y*mb_stride
+ 
+@@ -723,14 +724,7 @@ void ff_er_add_slice(MpegEncContext *s, int startx, int starty, int endx, int en
+ 
+ extern enum PixelFormat ff_yuv420p_list[2];
+ 
+-static inline void ff_init_block_index(MpegEncContext *s){
+-    s->block_index[0]= s->block_wrap[0]*(s->mb_y*2 + 1) - 1 + s->mb_x*2;
+-    s->block_index[1]= s->block_wrap[0]*(s->mb_y*2 + 1)     + s->mb_x*2;
+-    s->block_index[2]= s->block_wrap[0]*(s->mb_y*2 + 2) - 1 + s->mb_x*2;
+-    s->block_index[3]= s->block_wrap[0]*(s->mb_y*2 + 2)     + s->mb_x*2;
+-    s->block_index[4]= s->block_wrap[4]*(s->mb_y + 1)                    + s->block_wrap[0]*(s->mb_height*2 + 2) + s->mb_x;
+-    s->block_index[5]= s->block_wrap[4]*(s->mb_y + 1 + s->mb_height + 2) + s->block_wrap[0]*(s->mb_height*2 + 2) + s->mb_x;
+-}
++void ff_init_block_index(MpegEncContext *s);
+ 
+ static inline void ff_update_block_index(MpegEncContext *s){
+     s->block_index[0]+=2;
+@@ -739,6 +733,9 @@ static inline void ff_update_block_index(MpegEncContext *s){
+     s->block_index[3]+=2;
+     s->block_index[4]++;
+     s->block_index[5]++;
++    s->dest[0]+= 16;
++    s->dest[1]+= 8;
++    s->dest[2]+= 8;
+ }
+ 
+ static inline int get_bits_diff(MpegEncContext *s){
+@@ -833,6 +830,7 @@ void h263_decode_init_vlc(MpegEncContext *s);
+ int h263_decode_picture_header(MpegEncContext *s);
+ int ff_h263_decode_gob_header(MpegEncContext *s);
+ int ff_mpeg4_decode_picture_header(MpegEncContext * s, GetBitContext *gb);
++void ff_h263_update_motion_val(MpegEncContext * s);
+ 
+ 
+ int intel_h263_decode_picture_header(MpegEncContext *s);
+diff --git a/libavcodec/rv10.c b/libavcodec/rv10.c
+index 4b351ea1e..c19c36ec5 100644
+--- a/libavcodec/rv10.c
++++ b/libavcodec/rv10.c
+@@ -466,6 +466,7 @@ static int rv10_decode_packet(AVCodecContext *avctx,
+             fprintf(stderr, "ERROR at MB %d %d\n", s->mb_x, s->mb_y);
+             return -1;
+         }
++        ff_h263_update_motion_val(s);
+         MPV_decode_mb(s, s->block);
+         if (++s->mb_x == s->mb_width) {
+             s->mb_x = 0;
+diff --git a/libavcodec/utils.c b/libavcodec/utils.c
+index eeffde2c9..47831f2f3 100644
+--- a/libavcodec/utils.c
++++ b/libavcodec/utils.c
+@@ -489,7 +489,7 @@ void avcodec_string(char *buf, int buf_size, AVCodecContext *enc, int encode)
+     case CODEC_TYPE_VIDEO:
+         snprintf(buf, buf_size,
+                  "Video: %s%s",
+-                 codec_name, enc->flags & CODEC_FLAG_HQ ? " (hq)" : "");
++                 codec_name, enc->mb_decision ? " (hq)" : "");
+         if (enc->codec_id == CODEC_ID_RAWVIDEO) {
+             snprintf(buf + strlen(buf), buf_size - strlen(buf),
+                      ", %s",
+

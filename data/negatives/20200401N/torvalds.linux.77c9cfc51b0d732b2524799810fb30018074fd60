@@ -1,0 +1,59 @@
+commit 77c9cfc51b0d732b2524799810fb30018074fd60
+Author: Martin K. Petersen <martin.petersen@oracle.com>
+Date:   Wed Jan 20 02:20:43 2010 -0500
+
+    [SCSI] Fix printing of failed 32-byte commands
+    
+    Having the large CDB allocation logic in sd.c means that
+    scsi_io_completion does not have access to the command buffer. That in
+    turn causes garbage to be printed when a 32-byte command fails. Move the
+    command printing to sd_done where the command buffer is intact.  Clear
+    the command buffer pointer after the extended CDB has been freed.
+    
+    Make scsi_print_command ignore commands with NULL CDB pointers to
+    inhibit printing of garbled command strings.
+    
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+    Reviewed-by: Boaz Harrosh <bharrosh@panasas.com>
+    Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+
+diff --git a/drivers/scsi/constants.c b/drivers/scsi/constants.c
+index 7092ff67ecd3..cd05e049d5f6 100644
+--- a/drivers/scsi/constants.c
++++ b/drivers/scsi/constants.c
+@@ -346,6 +346,9 @@ void scsi_print_command(struct scsi_cmnd *cmd)
+ {
+ 	int k;
+ 
++	if (cmd->cmnd == NULL)
++		return;
++
+ 	scmd_printk(KERN_INFO, cmd, "CDB: ");
+ 	print_opcode_name(cmd->cmnd, cmd->cmd_len);
+ 
+diff --git a/drivers/scsi/sd.c b/drivers/scsi/sd.c
+index 908d400b601a..1dd4d8407694 100644
+--- a/drivers/scsi/sd.c
++++ b/drivers/scsi/sd.c
+@@ -1209,8 +1209,19 @@ static int sd_done(struct scsi_cmnd *SCpnt)
+ 		sd_dif_complete(SCpnt, good_bytes);
+ 
+ 	if (scsi_host_dif_capable(sdkp->device->host, sdkp->protection_type)
+-	    == SD_DIF_TYPE2_PROTECTION && SCpnt->cmnd != SCpnt->request->cmd)
++	    == SD_DIF_TYPE2_PROTECTION && SCpnt->cmnd != SCpnt->request->cmd) {
++
++		/* We have to print a failed command here as the
++		 * extended CDB gets freed before scsi_io_completion()
++		 * is called.
++		 */
++		if (result)
++			scsi_print_command(SCpnt);
++
+ 		mempool_free(SCpnt->cmnd, sd_cdb_pool);
++		SCpnt->cmnd = NULL;
++		SCpnt->cmd_len = 0;
++	}
+ 
+ 	return good_bytes;
+ }
+

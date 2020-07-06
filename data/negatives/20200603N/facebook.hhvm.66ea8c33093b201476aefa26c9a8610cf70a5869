@@ -1,0 +1,429 @@
+commit 66ea8c33093b201476aefa26c9a8610cf70a5869
+Author: Owen Yamauchi <oyamauchi@fb.com>
+Date:   Wed Dec 19 12:14:18 2012 -0800
+
+    Use call/ret, real prologues for ContEnter, ContExit (tx64)
+    
+    Before, generator bodies were entered without prologues, meaning they didn't get
+    stack-size checks or surprise flag checks. This fixes that.
+    
+    This lets us use an entry path that's much more similar to regular function
+    entry, including the use of the call/ret instructions, which should offset some
+    of the perf regression caused by the extra checking on entry.
+
+diff --git a/src/runtime/vm/func.cpp b/src/runtime/vm/func.cpp
+index 99803339be..1c41e81397 100644
+--- a/src/runtime/vm/func.cpp
++++ b/src/runtime/vm/func.cpp
+@@ -113,21 +113,23 @@ void Func::setFullName() {
+   }
+ }
+ 
+-void Func::initPrologues(int numParams) {
+-  TCA fcallHelper = (TCA)HPHP::VM::Transl::fcallHelperThunk;
++void Func::initPrologues(int numParams, bool isGenerator) {
++  m_funcBody = (isGenerator ?
++                (TCA)HPHP::VM::Transl::contEnterHelperThunk :
++                (TCA)HPHP::VM::Transl::funcBodyHelperThunk);
++
+   int maxNumPrologues = Func::getMaxNumPrologues(numParams);
+   int numPrologues =
+     maxNumPrologues > kNumFixedPrologues ? maxNumPrologues
+                                          : kNumFixedPrologues;
+ 
+-  m_funcBody = (TCA)HPHP::VM::Transl::funcBodyHelperThunk;
+   TRACE(2, "initPrologues func %p %d\n", this, numPrologues);
+   for (int i = 0; i < numPrologues; i++) {
+-    m_prologueTable[i] = fcallHelper;
++    m_prologueTable[i] = (TCA)HPHP::VM::Transl::fcallHelperThunk;
+   }
+ }
+ 
+-void Func::init(int numParams) {
++void Func::init(int numParams, bool isGenerator) {
+   // For methods, we defer setting the full name until m_cls is initialized
+   m_maybeIntercepted = s_interceptsEnabled ? -1 : 0;
+   if (!preClass()) {
+@@ -152,7 +154,7 @@ void Func::init(int numParams) {
+   m_magic = kMagic;
+ #endif
+   ASSERT(m_name);
+-  initPrologues(numParams);
++  initPrologues(numParams, isGenerator);
+ }
+ 
+ void* Func::allocFuncMem(const StringData* name, int numParams) {
+@@ -167,7 +169,8 @@ void* Func::allocFuncMem(const StringData* name, int numParams) {
+ 
+ Func::Func(Unit& unit, Id id, int line1, int line2,
+            Offset base, Offset past, const StringData* name,
+-           Attr attrs, bool top, const StringData* docComment, int numParams)
++           Attr attrs, bool top, const StringData* docComment, int numParams,
++           bool isGenerator)
+   : m_unit(&unit)
+   , m_cls(NULL)
+   , m_baseCls(NULL)
+@@ -183,13 +186,14 @@ Func::Func(Unit& unit, Id id, int line1, int line2,
+ {
+   m_shared = new SharedData(NULL, id, base, past, line1, line2,
+                             top, docComment);
+-  init(numParams);
++  init(numParams, isGenerator);
+ }
+ 
+ // Class method
+ Func::Func(Unit& unit, PreClass* preClass, int line1, int line2, Offset base,
+            Offset past, const StringData* name, Attr attrs,
+-           bool top, const StringData* docComment, int numParams)
++           bool top, const StringData* docComment, int numParams,
++           bool isGenerator)
+   : m_unit(&unit)
+   , m_cls(NULL)
+   , m_baseCls(NULL)
+@@ -206,7 +210,7 @@ Func::Func(Unit& unit, PreClass* preClass, int line1, int line2, Offset base,
+   Id id = -1;
+   m_shared = new SharedData(preClass, id, base, past, line1, line2,
+                             top, docComment);
+-  init(numParams);
++  init(numParams, isGenerator);
+ }
+ 
+ Func::~Func() {
+@@ -226,7 +230,7 @@ void Func::destroy(Func* func) {
+ 
+ Func* Func::clone() const {
+   Func* f = new (allocFuncMem(m_name, m_numParams)) Func(*this);
+-  f->initPrologues(m_numParams);
++  f->initPrologues(m_numParams, isGenerator());
+   f->m_funcId = InvalidId;
+   return f;
+ }
+@@ -804,10 +808,10 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
+   Func* f = (m_pce == NULL)
+     ? m_ue.newFunc(this, unit, m_id, m_line1, m_line2, m_base,
+                    m_past, m_name, attrs, m_top, m_docComment,
+-                   m_params.size())
++                   m_params.size(), m_isGenerator)
+     : m_ue.newFunc(this, unit, preClass, m_line1, m_line2, m_base,
+                    m_past, m_name, attrs, m_top, m_docComment,
+-                   m_params.size());
++                   m_params.size(), m_isGenerator);
+   f->shared()->m_info = m_info;
+   f->shared()->m_returnType = m_returnType;
+   std::vector<Func::ParamInfo> pBuilder;
+diff --git a/src/runtime/vm/func.h b/src/runtime/vm/func.h
+index 58d445467c..7880e65a3c 100644
+--- a/src/runtime/vm/func.h
++++ b/src/runtime/vm/func.h
+@@ -123,12 +123,12 @@ struct Func {
+   static const FuncId InvalidId = -1LL;
+ 
+   Func(Unit& unit, Id id, int line1, int line2, Offset base,
+-      Offset past, const StringData* name, Attr attrs, bool top,
+-      const StringData* docComment, int numParams);
++       Offset past, const StringData* name, Attr attrs, bool top,
++       const StringData* docComment, int numParams, bool isGenerator);
+   Func(Unit& unit, PreClass* preClass, int line1,
+-      int line2, Offset base, Offset past,
+-      const StringData* name, Attr attrs, bool top,
+-      const StringData* docComment, int numParams);
++       int line2, Offset base, Offset past,
++       const StringData* name, Attr attrs, bool top,
++       const StringData* docComment, int numParams, bool isGenerator);
+   ~Func();
+   static void destroy(Func* func);
+ 
+@@ -347,7 +347,7 @@ struct Func {
+   void resetPrologues() {
+     // Useful when killing code; forget what we've learned about the contents
+     // of the translation cache.
+-    initPrologues(m_numParams);
++    initPrologues(m_numParams, isGenerator());
+   }
+ 
+   const NamedEntity* getNamedEntity() const {
+@@ -378,6 +378,7 @@ public: // Offset accessors for the translator.
+   X(prologueTable);
+   X(maybeIntercepted);
+   X(maxStackCells);
++  X(funcBody);
+ #undef X
+ 
+ private:
+@@ -423,8 +424,8 @@ private:
+ 
+ private:
+   void setFullName();
+-  void init(int numParams);
+-  void initPrologues(int numParams);
++  void init(int numParams, bool isGenerator);
++  void initPrologues(int numParams, bool isGenerator);
+   void appendParam(bool ref, const ParamInfo& info,
+                    std::vector<ParamInfo>& pBuilder);
+   void allocVarId(const StringData* name);
+@@ -464,9 +465,7 @@ private:
+                                  // method
+   // TODO(#1114385) intercept should work via invalidation.
+   mutable char m_maybeIntercepted; // -1, 0, or 1.  Accessed atomically.
+-public:
+   unsigned char* volatile m_funcBody;  // Accessed from assembly.
+-private:
+   // This must be the last field declared in this structure
+   // and the Func class should not be inherited from.
+   unsigned char* volatile m_prologueTable[kNumFixedPrologues];
+diff --git a/src/runtime/vm/translator/fixup.cpp b/src/runtime/vm/translator/fixup.cpp
+index 2cc4b94b7f..11936d145e 100644
+--- a/src/runtime/vm/translator/fixup.cpp
++++ b/src/runtime/vm/translator/fixup.cpp
+@@ -46,7 +46,7 @@ void* FixupMapUnitTest::reader(void* that) {
+   const StringData* sd = StringData::GetStaticString("test");
+   // ar2: a mock actrec, requires a Func, which can't be builtin.
+   Unit u;
+-  Func f(u, 1, 1, 1, 0, 0, sd, AttrNone, true, NULL, 0);
++  Func f(u, 1, 1, 1, 0, 0, sd, AttrNone, true, NULL, 0, false);
+   ActRec ar2;
+   ar2.m_savedRip = 0xdeadbeef;
+   ar2.m_savedRbp = 0;
+diff --git a/src/runtime/vm/translator/translator-inline.h b/src/runtime/vm/translator/translator-inline.h
+index 63480ea157..27ecd7b7e2 100644
+--- a/src/runtime/vm/translator/translator-inline.h
++++ b/src/runtime/vm/translator/translator-inline.h
+@@ -93,6 +93,7 @@ struct VMRegAnchor : private boost::noncopyable {
+ 
+     const Func* prevF = ((ActRec*)(ar->m_savedRbp))->m_func;
+     vmsp() = (TypedValue*)ar - numArgs;
++    ASSERT(g_vmContext->m_stack.isValidAddress((uintptr_t)vmsp()));
+     vmpc() = prevF->unit()->at(prevF->base() + ar->m_soff);
+     if (atFCall) {
+       // VMExecutionContext::doFCall expects vmfp to be the caller's
+diff --git a/src/runtime/vm/translator/translator-x64-helpers.cpp b/src/runtime/vm/translator/translator-x64-helpers.cpp
+index abfb4a5696..4c7abc41a9 100644
+--- a/src/runtime/vm/translator/translator-x64-helpers.cpp
++++ b/src/runtime/vm/translator/translator-x64-helpers.cpp
+@@ -153,6 +153,28 @@ asm (
+   "ud2\n"
+ );
+ 
++asm (
++  ".byte 0\n"
++  ".align 16\n"
++  ".globl __contEnterHelperThunk\n"
++"__contEnterHelperThunk:\n"
++#ifdef HHVM
++  // The generator body's AR is in rStashedAR. rVmFp still points to the frame
++  // above the generator. The prologue is responsible for setting rVmFp. Even
++  // if we can't get a prologue, funcBodyHelper syncs the new FP, and the
++  // "resume helper" sets the hardward FP from that.
++  "mov %r15, %rdi\n"
++  "call funcBodyHelper\n"
++  "jmp *%rax\n"
++#endif
++  "ud2\n"
++);
++
++/*
++ * Two different "function"-entry paths come through here: entering functions
++ * via FCallArray, and entering generator bodies. The common element is that
++ * neither requires different entry points for different callsite arities.
++ */
+ TCA funcBodyHelper(ActRec* fp) {
+   g_vmContext->m_fp = fp;
+   g_vmContext->m_stack.top() = sp;
+@@ -177,11 +199,23 @@ TCA funcBodyHelper(ActRec* fp) {
+   tl_regState = REGSTATE_CLEAN;
+   Func* func = const_cast<Func*>(fp->m_func);
+   SrcKey sk(func, func->base());
+-  TCA tca = tx64->getCallArrayProlog(func);
++
++  TCA tca;
++  if (func->isGenerator()) {
++    ASSERT(nargs == 1);
++    tca = tx64->funcPrologue(func, nargs);
++  } else {
++    tca = tx64->getCallArrayProlog(func);
++  }
++
+   if (tca) {
+     func->setFuncBody(tca);
+   } else {
+-    tca = Translator::Get()->getResumeHelper();
++    if (func->isGenerator()) {
++      tca = Translator::Get()->getResumeHelperRet();
++    } else {
++      tca = Translator::Get()->getResumeHelper();
++    }
+   }
+   tl_regState = REGSTATE_DIRTY;
+   return tca;
+diff --git a/src/runtime/vm/translator/translator-x64.cpp b/src/runtime/vm/translator/translator-x64.cpp
+index 87c827ae01..6658ae87f2 100644
+--- a/src/runtime/vm/translator/translator-x64.cpp
++++ b/src/runtime/vm/translator/translator-x64.cpp
+@@ -2164,13 +2164,13 @@ static void raiseMissingArgument(int idx, const char* name) {
+ 
+ SrcKey
+ TranslatorX64::emitPrologue(Func* func, int nPassed) {
+-  ASSERT(!func->isGenerator());
+   int numParams = func->numParams();
+   const Func::ParamInfoVec& paramInfo = func->params();
+   ASSERT(IMPLIES(func->maybeIntercepted() == -1,
+                  m_interceptsEnabled));
+   if (m_interceptsEnabled &&
+       !func->isPseudoMain() &&
++      !func->isGenerator() &&
+       (RuntimeOption::EvalJitEnableRenameFunction ||
+        func->attrs() & AttrDynamicInvoke)) {
+     emitInterceptPrologue(func);
+@@ -2178,6 +2178,7 @@ TranslatorX64::emitPrologue(Func* func, int nPassed) {
+ 
+   Offset dvInitializer = InvalidAbsoluteOffset;
+ 
++  ASSERT(IMPLIES(func->isGenerator(), nPassed == numParams));
+   if (nPassed > numParams) {
+     // Too many args; a weird case, so just callout. Stash ar
+     // somewhere callee-saved.
+@@ -2221,7 +2222,7 @@ TranslatorX64::emitPrologue(Func* func, int nPassed) {
+   // them alone here.
+   int numUninitLocals = func->numLocals() - numParams;
+   ASSERT(numUninitLocals >= 0);
+-  if (numUninitLocals > 0) {
++  if (numUninitLocals > 0 && !func->isGenerator()) {
+     SpaceRecorder sr("_InitializeLocals", a);
+ 
+     // If there are too many locals, then emitting a loop to initialize locals
+@@ -2263,7 +2264,10 @@ TranslatorX64::emitPrologue(Func* func, int nPassed) {
+ 
+   // Move rVmSp to the right place: just past all locals
+   int frameCells = func->numSlotsInFrame();
+-  emitLea(a, rVmFp, -cellsToBytes(frameCells), rVmSp);
++  if (!func->isGenerator()) {
++    emitLea(a, rVmFp, -cellsToBytes(frameCells), rVmSp);
++  }
++
+   const Opcode* destPC = func->unit()->entry() + func->base();
+   if (dvInitializer != InvalidAbsoluteOffset) {
+     // dispatch to funclet.
+@@ -3157,6 +3161,7 @@ TranslatorX64::enterTC(SrcKey sk) {
+     enterTCHelper(vmsp(), vmfp(), start, &info, vmFirstAR(),
+                   tl_targetCaches);
+     asm volatile("" : : : "rbx","r12","r13","r14","r15");
++    ASSERT(g_vmContext->m_stack.isValidAddress((uintptr_t)vmsp()));
+ 
+     tl_regState = REGSTATE_CLEAN; // Careful: pc isn't sync'ed yet.
+     TRACE(1, "enterTC: %p fp%p sp%p } return\n", start,
+@@ -7387,40 +7392,28 @@ void TranslatorX64::translateContEnter(const Tracelet& t,
+   // We're about to execute the generator body, which uses regs
+   syncOutputs(i);
+ 
+-  ScratchReg scratch(m_regMap);
+-  ScratchReg retIP(m_regMap);
+-
+-  a.    loadq  (rVmFp[AROFF(m_this)], r(scratch));
+-  a.    loadq  (r(scratch)[CONTOFF(m_arPtr)], r(scratch));
+-  // rScratch == cont->actRec()
++  a.    loadq  (rVmFp[AROFF(m_this)], rStashedAR);
++  a.    loadq  (rStashedAR[CONTOFF(m_arPtr)], rStashedAR);
+ 
+   // Frame linkage.
+   int32_t returnOffset = nextSrcKey(t, i).offset() - curFunc()->base();
+-  a.    storel (returnOffset, r(scratch)[AROFF(m_soff)]);
+-  StoreImmPatcher patchIP(a, (uint64_t)a.code.frontier, r(retIP),
+-                          AROFF(m_savedRip), r(scratch));
+-  a.    storeq (rVmFp, r(scratch)[AROFF(m_savedRbp)]);
++  a.    storel (returnOffset, rStashedAR[AROFF(m_soff)]);
++  a.    storeq (rVmFp, rStashedAR[AROFF(m_savedRbp)]);
+ 
+-  a.    movq   (r(scratch), rVmFp);
++  // We're between tracelets; hardcode the register
++  a.    loadq  (rStashedAR[AROFF(m_func)], rax);
++  a.    loadq  (rax[Func::funcBodyOff()], rax);
+ 
+-  // Load func and get its body
+-  a.    loadq  (rVmFp[AROFF(m_func)], r(scratch));
+-  a.    loadq  (r(scratch)[offsetof(Func, m_funcBody)], r(scratch));
+-  a.    jmp    (r(scratch));
+-
+-  patchIP.patch(uint64(a.code.frontier));
++  a.    call   (rax);
+ }
+ 
+ void TranslatorX64::translateContExit(const Tracelet& t,
+                                       const NormalizedInstruction& i) {
+   syncOutputs(i);
+ 
+-  RegSet scratchRegs = kScratchCrossTraceRegs;
+-  DumbScratchReg rRetAddr(scratchRegs);
+-  a.    loadq (rVmFp[AROFF(m_savedRip)], r64(rRetAddr));
++  a.    push  (rVmFp[AROFF(m_savedRip)]);
+   a.    loadq (rVmFp[AROFF(m_savedRbp)], rVmFp);
+-  a.    jmp   (r64(rRetAddr));
+-  a.    ud2   ();
++  a.    ret   ();
+ }
+ 
+ void TranslatorX64::translateContDone(const Tracelet& t,
+diff --git a/src/runtime/vm/translator/translator-x64.h b/src/runtime/vm/translator/translator-x64.h
+index 48e845c04c..8340d0e7ec 100644
+--- a/src/runtime/vm/translator/translator-x64.h
++++ b/src/runtime/vm/translator/translator-x64.h
+@@ -1106,6 +1106,7 @@ const size_t kMaxNumTrampolines = kTrampolinesBlockSize /
+ 
+ void fcallHelperThunk() asm ("__fcallHelperThunk");
+ void funcBodyHelperThunk() asm ("__funcBodyHelperThunk");
++void contEnterHelperThunk() asm ("__contEnterHelperThunk");
+ 
+ // These could be static but are used in hopt/codegen.cpp
+ void raiseUndefVariable(StringData* nm);
+diff --git a/src/runtime/vm/unit.cpp b/src/runtime/vm/unit.cpp
+index f673f704a5..df7c9a5f24 100644
+--- a/src/runtime/vm/unit.cpp
++++ b/src/runtime/vm/unit.cpp
+@@ -2155,10 +2155,11 @@ void UnitEmitter::recordFunction(FuncEmitter* fe) {
+ Func* UnitEmitter::newFunc(const FuncEmitter* fe, Unit& unit, Id id, int line1,
+                            int line2, Offset base, Offset past,
+                            const StringData* name, Attr attrs, bool top,
+-                           const StringData* docComment, int numParams) {
++                           const StringData* docComment, int numParams,
++                           bool isGenerator) {
+   Func* f = new (Func::allocFuncMem(name, numParams))
+     Func(unit, id, line1, line2, base, past, name, attrs,
+-         top, docComment, numParams);
++         top, docComment, numParams, isGenerator);
+   m_fMap[fe] = f;
+   return f;
+ }
+@@ -2167,10 +2168,11 @@ Func* UnitEmitter::newFunc(const FuncEmitter* fe, Unit& unit,
+                            PreClass* preClass, int line1, int line2,
+                            Offset base, Offset past,
+                            const StringData* name, Attr attrs, bool top,
+-                           const StringData* docComment, int numParams) {
++                           const StringData* docComment, int numParams,
++                           bool isGenerator) {
+   Func* f = new (Func::allocFuncMem(name, numParams))
+     Func(unit, preClass, line1, line2, base, past, name,
+-         attrs, top, docComment, numParams);
++         attrs, top, docComment, numParams, isGenerator);
+   m_fMap[fe] = f;
+   return f;
+ }
+diff --git a/src/runtime/vm/unit.h b/src/runtime/vm/unit.h
+index 01c596c116..4d7fa92fd2 100644
+--- a/src/runtime/vm/unit.h
++++ b/src/runtime/vm/unit.h
+@@ -733,11 +733,13 @@ class UnitEmitter {
+   Func* newFunc(const FuncEmitter* fe, Unit& unit, Id id, int line1, int line2,
+                 Offset base, Offset past,
+                 const StringData* name, Attr attrs, bool top,
+-                const StringData* docComment, int numParams);
++                const StringData* docComment, int numParams,
++                bool isGenerator);
+   Func* newFunc(const FuncEmitter* fe, Unit& unit, PreClass* preClass,
+                 int line1, int line2, Offset base, Offset past,
+                 const StringData* name, Attr attrs, bool top,
+-                const StringData* docComment, int numParams);
++                const StringData* docComment, int numParams,
++                bool isGenerator);
+   Unit* create();
+   void returnSeen() { m_returnSeen = true; }
+   void pushMergeableClass(PreClassEmitter* e);
+

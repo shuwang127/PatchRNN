@@ -1,0 +1,58 @@
+commit be405411f712489f2f780ab085e1069e8fb85f19
+Author: Stefan Berger <stefanb@linux.vnet.ibm.com>
+Date:   Tue Jan 17 22:07:30 2012 -0500
+
+    tpm: fix (ACPI S3) suspend regression
+    
+    This patch fixes an (ACPI S3) suspend regression introduced in commit
+    68d6e6713fcb ("tpm: Introduce function to poll for result of self test")
+    and occurring with an Infineon TPM and tpm_tis and tpm_infineon drivers
+    active.
+    
+    The suspend problem occurred if the TPM was disabled and/or deactivated
+    and therefore the TPM_PCRRead checking the result of the (asynchronous)
+    self test returned an error code which then caused the tpm_tis driver to
+    become inactive and this then seemed to have negatively influenced the
+    suspend support by the tpm_infineon driver...  Besides that the tpm_tis
+    drive may stay active even if the TPM is disabled and/or deactivated.
+    
+    Signed-off-by: Stefan Berger <stefanb@linux.vnet.ibm.com>
+    Tested-by: Rafael J. Wysocki <rjw@sisk.pl>
+    Acked-by: Rajiv Andrade <srajiv@linux.vnet.ibm.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/char/tpm/tpm.c b/drivers/char/tpm/tpm.c
+index 6a8771f47a55..32362cf35b8d 100644
+--- a/drivers/char/tpm/tpm.c
++++ b/drivers/char/tpm/tpm.c
+@@ -846,6 +846,15 @@ int tpm_do_selftest(struct tpm_chip *chip)
+ 
+ 	do {
+ 		rc = __tpm_pcr_read(chip, 0, digest);
++		if (rc == TPM_ERR_DISABLED || rc == TPM_ERR_DEACTIVATED) {
++			dev_info(chip->dev,
++				 "TPM is disabled/deactivated (0x%X)\n", rc);
++			/* TPM is disabled and/or deactivated; driver can
++			 * proceed and TPM does handle commands for
++			 * suspend/resume correctly
++			 */
++			return 0;
++		}
+ 		if (rc != TPM_WARN_DOING_SELFTEST)
+ 			return rc;
+ 		msleep(delay_msec);
+diff --git a/drivers/char/tpm/tpm.h b/drivers/char/tpm/tpm.h
+index 8c1df302fbb6..010547138281 100644
+--- a/drivers/char/tpm/tpm.h
++++ b/drivers/char/tpm/tpm.h
+@@ -39,6 +39,9 @@ enum tpm_addr {
+ };
+ 
+ #define TPM_WARN_DOING_SELFTEST 0x802
++#define TPM_ERR_DEACTIVATED     0x6
++#define TPM_ERR_DISABLED        0x7
++
+ #define TPM_HEADER_SIZE		10
+ extern ssize_t tpm_show_pubek(struct device *, struct device_attribute *attr,
+ 				char *);
+

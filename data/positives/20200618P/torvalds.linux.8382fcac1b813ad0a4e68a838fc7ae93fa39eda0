@@ -1,0 +1,42 @@
+commit 8382fcac1b813ad0a4e68a838fc7ae93fa39eda0
+Author: Eric W. Biederman <ebiederm@xmission.com>
+Date:   Thu Dec 20 19:26:06 2012 -0800
+
+    pidns: Outlaw thread creation after unshare(CLONE_NEWPID)
+    
+    The sequence:
+    unshare(CLONE_NEWPID)
+    clone(CLONE_THREAD|CLONE_SIGHAND|CLONE_VM)
+    
+    Creates a new process in the new pid namespace without setting
+    pid_ns->child_reaper.  After forking this results in a NULL
+    pointer dereference.
+    
+    Avoid this and other nonsense scenarios that can show up after
+    creating a new pid namespace with unshare by adding a new
+    check in copy_prodcess.
+    
+    Pointed-out-by:  Oleg Nesterov <oleg@redhat.com>
+    Acked-by:  Oleg Nesterov <oleg@redhat.com>
+    Signed-off-by: "Eric W. Biederman" <ebiederm@xmission.com>
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index a31b823b3c2d..65ca6d27f24e 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1166,6 +1166,14 @@ static struct task_struct *copy_process(unsigned long clone_flags,
+ 				current->signal->flags & SIGNAL_UNKILLABLE)
+ 		return ERR_PTR(-EINVAL);
+ 
++	/*
++	 * If the new process will be in a different pid namespace
++	 * don't allow the creation of threads.
++	 */
++	if ((clone_flags & (CLONE_VM|CLONE_NEWPID)) &&
++	    (task_active_pid_ns(current) != current->nsproxy->pid_ns))
++		return ERR_PTR(-EINVAL);
++
+ 	retval = security_task_create(clone_flags);
+ 	if (retval)
+ 		goto fork_out;
+

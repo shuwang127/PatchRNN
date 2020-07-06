@@ -1,0 +1,128 @@
+commit 8ee0789b8224627a28e7c42447bb6504f96ea9dc
+Author: Jose Diaz <josediazplay@gmail.com>
+Date:   Tue Oct 31 18:26:05 2017 +0100
+
+    Moved buffers to heap space
+
+diff --git a/libr/util/file.c b/libr/util/file.c
+index a6bf5b396..66376aa6d 100644
+--- a/libr/util/file.c
++++ b/libr/util/file.c
+@@ -905,10 +905,14 @@ R_API int r_file_mkstemp(const char *prefix, char **oname) {
+ 	int h = -1;
+ 	char *path = r_file_tmpdir ();
+ #if __WINDOWS__
+-	TCHAR name[MAX_PATH + 1];
++	LPTSTR name = NULL;
+ 	LPTSTR path_ = r_sys_conv_char_to_w32 (path);
+ 	LPTSTR prefix_ = r_sys_conv_char_to_w32 (prefix);
+ 
++	name = (LPTSTR)malloc (sizeof (TCHAR) * (MAX_PATH + 1));
++	if (!name) {
++		goto err_r_file_mkstemp;
++	}
+ 	if (GetTempFileName (path_, prefix_, 0, name)) {
+ 		char *name_ = r_sys_conv_w32_to_char (name);
+ 		h = r_sandbox_open (name_, O_RDWR|O_EXCL|O_BINARY, 0644);
+@@ -923,6 +927,8 @@ R_API int r_file_mkstemp(const char *prefix, char **oname) {
+ 			free (name_);
+ 		}	
+ 	}
++err_r_file_mkstemp:
++	free (name);
+ 	free (path_);
+ 	free (prefix_);
+ #else
+@@ -942,10 +948,14 @@ R_API int r_file_mkstemp(const char *prefix, char **oname) {
+ 
+ R_API char *r_file_tmpdir() {
+ #if __WINDOWS__
+-	TCHAR tmpdir[MAX_PATH + 1];
++	LPTSTR tmpdir;
+ 	char *path = NULL;
+ 	DWORD len = 0;
+ 
++	tmpdir = (LPTSTR)malloc (sizeof (TCHAR) * (MAX_PATH + 1));
++	if (!tmpdir) {
++		return NULL;
++	}
+ 	if ((len = GetTempPath (MAX_PATH + 1, tmpdir)) == 0) {
+ 		path = r_sys_getenv ("TEMP");
+ 		if (!path) {
+@@ -956,10 +966,11 @@ R_API char *r_file_tmpdir() {
+ 		DWORD (WINAPI *glpn)(LPCTSTR, LPCTSTR, DWORD) = r_lib_dl_sym (GetModuleHandle (TEXT ("kernel32.dll")), W32_TCALL("GetLongPathName"));
+ 		if (glpn) {
+ 			// Windows XP sometimes returns short path name
+-			glpn (tmpdir, tmpdir, sizeof (tmpdir));
++			glpn (tmpdir, tmpdir, MAX_PATH + 1);
+ 		}
+ 		path = r_sys_conv_w32_to_char (tmpdir);
+ 	}
++	free (tmpdir);
+ 	// Windows 7, stat() function fail if tmpdir ends with '\\'
+ 	if (path) {
+ 		int path_len = strlen (path);
+diff --git a/libr/util/sys.c b/libr/util/sys.c
+index ac8998e02..6cb89f34e 100644
+--- a/libr/util/sys.c
++++ b/libr/util/sys.c
+@@ -54,6 +54,7 @@ extern char **environ;
+ #if __WINDOWS__ && !defined(__CYGWIN__)
+ # include <io.h>
+ # include <winbase.h>
++#define TMP_BUFSIZE	4096
+ #ifdef _MSC_VER
+ #include <psapi.h>
+ #include <io.h>
+@@ -379,26 +380,38 @@ R_API int r_sys_crash_handler(const char *cmd) {
+ 
+ R_API char *r_sys_getenv(const char *key) {
+ #if __WINDOWS__ && !__CYGWIN__
+-	TCHAR envbuf[4096];
+ 	DWORD dwRet;
+-	LPTSTR key_;
++	LPTSTR envbuf = NULL, key_ = NULL;
++	char *val = NULL;
+ 
+ 	if (!key) {
+ 		return NULL;
+ 	}
++	envbuf = (LPTSTR)malloc (sizeof (TCHAR) * TMP_BUFSIZE);
++	if (!envbuf) {
++		goto err_r_sys_get_env;
++	}
+ 	key_ = r_sys_conv_char_to_w32 (key);
+-	dwRet = GetEnvironmentVariable (key_, envbuf, sizeof (envbuf) / sizeof (TCHAR));
+-	free (key_);
++	dwRet = GetEnvironmentVariable (key_, envbuf, TMP_BUFSIZE);
+ 	if (dwRet == 0) {
+-		/* Variable not found. */
+-		return NULL;
+-	}
+-	if (dwRet == sizeof(envbuf)) {
+-		/* The contents of envbuf are undefined, so return NULL */
+-		eprintf ("Buffer too small to read `%s' environment variable.\n", key);
+-		return NULL;
++		if (GetLastError () == ERROR_ENVVAR_NOT_FOUND) {
++			goto err_r_sys_get_env;
++		}
++	} else if (TMP_BUFSIZE < dwRet) {
++		envbuf = (LPTSTR)realloc (envbuf, dwRet * sizeof (TCHAR));
++		if (!envbuf) {
++			goto err_r_sys_get_env;
++		}
++		dwRet = GetEnvironmentVariable (key_, envbuf, dwRet);
++		if (!dwRet) {
++			goto err_r_sys_get_env;
++		}
+ 	}
+-	return r_sys_conv_w32_to_char_l (envbuf, (int)dwRet);
++	val = r_sys_conv_w32_to_char_l (envbuf, (int)dwRet);
++err_r_sys_get_env:
++	free (key_);
++	free (envbuf);
++	return val;
+ #else
+ 	char *b;
+ 	if (!key) {
+

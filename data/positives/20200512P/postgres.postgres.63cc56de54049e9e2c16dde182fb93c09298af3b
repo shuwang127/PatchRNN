@@ -1,0 +1,161 @@
+commit 63cc56de54049e9e2c16dde182fb93c09298af3b
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+Date:   Mon Dec 10 22:54:12 2001 +0000
+
+    Suppress subquery pullup and pushdown when the subquery has any
+    set-returning functions in its target list.  This ensures that we
+    won't rewrite the query in a way that places set-returning functions
+    into quals (WHERE clauses).  Cf. bug reports from Joe Conway.
+
+diff --git a/src/backend/optimizer/path/allpaths.c b/src/backend/optimizer/path/allpaths.c
+index 782990d0d2..9368723188 100644
+--- a/src/backend/optimizer/path/allpaths.c
++++ b/src/backend/optimizer/path/allpaths.c
+@@ -8,7 +8,7 @@
+  *
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/optimizer/path/allpaths.c,v 1.82 2001/11/05 17:46:25 momjian Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/optimizer/path/allpaths.c,v 1.83 2001/12/10 22:54:12 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -305,7 +305,14 @@ set_subquery_pathlist(Query *root, RelOptInfo *rel,
+ 	 * checking that seems more work than it's worth.  In any case, a
+ 	 * plain DISTINCT is safe to push down past.)
+ 	 *
+-	 * 3. We do not push down clauses that contain subselects, mainly because
++	 * 3. If the subquery has any ITER nodes (ie, functions returning sets)
++	 * in its target list, we do not push down any quals, since the quals
++	 * might refer to those tlist items, which would mean we'd introduce
++	 * functions-returning-sets into the subquery's WHERE/HAVING quals.
++	 * (It'd be sufficient to not push down quals that refer to those
++	 * particular tlist items, but that's much clumsier to check.)
++	 *
++	 * 4. We do not push down clauses that contain subselects, mainly because
+ 	 * I'm not sure it will work correctly (the subplan hasn't yet
+ 	 * transformed sublinks to subselects).
+ 	 *
+@@ -318,7 +325,8 @@ set_subquery_pathlist(Query *root, RelOptInfo *rel,
+ 	if (subquery->setOperations == NULL &&
+ 		subquery->limitOffset == NULL &&
+ 		subquery->limitCount == NULL &&
+-		!has_distinct_on_clause(subquery))
++		!has_distinct_on_clause(subquery) &&
++		!contain_iter_clause((Node *) subquery->targetList))
+ 	{
+ 		/* OK to consider pushing down individual quals */
+ 		List	   *upperrestrictlist = NIL;
+diff --git a/src/backend/optimizer/plan/planner.c b/src/backend/optimizer/plan/planner.c
+index 1b71ecbef5..eb92c3d3af 100644
+--- a/src/backend/optimizer/plan/planner.c
++++ b/src/backend/optimizer/plan/planner.c
+@@ -8,7 +8,7 @@
+  *
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/optimizer/plan/planner.c,v 1.113 2001/11/05 17:46:26 momjian Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/optimizer/plan/planner.c,v 1.114 2001/12/10 22:54:12 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -461,6 +461,15 @@ is_simple_subquery(Query *subquery)
+ 		subquery->limitCount)
+ 		return false;
+ 
++	/*
++	 * Don't pull up a subquery that has any set-returning functions in
++	 * its targetlist.  Otherwise we might well wind up inserting
++	 * set-returning functions into places where they mustn't go,
++	 * such as quals of higher queries.
++	 */
++	if (contain_iter_clause((Node *) subquery->targetList))
++		return false;
++
+ 	/*
+ 	 * Hack: don't try to pull up a subquery with an empty jointree.
+ 	 * query_planner() will correctly generate a Result plan for a
+diff --git a/src/backend/optimizer/util/clauses.c b/src/backend/optimizer/util/clauses.c
+index d00867d648..b3d5043356 100644
+--- a/src/backend/optimizer/util/clauses.c
++++ b/src/backend/optimizer/util/clauses.c
+@@ -8,7 +8,7 @@
+  *
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/optimizer/util/clauses.c,v 1.91 2001/11/05 17:46:26 momjian Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/optimizer/util/clauses.c,v 1.92 2001/12/10 22:54:12 tgl Exp $
+  *
+  * HISTORY
+  *	  AUTHOR			DATE			MAJOR EVENT
+@@ -47,6 +47,7 @@ typedef struct
+ 
+ static bool contain_agg_clause_walker(Node *node, void *context);
+ static bool pull_agg_clause_walker(Node *node, List **listptr);
++static bool contain_iter_clause_walker(Node *node, void *context);
+ static bool contain_subplans_walker(Node *node, void *context);
+ static bool pull_subplans_walker(Node *node, List **listptr);
+ static bool check_subplans_for_ungrouped_vars_walker(Node *node,
+@@ -450,6 +451,39 @@ pull_agg_clause_walker(Node *node, List **listptr)
+ }
+ 
+ 
++/*****************************************************************************
++ *		Iter clause manipulation
++ *****************************************************************************/
++
++/*
++ * contain_iter_clause
++ *	  Recursively search for Iter nodes within a clause.
++ *
++ *	  Returns true if any Iter found.
++ *
++ * XXX Iter is a crock.  It'd be better to look directly at each function
++ * or operator to see if it can return a set.  However, that would require
++ * a lot of extra cycles as things presently stand.  The return-type info
++ * for function and operator nodes should be extended to include whether
++ * the return is a set.
++ */
++bool
++contain_iter_clause(Node *clause)
++{
++	return contain_iter_clause_walker(clause, NULL);
++}
++
++static bool
++contain_iter_clause_walker(Node *node, void *context)
++{
++	if (node == NULL)
++		return false;
++	if (IsA(node, Iter))
++		return true;			/* abort the tree traversal and return
++								 * true */
++	return expression_tree_walker(node, contain_iter_clause_walker, context);
++}
++
+ /*****************************************************************************
+  *		Subplan clause manipulation
+  *****************************************************************************/
+diff --git a/src/include/optimizer/clauses.h b/src/include/optimizer/clauses.h
+index 49272e3e7c..4cbaf762ca 100644
+--- a/src/include/optimizer/clauses.h
++++ b/src/include/optimizer/clauses.h
+@@ -7,7 +7,7 @@
+  * Portions Copyright (c) 1996-2001, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+- * $Id: clauses.h,v 1.49 2001/11/05 17:46:34 momjian Exp $
++ * $Id: clauses.h,v 1.50 2001/12/10 22:54:12 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -42,6 +42,8 @@ extern List *make_ands_implicit(Expr *clause);
+ extern bool contain_agg_clause(Node *clause);
+ extern List *pull_agg_clause(Node *clause);
+ 
++extern bool contain_iter_clause(Node *clause);
++
+ extern bool contain_subplans(Node *clause);
+ extern List *pull_subplans(Node *clause);
+ extern void check_subplans_for_ungrouped_vars(Query *query);
+

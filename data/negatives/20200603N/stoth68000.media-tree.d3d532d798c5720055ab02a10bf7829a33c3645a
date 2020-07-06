@@ -1,0 +1,132 @@
+commit d3d532d798c5720055ab02a10bf7829a33c3645a
+Author: Steven Rostedt (VMware) <rostedt@goodmis.org>
+Date:   Tue Apr 4 16:44:43 2017 -0400
+
+    ftrace: Have unregister_ftrace_function_probe_func() return a value
+    
+    Currently unregister_ftrace_function_probe_func() is a void function. It
+    does not give any feedback if an error occurred or no item was found to
+    remove and nothing was done.
+    
+    Change it to return status and success if it removed something. Also update
+    the callers to return that feedback to the user.
+    
+    Signed-off-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
+
+diff --git a/kernel/trace/ftrace.c b/kernel/trace/ftrace.c
+index 5c8d8eea9e7c..cbae7fb1be15 100644
+--- a/kernel/trace/ftrace.c
++++ b/kernel/trace/ftrace.c
+@@ -4102,7 +4102,7 @@ register_ftrace_function_probe(char *glob, struct ftrace_probe_ops *ops,
+ 	return count;
+ }
+ 
+-void
++int
+ unregister_ftrace_function_probe_func(char *glob, struct ftrace_probe_ops *ops)
+ {
+ 	struct ftrace_ops_hash old_hash_ops;
+@@ -4131,7 +4131,7 @@ unregister_ftrace_function_probe_func(char *glob, struct ftrace_probe_ops *ops)
+ 
+ 		/* we do not support '!' for function probes */
+ 		if (WARN_ON(not))
+-			return;
++			return -EINVAL;
+ 	}
+ 
+ 	mutex_lock(&trace_probe_ops.func_hash->regex_lock);
+@@ -4140,9 +4140,9 @@ unregister_ftrace_function_probe_func(char *glob, struct ftrace_probe_ops *ops)
+ 	/* Probes only have filters */
+ 	old_hash_ops.notrace_hash = NULL;
+ 
++	ret = -ENOMEM;
+ 	hash = alloc_and_copy_ftrace_hash(FTRACE_HASH_DEFAULT_BITS, *orig_hash);
+ 	if (!hash)
+-		/* Hmm, should report this somehow */
+ 		goto out_unlock;
+ 
+ 	INIT_LIST_HEAD(&free_list);
+@@ -4173,6 +4173,13 @@ unregister_ftrace_function_probe_func(char *glob, struct ftrace_probe_ops *ops)
+ 			list_add(&entry->free_list, &free_list);
+ 		}
+ 	}
++
++	/* Nothing found? */
++	if (list_empty(&free_list)) {
++		ret = -EINVAL;
++		goto out_unlock;
++	}
++
+ 	mutex_lock(&ftrace_lock);
+ 	disabled = __disable_ftrace_function_probe();
+ 	/*
+@@ -4198,6 +4205,7 @@ unregister_ftrace_function_probe_func(char *glob, struct ftrace_probe_ops *ops)
+  out_unlock:
+ 	mutex_unlock(&trace_probe_ops.func_hash->regex_lock);
+ 	free_ftrace_hash(hash);
++	return ret;
+ }
+ 
+ static LIST_HEAD(ftrace_commands);
+diff --git a/kernel/trace/trace.c b/kernel/trace/trace.c
+index 7a4d578d8887..64a4418a5106 100644
+--- a/kernel/trace/trace.c
++++ b/kernel/trace/trace.c
+@@ -6829,10 +6829,8 @@ ftrace_trace_snapshot_callback(struct ftrace_hash *hash,
+ 
+ 	ops = param ? &snapshot_count_probe_ops :  &snapshot_probe_ops;
+ 
+-	if (glob[0] == '!') {
+-		unregister_ftrace_function_probe_func(glob+1, ops);
+-		return 0;
+-	}
++	if (glob[0] == '!')
++		return unregister_ftrace_function_probe_func(glob+1, ops);
+ 
+ 	if (!param)
+ 		goto out_reg;
+diff --git a/kernel/trace/trace.h b/kernel/trace/trace.h
+index 86aa5a2222ba..31d80bff9ee6 100644
+--- a/kernel/trace/trace.h
++++ b/kernel/trace/trace.h
+@@ -963,7 +963,7 @@ void free_ftrace_func_mapper(struct ftrace_func_mapper *mapper,
+ extern int
+ register_ftrace_function_probe(char *glob, struct ftrace_probe_ops *ops,
+ 			      void *data);
+-extern void
++extern int
+ unregister_ftrace_function_probe_func(char *glob, struct ftrace_probe_ops *ops);
+ 
+ int register_ftrace_command(struct ftrace_func_command *cmd);
+diff --git a/kernel/trace/trace_events.c b/kernel/trace/trace_events.c
+index 37902107c44f..9e07a5b3869b 100644
+--- a/kernel/trace/trace_events.c
++++ b/kernel/trace/trace_events.c
+@@ -2652,8 +2652,7 @@ event_enable_func(struct ftrace_hash *hash,
+ 		ops = param ? &event_disable_count_probe_ops : &event_disable_probe_ops;
+ 
+ 	if (glob[0] == '!') {
+-		unregister_ftrace_function_probe_func(glob+1, ops);
+-		ret = 0;
++		ret = unregister_ftrace_function_probe_func(glob+1, ops);
+ 		goto out;
+ 	}
+ 
+diff --git a/kernel/trace/trace_functions.c b/kernel/trace/trace_functions.c
+index 56d0fe1e4ea1..dcb4d37ed4bd 100644
+--- a/kernel/trace/trace_functions.c
++++ b/kernel/trace/trace_functions.c
+@@ -586,10 +586,8 @@ ftrace_trace_probe_callback(struct ftrace_probe_ops *ops,
+ 	if (!enable)
+ 		return -EINVAL;
+ 
+-	if (glob[0] == '!') {
+-		unregister_ftrace_function_probe_func(glob+1, ops);
+-		return 0;
+-	}
++	if (glob[0] == '!')
++		return unregister_ftrace_function_probe_func(glob+1, ops);
+ 
+ 	if (!param)
+ 		goto out_reg;
+

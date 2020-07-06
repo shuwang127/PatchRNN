@@ -1,0 +1,80 @@
+commit 30a0dee7806d099c709603e65aa08be0363ea49d
+Author: Julia Lawall <julia@diku.dk>
+Date:   Fri Dec 23 18:39:30 2011 +0100
+
+    drivers/usb/host/isp1760-if.c: introduce missing kfree
+    
+    drvdata needds to be freed before leaving the function in an error case.
+    
+    A simplified version of the semantic match that finds the problem is as
+    follows: (http://coccinelle.lip6.fr)
+    
+    // <smpl>
+    @r exists@
+    local idexpression x;
+    statement S;
+    identifier f1;
+    position p1,p2;
+    expression *ptr != NULL;
+    @@
+    
+    x@p1 = \(kmalloc\|kzalloc\|kcalloc\)(...);
+    ...
+    if (x == NULL) S
+    <... when != x
+         when != if (...) { <+...x...+> }
+    x->f1
+    ...>
+    (
+     return \(0\|<+...x...+>\|ptr\);
+    |
+     return@p2 ...;
+    )
+    
+    @script:python@
+    p1 << r.p1;
+    p2 << r.p2;
+    @@
+    
+    print "* file: %s kmalloc %s return %s" % (p1[0].file,p1[0].line,p2[0].line)
+    // </smpl>
+    
+    Signed-off-by: Julia Lawall <julia@diku.dk>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/usb/host/isp1760-if.c b/drivers/usb/host/isp1760-if.c
+index b605224fb9e3..61de62cdb1dd 100644
+--- a/drivers/usb/host/isp1760-if.c
++++ b/drivers/usb/host/isp1760-if.c
+@@ -56,14 +56,18 @@ static int of_isp1760_probe(struct platform_device *dev)
+ 		return -ENOMEM;
+ 
+ 	ret = of_address_to_resource(dp, 0, &memory);
+-	if (ret)
+-		return -ENXIO;
++	if (ret) {
++		ret = -ENXIO;
++		goto free_data;
++	}
+ 
+ 	res_len = resource_size(&memory);
+ 
+ 	res = request_mem_region(memory.start, res_len, dev_name(&dev->dev));
+-	if (!res)
+-		return -EBUSY;
++	if (!res) {
++		ret = -EBUSY;
++		goto free_data;
++	}
+ 
+ 	if (of_irq_map_one(dp, 0, &oirq)) {
+ 		ret = -ENODEV;
+@@ -125,6 +129,7 @@ static int of_isp1760_probe(struct platform_device *dev)
+ 		gpio_free(drvdata->rst_gpio);
+ release_reg:
+ 	release_mem_region(memory.start, res_len);
++free_data:
+ 	kfree(drvdata);
+ 	return ret;
+ }
+

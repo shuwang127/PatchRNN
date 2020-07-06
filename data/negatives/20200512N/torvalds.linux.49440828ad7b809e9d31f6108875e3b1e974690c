@@ -1,0 +1,132 @@
+commit 49440828ad7b809e9d31f6108875e3b1e974690c
+Author: Steven Rostedt (Red Hat) <rostedt@goodmis.org>
+Date:   Mon Jun 2 23:20:15 2014 -0400
+
+    tools lib traceevent: Add options to function plugin
+    
+    Add the options "parent" and "indent" to the function plugin.
+    
+    When parent is set, the output looks like this:
+    
+    function:             fsnotify_modify <-- vfs_write
+    function:             zone_statistics <-- get_page_from_freelist
+    function:                __inc_zone_state <-- zone_statistics
+    function:                inotify_inode_queue_event <-- fsnotify_modify
+    function:                fsnotify_parent <-- fsnotify_modify
+    function:                __inc_zone_state <-- zone_statistics
+    function:                   __fsnotify_parent <-- fsnotify_parent
+    function:                   inotify_dentry_parent_queue_event <-- fsnotify_parent
+    function:             add_to_page_cache_lru <-- do_read_cache_page
+    
+    When it's not set, it looks like:
+    
+    function:             fsnotify_modify
+    function:             zone_statistics
+    function:                __inc_zone_state
+    function:                inotify_inode_queue_event
+    function:                fsnotify_parent
+    function:                __inc_zone_state
+    function:                   __fsnotify_parent
+    function:                   inotify_dentry_parent_queue_event
+    function:             add_to_page_cache_lru
+    
+    When the otpion "indent" is not set, it looks like this:
+    
+    function:             fsnotify_modify <-- vfs_write
+    function:             zone_statistics <-- get_page_from_freelist
+    function:             __inc_zone_state <-- zone_statistics
+    function:             inotify_inode_queue_event <-- fsnotify_modify
+    function:             fsnotify_parent <-- fsnotify_modify
+    function:             __inc_zone_state <-- zone_statistics
+    function:             __fsnotify_parent <-- fsnotify_parent
+    function:             inotify_dentry_parent_queue_event <-- fsnotify_parent
+    function:             add_to_page_cache_lru <-- do_read_cache_page
+    
+    Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+    Acked-by: Namhyung Kim <namhyung@kernel.org>
+    Link: http://lkml.kernel.org/r/20140603032224.056940410@goodmis.org
+    Signed-off-by: Jiri Olsa <jolsa@kernel.org>
+
+diff --git a/tools/lib/traceevent/plugin_function.c b/tools/lib/traceevent/plugin_function.c
+index 80ba4ff1fe84..a00ec190821a 100644
+--- a/tools/lib/traceevent/plugin_function.c
++++ b/tools/lib/traceevent/plugin_function.c
+@@ -33,6 +33,29 @@ static int cpus = -1;
+ 
+ #define STK_BLK 10
+ 
++struct pevent_plugin_option plugin_options[] =
++{
++	{
++		.name = "parent",
++		.plugin_alias = "ftrace",
++		.description =
++		"Print parent of functions for function events",
++	},
++	{
++		.name = "indent",
++		.plugin_alias = "ftrace",
++		.description =
++		"Try to show function call indents, based on parents",
++		.set = 1,
++	},
++	{
++		.name = NULL,
++	}
++};
++
++static struct pevent_plugin_option *ftrace_parent = &plugin_options[0];
++static struct pevent_plugin_option *ftrace_indent = &plugin_options[1];
++
+ static void add_child(struct func_stack *stack, const char *child, int pos)
+ {
+ 	int i;
+@@ -119,7 +142,8 @@ static int function_handler(struct trace_seq *s, struct pevent_record *record,
+ 
+ 	parent = pevent_find_function(pevent, pfunction);
+ 
+-	index = add_and_get_index(parent, func, record->cpu);
++	if (parent && ftrace_indent->set)
++		index = add_and_get_index(parent, func, record->cpu);
+ 
+ 	trace_seq_printf(s, "%*s", index*3, "");
+ 
+@@ -128,11 +152,13 @@ static int function_handler(struct trace_seq *s, struct pevent_record *record,
+ 	else
+ 		trace_seq_printf(s, "0x%llx", function);
+ 
+-	trace_seq_printf(s, " <-- ");
+-	if (parent)
+-		trace_seq_printf(s, "%s", parent);
+-	else
+-		trace_seq_printf(s, "0x%llx", pfunction);
++	if (ftrace_parent->set) {
++		trace_seq_printf(s, " <-- ");
++		if (parent)
++			trace_seq_printf(s, "%s", parent);
++		else
++			trace_seq_printf(s, "0x%llx", pfunction);
++	}
+ 
+ 	return 0;
+ }
+@@ -141,6 +167,9 @@ int PEVENT_PLUGIN_LOADER(struct pevent *pevent)
+ {
+ 	pevent_register_event_handler(pevent, -1, "ftrace", "function",
+ 				      function_handler, NULL);
++
++	traceevent_plugin_add_options("ftrace", plugin_options);
++
+ 	return 0;
+ }
+ 
+@@ -157,6 +186,8 @@ void PEVENT_PLUGIN_UNLOADER(struct pevent *pevent)
+ 		free(fstack[i].stack);
+ 	}
+ 
++	traceevent_plugin_remove_options(plugin_options);
++
+ 	free(fstack);
+ 	fstack = NULL;
+ 	cpus = -1;
+

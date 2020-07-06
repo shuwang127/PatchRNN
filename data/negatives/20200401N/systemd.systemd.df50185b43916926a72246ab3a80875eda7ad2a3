@@ -1,0 +1,469 @@
+commit df50185b43916926a72246ab3a80875eda7ad2a3
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Wed Jan 4 18:33:36 2012 +0100
+
+    journal: beef up journal output of systemctl and journalctl
+
+diff --git a/src/journal/journalctl.c b/src/journal/journalctl.c
+index e888990f2..17d6a7fc2 100644
+--- a/src/journal/journalctl.c
++++ b/src/journal/journalctl.c
+@@ -37,7 +37,7 @@
+ #include "pager.h"
+ #include "logs-show.h"
+ 
+-static output_mode arg_output = OUTPUT_SHORT;
++static OutputMode arg_output = OUTPUT_SHORT;
+ static bool arg_follow = false;
+ static bool arg_show_all = false;
+ static bool arg_no_pager = false;
+@@ -47,15 +47,15 @@ static bool arg_no_tail = false;
+ static int help(void) {
+ 
+         printf("%s [OPTIONS...] {COMMAND} ...\n\n"
+-               "Send control commands to or query the login manager.\n\n"
++               "Send control commands to or query the journal.\n\n"
+                "  -h --help           Show this help\n"
+                "     --version        Show package version\n"
+                "     --no-pager       Do not pipe output into a pager\n"
+                "  -a --all            Show all properties, including long and unprintable\n"
+                "  -f --follow         Follow journal\n"
+-               "  -n --lines=INTEGER  Lines to show\n"
++               "  -n --lines=INTEGER  Journal entries to show\n"
+                "     --no-tail        Show all lines, even in follow mode\n"
+-               "  -o --output=STRING  Change output mode (short, verbose, export, json)\n",
++               "  -o --output=STRING  Change journal output mode (short, verbose, export, json)\n",
+                program_invocation_short_name);
+ 
+         return 0;
+@@ -109,18 +109,12 @@ static int parse_argv(int argc, char *argv[]) {
+                         break;
+ 
+                 case 'o':
+-                        if (streq(optarg, "short"))
+-                                arg_output = OUTPUT_SHORT;
+-                        else if (streq(optarg, "verbose"))
+-                                arg_output = OUTPUT_VERBOSE;
+-                        else if (streq(optarg, "export"))
+-                                arg_output = OUTPUT_EXPORT;
+-                        else if (streq(optarg, "json"))
+-                                arg_output = OUTPUT_JSON;
+-                        else {
++                        arg_output =  output_mode_from_string(optarg);
++                        if (arg_output < 0) {
+                                 log_error("Unknown output '%s'.", optarg);
+                                 return -EINVAL;
+                         }
++
+                         break;
+ 
+                 case 'a':
+@@ -221,8 +215,6 @@ int main(int argc, char *argv[]) {
+         }
+ 
+         for (;;) {
+-                struct pollfd pollfd;
+-
+                 for (;;) {
+                         if (need_seek) {
+                                 r = sd_journal_next(j);
+@@ -247,16 +239,9 @@ int main(int argc, char *argv[]) {
+                 if (!arg_follow)
+                         break;
+ 
+-                zero(pollfd);
+-                pollfd.fd = fd;
+-                pollfd.events = POLLIN;
+-
+-                if (poll(&pollfd, 1, -1) < 0) {
+-                        if (errno == EINTR)
+-                                break;
+-
+-                        log_error("poll(): %m");
+-                        r = -errno;
++                r = fd_wait_for_event(fd, POLLIN);
++                if (r < 0) {
++                        log_error("Couldn't wait for event: %s", strerror(-r));
+                         goto finish;
+                 }
+ 
+diff --git a/src/journal/sd-journal.c b/src/journal/sd-journal.c
+index 05c0d96ce..fe9208c01 100644
+--- a/src/journal/sd-journal.c
++++ b/src/journal/sd-journal.c
+@@ -1298,7 +1298,7 @@ _public_ int sd_journal_get_monotonic_usec(sd_journal *j, uint64_t *ret, sd_id12
+                         return r;
+ 
+                 if (!sd_id128_equal(id, o->entry.boot_id))
+-                        return -ENOENT;
++                        return -ESTALE;
+         }
+ 
+         *ret = le64toh(o->entry.monotonic);
+diff --git a/src/logs-show.c b/src/logs-show.c
+index d44c50a29..539dfeddb 100644
+--- a/src/logs-show.c
++++ b/src/logs-show.c
+@@ -22,6 +22,7 @@
+ #include <time.h>
+ #include <assert.h>
+ #include <errno.h>
++#include <sys/poll.h>
+ 
+ #include "logs-show.h"
+ #include "log.h"
+@@ -328,44 +329,50 @@ static int (*output_funcs[_OUTPUT_MODE_MAX])(sd_journal*j, unsigned line, bool s
+         [OUTPUT_JSON] = output_json
+ };
+ 
+-int output_journal(sd_journal *j, output_mode mode, unsigned line, bool show_all) {
++int output_journal(sd_journal *j, OutputMode mode, unsigned line, bool show_all) {
++        assert(mode >= 0);
+         assert(mode < _OUTPUT_MODE_MAX);
+ 
+         return output_funcs[mode](j, line, show_all);
+ }
+ 
+-int show_journal_by_service(
+-                const char *service,
+-                output_mode mode,
++int show_journal_by_unit(
++                const char *unit,
++                OutputMode mode,
+                 const char *prefix,
+                 unsigned n_columns,
+                 usec_t not_before,
+                 unsigned how_many,
+-                bool show_all) {
++                bool show_all,
++                bool follow) {
+ 
+         char *m = NULL;
+         sd_journal *j;
+         int r;
+-        unsigned i;
++        int fd;
++        unsigned line = 0;
++        bool need_seek = false;
+ 
+-        assert(service);
++        assert(mode >= 0);
++        assert(mode < _OUTPUT_MODE_MAX);
++        assert(unit);
++
++        if (!endswith(unit, ".service") &&
++            !endswith(unit, ".socket") &&
++            !endswith(unit, ".mount") &&
++            !endswith(unit, ".swap"))
++                return 0;
+ 
+-        if (!endswith(service, ".service") &&
+-            !endswith(service, ".socket") &&
+-            !endswith(service, ".mount") &&
+-            !endswith(service, ".swap"))
++        if (how_many <= 0)
+                 return 0;
+ 
+         if (n_columns <= 0)
+                 n_columns = columns();
+ 
+-        if (how_many <= 0)
+-                how_many = 10;
+-
+         if (!prefix)
+                 prefix = "";
+ 
+-        if (asprintf(&m, "_SYSTEMD_UNIT=%s", service) < 0) {
++        if (asprintf(&m, "_SYSTEMD_UNIT=%s", unit) < 0) {
+                 r = -ENOMEM;
+                 goto finish;
+         }
+@@ -374,6 +381,10 @@ int show_journal_by_service(
+         if (r < 0)
+                 goto finish;
+ 
++        fd = sd_journal_get_fd(j);
++        if (fd < 0)
++                goto finish;
++
+         r = sd_journal_add_match(j, m, strlen(m));
+         if (r < 0)
+                 goto finish;
+@@ -382,23 +393,67 @@ int show_journal_by_service(
+         if (r < 0)
+                 goto finish;
+ 
+-        for (i = 0; i < how_many; i++)
+-                sd_journal_previous(j);
++        r = sd_journal_previous_skip(j, how_many);
++        if (r < 0)
++                goto finish;
+ 
+-        for (i = 0; i < how_many; i++) {
++        if (mode == OUTPUT_JSON) {
++                fputc('[', stdout);
++                fflush(stdout);
++        }
+ 
+-                r = sd_journal_next(j);
+-                if (r < 0)
+-                        goto finish;
++        for (;;) {
++                for (;;) {
++                        usec_t usec;
++
++                        if (need_seek) {
++                                r = sd_journal_next(j);
++                                if (r < 0)
++                                        goto finish;
++                        }
++
++                        if (r == 0)
++                                break;
+ 
+-                if (r == 0)
++                        need_seek = true;
++
++                        if (not_before > 0) {
++                                r = sd_journal_get_monotonic_usec(j, &usec, NULL);
++
++                                /* -ESTALE is returned if the
++                                   timestamp is not from this boot */
++                                if (r == -ESTALE)
++                                        continue;
++                                else if (r < 0)
++                                        goto finish;
++
++                                if (usec < not_before)
++                                        continue;
++                        }
++
++                        line ++;
++
++                        r = output_journal(j, mode, line, show_all);
++                        if (r < 0)
++                                goto finish;
++                }
++
++                if (!follow)
+                         break;
+ 
+-                r = output_journal(j, mode, i+1, show_all);
++                r = fd_wait_for_event(fd, POLLIN);
+                 if (r < 0)
+                         goto finish;
++
++                r = sd_journal_process(j);
++                if (r < 0)
++                        goto finish;
++
+         }
+ 
++        if (mode == OUTPUT_JSON)
++                fputs("\n]\n", stdout);
++
+ finish:
+         if (m)
+                 free(m);
+@@ -408,3 +463,12 @@ finish:
+ 
+         return r;
+ }
++
++static const char *const output_mode_table[_OUTPUT_MODE_MAX] = {
++        [OUTPUT_SHORT] = "short",
++        [OUTPUT_VERBOSE] = "verbose",
++        [OUTPUT_EXPORT] = "export",
++        [OUTPUT_JSON] = "json"
++};
++
++DEFINE_STRING_TABLE_LOOKUP(output_mode, OutputMode);
+diff --git a/src/logs-show.h b/src/logs-show.h
+index f83df069c..5cf1a6369 100644
+--- a/src/logs-show.h
++++ b/src/logs-show.h
+@@ -27,23 +27,28 @@
+ #include "sd-journal.h"
+ #include "util.h"
+ 
+-typedef enum output_mode {
++typedef enum OutputMode {
+         OUTPUT_SHORT,
+         OUTPUT_VERBOSE,
+         OUTPUT_EXPORT,
+         OUTPUT_JSON,
+-        _OUTPUT_MODE_MAX
+-} output_mode;
++        _OUTPUT_MODE_MAX,
++        _OUTPUT_MODE_INVALID = -1
++} OutputMode;
+ 
+-int output_journal(sd_journal *j, output_mode mode, unsigned line, bool show_all);
++int output_journal(sd_journal *j, OutputMode mode, unsigned line, bool show_all);
+ 
+-int show_journal_by_service(
+-                const char *service,
+-                output_mode mode,
++int show_journal_by_unit(
++                const char *unit,
++                OutputMode mode,
+                 const char *prefix,
+                 unsigned n_columns,
+                 usec_t not_before,
+                 unsigned how_many,
+-                bool show_all);
++                bool show_all,
++                bool follow);
++
++const char* output_mode_to_string(OutputMode m);
++OutputMode output_mode_from_string(const char *s);
+ 
+ #endif
+diff --git a/src/systemctl.c b/src/systemctl.c
+index 6f87b06dd..2f03f6baa 100644
+--- a/src/systemctl.c
++++ b/src/systemctl.c
+@@ -118,6 +118,9 @@ static enum transport {
+         TRANSPORT_POLKIT
+ } arg_transport = TRANSPORT_NORMAL;
+ static const char *arg_host = NULL;
++static bool arg_follow = false;
++static unsigned arg_lines = 10;
++static OutputMode arg_output = OUTPUT_SHORT;
+ 
+ static bool private_bus = false;
+ 
+@@ -2001,6 +2004,7 @@ typedef struct UnitStatusInfo {
+         const char *load_error;
+ 
+         usec_t inactive_exit_timestamp;
++        usec_t inactive_exit_timestamp_monotonic;
+         usec_t active_enter_timestamp;
+         usec_t active_exit_timestamp;
+         usec_t inactive_enter_timestamp;
+@@ -2264,7 +2268,7 @@ static void print_status_info(UnitStatusInfo *i) {
+ 
+         if (i->id && arg_transport != TRANSPORT_SSH) {
+                 printf("\n");
+-                show_journal_by_service(i->id, OUTPUT_SHORT, NULL, 0, 0, 0, arg_all);
++                show_journal_by_unit(i->id, arg_output, NULL, 0, i->inactive_exit_timestamp_monotonic, arg_lines, arg_all, arg_follow);
+         }
+ 
+         if (i->need_daemon_reload)
+@@ -2391,6 +2395,8 @@ static int status_property(const char *name, DBusMessageIter *iter, UnitStatusIn
+                         i->inactive_enter_timestamp = (usec_t) u;
+                 else if (streq(name, "InactiveExitTimestamp"))
+                         i->inactive_exit_timestamp = (usec_t) u;
++                else if (streq(name, "InactiveExitTimestampMonotonic"))
++                        i->inactive_exit_timestamp_monotonic = (usec_t) u;
+                 else if (streq(name, "ActiveExitTimestamp"))
+                         i->active_exit_timestamp = (usec_t) u;
+                 else if (streq(name, "ConditionTimestamp"))
+@@ -3969,7 +3975,10 @@ static int systemctl_help(void) {
+                "  -f --force          When enabling unit files, override existing symlinks\n"
+                "                      When shutting down, execute action immediately\n"
+                "     --root=PATH      Enable unit files in the specified root directory\n"
+-               "     --runtime        Enable unit files only temporarily until next reboot\n\n"
++               "     --runtime        Enable unit files only temporarily until next reboot\n"
++               "  -n --lines=INTEGER  Journal entries to show\n"
++               "     --follow         Follow journal\n"
++               "  -o --output=STRING  Change journal output mode (short, verbose, export, json)\n\n"
+                "Unit Commands:\n"
+                "  list-units                      List loaded units\n"
+                "  start [NAME...]                 Start (activate) one or more units\n"
+@@ -4120,7 +4129,8 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
+                 ARG_KILL_WHO,
+                 ARG_NO_ASK_PASSWORD,
+                 ARG_FAILED,
+-                ARG_RUNTIME
++                ARG_RUNTIME,
++                ARG_FOLLOW
+         };
+ 
+         static const struct option options[] = {
+@@ -4153,6 +4163,9 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
+                 { "host",      required_argument, NULL, 'H'           },
+                 { "privileged",no_argument,       NULL, 'P'           },
+                 { "runtime",   no_argument,       NULL, ARG_RUNTIME   },
++                { "lines",     required_argument, NULL, 'n'           },
++                { "follow",    no_argument,       NULL, ARG_FOLLOW    },
++                { "output",    required_argument, NULL, 'o'           },
+                 { NULL,        0,                 NULL, 0             }
+         };
+ 
+@@ -4164,7 +4177,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
+         /* Only when running as systemctl we ask for passwords */
+         arg_ask_password = true;
+ 
+-        while ((c = getopt_long(argc, argv, "ht:p:aqfs:H:P", options, NULL)) >= 0) {
++        while ((c = getopt_long(argc, argv, "ht:p:aqfs:H:Pn:o:", options, NULL)) >= 0) {
+ 
+                 switch (c) {
+ 
+@@ -4302,6 +4315,25 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
+                         arg_runtime = true;
+                         break;
+ 
++                case 'n':
++                        if (safe_atou(optarg, &arg_lines) < 0) {
++                                log_error("Failed to parse lines '%s'", optarg);
++                                return -EINVAL;
++                        }
++                        break;
++
++                case ARG_FOLLOW:
++                        arg_follow = true;
++                        break;
++
++                case 'o':
++                        arg_output = output_mode_from_string(optarg);
++                        if (arg_output < 0) {
++                                log_error("Unknown output '%s'.", optarg);
++                                return -EINVAL;
++                        }
++                        break;
++
+                 case '?':
+                         return -EINVAL;
+ 
+diff --git a/src/util.c b/src/util.c
+index de36d1595..8a6c3bb5e 100644
+--- a/src/util.c
++++ b/src/util.c
+@@ -4694,6 +4694,24 @@ int pipe_eof(int fd) {
+         return pollfd.revents & POLLHUP;
+ }
+ 
++int fd_wait_for_event(int fd, int event) {
++        struct pollfd pollfd;
++        int r;
++
++        zero(pollfd);
++        pollfd.fd = fd;
++        pollfd.events = event;
++
++        r = poll(&pollfd, 1, -1);
++        if (r < 0)
++                return -errno;
++
++        if (r == 0)
++                return 0;
++
++        return pollfd.revents;
++}
++
+ int fopen_temporary(const char *path, FILE **_f, char **_temp_path) {
+         FILE *f;
+         char *t;
+diff --git a/src/util.h b/src/util.h
+index 7f25788b3..e285ec77f 100644
+--- a/src/util.h
++++ b/src/util.h
+@@ -520,4 +520,6 @@ unsigned long cap_last_cap(void);
+ 
+ char *format_bytes(char *buf, size_t l, off_t t);
+ 
++int fd_wait_for_event(int fd, int event);
++
+ #endif
+

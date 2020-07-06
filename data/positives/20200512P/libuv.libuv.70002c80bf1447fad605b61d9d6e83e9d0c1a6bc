@@ -1,0 +1,48 @@
+commit 70002c80bf1447fad605b61d9d6e83e9d0c1a6bc
+Author: Ben Noordhuis <info@bnoordhuis.nl>
+Date:   Tue Jun 21 15:25:43 2016 +0200
+
+    linux: fix potential event loop stall
+    
+    It was pointed out[0] that libuv could effectively enter an infinite
+    loop (but not a busy loop) under certain conditions when polling for
+    events:
+    
+    1. When the architecture is 32 bits, and
+    2. When timeout > 0, i.e., finite, and
+    3. When timeout > max_safe_timeout (~30 minutes), and
+    4. When epoll_wait(timeout) returns 0, then
+    5. timeout was not properly updated on the next call to epoll_wait().
+    
+    Inspection of the code uncovered a secondary bug where under a similar
+    set of circumstances the timeout could drift when the epoll_wait()
+    system call returned late.
+    
+    [0] https://github.com/libuv/libuv/pull/354#discussion_r67837112
+    
+    PR-URL: https://github.com/libuv/libuv/pull/922
+    Reviewed-By: Colin Ihrig <cjihrig@gmail.com>
+
+diff --git a/src/unix/linux-core.c b/src/unix/linux-core.c
+index ae927b7e..58dd813d 100644
+--- a/src/unix/linux-core.c
++++ b/src/unix/linux-core.c
+@@ -289,11 +289,13 @@ void uv__io_poll(uv_loop_t* loop, int timeout) {
+     if (nfds == 0) {
+       assert(timeout != -1);
+ 
+-      timeout = real_timeout - timeout;
+-      if (timeout > 0)
+-        continue;
++      if (timeout == 0)
++        return;
+ 
+-      return;
++      /* We may have been inside the system call for longer than |timeout|
++       * milliseconds so we need to update the timestamp to avoid drift.
++       */
++      goto update_timeout;
+     }
+ 
+     if (nfds == -1) {
+

@@ -1,0 +1,76 @@
+commit 278c01eb132d2155589c3fd5e4ecc47285025fdc
+Author: Robert Moore <Robert.Moore@intel.com>
+Date:   Fri Apr 27 13:37:54 2012 -0700
+
+    Disassembler: Fixes for External() generation for some operators.
+    
+    This fixes the External() generation for the Create* field, Alias,
+    and Scope operators.
+    1) Create buffer field - fix type mismatch warning on disassembly
+    2) Alias - implement External support
+    3) Scope - fix to make sure all necessary externals are emitted.
+
+diff --git a/source/common/adwalk.c b/source/common/adwalk.c
+index eeb61d836..00d9bb6e0 100644
+--- a/source/common/adwalk.c
++++ b/source/common/adwalk.c
+@@ -593,6 +593,7 @@ AcpiDmFindOrphanDescending (
+ 
+         if ((OpInfo->Class != AML_CLASS_EXECUTE) &&
+             (OpInfo->Class != AML_CLASS_CREATE) &&
++            (OpInfo->ObjectType != ACPI_TYPE_LOCAL_ALIAS) &&
+             (ParentOp->Common.AmlOpcode != AML_INT_METHODCALL_OP) &&
+             !Op->Common.Node)
+         {
+@@ -815,13 +816,23 @@ AcpiDmXrefDescendingOp (
+ 
+     if (OpInfo->Flags & AML_NAMED)
+     {
+-        if ((Op->Common.AmlOpcode == AML_ALIAS_OP) ||
+-            (Op->Common.AmlOpcode == AML_SCOPE_OP))
++        /*
++         * Only these two operators (Alias, Scope) refer to an existing
++         * name, it is the first argument
++         */
++        if (Op->Common.AmlOpcode == AML_ALIAS_OP)
++        {
++            ObjectType = ACPI_TYPE_ANY;
++
++            NextOp = Op->Common.Value.Arg;
++            NextOp = NextOp->Common.Value.Arg;
++            if (NextOp->Common.AmlOpcode == AML_INT_NAMEPATH_OP)
++            {
++                Path = NextOp->Common.Value.String;
++            }
++        }
++        else if (Op->Common.AmlOpcode == AML_SCOPE_OP)
+         {
+-            /*
+-             * Only these two operators refer to an existing name,
+-             * first argument
+-             */
+             Path = (char *) Op->Named.Path;
+         }
+     }
+@@ -829,6 +840,8 @@ AcpiDmXrefDescendingOp (
+     {
+         /* Referenced Buffer Name is the first child */
+ 
++        ObjectType = ACPI_TYPE_BUFFER; /* Change from TYPE_BUFFER_FIELD */
++
+         NextOp = Op->Common.Value.Arg;
+         if (NextOp->Common.AmlOpcode == AML_INT_NAMEPATH_OP)
+         {
+@@ -855,6 +868,11 @@ AcpiDmXrefDescendingOp (
+     Status = AcpiNsLookup (WalkState->ScopeInfo, Path, ACPI_TYPE_ANY,
+                 ACPI_IMODE_EXECUTE, ACPI_NS_SEARCH_PARENT | ACPI_NS_DONT_OPEN_SCOPE,
+                 WalkState, &Node);
++    if (ACPI_SUCCESS (Status) && (Node->Flags & ANOBJ_IS_EXTERNAL))
++    {
++        Status = AE_NOT_FOUND;
++    }
++
+     if (ACPI_FAILURE (Status))
+     {
+         if (Status == AE_NOT_FOUND)
+

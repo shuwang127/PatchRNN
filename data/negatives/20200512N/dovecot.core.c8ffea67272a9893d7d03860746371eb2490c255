@@ -1,0 +1,884 @@
+commit c8ffea67272a9893d7d03860746371eb2490c255
+Author: Timo Sirainen <tss@iki.fi>
+Date:   Fri Dec 20 01:56:23 2002 +0200
+
+    Instead of just trusting randomness of authentication cookies between
+    auth<->master<->login process IPC, master now doesn't accept any cookies
+    from login process which weren't created by it (identified by PID). When
+    login process dies, all it's pending cookies are also removed, so I can't
+    see even a theoretical possiblity anymore for exploited login process to
+    authenticate as someone else.
+    
+    Also fixed some int -> unsigned int.
+    
+    --HG--
+    branch : HEAD
+
+diff --git a/src/auth/auth-digest-md5.c b/src/auth/auth-digest-md5.c
+index 178eb87b5..2d996c91c 100644
+--- a/src/auth/auth-digest-md5.c
++++ b/src/auth/auth-digest-md5.c
+@@ -575,7 +575,8 @@ static void auth_digest_md5_free(CookieData *cookie)
+ 	pool_unref(((AuthData *) cookie->context)->pool);
+ }
+ 
+-static void auth_digest_md5_init(AuthInitRequestData *request,
++static void auth_digest_md5_init(unsigned int login_pid,
++				 AuthInitRequestData *request,
+ 				 AuthCallback callback, void *context)
+ {
+ 	CookieData *cookie;
+@@ -591,6 +592,7 @@ static void auth_digest_md5_init(AuthInitRequestData *request,
+ 	auth->qop = QOP_AUTH;
+ 
+ 	cookie = p_new(pool, CookieData, 1);
++	cookie->login_pid = login_pid;
+ 	cookie->auth_fill_reply = auth_digest_md5_fill_reply;
+ 	cookie->auth_continue = auth_digest_md5_continue;
+ 	cookie->free = auth_digest_md5_free;
+diff --git a/src/auth/auth-interface.h b/src/auth/auth-interface.h
+index 9e2ae091d..5eb18c455 100644
+--- a/src/auth/auth-interface.h
++++ b/src/auth/auth-interface.h
+@@ -34,16 +34,21 @@ typedef enum {
+ 
+ /* Initialization reply, sent after client is connected */
+ typedef struct {
+-	int auth_process; /* unique auth process identifier */
++	unsigned int auth_process; /* unique auth process identifier */
+ 	AuthMethod auth_methods; /* valid authentication methods */
+ } AuthInitData;
+ 
++/* Initialization handshake from client. */
++typedef struct {
++	unsigned int pid; /* unique identifier for client process */
++} ClientAuthInitData;
++
+ /* New authentication request */
+ typedef struct {
+ 	AuthRequestType type; /* AUTH_REQUEST_INIT */
+ 
+ 	AuthMethod method;
+-	int id; /* AuthReplyData.id will contain this value */
++	unsigned int id; /* AuthReplyData.id will contain this value */
+ } AuthInitRequestData;
+ 
+ /* Continued authentication request */
+@@ -51,7 +56,7 @@ typedef struct {
+ 	AuthRequestType type; /* AUTH_REQUEST_CONTINUE */
+ 
+ 	unsigned char cookie[AUTH_COOKIE_SIZE];
+-	int id; /* AuthReplyData.id will contain this value */
++	unsigned int id; /* AuthReplyData.id will contain this value */
+ 
+ 	size_t data_size;
+ 	/* unsigned char data[]; */
+@@ -59,7 +64,7 @@ typedef struct {
+ 
+ /* Reply to authentication */
+ typedef struct {
+-	int id;
++	unsigned int id;
+ 	unsigned char cookie[AUTH_COOKIE_SIZE];
+ 	AuthResult result;
+ 
+@@ -69,13 +74,14 @@ typedef struct {
+ 
+ /* Request data associated to cookie */
+ typedef struct {
+-	int id;
++	unsigned int id;
++	unsigned int login_pid;
+ 	unsigned char cookie[AUTH_COOKIE_SIZE];
+ } AuthCookieRequestData;
+ 
+ /* Reply to cookie request */
+ typedef struct {
+-	int id;
++	unsigned int id;
+ 	int success; /* FALSE if cookie wasn't found */
+ 
+ 	char system_user[AUTH_MAX_USER_LEN]; /* system user, if available */
+diff --git a/src/auth/auth-plain.c b/src/auth/auth-plain.c
+index 625060e18..922e63430 100644
+--- a/src/auth/auth-plain.c
++++ b/src/auth/auth-plain.c
+@@ -80,13 +80,15 @@ static void auth_plain_free(CookieData *cookie)
+ 	i_free(cookie);
+ }
+ 
+-static void auth_plain_init(AuthInitRequestData *request,
++static void auth_plain_init(unsigned int login_pid,
++			    AuthInitRequestData *request,
+ 			    AuthCallback callback, void *context)
+ {
+ 	CookieData *cookie;
+ 	AuthReplyData reply;
+ 
+ 	cookie = i_new(CookieData, 1);
++	cookie->login_pid = login_pid;
+ 	cookie->auth_fill_reply = auth_plain_fill_reply;
+ 	cookie->auth_continue = auth_plain_continue;
+ 	cookie->free = auth_plain_free;
+diff --git a/src/auth/auth.c b/src/auth/auth.c
+index 1bdcbed6b..ca69947ca 100644
+--- a/src/auth/auth.c
++++ b/src/auth/auth.c
+@@ -54,7 +54,8 @@ void auth_unregister_module(AuthModule *module)
+ 	}
+ }
+ 
+-void auth_init_request(AuthInitRequestData *request,
++void auth_init_request(unsigned int login_pid,
++		       AuthInitRequestData *request,
+ 		       AuthCallback callback, void *context)
+ {
+ 	AuthModuleList *list;
+@@ -70,7 +71,8 @@ void auth_init_request(AuthInitRequestData *request,
+ 
+ 	for (list = auth_modules; list != NULL; list = list->next) {
+ 		if (list->module.method == request->method) {
+-			list->module.init(request, callback, context);
++			list->module.init(login_pid, request,
++					  callback, context);
+ 			return;
+ 		}
+ 	}
+@@ -78,7 +80,8 @@ void auth_init_request(AuthInitRequestData *request,
+ 	i_unreached();
+ }
+ 
+-void auth_continue_request(AuthContinuedRequestData *request,
++void auth_continue_request(unsigned int login_pid,
++			   AuthContinuedRequestData *request,
+ 			   const unsigned char *data,
+ 			   AuthCallback callback, void *context)
+ {
+@@ -89,9 +92,11 @@ void auth_continue_request(AuthContinuedRequestData *request,
+ 		/* timeouted cookie */
+ 		failure_reply.id = request->id;
+ 		callback(&failure_reply, NULL, context);
++	} else if (cookie_data->login_pid != login_pid) {
++		i_error("BUG: imap-login requested cookie it didn't own");
+ 	} else {
+-		cookie_data->auth_continue(cookie_data, request, data,
+-					   callback, context);
++		cookie_data->auth_continue(cookie_data, request,
++					   data, callback, context);
+ 	}
+ }
+ 
+diff --git a/src/auth/auth.h b/src/auth/auth.h
+index bae07e1ab..0077f3c39 100644
+--- a/src/auth/auth.h
++++ b/src/auth/auth.h
+@@ -9,7 +9,8 @@ typedef void (*AuthCallback) (AuthReplyData *reply, const unsigned char *data,
+ typedef struct {
+ 	AuthMethod method;
+ 
+-	void (*init)(AuthInitRequestData *request,
++	void (*init)(unsigned int login_pid,
++		     AuthInitRequestData *request,
+ 		     AuthCallback callback, void *context);
+ } AuthModule;
+ 
+@@ -19,9 +20,11 @@ extern char *const *auth_realms;
+ void auth_register_module(AuthModule *module);
+ void auth_unregister_module(AuthModule *module);
+ 
+-void auth_init_request(AuthInitRequestData *request,
++void auth_init_request(unsigned int login_pid,
++		       AuthInitRequestData *request,
+ 		       AuthCallback callback, void *context);
+-void auth_continue_request(AuthContinuedRequestData *request,
++void auth_continue_request(unsigned int login_pid,
++			   AuthContinuedRequestData *request,
+ 			   const unsigned char *data,
+ 			   AuthCallback callback, void *context);
+ 
+diff --git a/src/auth/cookie.c b/src/auth/cookie.c
+index 2865b0827..e3b2f7a10 100644
+--- a/src/auth/cookie.c
++++ b/src/auth/cookie.c
+@@ -84,6 +84,7 @@ static void cookie_destroy(unsigned char cookie[AUTH_COOKIE_SIZE],
+ 
+ 	hash_remove(cookies, cookie);
+ 
++	/* FIXME: slow */
+ 	list = NULL;
+ 	for (pos = &oldest_cookie; *pos != NULL; pos = &(*pos)->next) {
+ 		if (cookie_cmp((*pos)->data->cookie, cookie) == 0) {
+@@ -112,16 +113,34 @@ void cookie_remove(unsigned char cookie[AUTH_COOKIE_SIZE])
+ 	cookie_destroy(cookie, TRUE);
+ }
+ 
+-CookieData *cookie_lookup_and_remove(unsigned char cookie[AUTH_COOKIE_SIZE])
++CookieData *cookie_lookup_and_remove(unsigned int login_pid,
++				     unsigned char cookie[AUTH_COOKIE_SIZE])
+ {
+ 	CookieData *data;
+ 
+ 	data = hash_lookup(cookies, cookie);
+-	if (data != NULL)
+-		cookie_destroy(cookie, FALSE);
++	if (data != NULL) {
++		if (data->login_pid != login_pid)
++			data = NULL;
++		else
++			cookie_destroy(cookie, FALSE);
++	}
+ 	return data;
+ }
+ 
++void cookies_remove_login_pid(unsigned int login_pid)
++{
++	CookieList *list, *next;
++
++	/* FIXME: slow */
++	for (list = oldest_cookie; list != NULL; list = next) {
++		next = list->next;
++
++		if (list->data->login_pid == login_pid)
++			cookie_destroy(list->data->cookie, TRUE);
++	}
++}
++
+ static void cookie_timeout(void *context __attr_unused__,
+ 			   Timeout timeout __attr_unused__)
+ {
+diff --git a/src/auth/cookie.h b/src/auth/cookie.h
+index ae62c1f93..7dfd1fcde 100644
+--- a/src/auth/cookie.h
++++ b/src/auth/cookie.h
+@@ -6,6 +6,7 @@
+ typedef struct _CookieData CookieData;
+ 
+ struct _CookieData {
++	unsigned int login_pid;
+ 	unsigned char cookie[AUTH_COOKIE_SIZE];
+ 
+ 	/* continue authentication */
+@@ -32,7 +33,11 @@ CookieData *cookie_lookup(unsigned char cookie[AUTH_COOKIE_SIZE]);
+ /* Removes and frees the cookie */
+ void cookie_remove(unsigned char cookie[AUTH_COOKIE_SIZE]);
+ /* Looks up the cookie and removes it, you have to free the returned data. */
+-CookieData *cookie_lookup_and_remove(unsigned char cookie[AUTH_COOKIE_SIZE]);
++CookieData *cookie_lookup_and_remove(unsigned int login_pid,
++				     unsigned char cookie[AUTH_COOKIE_SIZE]);
++
++/* Remove all cookies created by a login process. */
++void cookies_remove_login_pid(unsigned int login_pid);
+ 
+ void cookies_init(void);
+ void cookies_deinit(void);
+diff --git a/src/auth/login-connection.c b/src/auth/login-connection.c
+index d5a7d172c..470d35490 100644
+--- a/src/auth/login-connection.c
++++ b/src/auth/login-connection.c
+@@ -6,6 +6,7 @@
+ #include "ostream.h"
+ #include "network.h"
+ #include "safe-memset.h"
++#include "cookie.h"
+ #include "login-connection.h"
+ 
+ #include <stdlib.h>
+@@ -23,7 +24,9 @@ struct _LoginConnection {
+ 	IO io;
+ 	IStream *input;
+ 	OStream *output;
+-        AuthRequestType type;
++
++	unsigned int pid;
++	AuthRequestType type;
+ };
+ 
+ static AuthInitData auth_init_data;
+@@ -44,27 +47,49 @@ static void request_callback(AuthReplyData *reply, const unsigned char *data,
+ 	}
+ }
+ 
+-static void login_input(void *context, int fd __attr_unused__,
+-			IO io __attr_unused__)
++static LoginConnection *login_find_pid(unsigned int pid)
+ {
+-	LoginConnection *conn  = context;
++	LoginConnection *conn;
++
++	for (conn = connections; conn != NULL; conn = conn->next) {
++		if (conn->pid == pid)
++			return conn;
++	}
++
++	return NULL;
++}
++
++static void login_input_handshake(LoginConnection *conn)
++{
++        ClientAuthInitData rec;
+         unsigned char *data;
+ 	size_t size;
+ 
+-	switch (i_stream_read(conn->input)) {
+-	case 0:
++	data = i_stream_get_modifyable_data(conn->input, &size);
++	if (size < sizeof(ClientAuthInitData))
+ 		return;
+-	case -1:
+-		/* disconnected */
++
++	/* Don't just cast because of alignment issues. */
++	memcpy(&rec, data, sizeof(rec));
++	i_stream_skip(conn->input, sizeof(rec));
++
++	if (rec.pid == 0) {
++		i_error("BUG: imap-login said it's PID 0");
+ 		login_connection_destroy(conn);
+-		return;
+-	case -2:
+-		/* buffer full */
+-		i_error("BUG: imap-login sent us more than %d bytes of data",
+-			(int)MAX_INBUF_SIZE);
++	} else if (login_find_pid(rec.pid) != NULL) {
++		/* well, it might have just reconnected very fast .. although
++		   there's not much reason for it. */
++		i_error("BUG: imap-login gave a PID of existing connection");
+ 		login_connection_destroy(conn);
+-		return;
++	} else {
++		conn->pid = rec.pid;
+ 	}
++}
++
++static void login_input_request(LoginConnection *conn)
++{
++        unsigned char *data;
++	size_t size;
+ 
+ 	data = i_stream_get_modifyable_data(conn->input, &size);
+ 	if (size < sizeof(AuthRequestType))
+@@ -87,7 +112,7 @@ static void login_input(void *context, int fd __attr_unused__,
+ 		i_stream_skip(conn->input, sizeof(request));
+ 
+ 		/* we have a full init request */
+-		auth_init_request(&request, request_callback, conn);
++		auth_init_request(conn->pid, &request, request_callback, conn);
+ 		conn->type = AUTH_REQUEST_NONE;
+ 	} else if (conn->type == AUTH_REQUEST_CONTINUE) {
+                 AuthContinuedRequestData request;
+@@ -102,7 +127,8 @@ static void login_input(void *context, int fd __attr_unused__,
+ 		i_stream_skip(conn->input, sizeof(request) + request.data_size);
+ 
+ 		/* we have a full continued request */
+-		auth_continue_request(&request, data + sizeof(request),
++		auth_continue_request(conn->pid, &request,
++				      data + sizeof(request),
+ 				      request_callback, conn);
+ 		conn->type = AUTH_REQUEST_NONE;
+ 
+@@ -116,6 +142,32 @@ static void login_input(void *context, int fd __attr_unused__,
+ 	}
+ }
+ 
++static void login_input(void *context, int fd __attr_unused__,
++			IO io __attr_unused__)
++{
++	LoginConnection *conn  = context;
++
++	switch (i_stream_read(conn->input)) {
++	case 0:
++		return;
++	case -1:
++		/* disconnected */
++		login_connection_destroy(conn);
++		return;
++	case -2:
++		/* buffer full */
++		i_error("BUG: imap-login sent us more than %d bytes of data",
++			(int)MAX_INBUF_SIZE);
++		login_connection_destroy(conn);
++		return;
++	}
++
++	if (conn->pid == 0)
++		login_input_handshake(conn);
++	else
++		login_input_request(conn);
++}
++
+ LoginConnection *login_connection_create(int fd)
+ {
+ 	LoginConnection *conn;
+@@ -153,6 +205,8 @@ void login_connection_destroy(LoginConnection *conn)
+ 		}
+ 	}
+ 
++	cookies_remove_login_pid(conn->pid);
++
+ 	i_stream_unref(conn->input);
+ 	o_stream_unref(conn->output);
+ 
+diff --git a/src/auth/main.c b/src/auth/main.c
+index aa7e14c58..3dd4d9535 100644
+--- a/src/auth/main.c
++++ b/src/auth/main.c
+@@ -71,7 +71,8 @@ static void main_init(void)
+ 	master_init();
+ 	userinfo_init();
+ 
+-	io_listen = io_add(LOGIN_LISTEN_FD, IO_READ, auth_accept, NULL);
++	io_listen = io_add_priority(LOGIN_LISTEN_FD, IO_PRIORITY_LOW,
++				    IO_READ, auth_accept, NULL);
+ }
+ 
+ static void main_deinit(void)
+diff --git a/src/auth/master.c b/src/auth/master.c
+index 3e54c18b4..1578de720 100644
+--- a/src/auth/master.c
++++ b/src/auth/master.c
+@@ -23,7 +23,7 @@ static void master_handle_request(AuthCookieRequestData *request,
+ 	CookieData *cookie;
+         AuthCookieReplyData *reply, temp_reply;
+ 
+-	cookie = cookie_lookup_and_remove(request->cookie);
++	cookie = cookie_lookup_and_remove(request->login_pid, request->cookie);
+ 	if (cookie == NULL)
+ 		reply = &failure_reply;
+ 	else {
+diff --git a/src/login/auth-connection.c b/src/login/auth-connection.c
+index b57bfd031..c8c4798fa 100644
+--- a/src/login/auth-connection.c
++++ b/src/login/auth-connection.c
+@@ -25,7 +25,7 @@ struct _AuthConnection {
+ 	IStream *input;
+ 	OStream *output;
+ 
+-	int auth_process;
++	unsigned int auth_process;
+ 	AuthMethod available_auth_methods;
+         AuthReplyData in_reply;
+ 
+@@ -38,10 +38,11 @@ struct _AuthConnection {
+ AuthMethod available_auth_methods;
+ 
+ static int auth_reconnect;
+-static int request_id_counter;
++static unsigned int request_id_counter;
+ static AuthConnection *auth_connections;
+ static Timeout to;
+ 
++static void auth_connection_destroy(AuthConnection *conn);
+ static void auth_input(void *context, int fd, IO io);
+ static void auth_connect_missing(void);
+ 
+@@ -59,7 +60,8 @@ static AuthConnection *auth_connection_find(const char *path)
+ 
+ static AuthConnection *auth_connection_new(const char *path)
+ {
+-        AuthConnection *conn;
++	AuthConnection *conn;
++        ClientAuthInitData init_data;
+ 	int fd;
+ 
+ 	fd = net_connect_unix(path);
+@@ -81,6 +83,14 @@ static AuthConnection *auth_connection_new(const char *path)
+ 
+ 	conn->next = auth_connections;
+ 	auth_connections = conn;
++
++	/* send our handshake */
++	memset(&init_data, 0, sizeof(init_data));
++	init_data.pid = login_process_uid;
++	if (o_stream_send(conn->output, &init_data, sizeof(init_data)) < 0) {
++                auth_connection_destroy(conn);
++		return NULL;
++	}
+ 	return conn;
+ }
+ 
+diff --git a/src/login/auth-connection.h b/src/login/auth-connection.h
+index 3617bc64d..c1b100d9d 100644
+--- a/src/login/auth-connection.h
++++ b/src/login/auth-connection.h
+@@ -5,7 +5,7 @@ typedef struct _AuthConnection AuthConnection;
+ 
+ /* If result == AUTH_RESULT_INTERNAL_FAILURE, request may be NULL and
+    reply_data_size contains the error message. */
+-typedef void (*AuthCallback)(AuthRequest *request, int auth_process,
++typedef void (*AuthCallback)(AuthRequest *request, unsigned int auth_process,
+ 			     AuthResult result, const unsigned char *reply_data,
+ 			     size_t reply_data_size, void *context);
+ 
+@@ -13,7 +13,7 @@ struct _AuthRequest {
+         AuthMethod method;
+         AuthConnection *conn;
+ 
+-	int id;
++	unsigned int id;
+ 	unsigned char cookie[AUTH_COOKIE_SIZE];
+ 
+ 	AuthCallback callback;
+diff --git a/src/login/client-authenticate.c b/src/login/client-authenticate.c
+index df080f007..16584508b 100644
+--- a/src/login/client-authenticate.c
++++ b/src/login/client-authenticate.c
+@@ -123,7 +123,7 @@ static void client_send_auth_data(Client *client, const unsigned char *data,
+ 	t_pop();
+ }
+ 
+-static int auth_callback(AuthRequest *request, int auth_process,
++static int auth_callback(AuthRequest *request, unsigned int auth_process,
+ 			 AuthResult result, const unsigned char *reply_data,
+ 			 size_t reply_data_size, void *context)
+ {
+@@ -167,7 +167,7 @@ static int auth_callback(AuthRequest *request, int auth_process,
+ 	}
+ }
+ 
+-static void login_callback(AuthRequest *request, int auth_process,
++static void login_callback(AuthRequest *request, unsigned int auth_process,
+ 			   AuthResult result, const unsigned char *reply_data,
+ 			   size_t reply_data_size, void *context)
+ {
+@@ -219,8 +219,8 @@ int cmd_login(Client *client, const char *user, const char *pass)
+ 	}
+ }
+ 
+-static void authenticate_callback(AuthRequest *request, int auth_process,
+-				  AuthResult result,
++static void authenticate_callback(AuthRequest *request,
++				  unsigned int auth_process, AuthResult result,
+ 				  const unsigned char *reply_data,
+ 				  size_t reply_data_size, void *context)
+ {
+diff --git a/src/login/common.h b/src/login/common.h
+index 41f37ec96..3a47f5d45 100644
+--- a/src/login/common.h
++++ b/src/login/common.h
+@@ -9,6 +9,7 @@ typedef struct _AuthRequest AuthRequest;
+ 
+ extern int disable_plaintext_auth, process_per_connection, verbose_proctitle;
+ extern unsigned int max_logging_users;
++extern unsigned int login_process_uid;
+ 
+ void main_ref(void);
+ void main_unref(void);
+diff --git a/src/login/main.c b/src/login/main.c
+index e5b7ddbc6..609195c16 100644
+--- a/src/login/main.c
++++ b/src/login/main.c
+@@ -17,6 +17,7 @@
+ 
+ int disable_plaintext_auth, process_per_connection, verbose_proctitle;
+ unsigned int max_logging_users;
++unsigned int login_process_uid;
+ 
+ static IOLoop ioloop;
+ static IO io_imap, io_imaps;
+@@ -153,6 +154,13 @@ static void main_init(void)
+ 	value = getenv("MAX_LOGGING_USERS");
+ 	max_logging_users = value == NULL ? 0 : strtoul(value, NULL, 10);
+ 
++	value = getenv("PROCESS_UID");
++	if (value == NULL)
++		i_fatal("BUG: PROCESS_UID environment not given");
++        login_process_uid = strtoul(value, NULL, 10);
++	if (login_process_uid == 0)
++		i_fatal("BUG: PROCESS_UID environment is 0");
++
+         closing_down = FALSE;
+ 	main_refcount = 0;
+ 
+diff --git a/src/login/master.c b/src/login/master.c
+index a03904852..09f83167e 100644
+--- a/src/login/master.c
++++ b/src/login/master.c
+@@ -14,7 +14,7 @@ typedef struct _WaitingRequest WaitingRequest;
+ struct _WaitingRequest {
+ 	WaitingRequest *next;
+ 
+-	int id;
++	unsigned int id;
+ 	MasterCallback callback;
+ 	void *context;
+ };
+@@ -25,7 +25,8 @@ static WaitingRequest *requests, **next_request;
+ static unsigned int master_pos;
+ static char master_buf[sizeof(MasterReply)];
+ 
+-static void push_request(int id, MasterCallback callback, void *context)
++static void push_request(unsigned int id, MasterCallback callback,
++			 void *context)
+ {
+ 	WaitingRequest *req;
+ 
+@@ -63,7 +64,8 @@ static void pop_request(MasterReply *reply)
+ 	i_free(req);
+ }
+ 
+-void master_request_imap(int fd, int auth_process, const char *login_tag,
++void master_request_imap(int fd, unsigned int auth_process,
++			 const char *login_tag,
+ 			 unsigned char cookie[AUTH_COOKIE_SIZE], IPADDR *ip,
+ 			 MasterCallback callback, void *context)
+ {
+diff --git a/src/login/master.h b/src/login/master.h
+index 6c629e348..fe9ae814c 100644
+--- a/src/login/master.h
++++ b/src/login/master.h
+@@ -6,7 +6,8 @@
+ typedef void (*MasterCallback)(MasterReplyResult result, void *context);
+ 
+ /* Request IMAP process for given cookie. */
+-void master_request_imap(int fd, int auth_process,  const char *login_tag,
++void master_request_imap(int fd, unsigned int auth_process,
++			 const char *login_tag,
+ 			 unsigned char cookie[AUTH_COOKIE_SIZE], IPADDR *ip,
+ 			 MasterCallback callback, void *context);
+ 
+diff --git a/src/master/auth-process.c b/src/master/auth-process.c
+index 2e527c367..7a789547d 100644
+--- a/src/master/auth-process.c
++++ b/src/master/auth-process.c
+@@ -35,7 +35,7 @@ struct _AuthProcess {
+ 
+ struct _WaitingRequest {
+         WaitingRequest *next;
+-	int id;
++	unsigned int id;
+ 
+ 	AuthCallback callback;
+ 	void *context;
+@@ -46,7 +46,7 @@ static AuthProcess *processes;
+ 
+ static void auth_process_destroy(AuthProcess *p);
+ 
+-static void push_request(AuthProcess *process, int id,
++static void push_request(AuthProcess *process, unsigned int id,
+ 			 AuthCallback callback, void *context)
+ {
+ 	WaitingRequest *req;
+@@ -275,25 +275,27 @@ static pid_t create_auth_process(AuthConfig *config)
+ 	return -1;
+ }
+ 
+-AuthProcess *auth_process_find(int id)
++AuthProcess *auth_process_find(unsigned int id)
+ {
+ 	AuthProcess *p;
+ 
+ 	for (p = processes; p != NULL; p = p->next) {
+-		if (p->pid == id)
++		if ((unsigned int)p->pid == id)
+ 			return p;
+ 	}
+ 
+ 	return NULL;
+ }
+ 
+-void auth_process_request(AuthProcess *process, int id,
++void auth_process_request(unsigned int login_pid,
++			  AuthProcess *process, unsigned int id,
+ 			  unsigned char cookie[AUTH_COOKIE_SIZE],
+ 			  AuthCallback callback, void *context)
+ {
+ 	AuthCookieRequestData req;
+ 
+ 	req.id = id;
++	req.login_pid = login_pid;
+ 	memcpy(req.cookie, cookie, AUTH_COOKIE_SIZE);
+ 
+ 	if (o_stream_send(process->output, &req, sizeof(req)) < 0)
+@@ -302,10 +304,10 @@ void auth_process_request(AuthProcess *process, int id,
+ 	push_request(process, id, callback, context);
+ }
+ 
+-static int auth_process_get_count(const char *name)
++static unsigned int auth_process_get_count(const char *name)
+ {
+ 	AuthProcess *p;
+-	int count = 0;
++	unsigned int count = 0;
+ 
+ 	for (p = processes; p != NULL; p = p->next) {
+ 		if (strcmp(p->name, name) == 0)
+@@ -330,7 +332,7 @@ static void auth_processes_start_missing(void *context __attr_unused__,
+ 					 Timeout timeout __attr_unused__)
+ {
+ 	AuthConfig *config;
+-	int count;
++	unsigned int count;
+ 
+         config = auth_processes_config;
+ 	for (; config != NULL; config = config->next) {
+diff --git a/src/master/auth-process.h b/src/master/auth-process.h
+index b1b616b3d..8d460f86a 100644
+--- a/src/master/auth-process.h
++++ b/src/master/auth-process.h
+@@ -8,10 +8,11 @@ typedef void (*AuthCallback)(AuthCookieReplyData *cookie_reply,
+ typedef struct _AuthProcess AuthProcess;
+ 
+ /* Find process for given id */
+-AuthProcess *auth_process_find(int id);
++AuthProcess *auth_process_find(unsigned int id);
+ 
+ /* Request information about given cookie */
+-void auth_process_request(AuthProcess *process, int id,
++void auth_process_request(unsigned int login_pid,
++			  AuthProcess *process, unsigned int id,
+ 			  unsigned char cookie[AUTH_COOKIE_SIZE],
+ 			  AuthCallback callback, void *context);
+ 
+diff --git a/src/master/common.h b/src/master/common.h
+index 34498764a..728d6d3ab 100644
+--- a/src/master/common.h
++++ b/src/master/common.h
+@@ -44,6 +44,6 @@ void imap_process_destroyed(pid_t pid);
+ /* misc */
+ #define VALIDATE_STR(str) \
+ 	validate_str(str, sizeof(str))
+-int validate_str(const char *str, int max_len);
++int validate_str(const char *str, size_t max_len);
+ 
+ #endif
+diff --git a/src/master/login-process.c b/src/master/login-process.c
+index aafa4f5d2..3ec78437f 100644
+--- a/src/master/login-process.c
++++ b/src/master/login-process.c
+@@ -32,15 +32,15 @@ struct _LoginProcess {
+ 
+ typedef struct {
+ 	LoginProcess *process;
+-	int login_id;
+-	int auth_id;
++	unsigned int login_id;
++	unsigned int auth_id;
+ 	int fd;
+ 
+ 	IPADDR ip;
+ 	char login_tag[LOGIN_TAG_SIZE];
+ } LoginAuthRequest;
+ 
+-static int auth_id_counter;
++static unsigned int auth_id_counter;
+ static Timeout to;
+ 
+ static HashTable *processes;
+@@ -163,8 +163,8 @@ static void login_process_input(void *context, int fd __attr_unused__,
+ 			req.auth_process);
+ 		auth_callback(NULL, authreq);
+ 	} else {
+-		auth_process_request(auth_process, authreq->auth_id, req.cookie,
+-				     auth_callback, authreq);
++		auth_process_request(p->pid, auth_process, authreq->auth_id,
++				     req.cookie, auth_callback, authreq);
+ 	}
+ }
+ 
+@@ -321,10 +321,12 @@ static pid_t create_login_process(void)
+ 		env_put("PROCESS_PER_CONNECTION=1");
+ 		env_put("MAX_LOGGING_USERS=1");
+ 	} else {
+-		env_put(t_strdup_printf("MAX_LOGGING_USERS=%d",
++		env_put(t_strdup_printf("MAX_LOGGING_USERS=%u",
+ 					set_max_logging_users));
+ 	}
+ 
++	env_put(t_strdup_printf("PROCESS_UID=%s", dec2str(getpid())));
++
+ 	restrict_process_size(set_login_process_size);
+ 
+ 	/* make sure we don't leak syslog fd, but do it last so that
+diff --git a/src/master/main.c b/src/master/main.c
+index e493dcfc0..dd8136009 100644
+--- a/src/master/main.c
++++ b/src/master/main.c
+@@ -34,9 +34,9 @@ static Timeout to;
+ HashTable *pids;
+ int null_fd, imap_fd, imaps_fd;
+ 
+-int validate_str(const char *str, int max_len)
++int validate_str(const char *str, size_t max_len)
+ {
+-	int i;
++	size_t i;
+ 
+ 	for (i = 0; i < max_len; i++) {
+ 		if (str[i] == '\0')
+@@ -125,8 +125,8 @@ static void timeout_handler(void *context __attr_unused__,
+ 			if (status != 0) {
+ 				login_process_abormal_exit(pid);
+ 				msg = get_exit_status_message(status);
+-				if (msg != NULL)
+-					msg = t_strconcat(" (", msg, ")", NULL);
++				msg = msg == NULL ? "" :
++					t_strconcat(" (", msg, ")", NULL);
+ 				i_error("child %s (%s) returned error %d%s",
+ 					dec2str(pid), process_type_name,
+ 					status, msg);
+diff --git a/src/master/master-interface.h b/src/master/master-interface.h
+index 07b8cb8f9..d887ab836 100644
+--- a/src/master/master-interface.h
++++ b/src/master/master-interface.h
+@@ -17,9 +17,9 @@ typedef enum {
+ } MasterReplyResult;
+ 
+ typedef struct {
+-	int id;
++	unsigned int id;
+ 
+-	int auth_process;
++	unsigned int auth_process;
+ 	unsigned char cookie[AUTH_COOKIE_SIZE];
+ 
+ 	IPADDR ip;
+@@ -27,7 +27,7 @@ typedef struct {
+ } MasterRequest;
+ 
+ typedef struct {
+-	int id;
++	unsigned int id;
+         MasterReplyResult result;
+ } MasterReply;
+ 
+diff --git a/src/master/settings.c b/src/master/settings.c
+index 90d862b83..87c100082 100644
+--- a/src/master/settings.c
++++ b/src/master/settings.c
+@@ -368,14 +368,20 @@ static const char *parse_auth(const char *key, const char *value)
+ 	}
+ 
+ 	if (strcmp(key, "auth_count") == 0) {
+-		if (!sscanf(value, "%i", &auth->count))
++		int num;
++
++		if (!sscanf(value, "%i", &num) || num < 0)
+ 			return t_strconcat("Invalid number: ", value, NULL);
++                auth->count = num;
+ 		return NULL;
+ 	}
+ 
+ 	if (strcmp(key, "auth_process_size") == 0) {
+-		if (!sscanf(value, "%i", &auth->process_size))
++		int num;
++
++		if (!sscanf(value, "%i", &num) || num < 0)
+ 			return t_strconcat("Invalid number: ", value, NULL);
++                auth->process_size = num;
+ 		return NULL;
+ 	}
+ 
+diff --git a/src/master/settings.h b/src/master/settings.h
+index eccd22307..601358e23 100644
+--- a/src/master/settings.h
++++ b/src/master/settings.h
+@@ -72,7 +72,7 @@ struct _AuthConfig {
+ 	char *user;
+ 	char *chroot;
+ 
+-	int count;
++	unsigned int count;
+ 	unsigned int process_size;
+ };
+ 
+

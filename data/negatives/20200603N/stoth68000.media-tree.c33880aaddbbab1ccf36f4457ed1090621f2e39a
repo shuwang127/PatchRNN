@@ -1,0 +1,39 @@
+commit c33880aaddbbab1ccf36f4457ed1090621f2e39a
+Author: Kirill Korotaev <dev@sw.ru>
+Date:   Tue May 24 19:29:47 2005 -0700
+
+    [PATCH] sigkill priority fix
+    
+    If SIGKILL does not have priority, we cannot instantly kill task before it
+    makes some unexpected job.  It can be critical, but we were unable to
+    reproduce this easily until Heiko Carstens <Heiko.Carstens@de.ibm.com>
+    reported this problem on LKML.
+    
+    Signed-Off-By: Kirill Korotaev <dev@sw.ru>
+    Signed-Off-By: Alexey Kuznetsov <kuznet@ms2.inr.ac.ru>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 8f3debc77c5b..b3c24c732c5a 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -522,7 +522,16 @@ static int __dequeue_signal(struct sigpending *pending, sigset_t *mask,
+ {
+ 	int sig = 0;
+ 
+-	sig = next_signal(pending, mask);
++	/* SIGKILL must have priority, otherwise it is quite easy
++	 * to create an unkillable process, sending sig < SIGKILL
++	 * to self */
++	if (unlikely(sigismember(&pending->signal, SIGKILL))) {
++		if (!sigismember(mask, SIGKILL))
++			sig = SIGKILL;
++	}
++
++	if (likely(!sig))
++		sig = next_signal(pending, mask);
+ 	if (sig) {
+ 		if (current->notifier) {
+ 			if (sigismember(current->notifier_mask, sig)) {
+

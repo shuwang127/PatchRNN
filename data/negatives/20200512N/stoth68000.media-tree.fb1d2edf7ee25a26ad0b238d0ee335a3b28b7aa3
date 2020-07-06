@@ -1,0 +1,64 @@
+commit fb1d2edf7ee25a26ad0b238d0ee335a3b28b7aa3
+Author: Masami Hiramatsu <mhiramat@redhat.com>
+Date:   Tue Jan 5 17:47:17 2010 -0500
+
+    perf tools: Support tracepoint glob matching
+    
+    Support glob wildcard when selecting tracepoint events by -e
+    option. Without this patch, perf-tools supports 'GROUP:*:record'
+    syntax for selecting all tracepoints under GROUP group.
+    
+    With this patch, user can choose tracepoints more flexibly by using
+    partial wildcards, e.g. 'block:*bio*:record'.
+    
+    Signed-off-by: Masami Hiramatsu <mhiramat@redhat.com>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+    Cc: systemtap <systemtap@sources.redhat.com>
+    Cc: DLE <dle-develop@lists.sourceforge.net>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Mike Galbraith <efault@gmx.de>
+    LKML-Reference: <20100105224717.19431.68972.stgit@dhcp-100-2-132.bos.redhat.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/tools/perf/util/parse-events.c b/tools/perf/util/parse-events.c
+index 609d5a9470c5..05d0c5c2030c 100644
+--- a/tools/perf/util/parse-events.c
++++ b/tools/perf/util/parse-events.c
+@@ -450,7 +450,8 @@ parse_single_tracepoint_event(char *sys_name,
+ /* sys + ':' + event + ':' + flags*/
+ #define MAX_EVOPT_LEN	(MAX_EVENT_LENGTH * 2 + 2 + 128)
+ static enum event_result
+-parse_subsystem_tracepoint_event(char *sys_name, char *flags)
++parse_multiple_tracepoint_event(char *sys_name, const char *evt_exp,
++				char *flags)
+ {
+ 	char evt_path[MAXPATHLEN];
+ 	struct dirent *evt_ent;
+@@ -474,6 +475,9 @@ parse_subsystem_tracepoint_event(char *sys_name, char *flags)
+ 		    || !strcmp(evt_ent->d_name, "filter"))
+ 			continue;
+ 
++		if (!strglobmatch(evt_ent->d_name, evt_exp))
++			continue;
++
+ 		len = snprintf(event_opt, MAX_EVOPT_LEN, "%s:%s%s%s", sys_name,
+ 			       evt_ent->d_name, flags ? ":" : "",
+ 			       flags ?: "");
+@@ -522,9 +526,10 @@ static enum event_result parse_tracepoint_event(const char **strp,
+ 	if (evt_length >= MAX_EVENT_LENGTH)
+ 		return EVT_FAILED;
+ 
+-	if (!strcmp(evt_name, "*")) {
++	if (strpbrk(evt_name, "*?")) {
+ 		*strp = evt_name + evt_length;
+-		return parse_subsystem_tracepoint_event(sys_name, flags);
++		return parse_multiple_tracepoint_event(sys_name, evt_name,
++						       flags);
+ 	} else
+ 		return parse_single_tracepoint_event(sys_name, evt_name,
+ 						     evt_length, flags,
+

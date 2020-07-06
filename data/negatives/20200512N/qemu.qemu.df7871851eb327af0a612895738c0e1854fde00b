@@ -1,0 +1,60 @@
+commit df7871851eb327af0a612895738c0e1854fde00b
+Author: Hans de Goede <hdegoede@redhat.com>
+Date:   Sun Feb 26 16:14:48 2012 +0100
+
+    usb-ehci: Handle ISO packets failing with an error other then NAK
+    
+    Before this patch the ehci code was not checking for any other errors other
+    then USB_RET_NAK. This causes 2 problems:
+    1) Other errors are not reported to the guest.
+    2) When transactions with the ITD_XACT_IOC bit set completing with another
+       error would not result in USBSTS_INT getting set.
+    
+    I hit this problem when unplugging devices while iso data was streaming from
+    the device to the guest. When this happens it takes a while for the guest to
+    process the unplugging and remove ISO transactions from the ehci schedule, in
+    the mean time these transactions would complete with a result of USB_RET_NODEV,
+    which was not handled. This lead to the Linux guest's usb subsystem "hanging",
+    that is it would no longer see new usb devices getting plugged in and running
+    for example lsusb would lead to a stuck (D state) lsusb process. This patch
+    fixes this.
+    
+    Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+    Signed-off-by: Gerd Hoffmann <kraxel@redhat.com>
+
+diff --git a/hw/usb-ehci.c b/hw/usb-ehci.c
+index 048eb7663e..b95773f5b1 100644
+--- a/hw/usb-ehci.c
++++ b/hw/usb-ehci.c
+@@ -1510,11 +1510,27 @@ static int ehci_process_itd(EHCIState *ehci,
+                     /* IN */
+                     set_field(&itd->transact[i], ret, ITD_XACT_LENGTH);
+                 }
+-
+-                if (itd->transact[i] & ITD_XACT_IOC) {
+-                    ehci_record_interrupt(ehci, USBSTS_INT);
++            } else {
++                switch (ret) {
++                default:
++                    fprintf(stderr, "Unexpected iso usb result: %d\n", ret);
++                    /* Fall through */
++                case USB_RET_NODEV:
++                    /* 3.3.2: XACTERR is only allowed on IN transactions */
++                    if (dir) {
++                        itd->transact[i] |= ITD_XACT_XACTERR;
++                        ehci_record_interrupt(ehci, USBSTS_ERRINT);
++                    }
++                    break;
++                case USB_RET_BABBLE:
++                    itd->transact[i] |= ITD_XACT_BABBLE;
++                    ehci_record_interrupt(ehci, USBSTS_ERRINT);
++                    break;
+                 }
+             }
++            if (itd->transact[i] & ITD_XACT_IOC) {
++                ehci_record_interrupt(ehci, USBSTS_INT);
++            }
+             itd->transact[i] &= ~ITD_XACT_ACTIVE;
+         }
+     }
+

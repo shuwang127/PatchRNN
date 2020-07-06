@@ -1,0 +1,79 @@
+commit ee6a7354a3629f9b65bc18dbe393503e9440d6f5
+Author: Masami Hiramatsu <mhiramat@kernel.org>
+Date:   Wed May 9 21:58:15 2018 +0900
+
+    kprobes/x86: Prohibit probing on exception masking instructions
+    
+    Since MOV SS and POP SS instructions will delay the exceptions until the
+    next instruction is executed, single-stepping on it by kprobes must be
+    prohibited.
+    
+    However, kprobes usually executes those instructions directly on trampoline
+    buffer (a.k.a. kprobe-booster), except for the kprobes which has
+    post_handler. Thus if kprobe user probes MOV SS with post_handler, it will
+    do single-stepping on the MOV SS.
+    
+    This means it is safe that if it is used via ftrace or perf/bpf since those
+    don't use the post_handler.
+    
+    Anyway, since the stack switching is a rare case, it is safer just
+    rejecting kprobes on such instructions.
+    
+    Signed-off-by: Masami Hiramatsu <mhiramat@kernel.org>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+    Cc: Francis Deslauriers <francis.deslauriers@efficios.com>
+    Cc: Oleg Nesterov <oleg@redhat.com>
+    Cc: Alexei Starovoitov <ast@kernel.org>
+    Cc: Steven Rostedt <rostedt@goodmis.org>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: "H . Peter Anvin" <hpa@zytor.com>
+    Cc: Yonghong Song <yhs@fb.com>
+    Cc: Borislav Petkov <bp@suse.de>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: "David S . Miller" <davem@davemloft.net>
+    Link: https://lkml.kernel.org/r/152587069574.17316.3311695234863248641.stgit@devbox
+
+diff --git a/arch/x86/include/asm/insn.h b/arch/x86/include/asm/insn.h
+index b3e32b010ab1..c2c01f84df75 100644
+--- a/arch/x86/include/asm/insn.h
++++ b/arch/x86/include/asm/insn.h
+@@ -208,4 +208,22 @@ static inline int insn_offset_immediate(struct insn *insn)
+ 	return insn_offset_displacement(insn) + insn->displacement.nbytes;
+ }
+ 
++#define POP_SS_OPCODE 0x1f
++#define MOV_SREG_OPCODE 0x8e
++
++/*
++ * Intel SDM Vol.3A 6.8.3 states;
++ * "Any single-step trap that would be delivered following the MOV to SS
++ * instruction or POP to SS instruction (because EFLAGS.TF is 1) is
++ * suppressed."
++ * This function returns true if @insn is MOV SS or POP SS. On these
++ * instructions, single stepping is suppressed.
++ */
++static inline int insn_masking_exception(struct insn *insn)
++{
++	return insn->opcode.bytes[0] == POP_SS_OPCODE ||
++		(insn->opcode.bytes[0] == MOV_SREG_OPCODE &&
++		 X86_MODRM_REG(insn->modrm.bytes[0]) == 2);
++}
++
+ #endif /* _ASM_X86_INSN_H */
+diff --git a/arch/x86/kernel/kprobes/core.c b/arch/x86/kernel/kprobes/core.c
+index 0715f827607c..6f4d42377fe5 100644
+--- a/arch/x86/kernel/kprobes/core.c
++++ b/arch/x86/kernel/kprobes/core.c
+@@ -370,6 +370,10 @@ int __copy_instruction(u8 *dest, u8 *src, u8 *real, struct insn *insn)
+ 	if (insn->opcode.bytes[0] == BREAKPOINT_INSTRUCTION)
+ 		return 0;
+ 
++	/* We should not singlestep on the exception masking instructions */
++	if (insn_masking_exception(insn))
++		return 0;
++
+ #ifdef CONFIG_X86_64
+ 	/* Only x86_64 has RIP relative instructions */
+ 	if (insn_rip_relative(insn)) {
+

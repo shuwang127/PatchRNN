@@ -1,0 +1,76 @@
+commit 3d26fea01d5f80e3e585d69d8d73a60e1ca563a0
+Author: Christoph Hellwig <hch@infradead.org>
+Date:   Wed Dec 21 14:14:05 2011 -0500
+
+    target: remove the transport_lun_active field in struct se_cmd
+    
+    There is no reason to have a flag telling if a command is on the per-lun list,
+    we can simply do a list_empty check before removing it as long as we're careful
+    to always use list_del_init.
+    
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Nicholas Bellinger <nab@linux-iscsi.org>
+
+diff --git a/drivers/target/target_core_device.c b/drivers/target/target_core_device.c
+index edbcabbf85f7..0b25b50900e9 100644
+--- a/drivers/target/target_core_device.c
++++ b/drivers/target/target_core_device.c
+@@ -159,13 +159,8 @@ int transport_lookup_cmd_lun(struct se_cmd *se_cmd, u32 unpacked_lun)
+ 		dev->read_bytes += se_cmd->data_length;
+ 	spin_unlock_irqrestore(&dev->stats_lock, flags);
+ 
+-	/*
+-	 * Add the iscsi_cmd_t to the struct se_lun's cmd list.  This list is used
+-	 * for tracking state of struct se_cmds during LUN shutdown events.
+-	 */
+ 	spin_lock_irqsave(&se_lun->lun_cmd_lock, flags);
+ 	list_add_tail(&se_cmd->se_lun_node, &se_lun->lun_cmd_list);
+-	atomic_set(&se_cmd->transport_lun_active, 1);
+ 	spin_unlock_irqrestore(&se_lun->lun_cmd_lock, flags);
+ 
+ 	return 0;
+diff --git a/drivers/target/target_core_transport.c b/drivers/target/target_core_transport.c
+index f704123752c3..78ea638aa3b3 100644
+--- a/drivers/target/target_core_transport.c
++++ b/drivers/target/target_core_transport.c
+@@ -546,14 +546,8 @@ static void transport_lun_remove_cmd(struct se_cmd *cmd)
+ 	spin_unlock_irqrestore(&cmd->t_state_lock, flags);
+ 
+ 	spin_lock_irqsave(&lun->lun_cmd_lock, flags);
+-	if (atomic_read(&cmd->transport_lun_active)) {
+-		list_del(&cmd->se_lun_node);
+-		atomic_set(&cmd->transport_lun_active, 0);
+-#if 0
+-		pr_debug("Removed ITT: 0x%08x from LUN LIST[%d]\n"
+-			cmd->se_tfo->get_task_tag(cmd), lun->unpacked_lun);
+-#endif
+-	}
++	if (!list_empty(&cmd->se_lun_node))
++		list_del_init(&cmd->se_lun_node);
+ 	spin_unlock_irqrestore(&lun->lun_cmd_lock, flags);
+ }
+ 
+@@ -4163,9 +4157,8 @@ static void __transport_clear_lun_from_sessions(struct se_lun *lun)
+ 	while (!list_empty(&lun->lun_cmd_list)) {
+ 		cmd = list_first_entry(&lun->lun_cmd_list,
+ 		       struct se_cmd, se_lun_node);
+-		list_del(&cmd->se_lun_node);
++		list_del_init(&cmd->se_lun_node);
+ 
+-		atomic_set(&cmd->transport_lun_active, 0);
+ 		/*
+ 		 * This will notify iscsi_target_transport.c:
+ 		 * transport_cmd_check_stop() that a LUN shutdown is in
+diff --git a/include/target/target_core_base.h b/include/target/target_core_base.h
+index 9e7a6a5451c2..5b7d5f3dd24c 100644
+--- a/include/target/target_core_base.h
++++ b/include/target/target_core_base.h
+@@ -572,7 +572,6 @@ struct se_cmd {
+ #define CMD_T_LUN_STOP		(1 << 7)
+ #define CMD_T_LUN_FE_STOP	(1 << 8)
+ #define CMD_T_DEV_ACTIVE	(1 << 9)
+-	atomic_t		transport_lun_active;
+ 	spinlock_t		t_state_lock;
+ 	struct completion	t_transport_stop_comp;
+ 	struct completion	transport_lun_fe_stop_comp;
+

@@ -1,0 +1,248 @@
+commit 707f64b85c8a1b88923617ff72bd8a4ca562f3bd
+Author: Denys Vlasenko <vda.linux@googlemail.com>
+Date:   Wed Dec 16 15:09:55 2009 +0100
+
+    prevent destructors from throwing exceptions; check curl_easy_init errors
+    
+    Signed-off-by: Denys Vlasenko <vda.linux@googlemail.com>
+
+diff --git a/lib/Plugins/Catcut.cpp b/lib/Plugins/Catcut.cpp
+index 35f56f25..a56015d2 100644
+--- a/lib/Plugins/Catcut.cpp
++++ b/lib/Plugins/Catcut.cpp
+@@ -1,6 +1,3 @@
+-#include <xmlrpc-c/base.h>
+-#include <xmlrpc-c/client.h>
+-#include <curl/curl.h>
+ #include "abrtlib.h"
+ #include "abrt_xmlrpc.h"
+ #include "Catcut.h"
+@@ -18,11 +15,7 @@ using namespace std;
+ static int
+ put_stream(const char *pURL, FILE* f, size_t content_length)
+ {
+-    CURL* curl = curl_easy_init();
+-    if (!curl)
+-    {
+-        throw CABRTException(EXCEP_PLUGIN, "put_stream: can't initialize curl library");
+-    }
++    CURL* curl = xcurl_easy_init();
+     /* enable uploading */
+     curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+     /* specify target */
+diff --git a/lib/Plugins/FileTransfer.cpp b/lib/Plugins/FileTransfer.cpp
+index 08bba6ca..60e1e66b 100644
+--- a/lib/Plugins/FileTransfer.cpp
++++ b/lib/Plugins/FileTransfer.cpp
+@@ -35,8 +35,8 @@
+ #include <libtar.h>
+ #include <bzlib.h>
+ #include <zlib.h>
+-#include <curl/curl.h>
+ #include "abrtlib.h"
++#include "abrt_xmlrpc.h" /* for xcurl_easy_init */
+ #include "FileTransfer.h"
+ #include "DebugDump.h"
+ #include "ABRTException.h"
+@@ -85,11 +85,7 @@ void CFileTransfer::SendFile(const char *pURL, const char *pFilename)
+             fclose(f);
+             throw CABRTException(EXCEP_PLUGIN, "Can't stat archive file '%s'", pFilename);
+         }
+-        curl = curl_easy_init();
+-        if (!curl)
+-        {
+-            throw CABRTException(EXCEP_PLUGIN, "Curl library init error");
+-        }
++        curl = xcurl_easy_init();
+         /* enable uploading */
+         curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+         /* specify target */
+diff --git a/lib/Plugins/KerneloopsReporter.cpp b/lib/Plugins/KerneloopsReporter.cpp
+index 26430be6..5cb525bc 100644
+--- a/lib/Plugins/KerneloopsReporter.cpp
++++ b/lib/Plugins/KerneloopsReporter.cpp
+@@ -25,9 +25,9 @@
+  */
+ 
+ #include "abrtlib.h"
++#include "abrt_xmlrpc.h" /* for xcurl_easy_init */
+ #include "KerneloopsReporter.h"
+ #include "CommLayerInner.h"
+-#include <curl/curl.h>
+ #include "ABRTException.h"
+ 
+ #define FILENAME_KERNELOOPS "kerneloops"
+@@ -64,7 +64,7 @@ static int http_post_to_kerneloops_site(const char *url, const char *oopsdata)
+ 	struct curl_httppost *post = NULL;
+ 	struct curl_httppost *last = NULL;
+ 
+-	handle = curl_easy_init();
++	handle = xcurl_easy_init();
+ 	curl_easy_setopt(handle, CURLOPT_URL, url);
+ 
+ 	curl_formadd(&post, &last,
+diff --git a/lib/Plugins/SQLite3.cpp b/lib/Plugins/SQLite3.cpp
+index 12f8a5db..1979f246 100644
+--- a/lib/Plugins/SQLite3.cpp
++++ b/lib/Plugins/SQLite3.cpp
+@@ -238,7 +238,18 @@ CSQLite3::CSQLite3() :
+ 
+ CSQLite3::~CSQLite3()
+ {
+-    DisConnect();
++    /* Paranoia. In C++, destructor will abort() if it was called while unwinding
++     * the stack and it throws an exception.
++     */
++    try
++    {
++        DisConnect();
++        m_sDBPath.clear();
++    }
++    catch (...)
++    {
++        error_msg_and_die("Internal error");
++    }
+ }
+ 
+ void CSQLite3::DisConnect()
+diff --git a/lib/Plugins/TicketUploader.cpp b/lib/Plugins/TicketUploader.cpp
+index 14f5e1d5..a4fe0e87 100644
+--- a/lib/Plugins/TicketUploader.cpp
++++ b/lib/Plugins/TicketUploader.cpp
+@@ -20,8 +20,8 @@
+ #include <string>
+ #include <fstream>
+ #include <sstream>
+-#include <curl/curl.h>
+ #include "abrtlib.h"
++#include "abrt_xmlrpc.h" /* for xcurl_easy_init */
+ #include "TicketUploader.h"
+ #include "DebugDump.h"
+ #include "ABRTException.h"
+@@ -124,11 +124,7 @@ void CTicketUploader::SendFile(const char *pURL, const char *pFilename)
+         {
+             throw CABRTException(EXCEP_PLUGIN, "Can't stat archive file '%s'", pFilename);
+         }
+-        CURL* curl = curl_easy_init();
+-        if (!curl)
+-        {
+-            throw CABRTException(EXCEP_PLUGIN, "Curl library init error");
+-        }
++        CURL* curl = xcurl_easy_init();
+         /* enable uploading */
+         curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+         /* specify target */
+diff --git a/lib/Utils/DebugDump.cpp b/lib/Utils/DebugDump.cpp
+index 765b5146..b4c3ee49 100644
+--- a/lib/Utils/DebugDump.cpp
++++ b/lib/Utils/DebugDump.cpp
+@@ -68,6 +68,22 @@ CDebugDump::CDebugDump() :
+     m_bLocked(false)
+ {}
+ 
++CDebugDump::~CDebugDump()
++{
++    /* Paranoia. In C++, destructor will abort() if it was called while unwinding
++     * the stack and it throws an exception.
++     */
++    try
++    {
++        Close();
++        m_sDebugDumpDir.clear();
++    }
++    catch (...)
++    {
++        error_msg_and_die("Internal error");
++    }
++}
++
+ void CDebugDump::Open(const char *pDir)
+ {
+     if (m_bOpened)
+diff --git a/lib/Utils/DebugDump.h b/lib/Utils/DebugDump.h
+index fad39ecb..c59552e9 100644
+--- a/lib/Utils/DebugDump.h
++++ b/lib/Utils/DebugDump.h
+@@ -59,7 +59,7 @@ class CDebugDump
+ 
+     public:
+         CDebugDump();
+-        ~CDebugDump() { Close(); }
++        ~CDebugDump();
+ 
+         void Open(const char *pDir);
+         void Create(const char *pDir, int64_t uid);
+diff --git a/lib/Utils/abrt_xmlrpc.cpp b/lib/Utils/abrt_xmlrpc.cpp
+index 7205316c..ae1d098e 100644
+--- a/lib/Utils/abrt_xmlrpc.cpp
++++ b/lib/Utils/abrt_xmlrpc.cpp
+@@ -5,6 +5,16 @@
+ #include "abrt_xmlrpc.h"
+ #include "ABRTException.h"
+ 
++CURL* xcurl_easy_init()
++{
++    CURL* curl = curl_easy_init();
++    if (!curl)
++    {
++        error_msg_and_die("Can't create curl handle");
++    }
++    return curl;
++}
++
+ void throw_if_xml_fault_occurred(xmlrpc_env *env)
+ {
+     if (env->fault_occurred)
+diff --git a/lib/Utils/abrt_xmlrpc.h b/lib/Utils/abrt_xmlrpc.h
+index e67ab19a..352e80ca 100644
+--- a/lib/Utils/abrt_xmlrpc.h
++++ b/lib/Utils/abrt_xmlrpc.h
+@@ -1,6 +1,7 @@
+ #ifndef ABRT_XMLRPC_H_
+ #define ABRT_XMLRPC_H_ 1
+ 
++#include <curl/curl.h>
+ #include <xmlrpc-c/base.h>
+ #include <xmlrpc-c/client.h>
+ 
+@@ -15,13 +16,15 @@ struct abrt_xmlrpc_conn {
+     xmlrpc_server_info* m_pServer_info;
+ 
+     abrt_xmlrpc_conn(const char* url, bool no_ssl_verify) { new_xmlrpc_client(url, no_ssl_verify); }
++    /* this never throws exceptions - calls C functions only */
+     ~abrt_xmlrpc_conn() { destroy_xmlrpc_client(); }
+ 
+     void new_xmlrpc_client(const char* url, bool no_ssl_verify);
+     void destroy_xmlrpc_client();
+ };
+ 
+-/* Utility function */
++/* Utility functions */
+ void throw_if_xml_fault_occurred(xmlrpc_env *env);
++CURL* xcurl_easy_init();
+ 
+ #endif
+diff --git a/src/CLI/ABRTSocket.cpp b/src/CLI/ABRTSocket.cpp
+index d31c7a4f..13531342 100644
+--- a/src/CLI/ABRTSocket.cpp
++++ b/src/CLI/ABRTSocket.cpp
+@@ -13,7 +13,17 @@ CABRTSocket::CABRTSocket() : m_nSocket(-1)
+ 
+ CABRTSocket::~CABRTSocket()
+ {
+-    Disconnect();
++    /* Paranoia. In C++, destructor will abort() if it was called while unwinding
++     * the stack and it throws an exception.
++     */
++    try
++    {
++        Disconnect();
++    }
++    catch (...)
++    {
++        error_msg_and_die("Internal error");
++    }
+ }
+ 
+ void CABRTSocket::Send(const std::string& pMessage)
+

@@ -1,0 +1,67 @@
+commit c7176394a4a5cc70620eea8f35228cbc459237e5
+Author: Alan T. DeKok <aland@freeradius.org>
+Date:   Mon Jul 26 16:59:27 2010 +0200
+
+    Better fix for unlinking control sockets
+
+diff --git a/src/main/command.c b/src/main/command.c
+index 60afa5c48..650f5cdec 100644
+--- a/src/main/command.c
++++ b/src/main/command.c
+@@ -66,6 +66,7 @@ struct fr_command_table_t {
+ 
+ typedef struct fr_command_socket_t {
+ 	char	*path;
++	char	*copy;		/* <sigh> */
+ 	uid_t	uid;
+ 	gid_t	gid;
+ 	int	mode;
+@@ -254,6 +255,7 @@ static int fr_server_domain_socket(const char *path)
+ 	return sockfd;
+ }
+ 
++
+ static void command_close_socket(rad_listen_t *this)
+ {
+ 	this->status = RAD_LISTEN_STATUS_CLOSED;
+@@ -1831,6 +1833,16 @@ static fr_command_table_t command_table[] = {
+ };
+ 
+ 
++static void command_socket_free(rad_listen_t *this)
++{
++	fr_command_socket_t *sock = this->data;
++
++	unlink(sock->copy);
++	free(sock->copy);
++	sock->copy = NULL;
++}
++
++
+ /*
+  *	Parse the unix domain sockets.
+  *
+@@ -1846,6 +1858,9 @@ static int command_socket_parse(CONF_SECTION *cs, rad_listen_t *this)
+ 		return -1;
+ 	}
+ 
++	sock->copy = NULL;
++	if (sock->path) sock->copy = strdup(sock->path);
++
+ #if defined(HAVE_GETPEEREID) || defined (SO_PEERCRED)
+ 	if (sock->uid_name) {
+ 		struct passwd *pw;
+diff --git a/src/main/listen.c b/src/main/listen.c
+index 1c3695369..2ff447c72 100644
+--- a/src/main/listen.c
++++ b/src/main/listen.c
+@@ -1817,7 +1817,7 @@ static const rad_listen_master_t master_listen[RAD_LISTEN_MAX] = {
+ 
+ #ifdef WITH_COMMAND_SOCKET
+ 	/* TCP command socket */
+-	{ command_socket_parse, NULL,
++	{ command_socket_parse, command_socket_free,
+ 	  command_domain_accept, command_domain_send,
+ 	  command_socket_print, command_socket_encode, command_socket_decode },
+ #endif
+

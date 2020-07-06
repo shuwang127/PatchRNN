@@ -1,0 +1,55 @@
+commit 2456242530a21cfee82646ebeeda65d3f74faa4c
+Author: Yan Zheng <zheng.yan@oracle.com>
+Date:   Thu Feb 12 14:14:53 2009 -0500
+
+    Btrfs: hold trans_mutex when using btrfs_record_root_in_trans
+    
+    btrfs_record_root_in_trans needs the trans_mutex held to make sure two
+    callers don't race to setup the root in a given transaction.  This adds
+    it to all the places that were missing it.
+    
+    Signed-off-by: Yan Zheng <zheng.yan@oracle.com>
+
+diff --git a/fs/btrfs/extent-tree.c b/fs/btrfs/extent-tree.c
+index cd86bffbdc9f..0a5d796c9f7e 100644
+--- a/fs/btrfs/extent-tree.c
++++ b/fs/btrfs/extent-tree.c
+@@ -5658,7 +5658,9 @@ static noinline int relocate_one_extent(struct btrfs_root *extent_root,
+ 			prev_block = block_start;
+ 		}
+ 
++		mutex_lock(&extent_root->fs_info->trans_mutex);
+ 		btrfs_record_root_in_trans(found_root);
++		mutex_unlock(&extent_root->fs_info->trans_mutex);
+ 		if (ref_path->owner_objectid >= BTRFS_FIRST_FREE_OBJECTID) {
+ 			/*
+ 			 * try to update data extent references while
+diff --git a/fs/btrfs/transaction.c b/fs/btrfs/transaction.c
+index 919172de5c9a..4112d53d4f4d 100644
+--- a/fs/btrfs/transaction.c
++++ b/fs/btrfs/transaction.c
+@@ -688,7 +688,9 @@ static noinline int drop_dirty_roots(struct btrfs_root *tree_root,
+ 		num_bytes -= btrfs_root_used(&dirty->root->root_item);
+ 		bytes_used = btrfs_root_used(&root->root_item);
+ 		if (num_bytes) {
++			mutex_lock(&root->fs_info->trans_mutex);
+ 			btrfs_record_root_in_trans(root);
++			mutex_unlock(&root->fs_info->trans_mutex);
+ 			btrfs_set_root_used(&root->root_item,
+ 					    bytes_used - num_bytes);
+ 		}
+diff --git a/fs/btrfs/tree-log.c b/fs/btrfs/tree-log.c
+index 20794290256b..9c462fbd60fa 100644
+--- a/fs/btrfs/tree-log.c
++++ b/fs/btrfs/tree-log.c
+@@ -2832,7 +2832,9 @@ again:
+ 		BUG_ON(!wc.replay_dest);
+ 
+ 		wc.replay_dest->log_root = log;
++		mutex_lock(&fs_info->trans_mutex);
+ 		btrfs_record_root_in_trans(wc.replay_dest);
++		mutex_unlock(&fs_info->trans_mutex);
+ 		ret = walk_log_tree(trans, log, &wc);
+ 		BUG_ON(ret);
+ 
+

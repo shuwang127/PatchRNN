@@ -1,0 +1,174 @@
+commit 5926d9cfccccfca19895522ed7a445626be8cc79
+Author: Nick Mathewson <nickm@torproject.org>
+Date:   Wed Aug 18 13:36:09 2010 -0400
+
+    Move code for launching tests out of router_add_to_routerlist()
+    
+    router_add_to_routerlist() is supposed to be a nice minimal function
+    that only touches the routerlist structures, but it included a call to
+    dirserv_single_reachability_test().
+    
+    We have a function that gets called _after_ adding descriptors
+    successfully: routerlist_descriptors_added.  This patch moves the
+    responsibility for testing there.
+    
+    Because the decision of whether to test or not depends on whether
+    there was an old routerinfo for this router or not, we have to first
+    detect whether we _will_ want to run the tests if the router is added.
+    We make this the job of
+    routers_update_status_from_consensus_networkstatus().
+    
+    Finally, this patch makes the code notice if a router is going from
+    hibernating to non-hibernating, and if so causes a reachability test
+    to get launched.
+
+diff --git a/src/or/dirserv.c b/src/or/dirserv.c
+index 80831b5be..523a92178 100644
+--- a/src/or/dirserv.c
++++ b/src/or/dirserv.c
+@@ -730,6 +730,10 @@ dirserv_add_descriptor(routerinfo_t *ri, const char **msg, const char *source)
+   desc = tor_strndup(ri->cache_info.signed_descriptor_body, desclen);
+   nickname = tor_strdup(ri->nickname);
+ 
++  /* Tell if we're about to need to launch a test if we add this. */
++  ri->needs_retest_if_added =
++    dirserv_should_launch_reachability_test(ri, ri_old);
++
+   r = router_add_to_routerlist(ri, msg, 0, 0);
+   if (!WRA_WAS_ADDED(r)) {
+     /* unless the routerinfo was fine, just out-of-date */
+@@ -744,7 +748,7 @@ dirserv_add_descriptor(routerinfo_t *ri, const char **msg, const char *source)
+ 
+     changed = smartlist_create();
+     smartlist_add(changed, ri);
+-    control_event_descriptors_changed(changed);
++    routerlist_descriptors_added(changed, 0);
+     smartlist_free(changed);
+     if (!*msg) {
+       *msg =  ri->is_valid ? "Descriptor for valid server accepted" :
+@@ -3115,6 +3119,26 @@ dirserv_orconn_tls_done(const char *address,
+    * skip testing. */
+ }
+ 
++/** Called when we, as an authority, receive a new router descriptor either as
++ * an upload or a download.  Used to decide whether to relaunch reachability
++ * testing for the server. */
++int
++dirserv_should_launch_reachability_test(routerinfo_t *ri, routerinfo_t *ri_old)
++{
++  if (!authdir_mode_handles_descs(get_options(), ri->purpose))
++      return 0;
++  if (!ri_old) {
++    /* New router: Launch an immediate reachability test, so we will have an
++     * opinion soon in case we're generating a consensus soon */
++    return 1;
++  }
++  if (ri_old->is_hibernating && !ri->is_hibernating) {
++    /* It just came out of hibernation; launch a reachability test */
++    return 1;
++  }
++  return 0;
++}
++
+ /** Helper function for dirserv_test_reachability(). Start a TLS
+  * connection to <b>router</b>, and annotate it with when we started
+  * the test. */
+diff --git a/src/or/dirserv.h b/src/or/dirserv.h
+index fc5a5549c..d80d6f693 100644
+--- a/src/or/dirserv.h
++++ b/src/or/dirserv.h
+@@ -100,6 +100,8 @@ void dirserv_orconn_tls_done(const char *address,
+                              uint16_t or_port,
+                              const char *digest_rcvd,
+                              int as_advertised);
++int dirserv_should_launch_reachability_test(routerinfo_t *ri,
++                                            routerinfo_t *ri_old);
+ void dirserv_single_reachability_test(time_t now, routerinfo_t *router);
+ void dirserv_test_reachability(time_t now);
+ int authdir_wants_to_reject_router(routerinfo_t *ri, const char **msg,
+diff --git a/src/or/networkstatus.c b/src/or/networkstatus.c
+index a9a9c78b8..bf034f468 100644
+--- a/src/or/networkstatus.c
++++ b/src/or/networkstatus.c
+@@ -1924,6 +1924,15 @@ routers_update_status_from_consensus_networkstatus(smartlist_t *routers,
+       router->is_bad_directory = rs->is_bad_directory;
+       router->is_bad_exit = rs->is_bad_exit;
+       router->is_hs_dir = rs->is_hs_dir;
++    } else {
++      /* If we _are_ an authority, we should check wither this router
++       * is one that will cause us to need a reachability test. */
++      routerinfo_t *old_router =
++        router_get_by_digest(router->cache_info.identity_digest);
++      if (old_router != router) {
++        router->needs_retest_if_added =
++          dirserv_should_launch_reachability_test(router, old_router);
++      }
+     }
+     if (router->is_running && ds) {
+       download_status_reset(&ds->v2_ns_dl_status);
+diff --git a/src/or/or.h b/src/or/or.h
+index 572dc8b96..cb2bbd75f 100644
+--- a/src/or/or.h
++++ b/src/or/or.h
+@@ -1453,6 +1453,9 @@ typedef struct {
+                              * directory according to the authorities. */
+   unsigned int policy_is_reject_star:1; /**< True iff the exit policy for this
+                                          * router rejects everything. */
++  /** True if, after we have added this router, we should re-launch
++   * tests for it. */
++  unsigned int needs_retest_if_added:1;
+ 
+ /** Tor can use this router for general positions in circuits. */
+ #define ROUTER_PURPOSE_GENERAL 0
+diff --git a/src/or/routerlist.c b/src/or/routerlist.c
+index 5f98abe01..968d5a104 100644
+--- a/src/or/routerlist.c
++++ b/src/or/routerlist.c
+@@ -3276,11 +3276,6 @@ router_add_to_routerlist(routerinfo_t *router, const char **msg,
+    * the list. */
+   routerlist_insert(routerlist, router);
+   if (!from_cache) {
+-    if (authdir) {
+-      /* launch an immediate reachability test, so we will have an opinion
+-       * soon in case we're generating a consensus soon */
+-      dirserv_single_reachability_test(time(NULL), router);
+-    }
+     signed_desc_append_to_journal(&router->cache_info,
+                                   &routerlist->desc_store);
+   }
+@@ -3600,15 +3595,19 @@ routerlist_remove_old_routers(void)
+ 
+ /** We just added a new set of descriptors. Take whatever extra steps
+  * we need. */
+-static void
++void
+ routerlist_descriptors_added(smartlist_t *sl, int from_cache)
+ {
+   tor_assert(sl);
+   control_event_descriptors_changed(sl);
+-  SMARTLIST_FOREACH(sl, routerinfo_t *, ri,
++  SMARTLIST_FOREACH_BEGIN(sl, routerinfo_t *, ri) {
+     if (ri->purpose == ROUTER_PURPOSE_BRIDGE)
+       learned_bridge_descriptor(ri, from_cache);
+-  );
++    if (ri->needs_retest_if_added) {
++      ri->needs_retest_if_added = 0;
++      dirserv_single_reachability_test(approx_time(), ri);
++    }
++  } SMARTLIST_FOREACH_END(ri);
+ }
+ 
+ /**
+diff --git a/src/or/routerlist.h b/src/or/routerlist.h
+index e31b07aef..d71a737b8 100644
+--- a/src/or/routerlist.h
++++ b/src/or/routerlist.h
+@@ -115,6 +115,7 @@ was_router_added_t router_add_to_routerlist(routerinfo_t *router,
+ was_router_added_t router_add_extrainfo_to_routerlist(
+                                         extrainfo_t *ei, const char **msg,
+                                         int from_cache, int from_fetch);
++void routerlist_descriptors_added(smartlist_t *sl, int from_cache);
+ void routerlist_remove_old_routers(void);
+ int router_load_single_router(const char *s, uint8_t purpose, int cache,
+                               const char **msg);
+

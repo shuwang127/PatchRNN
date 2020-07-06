@@ -1,0 +1,67 @@
+commit ad46d396e418c0c5fcddfd270959b49f5f0e7298
+Author: Moe Jette <jette1@llnl.gov>
+Date:   Thu Oct 14 23:00:49 2004 +0000
+
+    Modify batch job requeue logic to try requeue only once. We saw a case
+     where the requeue logic was in a tight loop.
+
+diff --git a/src/slurmctld/agent.c b/src/slurmctld/agent.c
+index b164630c0b..7e34c9605e 100644
+--- a/src/slurmctld/agent.c
++++ b/src/slurmctld/agent.c
+@@ -489,7 +489,6 @@ static void _notify_slurmctld_nodes(agent_info_t *agent_ptr,
+ 			batch_job_launch_msg_t *launch_msg_ptr = 
+ 					*agent_ptr->msg_args_pptr;
+ 			uint32_t job_id = launch_msg_ptr->job_id;
+-			info("Non-responding node, requeue JobId=%u", job_id);
+ 			job_complete(job_id, 0, true, 0);
+ 		}
+ 		unlock_slurmctld(node_write_lock);
+diff --git a/src/slurmctld/job_mgr.c b/src/slurmctld/job_mgr.c
+index 52b8863bee..4369a918a5 100644
+--- a/src/slurmctld/job_mgr.c
++++ b/src/slurmctld/job_mgr.c
+@@ -491,7 +491,7 @@ static int _load_job_state(Buf buffer)
+ 
+ 	/* validity test as possible */
+ 	if (((job_state & (~JOB_COMPLETING)) >= JOB_END) || 
+-	    (batch_flag > 1)) {
++	    (batch_flag > 2)) {
+ 		error("Invalid data for job %u: job_state=%u batch_flag=%u",
+ 		      job_id, job_state, batch_flag);
+ 		goto unpack_error;
+@@ -1419,9 +1419,18 @@ job_complete(uint32_t job_id, uid_t uid, bool requeue,
+ 
+ 	if (job_ptr->job_state == JOB_RUNNING)
+ 		job_comp_flag = JOB_COMPLETING;
++
++	if (requeue && (job_ptr->batch_flag > 1)) {
++		requeue = 0;
++		if (job_return_code == 0)
++			job_return_code = 1;
++		info("Batch job launch failure, JobId=%u", job_ptr->job_id);	
++	}
++
+ 	if (requeue && job_ptr->details && job_ptr->batch_flag) {
++		job_ptr->batch_flag++;	/* only one retry */
+ 		job_ptr->job_state = JOB_PENDING | job_comp_flag;
+-		info("Requeing job %u", job_ptr->job_id);
++		info("Non-responding node, requeue JobId=%u", job_ptr->job_id);
+ 	} else if (job_ptr->job_state == JOB_PENDING) {
+ 		job_ptr->job_state  = JOB_COMPLETE;
+ 		job_ptr->start_time = 0;
+diff --git a/src/slurmctld/slurmctld.h b/src/slurmctld/slurmctld.h
+index 598d8a904f..8a84bdb0bb 100644
+--- a/src/slurmctld/slurmctld.h
++++ b/src/slurmctld/slurmctld.h
+@@ -266,7 +266,8 @@ struct job_record {
+ 	char name[MAX_NAME_LEN];	/* name of the job */
+ 	char partition[MAX_NAME_LEN];	/* name of the partition */
+ 	struct part_record *part_ptr;	/* pointer to the partition record */
+-	uint16_t batch_flag;		/* 1 if batch job (with script) */
++	uint16_t batch_flag;		/* 1 or 2 if batch job (with script),
++					 * 2 indicates retry mode (one retry) */
+ 	uint32_t user_id;		/* user the job runs as */
+ 	uint32_t group_id;		/* group submitted under */
+ 	enum job_states job_state;	/* state of the job */
+

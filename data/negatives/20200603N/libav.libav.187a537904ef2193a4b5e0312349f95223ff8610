@@ -1,0 +1,128 @@
+commit 187a537904ef2193a4b5e0312349f95223ff8610
+Author: Alex Converse <aconverse@google.com>
+Date:   Sat Apr 9 17:22:04 2011 -0700
+
+    Convert some undefined 1<<31 shifts into 1U<<31.
+    
+    According to ISO 9899:1999 S 6.5.7/4:
+    
+    The result of E1 << E2 is E1 left-shifted E2 bit positions; vacated bits
+    are filled with zeros. If E1 has an unsigned type, the value of the
+    result is E1× 2^E2, reduced modulo one more than the maximum value
+    representable in the result type. If E1 has a signed type and
+    nonnegative value, and E1× 2^E2 is representable in the result type, then
+    that is the resulting value; otherwise, the behavior is undefined.
+
+diff --git a/libavcodec/aacdec.c b/libavcodec/aacdec.c
+index 3ce0dce49..c9761a1ae 100644
+--- a/libavcodec/aacdec.c
++++ b/libavcodec/aacdec.c
+@@ -964,19 +964,19 @@ static inline float *VMUL4S(float *dst, const float *v, unsigned idx,
+     union float754 s = { .f = *scale };
+     union float754 t;
+ 
+-    t.i = s.i ^ (sign & 1<<31);
++    t.i = s.i ^ (sign & 1U<<31);
+     *dst++ = v[idx    & 3] * t.f;
+ 
+     sign <<= nz & 1; nz >>= 1;
+-    t.i = s.i ^ (sign & 1<<31);
++    t.i = s.i ^ (sign & 1U<<31);
+     *dst++ = v[idx>>2 & 3] * t.f;
+ 
+     sign <<= nz & 1; nz >>= 1;
+-    t.i = s.i ^ (sign & 1<<31);
++    t.i = s.i ^ (sign & 1U<<31);
+     *dst++ = v[idx>>4 & 3] * t.f;
+ 
+     sign <<= nz & 1; nz >>= 1;
+-    t.i = s.i ^ (sign & 1<<31);
++    t.i = s.i ^ (sign & 1U<<31);
+     *dst++ = v[idx>>6 & 3] * t.f;
+ 
+     return dst;
+@@ -1169,11 +1169,11 @@ static int decode_spectrum_and_dequant(AACContext *ac, float coef[1024],
+                                     b += 4;
+                                     n = (1 << b) + SHOW_UBITS(re, gb, b);
+                                     LAST_SKIP_BITS(re, gb, b);
+-                                    *icf++ = cbrt_tab[n] | (bits & 1<<31);
++                                    *icf++ = cbrt_tab[n] | (bits & 1U<<31);
+                                     bits <<= 1;
+                                 } else {
+                                     unsigned v = ((const uint32_t*)vq)[cb_idx & 15];
+-                                    *icf++ = (bits & 1<<31) | v;
++                                    *icf++ = (bits & 1U<<31) | v;
+                                     bits <<= !!v;
+                                 }
+                                 cb_idx >>= 4;
+diff --git a/libavcodec/dsputil.c b/libavcodec/dsputil.c
+index 33fc78a1e..ddaf0205d 100644
+--- a/libavcodec/dsputil.c
++++ b/libavcodec/dsputil.c
+@@ -3827,7 +3827,7 @@ static inline uint32_t clipf_c_one(uint32_t a, uint32_t mini,
+ {
+ 
+     if(a > mini) return mini;
+-    else if((a^(1<<31)) > maxisign) return maxi;
++    else if((a^(1U<<31)) > maxisign) return maxi;
+     else return a;
+ }
+ 
+@@ -3835,7 +3835,7 @@ static void vector_clipf_c_opposite_sign(float *dst, const float *src, float *mi
+     int i;
+     uint32_t mini = *(uint32_t*)min;
+     uint32_t maxi = *(uint32_t*)max;
+-    uint32_t maxisign = maxi ^ (1<<31);
++    uint32_t maxisign = maxi ^ (1U<<31);
+     uint32_t *dsti = (uint32_t*)dst;
+     const uint32_t *srci = (const uint32_t*)src;
+     for(i=0; i<len; i+=8) {
+diff --git a/libavcodec/fraps.c b/libavcodec/fraps.c
+index 346f03439..a142484a5 100644
+--- a/libavcodec/fraps.c
++++ b/libavcodec/fraps.c
+@@ -180,7 +180,7 @@ static int decode_frame(AVCodecContext *avctx,
+             return -1;
+         }
+         /* bit 31 means same as previous pic */
+-        f->pict_type = (header & (1<<31))? FF_P_TYPE : FF_I_TYPE;
++        f->pict_type = (header & (1U<<31))? FF_P_TYPE : FF_I_TYPE;
+         f->key_frame = f->pict_type == FF_I_TYPE;
+ 
+         if (f->pict_type == FF_I_TYPE) {
+@@ -223,7 +223,7 @@ static int decode_frame(AVCodecContext *avctx,
+             return -1;
+         }
+         /* bit 31 means same as previous pic */
+-        f->pict_type = (header & (1<<31))? FF_P_TYPE : FF_I_TYPE;
++        f->pict_type = (header & (1U<<31))? FF_P_TYPE : FF_I_TYPE;
+         f->key_frame = f->pict_type == FF_I_TYPE;
+ 
+         if (f->pict_type == FF_I_TYPE) {
+diff --git a/libavcodec/ppc/fft_altivec.c b/libavcodec/ppc/fft_altivec.c
+index 68f3071f3..435024a0c 100644
+--- a/libavcodec/ppc/fft_altivec.c
++++ b/libavcodec/ppc/fft_altivec.c
+@@ -122,7 +122,7 @@ static void ff_imdct_calc_altivec(FFTContext *s, FFTSample *output, const FFTSam
+     int n = 1 << s->mdct_bits;
+     int n4 = n >> 2;
+     int n16 = n >> 4;
+-    vec_u32 sign = {1<<31,1<<31,1<<31,1<<31};
++    vec_u32 sign = {1U<<31,1U<<31,1U<<31,1U<<31};
+     vec_u32 *p0 = (vec_u32*)(output+n4);
+     vec_u32 *p1 = (vec_u32*)(output+n4*3);
+ 
+diff --git a/libavcodec/vorbis_enc.c b/libavcodec/vorbis_enc.c
+index 7c5d52146..748fbd66f 100644
+--- a/libavcodec/vorbis_enc.c
++++ b/libavcodec/vorbis_enc.c
+@@ -394,7 +394,7 @@ static void put_float(PutBitContext *pb, float f)
+     mant = (int)ldexp(frexp(f, &exp), 20);
+     exp += 788 - 20;
+     if (mant < 0) {
+-        res |= (1 << 31);
++        res |= (1U << 31);
+         mant = -mant;
+     }
+     res |= mant | (exp << 21);
+

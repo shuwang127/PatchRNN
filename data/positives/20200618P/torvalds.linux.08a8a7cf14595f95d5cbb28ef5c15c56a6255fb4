@@ -1,0 +1,76 @@
+commit 08a8a7cf14595f95d5cbb28ef5c15c56a6255fb4
+Author: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+Date:   Fri Jul 13 16:13:50 2018 +0200
+
+    HID: core: do not upper bound the collection stack
+    
+    Looks like 4 was sufficient until now. However, the Surface Dial needs
+    a stack of 5 and simply fails at probing.
+    Dynamically add HID_COLLECTION_STACK_SIZE to the size of the stack if
+    we hit the upper bound.
+    
+    Checkpatch complains about bare unsigned, so converting those to
+    'unsigned int' in struct hid_parser
+    
+    Acked-by: Peter Hutterer <peter.hutterer@who-t.net>
+    Signed-off-by: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+diff --git a/drivers/hid/hid-core.c b/drivers/hid/hid-core.c
+index 3942ee61bd1c..5de6f18c9bf7 100644
+--- a/drivers/hid/hid-core.c
++++ b/drivers/hid/hid-core.c
+@@ -128,9 +128,19 @@ static int open_collection(struct hid_parser *parser, unsigned type)
+ 
+ 	usage = parser->local.usage[0];
+ 
+-	if (parser->collection_stack_ptr == HID_COLLECTION_STACK_SIZE) {
+-		hid_err(parser->device, "collection stack overflow\n");
+-		return -EINVAL;
++	if (parser->collection_stack_ptr == parser->collection_stack_size) {
++		unsigned int *collection_stack;
++		unsigned int new_size = parser->collection_stack_size +
++					HID_COLLECTION_STACK_SIZE;
++
++		collection_stack = krealloc(parser->collection_stack,
++					    new_size * sizeof(unsigned int),
++					    GFP_KERNEL);
++		if (!collection_stack)
++			return -ENOMEM;
++
++		parser->collection_stack = collection_stack;
++		parser->collection_stack_size = new_size;
+ 	}
+ 
+ 	if (parser->device->maxcollection == parser->device->collection_size) {
+@@ -840,6 +850,7 @@ static int hid_scan_report(struct hid_device *hid)
+ 		break;
+ 	}
+ 
++	kfree(parser->collection_stack);
+ 	vfree(parser);
+ 	return 0;
+ }
+diff --git a/include/linux/hid.h b/include/linux/hid.h
+index 2e4498d52a2f..aee281522c6d 100644
+--- a/include/linux/hid.h
++++ b/include/linux/hid.h
+@@ -644,12 +644,13 @@ static inline void hid_set_drvdata(struct hid_device *hdev, void *data)
+ struct hid_parser {
+ 	struct hid_global     global;
+ 	struct hid_global     global_stack[HID_GLOBAL_STACK_SIZE];
+-	unsigned              global_stack_ptr;
++	unsigned int          global_stack_ptr;
+ 	struct hid_local      local;
+-	unsigned              collection_stack[HID_COLLECTION_STACK_SIZE];
+-	unsigned              collection_stack_ptr;
++	unsigned int         *collection_stack;
++	unsigned int          collection_stack_ptr;
++	unsigned int          collection_stack_size;
+ 	struct hid_device    *device;
+-	unsigned              scan_flags;
++	unsigned int          scan_flags;
+ };
+ 
+ struct hid_class_descriptor {
+

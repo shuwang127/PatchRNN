@@ -1,0 +1,107 @@
+commit 4ea513cc387c0a67c861a87aea01e6d1cac4854c
+Author: Yang Tse <yangsita@gmail.com>
+Date:   Fri Jun 12 02:41:16 2009 +0000
+
+    fix compiler warning
+
+diff --git a/lib/easy.c b/lib/easy.c
+index 7701ce8e5..70aa5a097 100644
+--- a/lib/easy.c
++++ b/lib/easy.c
+@@ -544,7 +544,7 @@ CURLcode curl_easy_perform(CURL *curl)
+ 
+   if(!data->state.connc) {
+     /* oops, no connection cache, make one up */
+-    data->state.connc = Curl_mk_connc(CONNCACHE_PRIVATE, -1);
++    data->state.connc = Curl_mk_connc(CONNCACHE_PRIVATE, -1L);
+     if(!data->state.connc)
+       return CURLE_OUT_OF_MEMORY;
+   }
+diff --git a/lib/multi.c b/lib/multi.c
+index 25c8b9a9c..2c5b6d94d 100644
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -382,7 +382,7 @@ CURLM *curl_multi_init(void)
+     return NULL;
+   }
+ 
+-  multi->connc = Curl_mk_connc(CONNCACHE_MULTI, -1);
++  multi->connc = Curl_mk_connc(CONNCACHE_MULTI, -1L);
+   if(!multi->connc) {
+     Curl_hash_destroy(multi->sockhash);
+     Curl_hash_destroy(multi->hostcache);
+diff --git a/lib/url.c b/lib/url.c
+index 1ef52e8ec..840eefeb7 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -531,22 +531,23 @@ struct conncache *Curl_mk_connc(int type,
+ 
+   struct conncache *c;
+   long default_amount;
++  long max_amount = (long)(((size_t)INT_MAX) / sizeof(struct connectdata *));
+ 
+   if(type == CONNCACHE_PRIVATE) {
+-    default_amount = (amount < 0) ? 5 : amount;
++    default_amount = (amount < 1L) ? 5L : amount;
+   }
+   else {
+-    default_amount = (amount < 0) ? 10 : amount;
++    default_amount = (amount < 1L) ? 10L : amount;
+   }
+ 
+-  c= calloc(sizeof(struct conncache), 1);
++  if(default_amount > max_amount)
++    default_amount = max_amount;
++
++  c = calloc(1, sizeof(struct conncache));
+   if(!c)
+     return NULL;
+ 
+-  if((size_t)(default_amount) > ((size_t)-1) / sizeof(struct connectdata *))
+-    default_amount = ((size_t)-1) / sizeof(struct connectdata *);
+-
+-  c->connects = calloc(sizeof(struct connectdata *), (size_t)default_amount);
++  c->connects = calloc((size_t)default_amount, sizeof(struct connectdata *));
+   if(!c->connects) {
+     free(c);
+     return NULL;
+@@ -564,6 +565,7 @@ CURLcode Curl_ch_connc(struct SessionHandle *data,
+ {
+   long i;
+   struct connectdata **newptr;
++  long max_amount = (long)(((size_t)INT_MAX) / sizeof(struct connectdata *));
+ 
+   if(newamount < 1)
+     newamount = 1; /* we better have at least one entry */
+@@ -596,6 +598,8 @@ CURLcode Curl_ch_connc(struct SessionHandle *data,
+       data->state.lastconnect = -1;
+   }
+   if(newamount > 0) {
++    if(newamount > max_amount)
++      newamount = max_amount;
+     newptr = realloc(c->connects, sizeof(struct connectdata *) * newamount);
+     if(!newptr)
+       /* we closed a few connections in vain, but so what? */
+diff --git a/tests/server/sockfilt.c b/tests/server/sockfilt.c
+index 0e01035c5..d01a2d1fe 100644
+--- a/tests/server/sockfilt.c
++++ b/tests/server/sockfilt.c
+@@ -453,7 +453,17 @@ static bool juggle(curl_socket_t *sockfdp,
+   FD_ZERO(&fds_write);
+   FD_ZERO(&fds_err);
+ 
++#ifdef USE_WINSOCK
++  /*
++  ** WinSock select() does not support standard file descriptors,
++  ** it can only check SOCKETs. Since this program in its current
++  ** state will not work on WinSock based systems, next line is
++  ** commented out to allow warning-free compilation awaiting the
++  ** day it will be fixed to also run on WinSock systems.
++  */
++#else
+   FD_SET(fileno(stdin), &fds_read);
++#endif
+ 
+   switch(*mode) {
+ 
+

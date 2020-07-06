@@ -1,0 +1,116 @@
+commit 487b94aa88f26bef0b520de127d2eb354ae96f48
+Author: cehoyos <cehoyos@b3059339-0415-0410-9bf9-f77b7e298cf2>
+Date:   Thu Mar 4 16:57:04 2010 +0000
+
+    Support BGR555, BGR565, RGB555 and RGB565 foreign endian output in
+    libswscale.
+    
+    Patch by Alexis Ballier, alexis D ballier A gmail
+    
+    
+    git-svn-id: svn://svn.mplayerhq.hu/mplayer/trunk@30840 b3059339-0415-0410-9bf9-f77b7e298cf2
+
+diff --git a/libswscale/swscale.c b/libswscale/swscale.c
+index 83607d2b77..a4e9aa7a5f 100644
+--- a/libswscale/swscale.c
++++ b/libswscale/swscale.c
+@@ -765,8 +765,10 @@ static inline void yuv2nv12XinC(const int16_t *lumFilter, const int16_t **lumSrc
+             dest+=6;\
+         }\
+         break;\
+-    case PIX_FMT_RGB565:\
+-    case PIX_FMT_BGR565:\
++    case PIX_FMT_RGB565BE:\
++    case PIX_FMT_RGB565LE:\
++    case PIX_FMT_BGR565BE:\
++    case PIX_FMT_BGR565LE:\
+         {\
+             const int dr1= dither_2x2_8[y&1    ][0];\
+             const int dg1= dither_2x2_4[y&1    ][0];\
+@@ -780,8 +782,10 @@ static inline void yuv2nv12XinC(const int16_t *lumFilter, const int16_t **lumSrc
+             }\
+         }\
+         break;\
+-    case PIX_FMT_RGB555:\
+-    case PIX_FMT_BGR555:\
++    case PIX_FMT_RGB555BE:\
++    case PIX_FMT_RGB555LE:\
++    case PIX_FMT_BGR555BE:\
++    case PIX_FMT_BGR555LE:\
+         {\
+             const int dr1= dither_2x2_8[y&1    ][0];\
+             const int dg1= dither_2x2_8[y&1    ][1];\
+diff --git a/libswscale/swscale_internal.h b/libswscale/swscale_internal.h
+index 836a868055..5534e467ea 100644
+--- a/libswscale/swscale_internal.h
++++ b/libswscale/swscale_internal.h
+@@ -391,8 +391,10 @@ const char *sws_format_name(enum PixelFormat format);
+         || (x)==PIX_FMT_RGB32       \
+         || (x)==PIX_FMT_RGB32_1     \
+         || (x)==PIX_FMT_RGB24       \
+-        || (x)==PIX_FMT_RGB565      \
+-        || (x)==PIX_FMT_RGB555      \
++        || (x)==PIX_FMT_RGB565BE    \
++        || (x)==PIX_FMT_RGB565LE    \
++        || (x)==PIX_FMT_RGB555BE    \
++        || (x)==PIX_FMT_RGB555LE    \
+         || (x)==PIX_FMT_RGB8        \
+         || (x)==PIX_FMT_RGB4        \
+         || (x)==PIX_FMT_RGB4_BYTE   \
+@@ -403,8 +405,10 @@ const char *sws_format_name(enum PixelFormat format);
+            (x)==PIX_FMT_BGR32       \
+         || (x)==PIX_FMT_BGR32_1     \
+         || (x)==PIX_FMT_BGR24       \
+-        || (x)==PIX_FMT_BGR565      \
+-        || (x)==PIX_FMT_BGR555      \
++        || (x)==PIX_FMT_BGR565BE    \
++        || (x)==PIX_FMT_BGR565LE    \
++        || (x)==PIX_FMT_BGR555BE    \
++        || (x)==PIX_FMT_BGR555LE    \
+         || (x)==PIX_FMT_BGR8        \
+         || (x)==PIX_FMT_BGR4        \
+         || (x)==PIX_FMT_BGR4_BYTE   \
+diff --git a/libswscale/yuv2rgb.c b/libswscale/yuv2rgb.c
+index 2a05477bda..babc8c311e 100644
+--- a/libswscale/yuv2rgb.c
++++ b/libswscale/yuv2rgb.c
+@@ -33,6 +33,7 @@
+ #include "swscale.h"
+ #include "swscale_internal.h"
+ #include "libavutil/x86_cpu.h"
++#include "libavutil/bswap.h"
+ 
+ extern const uint8_t dither_8x8_32[8][8];
+ extern const uint8_t dither_8x8_73[8][8];
+@@ -596,12 +597,18 @@ av_cold int ff_yuv2rgb_c_init_tables(SwsContext *c, const int inv_table[4], int
+     const int isRgb =      c->dstFormat==PIX_FMT_RGB32
+                         || c->dstFormat==PIX_FMT_RGB32_1
+                         || c->dstFormat==PIX_FMT_BGR24
+-                        || c->dstFormat==PIX_FMT_RGB565
+-                        || c->dstFormat==PIX_FMT_RGB555
++                        || c->dstFormat==PIX_FMT_RGB565BE
++                        || c->dstFormat==PIX_FMT_RGB565LE
++                        || c->dstFormat==PIX_FMT_RGB555BE
++                        || c->dstFormat==PIX_FMT_RGB555LE
+                         || c->dstFormat==PIX_FMT_RGB8
+                         || c->dstFormat==PIX_FMT_RGB4
+                         || c->dstFormat==PIX_FMT_RGB4_BYTE
+                         || c->dstFormat==PIX_FMT_MONOBLACK;
++    const int isNotNe =    c->dstFormat==PIX_FMT_NE(RGB565LE,RGB565BE)
++                        || c->dstFormat==PIX_FMT_NE(RGB555LE,RGB555BE)
++                        || c->dstFormat==PIX_FMT_NE(BGR565LE,BGR565BE)
++                        || c->dstFormat==PIX_FMT_NE(BGR555LE,BGR555BE);
+     const int bpp = c->dstFormatBpp;
+     uint8_t *y_table;
+     uint16_t *y_table16;
+@@ -709,6 +716,9 @@ av_cold int ff_yuv2rgb_c_init_tables(SwsContext *c, const int inv_table[4], int
+             y_table16[i+2048] = (yval >> 3)          << bbase;
+             yb += cy;
+         }
++        if(isNotNe)
++            for (i = 0; i < 1024*3; i++)
++                y_table16[i] = bswap_16(y_table16[i]);
+         fill_table(c->table_rV, 2, crv, y_table16 + yoffs);
+         fill_table(c->table_gU, 2, cgu, y_table16 + yoffs + 1024);
+         fill_table(c->table_bU, 2, cbu, y_table16 + yoffs + 2048);
+

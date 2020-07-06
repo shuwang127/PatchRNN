@@ -1,0 +1,41 @@
+commit 97b89432e4566a5d620f97bfdf4c8ae9c83d94e8
+Author: Aman Gupta <aman@tmm1.net>
+Date:   Fri Dec 29 15:30:55 2017 -0800
+
+    avformat/hls: ignore http_persistent for segments requring crypto
+    
+    Encrypted HLS segments have regular http:// urls, but open_input()
+    actually prefixes them with crypto+ before calling open_url(), so
+    they end up using the crypto protocol and not the http protocol.
+    
+    This means invoking ff_http_do_new_request will fail, so we avoid
+    calling it in the first place. After the earlier http.c commit,
+    the failure results in a warning printed to the user. In earlier
+    versions, the failure would cause a segfault.
+    
+    Signed-off-by: Aman Gupta <aman@tmm1.net>
+
+diff --git a/libavformat/hls.c b/libavformat/hls.c
+index dccc7c7dd2..d9f7c6de4d 100644
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -1479,7 +1479,7 @@ reload:
+ 
+     seg = next_segment(v);
+     if (c->http_multiple == 1 && !v->input_next_requested &&
+-        seg && av_strstart(seg->url, "http", NULL)) {
++        seg && seg->key_type == KEY_NONE && av_strstart(seg->url, "http", NULL)) {
+         ret = open_input(c, v, seg, &v->input_next);
+         if (ret < 0) {
+             if (ff_check_interrupt(c->interrupt_callback))
+@@ -1511,7 +1511,8 @@ reload:
+ 
+         return ret;
+     }
+-    if (c->http_persistent && av_strstart(seg->url, "http", NULL)) {
++    if (c->http_persistent &&
++        seg->key_type == KEY_NONE && av_strstart(seg->url, "http", NULL)) {
+         v->input_read_done = 1;
+     } else {
+         ff_format_io_close(v->parent, &v->input);
+

@@ -1,0 +1,49 @@
+commit 03221702608c60b470fc86a23bdf4bc30e5bd59f
+Author: Brian Pomerantz <bapper@piratehaven.org>
+Date:   Sun Apr 1 23:49:41 2007 -0700
+
+    [PATCH] fix page leak during core dump
+    
+    When the dump cannot occur most likely because of a full file system and
+    the page to be written is the zero page, the call to page_cache_release()
+    is missed.
+    
+    Signed-off-by: Brian Pomerantz <bapper@mvista.com>
+    Cc: Hugh Dickins <hugh@veritas.com>
+    Cc: Nick Piggin <nickpiggin@yahoo.com.au>
+    Cc: David Howells <dhowells@redhat.com>
+    Cc: <stable@kernel.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/binfmt_elf.c b/fs/binfmt_elf.c
+index a2fceba7ef8e..9cc4f0a8aaae 100644
+--- a/fs/binfmt_elf.c
++++ b/fs/binfmt_elf.c
+@@ -1704,7 +1704,10 @@ static int elf_core_dump(long signr, struct pt_regs *regs, struct file *file)
+ 				DUMP_SEEK(PAGE_SIZE);
+ 			} else {
+ 				if (page == ZERO_PAGE(addr)) {
+-					DUMP_SEEK(PAGE_SIZE);
++					if (!dump_seek(file, PAGE_SIZE)) {
++						page_cache_release(page);
++						goto end_coredump;
++					}
+ 				} else {
+ 					void *kaddr;
+ 					flush_cache_page(vma, addr,
+diff --git a/fs/binfmt_elf_fdpic.c b/fs/binfmt_elf_fdpic.c
+index 47d6d49d1fb9..f3ddca4a387b 100644
+--- a/fs/binfmt_elf_fdpic.c
++++ b/fs/binfmt_elf_fdpic.c
+@@ -1480,8 +1480,8 @@ static int elf_fdpic_dump_segments(struct file *file, struct mm_struct *mm,
+ 				DUMP_SEEK(file->f_pos + PAGE_SIZE);
+ 			}
+ 			else if (page == ZERO_PAGE(addr)) {
+-				DUMP_SEEK(file->f_pos + PAGE_SIZE);
+ 				page_cache_release(page);
++				DUMP_SEEK(file->f_pos + PAGE_SIZE);
+ 			}
+ 			else {
+ 				void *kaddr;
+

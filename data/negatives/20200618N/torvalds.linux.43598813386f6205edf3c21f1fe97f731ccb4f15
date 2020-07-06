@@ -1,0 +1,113 @@
+commit 43598813386f6205edf3c21f1fe97f731ccb4f15
+Author: stephen hemminger <shemminger@vyatta.com>
+Date:   Thu Dec 8 07:17:49 2011 +0000
+
+    bridge: add local MAC address to forwarding table (v2)
+    
+    If user has configured a MAC address that is not one of the existing
+    ports of the bridge, then we need to add a special entry in the forwarding
+    table. This forwarding table entry has no outgoing port so it has to be
+    treated a little differently. The special entry is reported by the netlink
+    interface with ifindex of bridge, but ignored by the old interface since there
+    is no usable way to put it in the ABI.
+    
+    Reported-by: Koki Sanagi <sanagi.koki@jp.fujitsu.com>
+    Signed-off-by: Stephen Hemminger <shemminger@vyatta.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/bridge/br_device.c b/net/bridge/br_device.c
+index a3754ac262c3..71773b014e0c 100644
+--- a/net/bridge/br_device.c
++++ b/net/bridge/br_device.c
+@@ -170,8 +170,11 @@ static int br_set_mac_address(struct net_device *dev, void *p)
+ 		return -EINVAL;
+ 
+ 	spin_lock_bh(&br->lock);
+-	memcpy(dev->dev_addr, addr->sa_data, ETH_ALEN);
+-	br_stp_change_bridge_id(br, addr->sa_data);
++	if (compare_ether_addr(dev->dev_addr, addr->sa_data)) {
++		memcpy(dev->dev_addr, addr->sa_data, ETH_ALEN);
++		br_fdb_change_mac_address(br, addr->sa_data);
++		br_stp_change_bridge_id(br, addr->sa_data);
++	}
+ 	br->flags |= BR_SET_MAC_ADDR;
+ 	spin_unlock_bh(&br->lock);
+ 
+diff --git a/net/bridge/br_fdb.c b/net/bridge/br_fdb.c
+index b6ae60b08d46..a1429afca443 100644
+--- a/net/bridge/br_fdb.c
++++ b/net/bridge/br_fdb.c
+@@ -127,6 +127,18 @@ void br_fdb_changeaddr(struct net_bridge_port *p, const unsigned char *newaddr)
+ 	spin_unlock_bh(&br->hash_lock);
+ }
+ 
++void br_fdb_change_mac_address(struct net_bridge *br, const u8 *newaddr)
++{
++	struct net_bridge_fdb_entry *f;
++
++	/* If old entry was unassociated with any port, then delete it. */
++	f = __br_fdb_get(br, br->dev->dev_addr);
++	if (f && f->is_local && !f->dst)
++		fdb_delete(br, f);
++
++	fdb_insert(br, NULL, newaddr);
++}
++
+ void br_fdb_cleanup(unsigned long _data)
+ {
+ 	struct net_bridge *br = (struct net_bridge *)_data;
+@@ -250,7 +262,7 @@ int br_fdb_test_addr(struct net_device *dev, unsigned char *addr)
+ 		ret = 0;
+ 	else {
+ 		fdb = __br_fdb_get(port->br, addr);
+-		ret = fdb && fdb->dst->dev != dev &&
++		ret = fdb && fdb->dst && fdb->dst->dev != dev &&
+ 			fdb->dst->state == BR_STATE_FORWARDING;
+ 	}
+ 	rcu_read_unlock();
+@@ -282,6 +294,10 @@ int br_fdb_fillbuf(struct net_bridge *br, void *buf,
+ 			if (has_expired(br, f))
+ 				continue;
+ 
++			/* ignore pseudo entry for local MAC address */
++			if (!f->dst)
++				continue;
++
+ 			if (skip) {
+ 				--skip;
+ 				continue;
+@@ -468,7 +484,7 @@ static int fdb_fill_info(struct sk_buff *skb, const struct net_bridge *br,
+ 	ndm->ndm_pad2    = 0;
+ 	ndm->ndm_flags	 = 0;
+ 	ndm->ndm_type	 = 0;
+-	ndm->ndm_ifindex = fdb->dst->dev->ifindex;
++	ndm->ndm_ifindex = fdb->dst ? fdb->dst->dev->ifindex : br->dev->ifindex;
+ 	ndm->ndm_state   = fdb_to_nud(fdb);
+ 
+ 	NLA_PUT(skb, NDA_LLADDR, ETH_ALEN, &fdb->addr);
+diff --git a/net/bridge/br_forward.c b/net/bridge/br_forward.c
+index ee64287f1290..61f65344e711 100644
+--- a/net/bridge/br_forward.c
++++ b/net/bridge/br_forward.c
+@@ -98,7 +98,7 @@ static void __br_forward(const struct net_bridge_port *to, struct sk_buff *skb)
+ /* called with rcu_read_lock */
+ void br_deliver(const struct net_bridge_port *to, struct sk_buff *skb)
+ {
+-	if (should_deliver(to, skb)) {
++	if (to && should_deliver(to, skb)) {
+ 		__br_deliver(to, skb);
+ 		return;
+ 	}
+diff --git a/net/bridge/br_private.h b/net/bridge/br_private.h
+index 4027029aa5e4..89969080c384 100644
+--- a/net/bridge/br_private.h
++++ b/net/bridge/br_private.h
+@@ -348,6 +348,7 @@ extern void br_fdb_fini(void);
+ extern void br_fdb_flush(struct net_bridge *br);
+ extern void br_fdb_changeaddr(struct net_bridge_port *p,
+ 			      const unsigned char *newaddr);
++extern void br_fdb_change_mac_address(struct net_bridge *br, const u8 *newaddr);
+ extern void br_fdb_cleanup(unsigned long arg);
+ extern void br_fdb_delete_by_port(struct net_bridge *br,
+ 				  const struct net_bridge_port *p, int do_all);
+

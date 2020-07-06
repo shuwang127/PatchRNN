@@ -1,0 +1,118 @@
+commit 7bb68410ef22067b08fd52887875b8f337f89dcc
+Author: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+Date:   Sat Oct 18 15:04:15 2014 +0200
+
+    efi: split off remapping code from efi_config_init()
+    
+    Split of the remapping code from efi_config_init() so that the caller
+    can perform its own remapping. This is necessary to correctly handle
+    virtually remapped UEFI memory regions under kexec, as efi.systab will
+    have been updated to a virtual address.
+    
+    Acked-by: Matt Fleming <matt.fleming@intel.com>
+    Tested-by: Leif Lindholm <leif.lindholm@linaro.org>
+    Signed-off-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+
+diff --git a/drivers/firmware/efi/efi.c b/drivers/firmware/efi/efi.c
+index 9035c1b74d58..b7ba9d8ec4b0 100644
+--- a/drivers/firmware/efi/efi.c
++++ b/drivers/firmware/efi/efi.c
+@@ -293,29 +293,15 @@ static __init int match_config_table(efi_guid_t *guid,
+ 	return 0;
+ }
+ 
+-int __init efi_config_init(efi_config_table_type_t *arch_tables)
++int __init efi_config_parse_tables(void *config_tables, int count, int sz,
++				   efi_config_table_type_t *arch_tables)
+ {
+-	void *config_tables, *tablep;
+-	int i, sz;
+-
+-	if (efi_enabled(EFI_64BIT))
+-		sz = sizeof(efi_config_table_64_t);
+-	else
+-		sz = sizeof(efi_config_table_32_t);
+-
+-	/*
+-	 * Let's see what config tables the firmware passed to us.
+-	 */
+-	config_tables = early_memremap(efi.systab->tables,
+-				       efi.systab->nr_tables * sz);
+-	if (config_tables == NULL) {
+-		pr_err("Could not map Configuration table!\n");
+-		return -ENOMEM;
+-	}
++	void *tablep;
++	int i;
+ 
+ 	tablep = config_tables;
+ 	pr_info("");
+-	for (i = 0; i < efi.systab->nr_tables; i++) {
++	for (i = 0; i < count; i++) {
+ 		efi_guid_t guid;
+ 		unsigned long table;
+ 
+@@ -328,8 +314,6 @@ int __init efi_config_init(efi_config_table_type_t *arch_tables)
+ 			if (table64 >> 32) {
+ 				pr_cont("\n");
+ 				pr_err("Table located above 4GB, disabling EFI.\n");
+-				early_memunmap(config_tables,
+-					       efi.systab->nr_tables * sz);
+ 				return -EINVAL;
+ 			}
+ #endif
+@@ -344,13 +328,37 @@ int __init efi_config_init(efi_config_table_type_t *arch_tables)
+ 		tablep += sz;
+ 	}
+ 	pr_cont("\n");
+-	early_memunmap(config_tables, efi.systab->nr_tables * sz);
+-
+ 	set_bit(EFI_CONFIG_TABLES, &efi.flags);
+-
+ 	return 0;
+ }
+ 
++int __init efi_config_init(efi_config_table_type_t *arch_tables)
++{
++	void *config_tables;
++	int sz, ret;
++
++	if (efi_enabled(EFI_64BIT))
++		sz = sizeof(efi_config_table_64_t);
++	else
++		sz = sizeof(efi_config_table_32_t);
++
++	/*
++	 * Let's see what config tables the firmware passed to us.
++	 */
++	config_tables = early_memremap(efi.systab->tables,
++				       efi.systab->nr_tables * sz);
++	if (config_tables == NULL) {
++		pr_err("Could not map Configuration table!\n");
++		return -ENOMEM;
++	}
++
++	ret = efi_config_parse_tables(config_tables, efi.systab->nr_tables, sz,
++				      arch_tables);
++
++	early_memunmap(config_tables, efi.systab->nr_tables * sz);
++	return ret;
++}
++
+ #ifdef CONFIG_EFI_VARS_MODULE
+ static int __init efi_load_efivars(void)
+ {
+diff --git a/include/linux/efi.h b/include/linux/efi.h
+index 0238d612750e..5ffe5115951f 100644
+--- a/include/linux/efi.h
++++ b/include/linux/efi.h
+@@ -875,6 +875,8 @@ static inline efi_status_t efi_query_variable_store(u32 attributes, unsigned lon
+ #endif
+ extern void __iomem *efi_lookup_mapped_addr(u64 phys_addr);
+ extern int efi_config_init(efi_config_table_type_t *arch_tables);
++extern int efi_config_parse_tables(void *config_tables, int count, int sz,
++				   efi_config_table_type_t *arch_tables);
+ extern u64 efi_get_iobase (void);
+ extern u32 efi_mem_type (unsigned long phys_addr);
+ extern u64 efi_mem_attributes (unsigned long phys_addr);
+

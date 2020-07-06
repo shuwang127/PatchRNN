@@ -1,0 +1,65 @@
+commit cd1d9950f69b46d88002b39652ed0cf3608d008b
+Author: Philipp Reisner <philipp.reisner@linbit.com>
+Date:   Mon Apr 11 21:24:24 2011 -0700
+
+    drbd: Inlined drbd_free_mdev(); it got called only from one place
+    
+    Signed-off-by: Philipp Reisner <philipp.reisner@linbit.com>
+    Signed-off-by: Lars Ellenberg <lars.ellenberg@linbit.com>
+
+diff --git a/drivers/block/drbd/drbd_int.h b/drivers/block/drbd/drbd_int.h
+index ce56aa08314e..c49dc085d93a 100644
+--- a/drivers/block/drbd/drbd_int.h
++++ b/drivers/block/drbd/drbd_int.h
+@@ -1366,7 +1366,6 @@ extern rwlock_t global_state_lock;
+ 
+ extern int conn_lowest_minor(struct drbd_tconn *tconn);
+ enum drbd_ret_code conn_new_minor(struct drbd_tconn *tconn, unsigned int minor, int vnr);
+-extern void drbd_free_mdev(struct drbd_conf *mdev);
+ extern void drbd_delete_device(struct drbd_conf *mdev);
+ 
+ struct drbd_tconn *drbd_new_tconn(const char *name);
+diff --git a/drivers/block/drbd/drbd_main.c b/drivers/block/drbd/drbd_main.c
+index 93a16db8a999..563427bfc274 100644
+--- a/drivers/block/drbd/drbd_main.c
++++ b/drivers/block/drbd/drbd_main.c
+@@ -2233,10 +2233,13 @@ void drbd_delete_device(struct drbd_conf *mdev)
+ 	kfree(mdev->p_uuid);
+ 	/* mdev->p_uuid = NULL; */
+ 
+-	/* cleanup the rest that has been
+-	 * allocated from drbd_new_device
+-	 * and actually free the mdev itself */
+-	drbd_free_mdev(mdev);
++	kfree(mdev->current_epoch);
++	if (mdev->bitmap) /* should no longer be there. */
++		drbd_bm_cleanup(mdev);
++	__free_page(mdev->md_io_page);
++	put_disk(mdev->vdisk);
++	blk_cleanup_queue(mdev->rq_queue);
++	kfree(mdev);
+ }
+ 
+ static void drbd_cleanup(void)
+@@ -2551,20 +2554,6 @@ enum drbd_ret_code conn_new_minor(struct drbd_tconn *tconn, unsigned int minor,
+ 	return err;
+ }
+ 
+-/* counterpart of drbd_new_device.
+- * last part of drbd_delete_device. */
+-void drbd_free_mdev(struct drbd_conf *mdev)
+-{
+-	kfree(mdev->current_epoch);
+-	if (mdev->bitmap) /* should no longer be there. */
+-		drbd_bm_cleanup(mdev);
+-	__free_page(mdev->md_io_page);
+-	put_disk(mdev->vdisk);
+-	blk_cleanup_queue(mdev->rq_queue);
+-	kfree(mdev);
+-}
+-
+-
+ int __init drbd_init(void)
+ {
+ 	int err;
+

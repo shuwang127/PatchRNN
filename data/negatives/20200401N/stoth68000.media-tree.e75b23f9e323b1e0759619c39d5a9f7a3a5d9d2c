@@ -1,0 +1,82 @@
+commit e75b23f9e323b1e0759619c39d5a9f7a3a5d9d2c
+Author: J. Bruce Fields <bfields@redhat.com>
+Date:   Tue Jul 19 17:33:04 2016 -0400
+
+    nfsd: check d_can_lookup in fh_verify of directories
+    
+    Create and other nfsd ops generally assume we can call lookup_one_len on
+    inodes with S_IFDIR set.  Al says that this assumption isn't true in
+    general, though it should be for the filesystem objects nfsd sees.
+    
+    Add a check just to make sure our assumption isn't violated.
+    
+    Remove a couple checks for i_op->lookup in create code.
+    
+    Cc: Al Viro <viro@zeniv.linux.org.uk>
+    Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+
+diff --git a/fs/nfsd/nfsfh.c b/fs/nfsd/nfsfh.c
+index 27250e279c37..cfe7500d5847 100644
+--- a/fs/nfsd/nfsfh.c
++++ b/fs/nfsd/nfsfh.c
+@@ -59,14 +59,20 @@ static int nfsd_acceptable(void *expv, struct dentry *dentry)
+  * the write call).
+  */
+ static inline __be32
+-nfsd_mode_check(struct svc_rqst *rqstp, umode_t mode, umode_t requested)
++nfsd_mode_check(struct svc_rqst *rqstp, struct dentry *dentry,
++		umode_t requested)
+ {
+-	mode &= S_IFMT;
++	umode_t mode = d_inode(dentry)->i_mode & S_IFMT;
+ 
+ 	if (requested == 0) /* the caller doesn't care */
+ 		return nfs_ok;
+-	if (mode == requested)
++	if (mode == requested) {
++		if (mode == S_IFDIR && !d_can_lookup(dentry)) {
++			WARN_ON_ONCE(1);
++			return nfserr_notdir;
++		}
+ 		return nfs_ok;
++	}
+ 	/*
+ 	 * v4 has an error more specific than err_notdir which we should
+ 	 * return in preference to err_notdir:
+@@ -340,7 +346,7 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, umode_t type, int access)
+ 	if (error)
+ 		goto out;
+ 
+-	error = nfsd_mode_check(rqstp, d_inode(dentry)->i_mode, type);
++	error = nfsd_mode_check(rqstp, dentry, type);
+ 	if (error)
+ 		goto out;
+ 
+diff --git a/fs/nfsd/vfs.c b/fs/nfsd/vfs.c
+index fba8e7e521e0..cf14e394a1b0 100644
+--- a/fs/nfsd/vfs.c
++++ b/fs/nfsd/vfs.c
+@@ -1169,9 +1169,6 @@ nfsd_create(struct svc_rqst *rqstp, struct svc_fh *fhp,
+ 	dentry = fhp->fh_dentry;
+ 	dirp = d_inode(dentry);
+ 
+-	err = nfserr_notdir;
+-	if (!dirp->i_op->lookup)
+-		goto out;
+ 	/*
+ 	 * Check whether the response file handle has been verified yet.
+ 	 * If it has, the parent directory should already be locked.
+@@ -1310,12 +1307,6 @@ do_nfsd_create(struct svc_rqst *rqstp, struct svc_fh *fhp,
+ 	dentry = fhp->fh_dentry;
+ 	dirp = d_inode(dentry);
+ 
+-	/* Get all the sanity checks out of the way before
+-	 * we lock the parent. */
+-	err = nfserr_notdir;
+-	if (!dirp->i_op->lookup)
+-		goto out;
+-
+ 	host_err = fh_want_write(fhp);
+ 	if (host_err)
+ 		goto out_nfserr;
+

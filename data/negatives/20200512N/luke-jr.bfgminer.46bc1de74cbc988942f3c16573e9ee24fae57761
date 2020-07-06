@@ -1,0 +1,106 @@
+commit 46bc1de74cbc988942f3c16573e9ee24fae57761
+Author: Luke Dashjr <luke-jr+git@utopios.org>
+Date:   Fri Sep 14 09:58:18 2012 +0000
+
+    fpgautils: serial_claim function to politely ask other drivers not to try to use device
+
+diff --git a/driver-icarus.c b/driver-icarus.c
+index f9cac481..19917166 100644
+--- a/driver-icarus.c
++++ b/driver-icarus.c
+@@ -576,6 +576,12 @@ bool icarus_detect_custom(const char *devpath, struct device_api *api, struct IC
+ 	} else
+ 		return false;
+ 
++	if (serial_claim(devpath, api)) {
++		const char *claimedby = serial_claim(devpath, api)->dname;
++		applog(LOG_DEBUG, "Icarus device %s already claimed by other driver: %s", devpath, claimedby);
++		return false;
++	}
++
+ 	/* We have a real Icarus! */
+ 	struct cgpu_info *icarus;
+ 	icarus = calloc(1, sizeof(struct cgpu_info));
+diff --git a/fpgautils.c b/fpgautils.c
+index 2aeb7601..904e34d2 100644
+--- a/fpgautils.c
++++ b/fpgautils.c
+@@ -11,6 +11,7 @@
+ #include "config.h"
+ 
+ #include <stdint.h>
++#include <stdlib.h>
+ #include <sys/types.h>
+ #include <dirent.h>
+ #include <string.h>
+@@ -249,6 +250,56 @@ _serial_detect(const char*dname, detectone_func_t detectone, autoscan_func_t aut
+ 	return found;
+ }
+ 
++#ifndef WIN32
++typedef dev_t my_dev_t;
++#else
++typedef int my_dev_t;
++#endif
++
++struct _device_claim {
++	struct device_api *api;
++	my_dev_t dev;
++	UT_hash_handle hh;
++};
++
++struct device_api *serial_claim(const char *devpath, struct device_api *api)
++{
++	static struct _device_claim *claims = NULL;
++	struct _device_claim *c;
++	my_dev_t dev;
++
++#ifndef WIN32
++	{
++		struct stat my_stat;
++		if (stat(devpath, &my_stat))
++			return NULL;
++		dev = my_stat.st_rdev;
++	}
++#else
++	{
++		char *p = strstr(devpath, "COM"), *p2;
++		if (!p)
++			return NULL;
++		dev = strtol(&p[3], &p2, 10);
++		if (p2 == p)
++			return NULL;
++	}
++#endif
++
++	HASH_FIND(hh, claims, &dev, sizeof(dev), c);
++	if (c)
++		return c->api;
++
++	if (!api)
++		return NULL;
++
++	c = malloc(sizeof(*c));
++	c->dev = dev;
++	c->api = api;
++	HASH_ADD(hh, claims, dev, sizeof(dev), c);
++	return NULL;
++}
++
+ // This code is purely for debugging but is very useful for that
+ // It also took quite a bit of effort so I left it in
+ // #define TERMIOS_DEBUG 1
+diff --git a/fpgautils.h b/fpgautils.h
+index 4341515b..08f569be 100644
+--- a/fpgautils.h
++++ b/fpgautils.h
+@@ -30,6 +30,8 @@ extern int serial_autodetect_devserial(detectone_func_t, const char*prodname);
+ extern int serial_autodetect_udev     (detectone_func_t, const char*prodname);
+ extern int serial_autodetect_ftdi     (detectone_func_t, const char*needle, const char *needle2);
+ 
++extern struct device_api *serial_claim(const char *devpath, struct device_api *);
++
+ extern int serial_open(const char*devpath, unsigned long baud, uint8_t timeout, bool purge);
+ extern ssize_t _serial_read(int fd, char *buf, size_t buflen, char*eol);
+ #define serial_read(fd, buf, count)  \
+

@@ -1,0 +1,75 @@
+commit 89fd2e282ad510f801c1f44a660086f9d5bdf088
+Author: Bob Copeland <me@bobcopeland.com>
+Date:   Mon May 12 21:16:44 2008 -0400
+
+    ath5k: Fix loop variable initializations
+    
+    In ath5k_tasklet_rx, both status structures 'rxs' and 'rs' are
+    initialized at the top of the tasklet, but not within the loop.
+    If the loop is executed multiple times in the tasklet then the
+    variables may see changes from previous packets.
+    
+    For TKIP, this results in 'Invalid Michael MIC' errors if two packets
+    are processed in the tasklet: rxs.flag gets set to RX_DECRYPTED by
+    mac80211 when it decrypts the first encrypted packet.  The subsequent
+    packet will have RX_DECRYPTED set upon entry to mac80211, so mac80211
+    will not try to decrypt it.
+    
+    We currently initialize all but two fields in the structures, so fix
+    the other two.
+    
+    Signed-off-by: Bob Copeland <me@bobcopeland.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/ath5k/base.c b/drivers/net/wireless/ath5k/base.c
+index 4e5c8fc35200..635b9ac9aaa1 100644
+--- a/drivers/net/wireless/ath5k/base.c
++++ b/drivers/net/wireless/ath5k/base.c
+@@ -1787,6 +1787,8 @@ ath5k_tasklet_rx(unsigned long data)
+ 
+ 	spin_lock(&sc->rxbuflock);
+ 	do {
++		rxs.flag = 0;
++
+ 		if (unlikely(list_empty(&sc->rxbuf))) {
+ 			ATH5K_WARN(sc, "empty rx buf pool\n");
+ 			break;
+diff --git a/drivers/net/wireless/ath5k/hw.c b/drivers/net/wireless/ath5k/hw.c
+index 5fb1ae6ad3e2..77990b56860b 100644
+--- a/drivers/net/wireless/ath5k/hw.c
++++ b/drivers/net/wireless/ath5k/hw.c
+@@ -4119,6 +4119,7 @@ static int ath5k_hw_proc_5210_rx_status(struct ath5k_hw *ah,
+ 	rs->rs_tstamp = AR5K_REG_MS(rx_status->rx_status_1,
+ 		AR5K_5210_RX_DESC_STATUS1_RECEIVE_TIMESTAMP);
+ 	rs->rs_status = 0;
++	rs->rs_phyerr = 0;
+ 
+ 	/*
+ 	 * Key table status
+@@ -4145,7 +4146,7 @@ static int ath5k_hw_proc_5210_rx_status(struct ath5k_hw *ah,
+ 		if (rx_status->rx_status_1 &
+ 				AR5K_5210_RX_DESC_STATUS1_PHY_ERROR) {
+ 			rs->rs_status |= AR5K_RXERR_PHY;
+-			rs->rs_phyerr = AR5K_REG_MS(rx_status->rx_status_1,
++			rs->rs_phyerr |= AR5K_REG_MS(rx_status->rx_status_1,
+ 					   AR5K_5210_RX_DESC_STATUS1_PHY_ERROR);
+ 		}
+ 
+@@ -4193,6 +4194,7 @@ static int ath5k_hw_proc_5212_rx_status(struct ath5k_hw *ah,
+ 	rs->rs_tstamp = AR5K_REG_MS(rx_status->rx_status_1,
+ 		AR5K_5212_RX_DESC_STATUS1_RECEIVE_TIMESTAMP);
+ 	rs->rs_status = 0;
++	rs->rs_phyerr = 0;
+ 
+ 	/*
+ 	 * Key table status
+@@ -4215,7 +4217,7 @@ static int ath5k_hw_proc_5212_rx_status(struct ath5k_hw *ah,
+ 		if (rx_status->rx_status_1 &
+ 				AR5K_5212_RX_DESC_STATUS1_PHY_ERROR) {
+ 			rs->rs_status |= AR5K_RXERR_PHY;
+-			rs->rs_phyerr = AR5K_REG_MS(rx_err->rx_error_1,
++			rs->rs_phyerr |= AR5K_REG_MS(rx_err->rx_error_1,
+ 					   AR5K_RX_DESC_ERROR1_PHY_ERROR_CODE);
+ 		}
+ 
+

@@ -1,0 +1,70 @@
+commit aa9c9ed26839591fe389085ab13f6131b7ce2a22
+Author: Jilles Tjoelker <jilles@stack.nl>
+Date:   Sun May 17 20:52:16 2009 +0200
+
+    Allow ctcp replies through floodcount after ctcp'ing a large group.
+    
+    A large group is any $$ or $# or a channel with more than
+    floodcount/2 local members, checked on each server separately.
+    Note that floodcount checks are done on the sender's server.
+    
+    The special treatment is active for 15 seconds.
+
+diff --git a/include/client.h b/include/client.h
+index 31304ee4..6dbb8b57 100644
+--- a/include/client.h
++++ b/include/client.h
+@@ -175,6 +175,8 @@ struct Client
+ 
+ 	local_user_t *localClient;
+ 	pre_client_t *preClient;
++
++	time_t large_ctcp_sent; /* ctcp to large group sent, relax flood checks */
+ };
+ 
+ struct LocalUser
+diff --git a/modules/core/m_message.c b/modules/core/m_message.c
+index be1a732a..c8932503 100644
+--- a/modules/core/m_message.c
++++ b/modules/core/m_message.c
+@@ -95,6 +95,9 @@ static int flood_attack_client(int p_or_n, struct Client *source_p, struct Clien
+ static int flood_attack_channel(int p_or_n, struct Client *source_p,
+ 				struct Channel *chptr, char *chname);
+ 
++/* Fifteen seconds should be plenty for a client to reply a ctcp */
++#define LARGE_CTCP_TIME 15
++
+ #define ENTITY_NONE    0
+ #define ENTITY_CHANNEL 1
+ #define ENTITY_CHANNEL_OPMOD 2
+@@ -512,6 +515,9 @@ msg_channel(int p_or_n, const char *command,
+ 		{
+ 			sendto_channel_flags(client_p, ALL_MEMBERS, source_p, chptr,
+ 					     "%s %s :%s", command, chptr->chname, text);
++			if (p_or_n != NOTICE && *text == '\001' &&
++					rb_dlink_list_length(&chptr->locmembers) > (unsigned)(GlobalSetOptions.floodcount / 2))
++				source_p->large_ctcp_sent = rb_current_time();
+ 		}
+ 	}
+ 	else if(chptr->mode.mode & MODE_OPMODERATE &&
+@@ -766,6 +772,10 @@ msg_client(int p_or_n, const char *command,
+ 			}
+ 		}
+ 
++		if (do_floodcount && p_or_n == NOTICE && *text == '\001' &&
++				target_p->large_ctcp_sent + LARGE_CTCP_TIME >= rb_current_time())
++			do_floodcount = 0;
++
+ 		if (do_floodcount &&
+ 				flood_attack_client(p_or_n, source_p, target_p))
+ 			return;
+@@ -1089,6 +1099,8 @@ handle_special(int p_or_n, const char *command, struct Client *client_p,
+ 				    nick + 1,
+ 				    (*nick == '#') ? MATCH_HOST : MATCH_SERVER,
+ 				    "%s $%s :%s", command, nick, text);
++		if (p_or_n != NOTICE && *text == '\001')
++			source_p->large_ctcp_sent = rb_current_time();
+ 		return;
+ 	}
+ }
+

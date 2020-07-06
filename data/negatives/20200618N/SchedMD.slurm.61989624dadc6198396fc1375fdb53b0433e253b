@@ -1,0 +1,48 @@
+commit 61989624dadc6198396fc1375fdb53b0433e253b
+Author: Morris Jette <jette@schedmd.com>
+Date:   Thu Sep 8 14:40:17 2011 -0700
+
+    Prevent resetting schedloglevel if no logfile defined
+    
+    If there is no SchedLogfile defined and 'scontrol schedloglevel 1'
+    is issued from an administrator, slurmctld will segfault at the
+    next "sched: " log message due to NULL log file pointer. There
+    are obviously multiple ways to fix this issue, but in this patch
+    the RPC simply returns and "Operation Disabled" error immediately
+    if the sched log file is NULL.
+    
+    Other options include opening a new logfile with a default name,
+    sending sched log messages to stderr, or enhancing the scontrol
+    interface to allow specifying a logfile name for the schedlog.
+    
+    There are other cases in the schedlog code that could cause problems
+    for the slurmctld, but since the sched log stuff is tied in strangely
+    with the rest of the logging code, I didn't want to try modifying
+    anything in log.c, for fear of breaking the normal logging functions.
+    Patch from Mark Grondona, LLNL.
+
+diff --git a/src/slurmctld/proc_req.c b/src/slurmctld/proc_req.c
+index 89276f915b..22e2a88a43 100644
+--- a/src/slurmctld/proc_req.c
++++ b/src/slurmctld/proc_req.c
+@@ -3981,6 +3981,19 @@ inline static void  _slurm_rpc_set_schedlog_level(slurm_msg_t *msg)
+ 		return;
+ 	}
+ 
++	/*
++	 * If slurmctld_conf.sched_logfile is NULL, then this operation
++	 *  will fail, since there is no sched logfile for which to alter
++	 *  the log level. (Calling sched_log_alter with a NULL filename
++	 *  is likely to cause a segfault at the next sched log call)
++	 *  So just give up and return "Operation Disabled"
++	 */
++	if (slurmctld_conf.sched_logfile == NULL) {
++		error("set scheduler log level failed: no log file!");
++		slurm_send_rc_msg (msg, ESLURM_DISABLED);
++		return;
++	}
++
+ 	schedlog_level = MIN (request_msg->debug_level, (LOG_LEVEL_QUIET + 1));
+ 	schedlog_level = MAX (schedlog_level, LOG_LEVEL_QUIET);
+ 
+

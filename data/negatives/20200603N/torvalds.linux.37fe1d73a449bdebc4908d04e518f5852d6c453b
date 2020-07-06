@@ -1,0 +1,150 @@
+commit 37fe1d73a449bdebc4908d04e518f5852d6c453b
+Author: Heiko Carstens <heiko.carstens@de.ibm.com>
+Date:   Fri Jul 27 10:18:13 2012 +0200
+
+    s390/mm: rename user_mode variable to addressing_mode
+    
+    Fix name clash with user_mode() define which is also used in common code.
+    
+    Signed-off-by: Heiko Carstens <heiko.carstens@de.ibm.com>
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+
+diff --git a/arch/s390/include/asm/mmu_context.h b/arch/s390/include/asm/mmu_context.h
+index 077de7efc82f..b749c5733657 100644
+--- a/arch/s390/include/asm/mmu_context.h
++++ b/arch/s390/include/asm/mmu_context.h
+@@ -57,7 +57,7 @@ static inline void update_mm(struct mm_struct *mm, struct task_struct *tsk)
+ 	pgd_t *pgd = mm->pgd;
+ 
+ 	S390_lowcore.user_asce = mm->context.asce_bits | __pa(pgd);
+-	if (user_mode != HOME_SPACE_MODE) {
++	if (addressing_mode != HOME_SPACE_MODE) {
+ 		/* Load primary space page table origin. */
+ 		asm volatile(LCTL_OPCODE" 1,1,%0\n"
+ 			     : : "m" (S390_lowcore.user_asce) );
+diff --git a/arch/s390/include/asm/setup.h b/arch/s390/include/asm/setup.h
+index 57e80534375a..e6859d16ee2d 100644
+--- a/arch/s390/include/asm/setup.h
++++ b/arch/s390/include/asm/setup.h
+@@ -60,7 +60,7 @@ void create_mem_hole(struct mem_chunk memory_chunk[], unsigned long addr,
+ #define SECONDARY_SPACE_MODE	2
+ #define HOME_SPACE_MODE		3
+ 
+-extern unsigned int user_mode;
++extern unsigned int addressing_mode;
+ 
+ /*
+  * Machine features detected in head.S
+diff --git a/arch/s390/kernel/setup.c b/arch/s390/kernel/setup.c
+index 743c0f32fe3b..f86c81e13c37 100644
+--- a/arch/s390/kernel/setup.c
++++ b/arch/s390/kernel/setup.c
+@@ -302,8 +302,8 @@ static int __init parse_vmalloc(char *arg)
+ }
+ early_param("vmalloc", parse_vmalloc);
+ 
+-unsigned int user_mode = HOME_SPACE_MODE;
+-EXPORT_SYMBOL_GPL(user_mode);
++unsigned int addressing_mode = HOME_SPACE_MODE;
++EXPORT_SYMBOL_GPL(addressing_mode);
+ 
+ static int set_amode_primary(void)
+ {
+@@ -328,7 +328,7 @@ static int set_amode_primary(void)
+  */
+ static int __init early_parse_switch_amode(char *p)
+ {
+-	user_mode = PRIMARY_SPACE_MODE;
++	addressing_mode = PRIMARY_SPACE_MODE;
+ 	return 0;
+ }
+ early_param("switch_amode", early_parse_switch_amode);
+@@ -336,9 +336,9 @@ early_param("switch_amode", early_parse_switch_amode);
+ static int __init early_parse_user_mode(char *p)
+ {
+ 	if (p && strcmp(p, "primary") == 0)
+-		user_mode = PRIMARY_SPACE_MODE;
++		addressing_mode = PRIMARY_SPACE_MODE;
+ 	else if (!p || strcmp(p, "home") == 0)
+-		user_mode = HOME_SPACE_MODE;
++		addressing_mode = HOME_SPACE_MODE;
+ 	else
+ 		return 1;
+ 	return 0;
+@@ -347,7 +347,7 @@ early_param("user_mode", early_parse_user_mode);
+ 
+ static void setup_addressing_mode(void)
+ {
+-	if (user_mode == PRIMARY_SPACE_MODE) {
++	if (addressing_mode == PRIMARY_SPACE_MODE) {
+ 		if (set_amode_primary())
+ 			pr_info("Address spaces switched, "
+ 				"mvcos available\n");
+diff --git a/arch/s390/kernel/vdso.c b/arch/s390/kernel/vdso.c
+index ea5590fdca3b..9a19ca367c17 100644
+--- a/arch/s390/kernel/vdso.c
++++ b/arch/s390/kernel/vdso.c
+@@ -84,7 +84,8 @@ struct vdso_data *vdso_data = &vdso_data_store.data;
+  */
+ static void vdso_init_data(struct vdso_data *vd)
+ {
+-	vd->ectg_available = user_mode != HOME_SPACE_MODE && test_facility(31);
++	vd->ectg_available =
++		addressing_mode != HOME_SPACE_MODE && test_facility(31);
+ }
+ 
+ #ifdef CONFIG_64BIT
+@@ -101,7 +102,7 @@ int vdso_alloc_per_cpu(struct _lowcore *lowcore)
+ 
+ 	lowcore->vdso_per_cpu_data = __LC_PASTE;
+ 
+-	if (user_mode == HOME_SPACE_MODE || !vdso_enabled)
++	if (addressing_mode == HOME_SPACE_MODE || !vdso_enabled)
+ 		return 0;
+ 
+ 	segment_table = __get_free_pages(GFP_KERNEL, SEGMENT_ORDER);
+@@ -146,7 +147,7 @@ void vdso_free_per_cpu(struct _lowcore *lowcore)
+ 	unsigned long segment_table, page_table, page_frame;
+ 	u32 *psal, *aste;
+ 
+-	if (user_mode == HOME_SPACE_MODE || !vdso_enabled)
++	if (addressing_mode == HOME_SPACE_MODE || !vdso_enabled)
+ 		return;
+ 
+ 	psal = (u32 *)(addr_t) lowcore->paste[4];
+@@ -164,7 +165,7 @@ static void vdso_init_cr5(void)
+ {
+ 	unsigned long cr5;
+ 
+-	if (user_mode == HOME_SPACE_MODE || !vdso_enabled)
++	if (addressing_mode == HOME_SPACE_MODE || !vdso_enabled)
+ 		return;
+ 	cr5 = offsetof(struct _lowcore, paste);
+ 	__ctl_load(cr5, 5, 5);
+diff --git a/arch/s390/mm/fault.c b/arch/s390/mm/fault.c
+index dc659da2fac9..5bddbe4895d5 100644
+--- a/arch/s390/mm/fault.c
++++ b/arch/s390/mm/fault.c
+@@ -111,7 +111,7 @@ static inline int user_space_fault(unsigned long trans_exc_code)
+ 	if (trans_exc_code == 2)
+ 		/* Access via secondary space, set_fs setting decides */
+ 		return current->thread.mm_segment.ar4;
+-	if (user_mode == HOME_SPACE_MODE)
++	if (addressing_mode == HOME_SPACE_MODE)
+ 		/* User space if the access has been done via home space. */
+ 		return trans_exc_code == 3;
+ 	/*
+diff --git a/arch/s390/mm/pgtable.c b/arch/s390/mm/pgtable.c
+index e9ac2d60b7e5..18df31d1f2c9 100644
+--- a/arch/s390/mm/pgtable.c
++++ b/arch/s390/mm/pgtable.c
+@@ -796,7 +796,7 @@ int s390_enable_sie(void)
+ 	struct mm_struct *mm, *old_mm;
+ 
+ 	/* Do we have switched amode? If no, we cannot do sie */
+-	if (user_mode == HOME_SPACE_MODE)
++	if (addressing_mode == HOME_SPACE_MODE)
+ 		return -EINVAL;
+ 
+ 	/* Do we have pgstes? if yes, we are done */
+

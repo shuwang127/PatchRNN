@@ -1,0 +1,60 @@
+commit 8d67c821d96c8cfaa2ae05f346f1b2a07f0c15ec
+Author: Jinshan Xiong <jinshan.xiong@intel.com>
+Date:   Sun Apr 27 13:07:03 2014 -0400
+
+    staging/lustre/clio: Solve a race in cl_lock_put
+    
+    It's not atomic to check the last reference and state of cl_lock
+    in cl_lock_put(). This can cause a problem that an using lock is
+    freed, if the process is preempted between atomic_dec_and_test()
+    and (lock->cll_state == CLS_FREEING).
+    
+    This problem can be solved by holding a refcount by coh_locks. In
+    this case, it can be sure that if the lock refcount reaches zero,
+    nobody else can have any chance to use it again.
+    
+    Signed-off-by: Jinshan Xiong <jinshan.xiong@intel.com>
+    Reviewed-on: http://review.whamcloud.com/9881
+    Intel-bug-id: https://jira.hpdd.intel.com/browse/LU-4558
+    Reviewed-by: Bobi Jam <bobijam@gmail.com>
+    Reviewed-by: Lai Siyao <lai.siyao@intel.com>
+    Signed-off-by: Oleg Drokin <oleg.drokin@intel.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/lustre/lustre/obdclass/cl_lock.c b/drivers/staging/lustre/lustre/obdclass/cl_lock.c
+index 918f433b22d9..f8040a8923b2 100644
+--- a/drivers/staging/lustre/lustre/obdclass/cl_lock.c
++++ b/drivers/staging/lustre/lustre/obdclass/cl_lock.c
+@@ -533,6 +533,7 @@ static struct cl_lock *cl_lock_find(const struct lu_env *env,
+ 			spin_lock(&head->coh_lock_guard);
+ 			ghost = cl_lock_lookup(env, obj, io, need);
+ 			if (ghost == NULL) {
++				cl_lock_get_trust(lock);
+ 				list_add_tail(&lock->cll_linkage,
+ 						  &head->coh_locks);
+ 				spin_unlock(&head->coh_lock_guard);
+@@ -791,15 +792,22 @@ static void cl_lock_delete0(const struct lu_env *env, struct cl_lock *lock)
+ 	LINVRNT(cl_lock_invariant(env, lock));
+ 
+ 	if (lock->cll_state < CLS_FREEING) {
++		bool in_cache;
++
+ 		LASSERT(lock->cll_state != CLS_INTRANSIT);
+ 		cl_lock_state_set(env, lock, CLS_FREEING);
+ 
+ 		head = cl_object_header(lock->cll_descr.cld_obj);
+ 
+ 		spin_lock(&head->coh_lock_guard);
+-		list_del_init(&lock->cll_linkage);
++		in_cache = !list_empty(&lock->cll_linkage);
++		if (in_cache)
++			list_del_init(&lock->cll_linkage);
+ 		spin_unlock(&head->coh_lock_guard);
+ 
++		if (in_cache) /* coh_locks cache holds a refcount. */
++			cl_lock_put(env, lock);
++
+ 		/*
+ 		 * From now on, no new references to this lock can be acquired
+ 		 * by cl_lock_lookup().
+

@@ -1,0 +1,133 @@
+commit 26614ba5445fe31a69068a5e94266fa08b4ee345
+Author: Merav Sicron <meravs@broadcom.com>
+Date:   Mon Aug 27 03:26:19 2012 +0000
+
+    bnx2x: Move netif_napi_add to the open call
+    
+    Move netif_napi_add for all queues from the probe call to the open call, to
+    avoid the case that napi objects are added for queues that may eventually not
+    be initialized and activated. With the former behavior, the driver could crash
+    when netpoll was calling ndo_poll_controller.
+    
+    Signed-off-by: Merav Sicron <meravs@broadcom.com>
+    Signed-off-by: Dmitry Kravkov <dmitry@broadcom.com>
+    Signed-off-by: Eilon Greenstein <eilong@broadcom.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h b/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h
+index 463b9ec57d80..6d1a24acb77e 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h
+@@ -1708,9 +1708,6 @@ struct bnx2x_func_init_params {
+ 			continue;		\
+ 		else
+ 
+-#define for_each_napi_rx_queue(bp, var) \
+-	for ((var) = 0; (var) < bp->num_napi_queues; (var)++)
+-
+ /* Skip OOO FP */
+ #define for_each_tx_queue(bp, var) \
+ 	for ((var) = 0; (var) < BNX2X_NUM_QUEUES(bp); (var)++) \
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
+index e879e19eb0d6..af20c6ee2cd9 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
+@@ -2046,6 +2046,8 @@ int bnx2x_nic_load(struct bnx2x *bp, int load_mode)
+ 	 */
+ 	bnx2x_setup_tc(bp->dev, bp->max_cos);
+ 
++	/* Add all NAPI objects */
++	bnx2x_add_all_napi(bp);
+ 	bnx2x_napi_enable(bp);
+ 
+ 	/* set pf load just before approaching the MCP */
+@@ -2408,6 +2410,8 @@ int bnx2x_nic_unload(struct bnx2x *bp, int unload_mode)
+ 
+ 		/* Disable HW interrupts, NAPI */
+ 		bnx2x_netif_stop(bp, 1);
++		/* Delete all NAPI objects */
++		bnx2x_del_all_napi(bp);
+ 
+ 		/* Release IRQs */
+ 		bnx2x_free_irq(bp);
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.h b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.h
+index dfa757e74296..21b553229ea4 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.h
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.h
+@@ -792,7 +792,7 @@ static inline void bnx2x_add_all_napi(struct bnx2x *bp)
+ 	bp->num_napi_queues = bp->num_queues;
+ 
+ 	/* Add NAPI objects */
+-	for_each_napi_rx_queue(bp, i)
++	for_each_rx_queue(bp, i)
+ 		netif_napi_add(bp->dev, &bnx2x_fp(bp, i, napi),
+ 			       bnx2x_poll, BNX2X_NAPI_WEIGHT);
+ }
+@@ -801,7 +801,7 @@ static inline void bnx2x_del_all_napi(struct bnx2x *bp)
+ {
+ 	int i;
+ 
+-	for_each_napi_rx_queue(bp, i)
++	for_each_rx_queue(bp, i)
+ 		netif_napi_del(&bnx2x_fp(bp, i, napi));
+ }
+ 
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c
+index fc4e0e3885b0..c37a68d68090 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c
+@@ -2888,11 +2888,9 @@ static void bnx2x_get_channels(struct net_device *dev,
+  */
+ static void bnx2x_change_num_queues(struct bnx2x *bp, int num_rss)
+ {
+-	bnx2x_del_all_napi(bp);
+ 	bnx2x_disable_msi(bp);
+ 	BNX2X_NUM_QUEUES(bp) = num_rss + NON_ETH_CONTEXT_USE;
+ 	bnx2x_set_int_mode(bp);
+-	bnx2x_add_all_napi(bp);
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
+index 02b5a343b195..5b42275ed033 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
+@@ -8427,6 +8427,8 @@ void bnx2x_chip_cleanup(struct bnx2x *bp, int unload_mode)
+ 
+ 	/* Disable HW interrupts, NAPI */
+ 	bnx2x_netif_stop(bp, 1);
++	/* Delete all NAPI objects */
++	bnx2x_del_all_napi(bp);
+ 
+ 	/* Release IRQs */
+ 	bnx2x_free_irq(bp);
+@@ -11899,9 +11901,6 @@ static int __devinit bnx2x_init_one(struct pci_dev *pdev,
+ 	 */
+ 	bnx2x_set_int_mode(bp);
+ 
+-	/* Add all NAPI objects */
+-	bnx2x_add_all_napi(bp);
+-
+ 	rc = register_netdev(dev);
+ 	if (rc) {
+ 		dev_err(&pdev->dev, "Cannot register net device\n");
+@@ -11976,9 +11975,6 @@ static void __devexit bnx2x_remove_one(struct pci_dev *pdev)
+ 
+ 	unregister_netdev(dev);
+ 
+-	/* Delete all NAPI objects */
+-	bnx2x_del_all_napi(bp);
+-
+ 	/* Power on: we can't let PCI layer write to us while we are in D3 */
+ 	bnx2x_set_power_state(bp, PCI_D0);
+ 
+@@ -12025,6 +12021,8 @@ static int bnx2x_eeh_nic_unload(struct bnx2x *bp)
+ 	bnx2x_tx_disable(bp);
+ 
+ 	bnx2x_netif_stop(bp, 0);
++	/* Delete all NAPI objects */
++	bnx2x_del_all_napi(bp);
+ 
+ 	del_timer_sync(&bp->timer);
+ 
+

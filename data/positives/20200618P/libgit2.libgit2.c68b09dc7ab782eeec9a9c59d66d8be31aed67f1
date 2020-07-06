@@ -1,0 +1,55 @@
+commit c68b09dc7ab782eeec9a9c59d66d8be31aed67f1
+Author: Russell Belfer <rb@github.com>
+Date:   Thu May 23 11:52:34 2013 -0700
+
+    Fix dereference of freed delta
+    
+    I was accidentally using a value that I had just freed.  This
+    moves the clearing of the delta internal flags into a better place.
+
+diff --git a/src/diff_tform.c b/src/diff_tform.c
+index a3afe0d7a..b481e64ce 100644
+--- a/src/diff_tform.c
++++ b/src/diff_tform.c
+@@ -18,6 +18,7 @@ static git_diff_delta *diff_delta__dup(
+ 		return NULL;
+ 
+ 	memcpy(delta, d, sizeof(git_diff_delta));
++	GIT_DIFF_FLAG__CLEAR_INTERNAL(delta->flags);
+ 
+ 	if (d->old_file.path != NULL) {
+ 		delta->old_file.path = git_pool_strdup(pool, d->old_file.path);
+@@ -361,21 +362,25 @@ static int apply_splits_and_deletes(
+ 			delta->old_file.flags |= GIT_DIFF_FLAG_VALID_OID;
+ 		}
+ 
++		/* clean up delta before inserting into new list */
++		GIT_DIFF_FLAG__CLEAR_INTERNAL(delta->flags);
++
++		if (delta->status != GIT_DELTA_COPIED &&
++			delta->status != GIT_DELTA_RENAMED &&
++			(delta->status != GIT_DELTA_MODIFIED || actually_split))
++			delta->similarity = 0;
++
++		/* insert into new list */
+ 		if (git_vector_insert(&onto, delta) < 0)
+ 			goto on_error;
+ 	}
+ 
+ 	/* cannot return an error past this point */
++
++	/* free deltas from old list that didn't make it to the new one */
+ 	git_vector_foreach(&diff->deltas, i, delta) {
+ 		if ((delta->flags & GIT_DIFF_FLAG__TO_DELETE) != 0)
+ 			git__free(delta);
+-
+-		GIT_DIFF_FLAG__CLEAR_INTERNAL(delta->flags);
+-
+-		if (delta->status != GIT_DELTA_COPIED &&
+-			delta->status != GIT_DELTA_RENAMED &&
+-			(delta->status != GIT_DELTA_MODIFIED || actually_split))
+-			delta->similarity = 0;
+ 	}
+ 
+ 	/* swap new delta list into place */
+

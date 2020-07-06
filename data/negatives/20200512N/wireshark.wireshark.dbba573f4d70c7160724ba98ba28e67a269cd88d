@@ -1,0 +1,116 @@
+commit dbba573f4d70c7160724ba98ba28e67a269cd88d
+Author: Lars Christensen <larsch@belunktum.dk>
+Date:   Sun Jun 24 11:08:12 2018 +0000
+
+    USB: Fall back to transfer type from descriptor
+    
+    When dissecting USBIP packets, the transfer type is not known for every
+    packet like when dissecting usbmon captures. This patch lifs the
+    transfer type for the endpoint in the device descriptor and stores it in
+    the conversation. If the per-packet transfer type is unknown for a
+    transfer, it tries the one from the descriptor instead. This enables
+    bulk/iso payload dissectors to work on USBIP packets too.
+    
+    Change-Id: If0a3e4f3b9598f586fa460d0d07032d22e203122
+    Reviewed-on: https://code.wireshark.org/review/28412
+    Reviewed-by: Jaap Keuter <jaap.keuter@xs4all.nl>
+    Petri-Dish: Jaap Keuter <jaap.keuter@xs4all.nl>
+    Tested-by: Petri Dish Buildbot
+    Reviewed-by: Anders Broman <a.broman58@gmail.com>
+
+diff --git a/epan/dissectors/packet-usb.c b/epan/dissectors/packet-usb.c
+index c0761482f6..ba4ebdcd98 100644
+--- a/epan/dissectors/packet-usb.c
++++ b/epan/dissectors/packet-usb.c
+@@ -1670,6 +1670,7 @@ get_usb_conv_info(conversation_t *conversation)
+         usb_conv_info->deviceProduct     = DEV_PRODUCT_UNKNOWN;
+         usb_conv_info->alt_settings      = wmem_array_new(wmem_file_scope(), sizeof(usb_alt_setting_t));
+         usb_conv_info->transactions      = wmem_tree_new(wmem_file_scope());
++        usb_conv_info->descriptor_transfer_type = URB_UNKNOWN;
+ 
+         conversation_add_proto_data(conversation, proto_usb, usb_conv_info);
+     }
+@@ -2385,6 +2386,7 @@ dissect_usb_endpoint_descriptor(packet_info *pinfo, proto_tree *parent_tree,
+     guint8            ep_type;
+     guint8            len;
+     usb_trans_info_t *usb_trans_info = NULL;
++    conversation_t   *conversation   = NULL;
+ 
+     if (usb_conv_info)
+         usb_trans_info = usb_conv_info->usb_trans_info;
+@@ -2408,8 +2410,6 @@ dissect_usb_endpoint_descriptor(packet_info *pinfo, proto_tree *parent_tree,
+      * usb_conv_info structure.
+      */
+     if ((!pinfo->fd->flags.visited) && usb_trans_info && usb_trans_info->interface_info) {
+-        conversation_t *conversation = NULL;
+-
+         if (pinfo->destport == NO_ENDPOINT) {
+             address tmp_addr;
+             usb_address_t *usb_addr = wmem_new0(wmem_packet_scope(), usb_address_t);
+@@ -2444,6 +2444,30 @@ dissect_usb_endpoint_descriptor(packet_info *pinfo, proto_tree *parent_tree,
+     }
+     offset += 1;
+ 
++    if (conversation) {
++        usb_conv_info_t* endpoint_conv_info = get_usb_conv_info(conversation);
++        guint8 transfer_type;
++
++        switch(ep_type) {
++        case ENDPOINT_TYPE_CONTROL:
++            transfer_type = URB_CONTROL;
++            break;
++        case ENDPOINT_TYPE_ISOCHRONOUS:
++            transfer_type = URB_ISOCHRONOUS;
++            break;
++        case ENDPOINT_TYPE_BULK:
++            transfer_type = URB_BULK;
++            break;
++        case ENDPOINT_TYPE_INTERRUPT:
++            transfer_type = URB_INTERRUPT;
++            break;
++        default:
++            transfer_type = URB_UNKNOWN;
++            break;
++        }
++        endpoint_conv_info->descriptor_transfer_type = transfer_type;
++    }
++
+     /* wMaxPacketSize */
+     ep_pktsize_item = proto_tree_add_item(tree, hf_usb_wMaxPacketSize, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+     ep_pktsize_tree = proto_item_add_subtree(ep_pktsize_item, ett_endpoint_wMaxPacketSize);
+@@ -3316,6 +3340,7 @@ try_dissect_next_protocol(proto_tree *tree, tvbuff_t *next_tvb, packet_info *pin
+     /* if we select the next dissector based on a class,
+        this is the (device or interface) class we're using */
+     guint32                  usb_class;
++    guint8                   transfer_type;
+ 
+     if (!usb_conv_info) {
+         /*
+@@ -3372,7 +3397,11 @@ try_dissect_next_protocol(proto_tree *tree, tvbuff_t *next_tvb, packet_info *pin
+                     return tvb_captured_length(next_tvb);
+     }
+ 
+-    switch(usb_conv_info->transfer_type) {
++    transfer_type = usb_conv_info->transfer_type;
++    if (transfer_type == URB_UNKNOWN)
++        transfer_type = usb_conv_info->descriptor_transfer_type;
++
++    switch(transfer_type) {
+         case URB_BULK:
+             heur_subdissector_list = heur_bulk_subdissector_list;
+             usb_dissector_table = usb_bulk_dissector_table;
+diff --git a/epan/dissectors/packet-usb.h b/epan/dissectors/packet-usb.h
+index 4a5155d9b5..9328539a2b 100644
+--- a/epan/dissectors/packet-usb.h
++++ b/epan/dissectors/packet-usb.h
+@@ -88,7 +88,8 @@ struct _usb_conv_info_t {
+     guint16  device_address;
+     guint8   endpoint;
+     gint     direction;
+-    guint8   transfer_type;
++    guint8   transfer_type; /* transfer type from URB */
++    guint8   descriptor_transfer_type; /* transfer type lifted from the device descriptor */
+     guint32  device_protocol;
+     gboolean is_request;
+     gboolean is_setup;
+

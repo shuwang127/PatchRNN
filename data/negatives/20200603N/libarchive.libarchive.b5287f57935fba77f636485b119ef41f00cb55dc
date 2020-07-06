@@ -1,0 +1,45 @@
+commit b5287f57935fba77f636485b119ef41f00cb55dc
+Author: Tim Kientzle <kientzle@gmail.com>
+Date:   Sun Oct 19 18:38:35 2008 -0400
+
+    Make the end-of-archive detection work properly with the new
+    strict read_ahead() semantics, which return a failure instead of
+    a short read at end-of-file.  This seems to be one of the very
+    few cases where the short read is actually informative.
+    
+    SVN-Revision: 226
+
+diff --git a/libarchive/archive_read_support_format_tar.c b/libarchive/archive_read_support_format_tar.c
+index 44952381..0a649791 100644
+--- a/libarchive/archive_read_support_format_tar.c
++++ b/libarchive/archive_read_support_format_tar.c
+@@ -555,15 +555,19 @@ tar_read_header(struct archive_read *a, struct tar *tar,
+ 	bytes = (a->decompressor->read_ahead)(a, &h, 512);
+ 	if (bytes < 0)
+ 		return (bytes);
+-	if (bytes == 0) {
+-		/*
+-		 * An archive that just ends without a proper
+-		 * end-of-archive marker.  Yes, there are tar programs
+-		 * that do this; hold our nose and accept it.
+-		 */
+-		return (ARCHIVE_EOF);
+-	}
+-	if (bytes < 512) {
++	if (bytes < 512) {  /* Short read or EOF. */
++		/* Try requesting just one byte and see what happens. */
++		bytes = (a->decompressor->read_ahead)(a, &h, 1);
++		if (bytes == 0) {
++			/*
++			 * The archive ends at a 512-byte boundary but
++			 * without a proper end-of-archive marker.
++			 * Yes, there are tar writers that do this;
++			 * hold our nose and accept it.
++			 */
++			return (ARCHIVE_EOF);
++		}
++		/* Archive ends with a partial block; this is bad. */
+ 		archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+ 		    "Truncated tar archive");
+ 		return (ARCHIVE_FATAL);
+

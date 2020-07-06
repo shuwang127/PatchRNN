@@ -1,0 +1,54 @@
+commit 72b1e22dfcad1daca6906148fd956ffe404bb0bc
+Author: Suresh Siddha <suresh.b.siddha@intel.com>
+Date:   Thu Jul 10 11:16:45 2008 -0700
+
+    x64, x2apic/intr-remap: generic irq migration support from process context
+    
+    Generic infrastructure for migrating the irq from the process context in the
+    presence of CONFIG_GENERIC_PENDING_IRQ.
+    
+    This will be used later for migrating irq in the presence of
+    interrupt-remapping.
+    
+    Signed-off-by: Suresh Siddha <suresh.b.siddha@intel.com>
+    Cc: akpm@linux-foundation.org
+    Cc: arjan@linux.intel.com
+    Cc: andi@firstfloor.org
+    Cc: ebiederm@xmission.com
+    Cc: jbarnes@virtuousgeek.org
+    Cc: steiner@sgi.com
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/include/linux/irq.h b/include/linux/irq.h
+index 552e0ec269c9..c211984b55e5 100644
+--- a/include/linux/irq.h
++++ b/include/linux/irq.h
+@@ -62,6 +62,7 @@ typedef	void (*irq_flow_handler_t)(unsigned int irq,
+ #define IRQ_MOVE_PENDING	0x00200000	/* need to re-target IRQ destination */
+ #define IRQ_NO_BALANCING	0x00400000	/* IRQ is excluded from balancing */
+ #define IRQ_SPURIOUS_DISABLED	0x00800000	/* IRQ was disabled by the spurious trap */
++#define IRQ_MOVE_PCNTXT	0x01000000	/* IRQ migration from process context */
+ 
+ #ifdef CONFIG_IRQ_PER_CPU
+ # define CHECK_IRQ_PER_CPU(var) ((var) & IRQ_PER_CPU)
+diff --git a/kernel/irq/manage.c b/kernel/irq/manage.c
+index 46d6611a33bb..628b5572a7c2 100644
+--- a/kernel/irq/manage.c
++++ b/kernel/irq/manage.c
+@@ -87,7 +87,14 @@ int irq_set_affinity(unsigned int irq, cpumask_t cpumask)
+ 	set_balance_irq_affinity(irq, cpumask);
+ 
+ #ifdef CONFIG_GENERIC_PENDING_IRQ
+-	set_pending_irq(irq, cpumask);
++	if (desc->status & IRQ_MOVE_PCNTXT) {
++		unsigned long flags;
++
++		spin_lock_irqsave(&desc->lock, flags);
++		desc->chip->set_affinity(irq, cpumask);
++		spin_unlock_irqrestore(&desc->lock, flags);
++	} else
++		set_pending_irq(irq, cpumask);
+ #else
+ 	desc->affinity = cpumask;
+ 	desc->chip->set_affinity(irq, cpumask);
+

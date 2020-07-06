@@ -1,0 +1,46 @@
+commit 0ef38d70d4118b2ce1a538d14357be5ff9dc2bbd
+Author: Mikulas Patocka <mpatocka@redhat.com>
+Date:   Wed Jan 22 23:04:33 2014 -0500
+
+    alpha: fix broken network checksum
+    
+    The patch 3ddc5b46a8e90f3c9251338b60191d0a804b0d92 breaks networking on
+    alpha (there is a follow-up fix 5cfe8f1ba5eebe6f4b6e5858cdb1a5be4f3272a6,
+    but networking is still broken even with the second patch).
+    
+    The patch 3ddc5b46a8e90f3c9251338b60191d0a804b0d92 makes
+    csum_partial_copy_from_user check the pointer with access_ok. However,
+    csum_partial_copy_from_user is called also from csum_partial_copy_nocheck
+    and csum_partial_copy_nocheck is called on kernel pointers and it is
+    supposed not to check pointer validity.
+    
+    This bug results in ssh session hangs if the system is loaded and bulk
+    data are printed to ssh terminal.
+    
+    This patch fixes csum_partial_copy_nocheck to call set_fs(KERNEL_DS), so
+    that access_ok in csum_partial_copy_from_user accepts kernel-space
+    addresses.
+    
+    Cc: stable@vger.kernel.org
+    Signed-off-by: Mikulas Patocka <mpatocka@redhat.com>
+    Signed-off-by: Matt Turner <mattst88@gmail.com>
+
+diff --git a/arch/alpha/lib/csum_partial_copy.c b/arch/alpha/lib/csum_partial_copy.c
+index ff3c10721caf..5675dca8dbb1 100644
+--- a/arch/alpha/lib/csum_partial_copy.c
++++ b/arch/alpha/lib/csum_partial_copy.c
+@@ -378,6 +378,11 @@ csum_partial_copy_from_user(const void __user *src, void *dst, int len,
+ __wsum
+ csum_partial_copy_nocheck(const void *src, void *dst, int len, __wsum sum)
+ {
+-	return csum_partial_copy_from_user((__force const void __user *)src,
+-			dst, len, sum, NULL);
++	__wsum checksum;
++	mm_segment_t oldfs = get_fs();
++	set_fs(KERNEL_DS);
++	checksum = csum_partial_copy_from_user((__force const void __user *)src,
++						dst, len, sum, NULL);
++	set_fs(oldfs);
++	return checksum;
+ }
+

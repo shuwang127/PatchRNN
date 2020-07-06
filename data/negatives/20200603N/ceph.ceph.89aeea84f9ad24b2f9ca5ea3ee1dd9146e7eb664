@@ -1,0 +1,78 @@
+commit 89aeea84f9ad24b2f9ca5ea3ee1dd9146e7eb664
+Author: Igor Fedotov <ifed@mail.ru>
+Date:   Mon Oct 23 09:32:23 2017 -0700
+
+    os/bluestore: fix lack of extent demotion in StupidAllocator::init_rm_free
+    
+    Signed-off-by: Igor Fedotov <ifedotov@suse.com>
+
+diff --git a/src/include/interval_set.h b/src/include/interval_set.h
+index 181fb29f39..26e7a9d783 100644
+--- a/src/include/interval_set.h
++++ b/src/include/interval_set.h
+@@ -520,7 +520,8 @@ class interval_set {
+     erase(val, 1);
+   }
+ 
+-  void erase(T start, T len) {
++  void erase(T start, T len, 
++    std::function<bool(T, T)> post_process = {}) {
+     typename Map::iterator p = find_inc_m(start);
+ 
+     _size -= len;
+@@ -532,16 +533,16 @@ class interval_set {
+     T before = start - p->first;
+     assert(p->second >= before+len);
+     T after = p->second - before - len;
+-    
+-    if (before) 
++    if (before && (post_process ? post_process(p->first, before) : true)) {
+       p->second = before;        // shorten bit before
+-    else
++    } else {
+       m.erase(p);
+-    if (after)
+-      m[start+len] = after;
++    }
++    if (after && (post_process ? post_process(start + len, after) : true)) {
++      m[start + len] = after;
++    }
+   }
+ 
+-
+   void subtract(const interval_set &a) {
+     for (typename Map::const_iterator p = a.m.begin();
+          p != a.m.end();
+diff --git a/src/os/bluestore/StupidAllocator.cc b/src/os/bluestore/StupidAllocator.cc
+index 0dd52a87c6..39f31e0e09 100644
+--- a/src/os/bluestore/StupidAllocator.cc
++++ b/src/os/bluestore/StupidAllocator.cc
+@@ -300,7 +300,26 @@ void StupidAllocator::init_rm_free(uint64_t offset, uint64_t length)
+     if (!overlap.empty()) {
+       ldout(cct, 20) << __func__ << " bin " << i << " rm 0x" << std::hex << overlap
+ 		     << std::dec << dendl;
+-      free[i].subtract(overlap);
++      auto it = overlap.begin();
++      auto it_end = overlap.end();
++      while (it != it_end) {
++        auto o = it.get_start();
++        auto l = it.get_len();
++
++        free[i].erase(o, l,
++          [&](uint64_t off, uint64_t len) {
++            unsigned newbin = _choose_bin(len);
++            if (newbin != i) {
++              ldout(cct, 30) << __func__ << " demoting1 0x" << std::hex << off << "~" << len
++                             << std::dec << " to bin " << newbin << dendl;
++              _insert_free(off, len);
++              return false;
++            }
++            return true;
++          });
++        ++it;
++      }
++
+       rm.subtract(overlap);
+     }
+   }
+

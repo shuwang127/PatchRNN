@@ -1,0 +1,201 @@
+commit 5472c6965afc6b1a8df2c620b0548655c8440ab1
+Author: James Booth <boothj5@gmail.com>
+Date:   Sun Jan 26 00:15:34 2014 +0000
+
+    Moved xmpp ping to iq module
+
+diff --git a/src/command/commands.c b/src/command/commands.c
+index b282f525..b01dbfa6 100644
+--- a/src/command/commands.c
++++ b/src/command/commands.c
+@@ -2257,7 +2257,7 @@ cmd_autoping(gchar **args, struct cmd_help_t help)
+ 
+     if (_strtoi(value, &intval, 0, INT_MAX) == 0) {
+         prefs_set_autoping(intval);
+-        jabber_set_autoping(intval);
++        iq_set_autoping(intval);
+         if (intval == 0) {
+             cons_show("Autoping disabled.", intval);
+         } else {
+diff --git a/src/xmpp/connection.c b/src/xmpp/connection.c
+index 8566a8d6..4833d56c 100644
+--- a/src/xmpp/connection.c
++++ b/src/xmpp/connection.c
+@@ -87,7 +87,6 @@ static void _jabber_reconnect(void);
+ static void _connection_handler(xmpp_conn_t * const conn,
+     const xmpp_conn_event_t status, const int error,
+     xmpp_stream_error_t * const stream_error, void * const userdata);
+-static int _ping_timed_handler(xmpp_conn_t * const conn, void * const userdata);
+ 
+ void _connection_free_saved_account(void);
+ void _connection_free_saved_details(void);
+@@ -224,20 +223,6 @@ _jabber_process_events(void)
+ 
+ }
+ 
+-static void
+-_jabber_set_autoping(const int seconds)
+-{
+-    if (jabber_conn.conn_status == JABBER_CONNECTED) {
+-        xmpp_timed_handler_delete(jabber_conn.conn, _ping_timed_handler);
+-
+-        if (seconds != 0) {
+-            int millis = seconds * 1000;
+-            xmpp_timed_handler_add(jabber_conn.conn, _ping_timed_handler, millis,
+-                jabber_conn.ctx);
+-        }
+-    }
+-}
+-
+ static GList *
+ _jabber_get_available_resources(void)
+ {
+@@ -459,8 +444,6 @@ _connection_handler(xmpp_conn_t * const conn,
+     const xmpp_conn_event_t status, const int error,
+     xmpp_stream_error_t * const stream_error, void * const userdata)
+ {
+-    xmpp_ctx_t *ctx = (xmpp_ctx_t *)userdata;
+-
+     // login success
+     if (status == XMPP_CONN_CONNECT) {
+         log_debug("Connection handler: XMPP_CONN_CONNECT");
+@@ -494,11 +477,6 @@ _connection_handler(xmpp_conn_t * const conn,
+         presence_add_handlers();
+         iq_add_handlers();
+ 
+-        if (prefs_get_autoping() != 0) {
+-            int millis = prefs_get_autoping() * 1000;
+-            xmpp_timed_handler_add(conn, _ping_timed_handler, millis, ctx);
+-        }
+-
+         roster_request();
+         bookmark_request();
+         jabber_conn.conn_status = JABBER_CONNECTED;
+@@ -556,20 +534,6 @@ _connection_handler(xmpp_conn_t * const conn,
+     }
+ }
+ 
+-static int
+-_ping_timed_handler(xmpp_conn_t * const conn, void * const userdata)
+-{
+-    if (jabber_conn.conn_status == JABBER_CONNECTED) {
+-        xmpp_ctx_t *ctx = (xmpp_ctx_t *)userdata;
+-
+-        xmpp_stanza_t *iq = stanza_create_ping_iq(ctx);
+-        xmpp_send(conn, iq);
+-        xmpp_stanza_release(iq);
+-    }
+-
+-    return 1;
+-}
+-
+ static log_level_t
+ _get_log_level(const xmpp_log_level_t xmpp_level)
+ {
+@@ -629,7 +593,6 @@ jabber_init_module(void)
+     jabber_disconnect = _jabber_disconnect;
+     jabber_shutdown = _jabber_shutdown;
+     jabber_process_events = _jabber_process_events;
+-    jabber_set_autoping = _jabber_set_autoping;
+     jabber_get_available_resources = _jabber_get_available_resources;
+     jabber_get_connection_status = _jabber_get_connection_status;
+     jabber_get_fulljid = _jabber_get_fulljid;
+diff --git a/src/xmpp/iq.c b/src/xmpp/iq.c
+index ff5e47ec..13650398 100644
+--- a/src/xmpp/iq.c
++++ b/src/xmpp/iq.c
+@@ -35,6 +35,7 @@
+ #include "log.h"
+ #include "muc.h"
+ #include "profanity.h"
++#include "config/preferences.h"
+ #include "server_events.h"
+ #include "xmpp/capabilities.h"
+ #include "xmpp/connection.h"
+@@ -60,6 +61,8 @@ static int _disco_items_result_handler(xmpp_conn_t * const conn,
+     xmpp_stanza_t * const stanza, void * const userdata);
+ static int _disco_items_get_handler(xmpp_conn_t * const conn,
+     xmpp_stanza_t * const stanza, void * const userdata);
++static int _ping_timed_handler(xmpp_conn_t * const conn,
++    void * const userdata);
+ 
+ void
+ iq_add_handlers(void)
+@@ -79,6 +82,28 @@ iq_add_handlers(void)
+     HANDLE(STANZA_NS_VERSION,   STANZA_TYPE_RESULT, _version_result_handler);
+ 
+     HANDLE(STANZA_NS_PING,      STANZA_TYPE_GET,    _ping_get_handler);
++
++    if (prefs_get_autoping() != 0) {
++        int millis = prefs_get_autoping() * 1000;
++        xmpp_timed_handler_add(conn, _ping_timed_handler, millis, ctx);
++    }
++}
++
++static void
++_iq_set_autoping(const int seconds)
++{
++    xmpp_conn_t * const conn = connection_get_conn();
++    xmpp_ctx_t * const ctx = connection_get_ctx();
++
++    if (jabber_get_connection_status() == JABBER_CONNECTED) {
++        xmpp_timed_handler_delete(conn, _ping_timed_handler);
++
++        if (seconds != 0) {
++            int millis = seconds * 1000;
++            xmpp_timed_handler_add(conn, _ping_timed_handler, millis,
++                ctx);
++        }
++    }
+ }
+ 
+ static void
+@@ -136,6 +161,21 @@ _error_handler(xmpp_conn_t * const conn, xmpp_stanza_t * const stanza,
+     return 1;
+ }
+ 
++static int
++_ping_timed_handler(xmpp_conn_t * const conn, void * const userdata)
++{
++    xmpp_ctx_t *ctx = (xmpp_ctx_t *)userdata;
++
++    if (jabber_get_connection_status() == JABBER_CONNECTED) {
++
++        xmpp_stanza_t *iq = stanza_create_ping_iq(ctx);
++        xmpp_send(conn, iq);
++        xmpp_stanza_release(iq);
++    }
++
++    return 1;
++}
++
+ static int
+ _version_result_handler(xmpp_conn_t * const conn, xmpp_stanza_t * const stanza,
+     void * const userdata)
+@@ -581,4 +621,5 @@ iq_init_module(void)
+     iq_disco_info_request = _iq_disco_info_request;
+     iq_disco_items_request = _iq_disco_items_request;
+     iq_send_software_version = _iq_send_software_version;
++    iq_set_autoping = _iq_set_autoping;
+ }
+diff --git a/src/xmpp/xmpp.h b/src/xmpp/xmpp.h
+index 5a331b04..dd91e398 100644
+--- a/src/xmpp/xmpp.h
++++ b/src/xmpp/xmpp.h
+@@ -94,7 +94,6 @@ const char * (*jabber_get_fulljid)(void);
+ const char * (*jabber_get_domain)(void);
+ jabber_conn_status_t (*jabber_get_connection_status)(void);
+ char * (*jabber_get_presence_message)(void);
+-void (*jabber_set_autoping)(int seconds);
+ char* (*jabber_get_account_name)(void);
+ GList * (*jabber_get_available_resources)(void);
+ 
+@@ -127,6 +126,7 @@ void (*iq_send_software_version)(const char * const fulljid);
+ void (*iq_room_list_request)(gchar *conferencejid);
+ void (*iq_disco_info_request)(gchar *jid);
+ void (*iq_disco_items_request)(gchar *jid);
++void (*iq_set_autoping)(int seconds);
+ 
+ // caps functions
+ Capabilities* (*caps_get)(const char * const caps_str);
+

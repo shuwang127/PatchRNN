@@ -1,0 +1,88 @@
+commit fda48a0d7a8412cedacda46a9c0bf8ef9cd13559
+Author: Eric Dumazet <eric.dumazet@gmail.com>
+Date:   Wed Apr 21 09:26:15 2010 +0000
+
+    tcp: bind() fix when many ports are bound
+    
+    Port autoselection done by kernel only works when number of bound
+    sockets is under a threshold (typically 30000).
+    
+    When this threshold is over, we must check if there is a conflict before
+    exiting first loop in inet_csk_get_port()
+    
+    Change inet_csk_bind_conflict() to forbid two reuse-enabled sockets to
+    bind on same (address,port) tuple (with a non ANY address)
+    
+    Same change for inet6_csk_bind_conflict()
+    
+    Reported-by: Gaspar Chilingarov <gasparch@gmail.com>
+    Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+    Acked-by: Evgeniy Polyakov <zbr@ioremap.net>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv4/inet_connection_sock.c b/net/ipv4/inet_connection_sock.c
+index 8da6429269dd..14825eb09770 100644
+--- a/net/ipv4/inet_connection_sock.c
++++ b/net/ipv4/inet_connection_sock.c
+@@ -70,13 +70,17 @@ int inet_csk_bind_conflict(const struct sock *sk,
+ 		    (!sk->sk_bound_dev_if ||
+ 		     !sk2->sk_bound_dev_if ||
+ 		     sk->sk_bound_dev_if == sk2->sk_bound_dev_if)) {
++			const __be32 sk2_rcv_saddr = inet_rcv_saddr(sk2);
++
+ 			if (!reuse || !sk2->sk_reuse ||
+ 			    sk2->sk_state == TCP_LISTEN) {
+-				const __be32 sk2_rcv_saddr = inet_rcv_saddr(sk2);
+ 				if (!sk2_rcv_saddr || !sk_rcv_saddr ||
+ 				    sk2_rcv_saddr == sk_rcv_saddr)
+ 					break;
+-			}
++			} else if (reuse && sk2->sk_reuse &&
++				   sk2_rcv_saddr &&
++				   sk2_rcv_saddr == sk_rcv_saddr)
++				break;
+ 		}
+ 	}
+ 	return node != NULL;
+@@ -120,9 +124,11 @@ int inet_csk_get_port(struct sock *sk, unsigned short snum)
+ 						smallest_size = tb->num_owners;
+ 						smallest_rover = rover;
+ 						if (atomic_read(&hashinfo->bsockets) > (high - low) + 1) {
+-							spin_unlock(&head->lock);
+-							snum = smallest_rover;
+-							goto have_snum;
++							if (!inet_csk(sk)->icsk_af_ops->bind_conflict(sk, tb)) {
++								spin_unlock(&head->lock);
++								snum = smallest_rover;
++								goto have_snum;
++							}
+ 						}
+ 					}
+ 					goto next;
+diff --git a/net/ipv6/inet6_connection_sock.c b/net/ipv6/inet6_connection_sock.c
+index 628db24bcf22..b4b7d40a9c95 100644
+--- a/net/ipv6/inet6_connection_sock.c
++++ b/net/ipv6/inet6_connection_sock.c
+@@ -42,11 +42,16 @@ int inet6_csk_bind_conflict(const struct sock *sk,
+ 		if (sk != sk2 &&
+ 		    (!sk->sk_bound_dev_if ||
+ 		     !sk2->sk_bound_dev_if ||
+-		     sk->sk_bound_dev_if == sk2->sk_bound_dev_if) &&
+-		    (!sk->sk_reuse || !sk2->sk_reuse ||
+-		     sk2->sk_state == TCP_LISTEN) &&
+-		     ipv6_rcv_saddr_equal(sk, sk2))
+-			break;
++		     sk->sk_bound_dev_if == sk2->sk_bound_dev_if)) {
++			if ((!sk->sk_reuse || !sk2->sk_reuse ||
++			     sk2->sk_state == TCP_LISTEN) &&
++			     ipv6_rcv_saddr_equal(sk, sk2))
++				break;
++			else if (sk->sk_reuse && sk2->sk_reuse &&
++				!ipv6_addr_any(inet6_rcv_saddr(sk2)) &&
++				ipv6_rcv_saddr_equal(sk, sk2))
++				break;
++		}
+ 	}
+ 
+ 	return node != NULL;
+

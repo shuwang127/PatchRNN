@@ -1,0 +1,53 @@
+commit 4cb13e5d6ecc47b91b24a35f8fbc2c9f33d075fe
+Author: Liu Bo <liubo2009@cn.fujitsu.com>
+Date:   Thu Mar 29 09:57:45 2012 -0400
+
+    Btrfs: fix recursive defragment with autodefrag option
+    
+    $ mkfs.btrfs disk
+    $ mount disk /mnt -o autodefrag
+    $ dd if=/dev/zero of=/mnt/foobar bs=4k count=10 2>/dev/null && sync
+    $ for i in `seq 9 -2 0`; do dd if=/dev/zero of=/mnt/foobar bs=4k count=1 \
+      seek=$i conv=notrunc 2> /dev/null; done && sync
+    
+    then we'll get to defrag "foobar" again and again.
+    So does option "-o autodefrag,compress".
+    
+    Reasons:
+    When the cleaner kthread gets to fetch inodes from the defrag tree and defrag
+    them, it will dirty pages and submit them, this will comes to another DATA COW
+    where the processing inode will be inserted to the defrag tree again.
+    
+    This patch sets a rule for COW code, i.e. insert an inode when we're really
+    going to make some defragments.
+    
+    Signed-off-by: Liu Bo <liubo2009@cn.fujitsu.com>
+    Signed-off-by: Chris Mason <chris.mason@oracle.com>
+
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index eb6aec7bbacb..1be31368e881 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -347,8 +347,9 @@ static noinline int compress_file_range(struct inode *inode,
+ 	int will_compress;
+ 	int compress_type = root->fs_info->compress_type;
+ 
+-	/* if this is a small write inside eof, kick off a defragbot */
+-	if (end <= BTRFS_I(inode)->disk_i_size && (end - start + 1) < 16 * 1024)
++	/* if this is a small write inside eof, kick off a defrag */
++	if ((end - start + 1) < 16 * 1024 &&
++	    (start > 0 || end + 1 < BTRFS_I(inode)->disk_i_size))
+ 		btrfs_add_inode_defrag(NULL, inode);
+ 
+ 	actual_end = min_t(u64, isize, end + 1);
+@@ -843,7 +844,8 @@ static noinline int cow_file_range(struct inode *inode,
+ 	ret = 0;
+ 
+ 	/* if this is a small write inside eof, kick off defrag */
+-	if (end <= BTRFS_I(inode)->disk_i_size && num_bytes < 64 * 1024)
++	if (num_bytes < 64 * 1024 &&
++	    (start > 0 || end + 1 < BTRFS_I(inode)->disk_i_size))
+ 		btrfs_add_inode_defrag(trans, inode);
+ 
+ 	if (start == 0) {
+

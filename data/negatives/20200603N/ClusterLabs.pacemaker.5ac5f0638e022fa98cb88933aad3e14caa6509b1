@@ -1,0 +1,551 @@
+commit 5ac5f0638e022fa98cb88933aad3e14caa6509b1
+Author: Andrew Beekhof <andrew@beekhof.net>
+Date:   Wed Oct 9 17:10:28 2013 +1100
+
+    Feature: crmd: Do not block on proxied calls from pacemaker_remoted
+
+diff --git a/attrd/legacy.c b/attrd/legacy.c
+index 2d485f9d9..0df56d668 100644
+--- a/attrd/legacy.c
++++ b/attrd/legacy.c
+@@ -124,11 +124,7 @@ attrd_ipc_dispatch(qb_ipcs_connection_t * c, void *data, size_t size)
+     crm_client_t *client = crm_client_get(c);
+     xmlNode *msg = crm_ipcs_recv(client, data, size, &id, &flags);
+ 
+-    if (flags & crm_ipc_client_response) {
+-        crm_trace("Ack'ing msg from %d (%p)", crm_ipcs_client_pid(c), c);
+-        crm_ipcs_send_ack(client, id, "ack", __FUNCTION__, __LINE__);
+-    }
+-
++    crm_ipcs_send_ack(client, id, flags, "ack", __FUNCTION__, __LINE__);
+     if (msg == NULL) {
+         crm_debug("No msg from %d (%p)", crm_ipcs_client_pid(c), c);
+         return 0;
+diff --git a/attrd/main.c b/attrd/main.c
+index 9f7553de4..bc39cbbaf 100644
+--- a/attrd/main.c
++++ b/attrd/main.c
+@@ -209,11 +209,7 @@ attrd_ipc_dispatch(qb_ipcs_connection_t * c, void *data, size_t size)
+     crm_client_t *client = crm_client_get(c);
+     xmlNode *xml = crm_ipcs_recv(client, data, size, &id, &flags);
+ 
+-    if (flags & crm_ipc_client_response) {
+-        crm_trace("Ack'ing msg from %d (%p)", crm_ipcs_client_pid(c), c);
+-        crm_ipcs_send_ack(client, id, "ack", __FUNCTION__, __LINE__);
+-    }
+-
++    crm_ipcs_send_ack(client, id, flags, "ack", __FUNCTION__, __LINE__);
+     if (xml == NULL) {
+         crm_debug("No msg from %d (%p)", crm_ipcs_client_pid(c), c);
+         return 0;
+diff --git a/cib/callbacks.c b/cib/callbacks.c
+index 77853d9dd..9c60e3acf 100644
+--- a/cib/callbacks.c
++++ b/cib/callbacks.c
+@@ -171,7 +171,7 @@ cib_common_callback_worker(uint32_t id, uint32_t flags, xmlNode * op_request,
+ 
+             crm_xml_add(ack, F_CIB_OPERATION, CRM_OP_REGISTER);
+             crm_xml_add(ack, F_CIB_CLIENTID, cib_client->id);
+-            crm_ipcs_send(cib_client, id, ack, FALSE);
++            crm_ipcs_send(cib_client, id, ack, is_set(flags, crm_ipc_client_event));
+             cib_client->request_id = 0;
+             free_xml(ack);
+         }
+@@ -212,8 +212,7 @@ cib_common_callback_worker(uint32_t id, uint32_t flags, xmlNode * op_request,
+ 
+         if (flags & crm_ipc_client_response) {
+             /* TODO - include rc */
+-            crm_ipcs_send_ack(cib_client, id, "ack", __FUNCTION__, __LINE__);
+-            cib_client->request_id = 0;
++            crm_ipcs_send_ack(cib_client, id, flags, "ack", __FUNCTION__, __LINE__);
+         }
+         return;
+     }
+@@ -237,7 +236,7 @@ cib_common_callback(qb_ipcs_connection_t * c, void *data, size_t size, gboolean
+     crm_trace("Inbound: %.200s", data);
+     if (op_request == NULL) {
+         crm_trace("Invalid message from %p", c);
+-        crm_ipcs_send_ack(cib_client, id, "nack", __FUNCTION__, __LINE__);
++        crm_ipcs_send_ack(cib_client, id, flags, "nack", __FUNCTION__, __LINE__);
+         return 0;
+ 
+     } else if(cib_client == NULL) {
+@@ -582,7 +581,7 @@ send_peer_reply(xmlNode * msg, xmlNode * result_diff, const char *originator, gb
+ 
+     } else if (originator != NULL) {
+         /* send reply via HA to originating node */
+-        crm_trace("Sending request result to originator only");
++        crm_trace("Sending request result to %s only", originator);
+         crm_xml_add(msg, F_CIB_ISREPLY, originator);
+         return send_cluster_message(crm_get_peer(0, originator), crm_msg_cib, msg, FALSE);
+     }
+diff --git a/crmd/control.c b/crmd/control.c
+index 34914e9fe..25faa37d9 100644
+--- a/crmd/control.c
++++ b/crmd/control.c
+@@ -636,10 +636,7 @@ crmd_ipc_dispatch(qb_ipcs_connection_t * c, void *data, size_t size)
+     xmlNode *msg = crm_ipcs_recv(client, data, size, &id, &flags);
+ 
+     crm_trace("Invoked: %s", crm_client_name(client));
+-
+-    if (flags & crm_ipc_client_response) {
+-        crm_ipcs_send_ack(client, id, "ack", __FUNCTION__, __LINE__);
+-    }
++    crm_ipcs_send_ack(client, id, flags, "ack", __FUNCTION__, __LINE__);
+ 
+     if (msg == NULL) {
+         return 0;
+diff --git a/crmd/lrm_state.c b/crmd/lrm_state.c
+index b1b1b7f23..dc39df21f 100644
+--- a/crmd/lrm_state.c
++++ b/crmd/lrm_state.c
+@@ -331,6 +331,7 @@ remote_proxy_relay_event(lrmd_t *lrmd, const char *session_id, xmlNode *msg)
+     crm_xml_add(event, F_LRMD_IPC_OP, "event");
+     crm_xml_add(event, F_LRMD_IPC_SESSION, session_id);
+     add_message_xml(event, F_LRMD_IPC_MSG, msg);
++    crm_log_xml_explicit(event, "EventForProxy");
+     lrmd_internal_proxy_send(lrmd, event);
+     free_xml(event);
+ }
+@@ -351,6 +352,7 @@ remote_proxy_relay_response(lrmd_t *lrmd, const char *session_id, xmlNode *msg,
+ static int
+ remote_proxy_dispatch_internal(const char *buffer, ssize_t length, gpointer userdata)
+ {
++    /* Async responses from cib and friends back to clients via pacemaker_remoted */
+     xmlNode *xml = NULL;
+     remote_proxy_t *proxy = userdata;
+     lrm_state_t *lrm_state = lrm_state_find(proxy->node_name);
+@@ -365,6 +367,7 @@ remote_proxy_dispatch_internal(const char *buffer, ssize_t length, gpointer user
+         return 1;
+     }
+ 
++    crm_trace("Passing event back to %.8s on %s: %.200s", proxy->session_id, proxy->node_name, buffer);
+     remote_proxy_relay_event(lrm_state->conn, proxy->session_id, xml);
+     free_xml(xml);
+     return 1;
+@@ -431,8 +434,10 @@ crmd_proxy_send(const char *session, xmlNode *msg)
+     if (!proxy) {
+         return;
+     }
++    crm_log_xml_trace(msg, "to-proxy");
+     lrm_state = lrm_state_find(proxy->node_name);
+     if (lrm_state) {
++        crm_trace("Sending event to %.8s on %s", proxy->session_id, proxy->node_name);
+         remote_proxy_relay_event(lrm_state->conn, session, msg);
+     }
+ }
+@@ -460,7 +465,6 @@ static void
+ remote_proxy_cb(lrmd_t *lrmd, void *userdata, xmlNode *msg)
+ {
+     lrm_state_t *lrm_state = userdata;
+-    xmlNode *op_reply = NULL;
+     const char *op = crm_element_value(msg, F_LRMD_IPC_OP);
+     const char *session = crm_element_value(msg, F_LRMD_IPC_SESSION);
+     const char *user = crm_element_value(msg, F_LRMD_IPC_USER);
+@@ -484,13 +488,14 @@ remote_proxy_cb(lrmd_t *lrmd, void *userdata, xmlNode *msg)
+         if (remote_proxy_new(lrm_state->node_name, session, channel) == NULL) {
+             remote_proxy_notify_destroy(lrmd, session);
+         }
+-        crm_info("new remote proxy client established, session id %s", session);
++        crm_info("new remote proxy client established to %s, session id %s", channel, session);
+     } else if (safe_str_eq(op, "destroy")) {
+         g_hash_table_remove(proxy_table, session);
+ 
+     } else if (safe_str_eq(op, "request")) {
+         int flags = 0;
+         xmlNode *request = get_message_xml(msg, F_LRMD_IPC_MSG);
++        const char *name = crm_element_value(msg, F_LRMD_IPC_CLIENT);
+         remote_proxy_t *proxy = g_hash_table_lookup(proxy_table, session);
+ 
+         CRM_CHECK(request != NULL, return);
+@@ -509,21 +514,61 @@ remote_proxy_cb(lrmd_t *lrmd, void *userdata, xmlNode *msg)
+             /* this is for the crmd, which we are, so don't try
+              * and connect/send to ourselves over ipc. instead
+              * do it directly. */
++            crmd_proxy_dispatch(user, session, request);
+             if (flags & crm_ipc_client_response) {
+-                op_reply = create_xml_node(NULL, "ack");
++                xmlNode *op_reply = create_xml_node(NULL, "ack");
++
+                 crm_xml_add(op_reply, "function", __FUNCTION__);
+                 crm_xml_add_int(op_reply, "line", __LINE__);
++                remote_proxy_relay_response(lrmd, session, op_reply, msg_id);
++                free_xml(op_reply);
+             }
+-            crmd_proxy_dispatch(user, session, request);
++
++        } else if(is_set(flags, crm_ipc_client_event)) {
++            int rc = crm_ipc_send(proxy->ipc, request, flags, 5000, NULL);
++
++            if(rc < 0) {
++                xmlNode *op_reply = create_xml_node(NULL, "nack");
++
++                crm_err("Could not relay %s request %d from %s to %s for %s: %s (%d)",
++                         op, msg_id, proxy->node_name, crm_ipc_name(proxy->ipc), name, pcmk_strerror(rc), rc);
++
++                /* Send a n'ack so the caller doesn't block */
++                crm_xml_add(op_reply, "function", __FUNCTION__);
++                crm_xml_add_int(op_reply, "line", __LINE__);
++                crm_xml_add_int(op_reply, "rc", rc);
++                remote_proxy_relay_response(lrmd, session, op_reply, msg_id);
++                free_xml(op_reply);
++
++            } else {
++                crm_trace("Relayed %s request %d from %s to %s for %s",
++                          op, msg_id, proxy->node_name, crm_ipc_name(proxy->ipc), name);
++            }
++
+         } else {
+-            /* TODO make this async. */
+-            crm_ipc_send(proxy->ipc, request, flags, 10000, &op_reply);
+-        }
+-    }
++            int rc = pcmk_ok;
++            xmlNode *op_reply = NULL;
++            /* For backwards compatibility with pacemaker_remoted <= 1.1.10 */
++
++            crm_trace("Relaying %s request %d from %s to %s for %s",
++                      op, msg_id, proxy->node_name, crm_ipc_name(proxy->ipc), name);
++
++            rc = crm_ipc_send(proxy->ipc, request, flags, 10000, &op_reply);
++            if(rc < 0) {
++                crm_err("Could not relay %s request %d from %s to %s for %s: %s (%d)",
++                         op, msg_id, proxy->node_name, crm_ipc_name(proxy->ipc), name, pcmk_strerror(rc), rc);
++            } else {
++                crm_trace("Relayed %s request %d from %s to %s for %s",
++                          op, msg_id, proxy->node_name, crm_ipc_name(proxy->ipc), name);
++            }
+ 
+-    if (op_reply) {
+-        remote_proxy_relay_response(lrmd, session, op_reply, msg_id);
+-        free_xml(op_reply);
++            if(op_reply) {
++                remote_proxy_relay_response(lrmd, session, op_reply, msg_id);
++                free_xml(op_reply);
++            }
++        }
++    } else {
++        crm_err("Unknown proxy operation: %s", op);
+     }
+ }
+ 
+diff --git a/fencing/commands.c b/fencing/commands.c
+index b7e99820c..7c72e7af0 100644
+--- a/fencing/commands.c
++++ b/fencing/commands.c
+@@ -1789,7 +1789,7 @@ handle_request(crm_client_t * client, uint32_t id, uint32_t flags, xmlNode * req
+         CRM_ASSERT(client);
+         crm_xml_add(reply, F_STONITH_OPERATION, CRM_OP_REGISTER);
+         crm_xml_add(reply, F_STONITH_CLIENTID, client->id);
+-        crm_ipcs_send(client, id, reply, FALSE);
++        crm_ipcs_send(client, id, reply, is_set(flags, crm_ipc_client_event));
+         client->request_id = 0;
+         free_xml(reply);
+         return 0;
+@@ -1830,8 +1830,7 @@ handle_request(crm_client_t * client, uint32_t id, uint32_t flags, xmlNode * req
+         }
+ 
+         if (flags & crm_ipc_client_response) {
+-            crm_ipcs_send_ack(client, id, "ack", __FUNCTION__, __LINE__);
+-            client->request_id = 0;
++            crm_ipcs_send_ack(client, id, flags, "ack", __FUNCTION__, __LINE__);
+         }
+         return 0;
+ 
+diff --git a/fencing/main.c b/fencing/main.c
+index 81366283c..09312a28e 100644
+--- a/fencing/main.c
++++ b/fencing/main.c
+@@ -103,7 +103,7 @@ st_ipc_dispatch(qb_ipcs_connection_t * qbc, void *data, size_t size)
+ 
+     request = crm_ipcs_recv(c, data, size, &id, &flags);
+     if (request == NULL) {
+-        crm_ipcs_send_ack(c, id, "nack", __FUNCTION__, __LINE__);
++        crm_ipcs_send_ack(c, id, flags, "nack", __FUNCTION__, __LINE__);
+         return 0;
+     }
+ 
+diff --git a/include/crm/common/ipc.h b/include/crm/common/ipc.h
+index dee6d5ba1..fb55d73ce 100644
+--- a/include/crm/common/ipc.h
++++ b/include/crm/common/ipc.h
+@@ -43,6 +43,7 @@ enum crm_ipc_flags
+     crm_ipc_client_none     = 0x0000,
+     crm_ipc_client_response = 0x0001, /* A Response is expected in reply */
+     crm_ipc_compressed      = 0x0002, /* Message has been compressed */
++    crm_ipc_client_event    = 0x0004, /* An a-sync event is expected in reply */
+ };
+ /* *INDENT-ON* */
+ 
+diff --git a/include/crm/common/ipcs.h b/include/crm/common/ipcs.h
+index 4d7ccf317..ca91e5519 100644
+--- a/include/crm/common/ipcs.h
++++ b/include/crm/common/ipcs.h
+@@ -67,6 +67,7 @@ struct crm_client_s {
+ 
+     long long options;
+ 
++    bool have_events;           /* ipc_proxy code only */
+     int request_id;
+     void *userdata;
+ 
+@@ -109,8 +110,8 @@ crm_client_t *crm_client_new(qb_ipcs_connection_t * c, uid_t uid, gid_t gid);
+ void crm_client_destroy(crm_client_t * c);
+ void crm_client_disconnect_all(qb_ipcs_service_t *s);
+ 
+-void crm_ipcs_send_ack(crm_client_t * c, uint32_t request, const char *tag, const char *function,
+-                       int line);
++void crm_ipcs_send_ack(crm_client_t * c, uint32_t request, uint32_t flags,
++                       const char *tag, const char *function, int line);
+ ssize_t crm_ipc_prepare(uint32_t request, xmlNode * message, struct iovec **result);
+ ssize_t crm_ipcs_send(crm_client_t * c, uint32_t request, xmlNode * message,
+                       enum crm_ipc_server_flags flags);
+diff --git a/include/crm/lrmd.h b/include/crm/lrmd.h
+index b8c316780..f53bd590d 100644
+--- a/include/crm/lrmd.h
++++ b/include/crm/lrmd.h
+@@ -90,6 +90,7 @@ typedef struct lrmd_key_value_s {
+ #define F_LRMD_IPC_OP           "lrmd_ipc_op"
+ #define F_LRMD_IPC_IPC_SERVER   "lrmd_ipc_server"
+ #define F_LRMD_IPC_SESSION      "lrmd_ipc_session"
++#define F_LRMD_IPC_CLIENT       "lrmd_ipc_client"
+ #define F_LRMD_IPC_PROXY_NODE   "lrmd_ipc_proxy_node"
+ #define F_LRMD_IPC_USER         "lrmd_ipc_user"
+ #define F_LRMD_IPC_MSG          "lrmd_ipc_msg"
+diff --git a/lib/common/ipc.c b/lib/common/ipc.c
+index 899f7a00a..11ecd504c 100644
+--- a/lib/common/ipc.c
++++ b/lib/common/ipc.c
+@@ -666,15 +666,19 @@ crm_ipcs_send(crm_client_t * c, uint32_t request, xmlNode * message,
+ }
+ 
+ void
+-crm_ipcs_send_ack(crm_client_t * c, uint32_t request, const char *tag, const char *function,
++crm_ipcs_send_ack(crm_client_t * c, uint32_t request, uint32_t flags, const char *tag, const char *function,
+                   int line)
+ {
+-    xmlNode *ack = create_xml_node(NULL, tag);
+-
+-    crm_xml_add(ack, "function", function);
+-    crm_xml_add_int(ack, "line", line);
+-    crm_ipcs_send(c, request, ack, 0);
+-    free_xml(ack);
++    if (flags & crm_ipc_client_response) {
++        xmlNode *ack = create_xml_node(NULL, tag);
++
++        crm_trace("Ack'ing msg from %s (%p)", crm_client_name(c), c);
++        c->request_id = 0;
++        crm_xml_add(ack, "function", function);
++        crm_xml_add_int(ack, "line", line);
++        crm_ipcs_send(c, request, ack, is_set(flags, crm_ipc_client_event));
++        free_xml(ack);
++    }
+ }
+ 
+ /* Client... */
+@@ -1034,9 +1038,13 @@ crm_ipc_send(crm_ipc_t * client, xmlNode * message, enum crm_ipc_flags flags, in
+         return -ENOTCONN;
+     }
+ 
++    if (ms_timeout == 0) {
++        ms_timeout = 5000;
++    }
++
+     if (client->need_reply) {
+         crm_trace("Trying again to obtain pending reply from %s", client->name);
+-        rc = qb_ipcc_recv(client->ipc, client->buffer, client->buf_size, 300);
++        rc = qb_ipcc_recv(client->ipc, client->buffer, client->buf_size, ms_timeout/2);
+         if (rc < 0) {
+             crm_warn("Sending to %s (%p) is disabled until pending reply is received", client->name,
+                      client->ipc);
+@@ -1049,7 +1057,9 @@ crm_ipc_send(crm_ipc_t * client, xmlNode * message, enum crm_ipc_flags flags, in
+         }
+     }
+ 
+-    rc = crm_ipc_prepare(++id, message, &iov);
++    id++;
++    CRM_LOG_ASSERT(id != 0); /* Crude wrap-around detection */
++    rc = crm_ipc_prepare(id, message, &iov);
+     if(rc < 0) {
+         return rc;
+     }
+@@ -1066,14 +1076,12 @@ crm_ipc_send(crm_ipc_t * client, xmlNode * message, enum crm_ipc_flags flags, in
+         }
+     }
+ 
+-    if (ms_timeout == 0) {
+-        ms_timeout = 5000;
+-    }
+-
+     crm_trace("Sending from client: %s request id: %d bytes: %u timeout:%d msg...",
+               client->name, header->qb.id, header->qb.size, ms_timeout);
+ 
+-    if (ms_timeout > 0) {
++    if (ms_timeout > 0
++        || is_not_set(flags, crm_ipc_client_response)
++        || is_set(flags, crm_ipc_client_event)) {
+ 
+         rc = internal_ipc_send_request(client, iov, ms_timeout);
+ 
+@@ -1082,7 +1090,8 @@ crm_ipc_send(crm_ipc_t * client, xmlNode * message, enum crm_ipc_flags flags, in
+                       client->name, header->qb.id, header->qb.size);
+             goto send_cleanup;
+ 
+-        } else if (is_not_set(flags, crm_ipc_client_response)) {
++        } else if (is_not_set(flags, crm_ipc_client_response)
++                   || is_set(flags, crm_ipc_client_event)) {
+             crm_trace("Message sent, not waiting for reply to %d from %s to %u bytes...",
+                       header->qb.id, client->name, header->qb.size);
+ 
+diff --git a/lrmd/ipc_proxy.c b/lrmd/ipc_proxy.c
+index 100c13e3d..6cd4fe7c2 100644
+--- a/lrmd/ipc_proxy.c
++++ b/lrmd/ipc_proxy.c
+@@ -31,6 +31,7 @@
+ #include <crm/common/ipc.h>
+ #include <crm/common/ipcs.h>
+ #include <crm/cib/internal.h>
++#include <crm/fencing/internal.h>
+ 
+ static qb_ipcs_service_t *cib_ro = NULL;
+ static qb_ipcs_service_t *cib_rw = NULL;
+@@ -83,6 +84,7 @@ ipc_proxy_accept(qb_ipcs_connection_t * c, uid_t uid, gid_t gid, const char *ipc
+     /* This ipc client is bound to a single ipc provider. If the
+      * provider goes away, this client is disconnected */
+     client->userdata = strdup(ipc_proxy->id);
++    client->name = g_strdup_printf("proxy-%s-%d-%.8s", ipc_channel, client->pid, client->id);
+ 
+     g_hash_table_insert(ipc_clients, client->id, client);
+ 
+@@ -161,14 +163,33 @@ ipc_proxy_forward_client(crm_client_t *ipc_proxy, xmlNode *xml)
+      * This function is receiving a msg from connection 2
+      * and forwarding it to connection 1.
+      */
++
+     if (safe_str_eq(msg_type, "event")) {
+-        rc = crm_ipcs_send(ipc_client, 0, msg, TRUE);
++        if(ipc_client->request_id) {
++            crm_info("Sending response for request %u to %s", ipc_client->request_id, ipc_client->id);
++            CRM_LOG_ASSERT(ipc_client->have_events == FALSE);
++            rc = crm_ipcs_send(ipc_client, ipc_client->request_id, msg, FALSE);
++            ipc_client->request_id = 0;
++
++        } else {
++            crm_info("Sending event to %s", ipc_client->request_id, ipc_client->id);
++            ipc_client->have_events = TRUE;
++            rc = crm_ipcs_send(ipc_client, 0, msg, TRUE);
++        }
++
+     } else if (safe_str_eq(msg_type, "response")) {
+         int msg_id = 0;
++        /* For backwards compatibility with crmd <= 1.1.10 */
++
+         crm_element_value_int(xml, F_LRMD_IPC_MSG_ID, &msg_id);
+         rc = crm_ipcs_send(ipc_client, msg_id, msg, FALSE);
++
++        CRM_LOG_ASSERT(msg_id == ipc_client->request_id);
++        ipc_client->request_id = 0;
++
+     } else if (safe_str_eq(msg_type, "destroy")) {
+         qb_ipcs_disconnect(ipc_client->ipcs);
++
+     } else {
+         crm_err("Unknown ipc proxy msg type %s" , msg_type);
+     }
+@@ -183,6 +204,7 @@ ipc_proxy_dispatch(qb_ipcs_connection_t * c, void *data, size_t size)
+ {
+     uint32_t id = 0;
+     uint32_t flags = 0;
++    int api_options = 0;
+     crm_client_t *client = crm_client_get(c);
+     crm_client_t *ipc_proxy = crm_client_get_by_id(client->userdata);
+     xmlNode *request = NULL;
+@@ -199,7 +221,7 @@ ipc_proxy_dispatch(qb_ipcs_connection_t * c, void *data, size_t size)
+      * Looking at the chain of events.
+      *
+      * -----remote node----------------|---- cluster node ------
+-     * ipc_client <--1--> this code <--2--> crmd <----3----> ipc server
++     * ipc_client <--1--> this code <--2--> crmd:remote_proxy_dispatch_internal() <----3----> ipc server
+      *
+      * This function is receiving a request from connection
+      * 1 and forwarding it to connection 2.
+@@ -215,9 +237,46 @@ ipc_proxy_dispatch(qb_ipcs_connection_t * c, void *data, size_t size)
+     CRM_CHECK(client->id != NULL, crm_err("Invalid client: %p", client);
+               return FALSE);
+ 
++    /* We send things out as async requests to avoid blocking in the
++     * crmd but 'ipc_client' is expecting a synchronous response
++     *
++     * Record the request_id here and assume the next event
++     * destined for 'ipc_client' is the reply
++     *
++     * This will break badly if a client makes a synchronous call
++     * after events start arriving.  No known clients do this
++     * though
++     */
++
++    set_bit(flags, crm_ipc_client_event);
++
++    /* Now clear the sync option from each message type
++     * Not ideal, but necessary
++     */
++    crm_element_value_int(request, F_CIB_CALLOPTS, &api_options);
++    if(api_options & cib_sync_call) {
++        client->request_id = id;
++        crm_info("Fixing and forwarding cib request %u for %s", client->request_id, client->name);
++
++        clear_bit(api_options, cib_sync_call);
++        crm_xml_add_int(request, F_CIB_CALLOPTS, api_options);
++        CRM_LOG_ASSERT(client->have_events == FALSE);
++    }
++
++    crm_element_value_int(request, F_STONITH_CALLOPTS, &api_options);
++    if(api_options & st_opt_sync_call) {
++        client->request_id = id;
++        crm_info("Fixing and forwarding st request %u for %s", client->request_id, client->name);
++
++        clear_bit(api_options, st_opt_sync_call);
++        crm_xml_add_int(request, F_STONITH_CALLOPTS, api_options);
++        CRM_LOG_ASSERT(client->have_events == FALSE);
++    }
++
+     msg = create_xml_node(NULL, T_LRMD_IPC_PROXY);
+     crm_xml_add(msg, F_LRMD_IPC_OP, "request");
+     crm_xml_add(msg, F_LRMD_IPC_SESSION, client->id);
++    crm_xml_add(msg, F_LRMD_IPC_CLIENT, crm_client_name(client));
+     crm_xml_add(msg, F_LRMD_IPC_USER, client->user);
+     crm_xml_add_int(msg, F_LRMD_IPC_MSG_ID, id);
+     crm_xml_add_int(msg, F_LRMD_IPC_MSG_FLAGS, flags);
+diff --git a/mcp/pacemaker.c b/mcp/pacemaker.c
+index ed1838a43..e67cd2433 100644
+--- a/mcp/pacemaker.c
++++ b/mcp/pacemaker.c
+@@ -457,10 +457,7 @@ pcmk_ipc_dispatch(qb_ipcs_connection_t * qbc, void *data, size_t size)
+     crm_client_t *c = crm_client_get(qbc);
+     xmlNode *msg = crm_ipcs_recv(c, data, size, &id, &flags);
+ 
+-    if (flags & crm_ipc_client_response) {
+-        crm_ipcs_send_ack(c, id, "ack", __FUNCTION__, __LINE__);
+-    }
+-
++    crm_ipcs_send_ack(c, id, flags, "ack", __FUNCTION__, __LINE__);
+     if (msg == NULL) {
+         return 0;
+     }
+diff --git a/pengine/main.c b/pengine/main.c
+index 397cc612e..3a7c5b166 100644
+--- a/pengine/main.c
++++ b/pengine/main.c
+@@ -69,10 +69,7 @@ pe_ipc_dispatch(qb_ipcs_connection_t * qbc, void *data, size_t size)
+     crm_client_t *c = crm_client_get(qbc);
+     xmlNode *msg = crm_ipcs_recv(c, data, size, &id, &flags);
+ 
+-    if (flags & crm_ipc_client_response) {
+-        crm_ipcs_send_ack(c, id, "ack", __FUNCTION__, __LINE__);
+-    }
+-
++    crm_ipcs_send_ack(c, id, flags, "ack", __FUNCTION__, __LINE__);
+     if (msg != NULL) {
+         xmlNode *data = get_message_xml(msg, F_CRM_DATA);
+ 
+

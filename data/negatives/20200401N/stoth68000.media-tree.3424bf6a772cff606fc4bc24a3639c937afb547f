@@ -1,0 +1,50 @@
+commit 3424bf6a772cff606fc4bc24a3639c937afb547f
+Author: NeilBrown <neilb@suse.de>
+Date:   Thu Jun 17 17:48:26 2010 +1000
+
+    md/raid5: don't include 'spare' drives when reshaping to fewer devices.
+    
+    There are few situations where it would make any sense to add a spare
+    when reducing the number of devices in an array, but it is
+    conceivable:  A 6 drive RAID6 with two missing devices could be
+    reshaped to a 5 drive RAID6, and a spare could become available
+    just in time for the reshape, but not early enough to have been
+    recovered first.  'freezing' recovery can make this easy to
+    do without any races.
+    
+    However doing such a thing is a bad idea.  md will not record the
+    partially-recovered state of the 'spare' and when the reshape
+    finished it will think that the spare is still spare.
+    Easiest way to avoid this confusion is to simply disallow it.
+    
+    Signed-off-by: NeilBrown <neilb@suse.de>
+
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index 66cd47973398..96c690279fc6 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -5526,8 +5526,13 @@ static int raid5_start_reshape(mddev_t *mddev)
+ 
+ 	/* Add some new drives, as many as will fit.
+ 	 * We know there are enough to make the newly sized array work.
++	 * Don't add devices if we are reducing the number of
++	 * devices in the array.  This is because it is not possible
++	 * to correctly record the "partially reconstructed" state of
++	 * such devices during the reshape and confusion could result.
+ 	 */
+-	list_for_each_entry(rdev, &mddev->disks, same_set)
++	if (mddev->delta_disks >= 0)
++	    list_for_each_entry(rdev, &mddev->disks, same_set)
+ 		if (rdev->raid_disk < 0 &&
+ 		    !test_bit(Faulty, &rdev->flags)) {
+ 			if (raid5_add_disk(mddev, rdev) == 0) {
+@@ -5549,7 +5554,7 @@ static int raid5_start_reshape(mddev_t *mddev)
+ 		}
+ 
+ 	/* When a reshape changes the number of devices, ->degraded
+-	 * is measured against the large of the pre and post number of
++	 * is measured against the larger of the pre and post number of
+ 	 * devices.*/
+ 	if (mddev->delta_disks > 0) {
+ 		spin_lock_irqsave(&conf->device_lock, flags);
+

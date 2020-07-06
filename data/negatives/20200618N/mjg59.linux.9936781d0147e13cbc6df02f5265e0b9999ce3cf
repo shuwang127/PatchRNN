@@ -1,0 +1,73 @@
+commit 9936781d0147e13cbc6df02f5265e0b9999ce3cf
+Author: Trond Myklebust <Trond.Myklebust@netapp.com>
+Date:   Tue Jul 17 21:52:41 2007 -0400
+
+    NFSv4: Try to recover from getfh failures in nfs4_xdr_dec_open
+    
+    Try harder to recover the open state if the server failed to return a
+    filehandle.
+    
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/fs/nfs/nfs4proc.c b/fs/nfs/nfs4proc.c
+index 5f3689befc22..7ead63e065ab 100644
+--- a/fs/nfs/nfs4proc.c
++++ b/fs/nfs/nfs4proc.c
+@@ -66,6 +66,8 @@ static int _nfs4_proc_access(struct inode *inode, struct nfs_access_entry *entry
+ static int nfs4_handle_exception(const struct nfs_server *server, int errorcode, struct nfs4_exception *exception);
+ static int nfs4_wait_clnt_recover(struct rpc_clnt *clnt, struct nfs_client *clp);
+ static int _nfs4_do_access(struct inode *inode, struct rpc_cred *cred, int openflags);
++static int _nfs4_proc_lookup(struct inode *dir, const struct qstr *name, struct nfs_fh *fhandle, struct nfs_fattr *fattr);
++static int _nfs4_proc_getattr(struct nfs_server *server, struct nfs_fh *fhandle, struct nfs_fattr *fattr);
+ 
+ /* Prevent leaks of NFSv4 errors into userland */
+ int nfs4_map_errors(int err)
+@@ -930,6 +932,9 @@ static int _nfs4_proc_open(struct nfs4_opendata *data)
+ 	if (status != 0 || !data->rpc_done)
+ 		return status;
+ 
++	if (o_res->fh.size == 0)
++		_nfs4_proc_lookup(dir, o_arg->name, &o_res->fh, o_res->f_attr);
++
+ 	if (o_arg->open_flags & O_CREAT) {
+ 		update_changeattr(dir, &o_res->cinfo);
+ 		nfs_post_op_update_inode(dir, o_res->dir_attr);
+@@ -941,7 +946,7 @@ static int _nfs4_proc_open(struct nfs4_opendata *data)
+ 			return status;
+ 	}
+ 	if (!(o_res->f_attr->valid & NFS_ATTR_FATTR))
+-		return server->nfs_client->rpc_ops->getattr(server, &o_res->fh, o_res->f_attr);
++		_nfs4_proc_getattr(server, &o_res->fh, o_res->f_attr);
+ 	return 0;
+ }
+ 
+diff --git a/fs/nfs/nfs4xdr.c b/fs/nfs/nfs4xdr.c
+index 99a123db1083..af959147077b 100644
+--- a/fs/nfs/nfs4xdr.c
++++ b/fs/nfs/nfs4xdr.c
+@@ -3161,11 +3161,12 @@ static int decode_getfh(struct xdr_stream *xdr, struct nfs_fh *fh)
+ 	uint32_t len;
+ 	int status;
+ 
++	/* Zero handle first to allow comparisons */
++	memset(fh, 0, sizeof(*fh));
++
+ 	status = decode_op_hdr(xdr, OP_GETFH);
+ 	if (status)
+ 		return status;
+-	/* Zero handle first to allow comparisons */
+-	memset(fh, 0, sizeof(*fh));
+ 
+ 	READ_BUF(4);
+ 	READ32(len);
+@@ -4030,8 +4031,7 @@ static int nfs4_xdr_dec_open(struct rpc_rqst *rqstp, __be32 *p, struct nfs_openr
+         status = decode_open(&xdr, res);
+         if (status)
+                 goto out;
+-	status = decode_getfh(&xdr, &res->fh);
+-        if (status)
++	if (decode_getfh(&xdr, &res->fh) != 0)
+ 		goto out;
+ 	if (decode_getfattr(&xdr, res->f_attr, res->server) != 0)
+ 		goto out;
+

@@ -1,0 +1,158 @@
+commit c89393bb64aea830393c1e9d6392b55703c5a72a
+Author: Timothy Smith <timothy.smith@sun.com>
+Date:   Fri Dec 12 15:48:26 2008 -0700
+
+    Apply the rest of innodb-5.0-ss2475.  This fixes Bug#36819, "ut_usectime does
+    not handle errors from gettimeofday".
+    
+    r2475 | vasil | 2008-05-22 19:35:30 +0300 (Thu, 22 May 2008) | 13 lines
+    
+    Fix by retrying gettimeofday() several times if it fails in ut_usectime().
+    If it fails on all calls then return error to the caller to be handled
+    at higher level.
+    
+    Update the variable innodb_row_lock_time_max in SHOW STATUS output only
+    if ut_usectime() was successful.
+
+diff --git a/innobase/btr/btr0cur.c b/innobase/btr/btr0cur.c
+index d51a090be75..509b2ba3119 100644
+--- a/innobase/btr/btr0cur.c
++++ b/innobase/btr/btr0cur.c
+@@ -52,7 +52,7 @@ can be released by page reorganize, then it is reorganized */
+ 
+ #define BTR_CUR_PAGE_REORGANIZE_LIMIT	(UNIV_PAGE_SIZE / 32)
+ 
+-/* When estimating number of different kay values in an index sample
++/* When estimating number of different key values in an index, sample
+ this many index pages */
+ #define BTR_KEY_VAL_ESTIMATE_N_PAGES	8
+ 
+diff --git a/innobase/include/ut0ut.h b/innobase/include/ut0ut.h
+index 8938957cd12..b1c1602fd30 100644
+--- a/innobase/include/ut0ut.h
++++ b/innobase/include/ut0ut.h
+@@ -139,11 +139,15 @@ ib_time_t
+ ut_time(void);
+ /*=========*/
+ /**************************************************************
+-Returns system time. */
++Returns system time.
++Upon successful completion, the value 0 is returned; otherwise the
++value -1 is returned and the global variable errno is set to indicate the
++error. */
+ 
+-void
++int
+ ut_usectime(
+ /*========*/
++			/* out: 0 on success, -1 otherwise */
+ 	ulint*	sec,	/* out: seconds since the Epoch */
+ 	ulint*	ms);	/* out: microseconds since the Epoch+*sec */
+ /**************************************************************
+diff --git a/innobase/srv/srv0srv.c b/innobase/srv/srv0srv.c
+index 431138400b6..6b755ae9816 100644
+--- a/innobase/srv/srv0srv.c
++++ b/innobase/srv/srv0srv.c
+@@ -1372,7 +1372,7 @@ srv_table_reserve_slot_for_mysql(void)
+ 
+ /*******************************************************************
+ Puts a MySQL OS thread to wait for a lock to be released. If an error
+-occurs during the wait trx->error_state associated with thr is
++occurs during the wait, then trx->error_state associated with thr is
+ != DB_SUCCESS when we return. DB_LOCK_WAIT_TIMEOUT and DB_DEADLOCK
+ are possible errors. DB_DEADLOCK is returned if selective deadlock
+ resolution chose this transaction as a victim. */
+@@ -1442,8 +1442,11 @@ srv_suspend_mysql_thread(
+ 		srv_n_lock_wait_count++;
+ 		srv_n_lock_wait_current_count++;
+ 
+-		ut_usectime(&sec, &ms);
+-		start_time = (ib_longlong)sec * 1000000 + ms;
++		if (ut_usectime(&sec, &ms) == -1) {
++			start_time = -1;
++		} else {
++			start_time = (ib_longlong)sec * 1000000 + ms;
++		}
+ 	}
+ 	/* Wake the lock timeout monitor thread, if it is suspended */
+ 
+@@ -1497,14 +1500,20 @@ srv_suspend_mysql_thread(
+ 	wait_time = ut_difftime(ut_time(), slot->suspend_time);
+ 
+ 	if (thr->lock_state == QUE_THR_LOCK_ROW) {
+-		ut_usectime(&sec, &ms);
+-		finish_time = (ib_longlong)sec * 1000000 + ms;
++		if (ut_usectime(&sec, &ms) == -1) {
++			finish_time = -1;
++		} else {
++			finish_time = (ib_longlong)sec * 1000000 + ms;
++		}
+ 
+ 		diff_time = (ulint) (finish_time - start_time);
+   
+ 		srv_n_lock_wait_current_count--;
+ 		srv_n_lock_wait_time = srv_n_lock_wait_time + diff_time;
+-		if (diff_time > srv_n_lock_max_wait_time) {
++		if (diff_time > srv_n_lock_max_wait_time &&
++		    /* only update the variable if we successfully
++		    retrieved the start and finish times. See Bug#36819. */
++		    start_time != -1 && finish_time != -1) {
+ 			srv_n_lock_max_wait_time = diff_time;
+ 		}
+ 	}
+diff --git a/innobase/ut/ut0ut.c b/innobase/ut/ut0ut.c
+index feb03269d91..b93838a1885 100644
+--- a/innobase/ut/ut0ut.c
++++ b/innobase/ut/ut0ut.c
+@@ -123,19 +123,45 @@ ut_time(void)
+ }
+ 
+ /**************************************************************
+-Returns system time. */
++Returns system time.
++Upon successful completion, the value 0 is returned; otherwise the
++value -1 is returned and the global variable errno is set to indicate the
++error. */
+ 
+-void
++int
+ ut_usectime(
+ /*========*/
++			/* out: 0 on success, -1 otherwise */
+ 	ulint*	sec,	/* out: seconds since the Epoch */
+ 	ulint*	ms)	/* out: microseconds since the Epoch+*sec */
+ {
+ 	struct timeval	tv;
++	int		ret;
++	int		errno_gettimeofday;
++	int		i;
++
++	for (i = 0; i < 10; i++) {
++
++		ret = ut_gettimeofday(&tv, NULL);
++
++		if (ret == -1) {
++			errno_gettimeofday = errno;
++			ut_print_timestamp(stderr);
++			fprintf(stderr, "  InnoDB: gettimeofday(): %s\n",
++				strerror(errno_gettimeofday));
++			os_thread_sleep(100000);  /* 0.1 sec */
++			errno = errno_gettimeofday;
++		} else {
++			break;
++		}
++	}
++
++	if (ret != -1) {
++		*sec = (ulint) tv.tv_sec;
++		*ms  = (ulint) tv.tv_usec;
++	}
+ 
+-	ut_gettimeofday(&tv, NULL);
+-	*sec = (ulint) tv.tv_sec;
+-	*ms  = (ulint) tv.tv_usec;
++	return(ret);
+ }
+ 
+ /**************************************************************
+

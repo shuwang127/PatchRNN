@@ -1,0 +1,48 @@
+commit 68681f2bcf8d17e573c27ff3fc676ddde381204c
+Author: antirez <antirez@gmail.com>
+Date:   Mon Dec 4 10:33:04 2017 +0100
+
+    Fix issue #4505, Lua RDB AUX field loading of existing scripts.
+    
+    Unfortunately, as outlined by @soloestoy in #4505, "lua" AUX RDB field
+    loading in case of duplicated script was still broken. This commit fixes
+    this problem and also a memory leak introduced by the past commit.
+    
+    Note that now we have a regression test able to duplicate the issue, so
+    this commit was actually tested against the regression. The original PR
+    also had a valid fix, but I prefer to hide the details of scripting.c
+    outside scripting.c, and later "SCRIPT LOAD" should also be able to use
+    the function luaCreateFunction() instead of redoing the work.
+
+diff --git a/src/scripting.c b/src/scripting.c
+index ea167365..9427b7b6 100644
+--- a/src/scripting.c
++++ b/src/scripting.c
+@@ -1161,7 +1161,6 @@ int redis_math_randomseed (lua_State *L) {
+  * On error C_ERR is returned and an appropriate error is set in the
+  * client context. */
+ int luaCreateFunction(client *c, lua_State *lua, char *funcname, robj *body, int allow_dup) {
+-    sds funcdef = sdsempty();
+     char fname[43];
+ 
+     if (funcname == NULL) {
+@@ -1171,9 +1170,16 @@ int luaCreateFunction(client *c, lua_State *lua, char *funcname, robj *body, int
+         funcname = fname;
+     }
+ 
+-    if (allow_dup && dictFind(server.lua_scripts,funcname+2) != NULL)
+-        return C_OK;
++    if (allow_dup) {
++        sds sha = sdsnewlen(funcname+2,40);
++        if (allow_dup && dictFind(server.lua_scripts,sha) != NULL) {
++            sdsfree(sha);
++            return C_OK;
++        }
++        sdsfree(sha);
++    }
+ 
++    sds funcdef = sdsempty();
+     funcdef = sdscat(funcdef,"function ");
+     funcdef = sdscatlen(funcdef,funcname,42);
+     funcdef = sdscatlen(funcdef,"() ",3);
+

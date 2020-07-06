@@ -1,0 +1,188 @@
+commit 100b5ff381fe93e7ac4d7b0ea68f9b7256615e68
+Author: Michael Wallner <mike@php.net>
+Date:   Sun Oct 9 09:00:40 2005 +0000
+
+    - some minor strlen() and strlcat() tweaks
+
+diff --git a/http_api.c b/http_api.c
+index c5c63f9..9943cd8 100644
+--- a/http_api.c
++++ b/http_api.c
+@@ -195,7 +195,7 @@ void _http_log_ex(char *file, const char *ident, const char *message TSRMLS_DC)
+ 	strftime(datetime, sizeof(datetime), "%Y-%m-%d %H:%M:%S", php_localtime_r(&now, &nowtm));
+ 
+ #define HTTP_LOG_WRITE(file, type, msg) \
+-	if (file && strlen(file)) { \
++	if (file && *file) { \
+ 	 	php_stream *log = php_stream_open_wrapper(file, "ab", REPORT_ERRORS|ENFORCE_SAFE_MODE, NULL); \
+ 		 \
+ 		if (log) { \
+diff --git a/http_functions.c b/http_functions.c
+index 2f8d679..631de14 100644
+--- a/http_functions.c
++++ b/http_functions.c
+@@ -1254,7 +1254,7 @@ PHP_FUNCTION(http_put_stream)
+ PHP_FUNCTION(http_request_method_register)
+ {
+ 	char *method;
+-	int *method_len;
++	int method_len;
+ 	unsigned long existing;
+ 
+ 	if (SUCCESS != zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &method, &method_len)) {
+@@ -1264,7 +1264,7 @@ PHP_FUNCTION(http_request_method_register)
+ 		RETURN_LONG((long) existing);
+ 	}
+ 
+-	RETVAL_LONG((long) http_request_method_register(method));
++	RETVAL_LONG((long) http_request_method_register(method, method_len));
+ }
+ /* }}} */
+ 
+diff --git a/http_request_method_api.c b/http_request_method_api.c
+index 39c9ace..a2197c6 100644
+--- a/http_request_method_api.c
++++ b/http_request_method_api.c
+@@ -155,29 +155,28 @@ PHP_HTTP_API unsigned long _http_request_method_exists(zend_bool by_name, unsign
+ /* }}} */
+ 
+ /* {{{ unsigned long http_request_method_register(char *) */
+-PHP_HTTP_API unsigned long _http_request_method_register(const char *method_name TSRMLS_DC)
++PHP_HTTP_API unsigned long _http_request_method_register(const char *method_name, size_t method_name_len TSRMLS_DC)
+ {
+ 	zval array;
+ 	char *http_method, *method;
+-	int i, method_len = strlen(method_name);
+-	unsigned long meth_num = HTTP_G(request).methods.custom.nNextFreeElement + HTTP_MAX_REQUEST_METHOD;
++	unsigned long i, meth_num = HTTP_G(request).methods.custom.nNextFreeElement + HTTP_MAX_REQUEST_METHOD;
+ 
+-	method = emalloc(method_len + 1);
+-	for (i = 0; i < method_len; ++i) {
++	method = emalloc(method_name_len + 1);
++	for (i = 0; i < method_name_len; ++i) {
+ 		method[i] = toupper(method_name[i]);
+ 	}
+-	method[method_len] = '\0';
++	method[method_name_len] = '\0';
+ 	
+ 	INIT_ZARR(array, &HTTP_G(request).methods.custom);
+-	add_next_index_stringl(&array, method, method_len, 0);
++	add_next_index_stringl(&array, method, method_name_len, 0);
+ 
+-	method_len = spprintf(&http_method, 0, "HTTP_METH_%s", method);
+-	zend_register_long_constant(http_method, method_len + 1, meth_num, CONST_CS, http_module_number TSRMLS_CC);
++	method_name_len = spprintf(&http_method, 0, "HTTP_METH_%s", method);
++	zend_register_long_constant(http_method, method_name_len + 1, meth_num, CONST_CS, http_module_number TSRMLS_CC);
+ 	efree(http_method);
+ 	
+ #if defined(ZEND_ENGINE_2) && defined(HTTP_HAVE_CURL) && !defined(WONKY)
+-	method_len = spprintf(&http_method, 0, "METH_%s", method);
+-	zend_declare_class_constant_long(http_request_object_ce, http_method, method_len, meth_num TSRMLS_CC);
++	method_name_len = spprintf(&http_method, 0, "METH_%s", method);
++	zend_declare_class_constant_long(http_request_object_ce, http_method, method_name_len, meth_num TSRMLS_CC);
+ 	efree(http_method);
+ #endif
+ 
+diff --git a/http_request_object.c b/http_request_object.c
+index 7b1d82b..37e2a58 100644
+--- a/http_request_object.c
++++ b/http_request_object.c
+@@ -501,13 +501,13 @@ STATUS _http_request_object_requesthandler(http_request_object *obj, zval *this_
+ 	if (status == SUCCESS) {
+ 		zval *qdata = convert_to_type_ex(IS_STRING, GET_PROP(obj, queryData));
+ 		
+-		if (Z_STRLEN_P(qdata) && (strlen(request_uri) < HTTP_URI_MAXLEN)) {
++		if (Z_STRLEN_P(qdata)) {
+ 			if (!strchr(request_uri, '?')) {
+-				strcat(request_uri, "?");
++				strlcat(request_uri, "?", HTTP_URI_MAXLEN);
+ 			} else {
+-				strcat(request_uri, "&");
++				strlcat(request_uri, "&", HTTP_URI_MAXLEN);
+ 			}
+-			strncat(request_uri, Z_STRVAL_P(qdata), HTTP_URI_MAXLEN - strlen(request_uri));
++			strlcat(request_uri, Z_STRVAL_P(qdata), HTTP_URI_MAXLEN);
+ 		}
+ 		
+ 		status = http_request_init(obj->ch, Z_LVAL_P(meth), request_uri, body, Z_ARRVAL_P(GET_PROP(obj, options)));
+diff --git a/http_send_api.c b/http_send_api.c
+index 6fc9cc0..0c4306f 100644
+--- a/http_send_api.c
++++ b/http_send_api.c
+@@ -156,8 +156,8 @@ PHP_HTTP_API STATUS _http_send_header_ex(const char *name, size_t name_len, cons
+ 	char *header = emalloc(header_len + 1);
+ 
+ 	header[header_len] = '\0';
+-	snprintf(header, header_len, "%s: %s", name, value);
+-	ret = http_send_header_string_ex(header, replace);
++	header_len = snprintf(header, header_len, "%s: %s", name, value);
++	ret = http_send_header_string_ex(header, header_len, replace);
+ 	if (sent_header) {
+ 		*sent_header = header;
+ 	} else {
+@@ -168,10 +168,10 @@ PHP_HTTP_API STATUS _http_send_header_ex(const char *name, size_t name_len, cons
+ /* }}} */
+ 
+ /* {{{ STATUS http_send_status_header(int, char *) */
+-PHP_HTTP_API STATUS _http_send_status_header_ex(int status, const char *header, zend_bool replace TSRMLS_DC)
++PHP_HTTP_API STATUS _http_send_status_header_ex(int status, const char *header, size_t header_len, zend_bool replace TSRMLS_DC)
+ {
+ 	STATUS ret;
+-	sapi_header_line h = {(char *) header, header ? strlen(header) : 0, status};
++	sapi_header_line h = {(char *) header, header_len, status};
+ 	if (SUCCESS != (ret = sapi_header_op(replace ? SAPI_HEADER_REPLACE : SAPI_HEADER_ADD, &h TSRMLS_CC))) {
+ 		http_error_ex(HE_WARNING, HTTP_E_HEADER, "Could not send header: %s (%d)", header, status);
+ 	}
+@@ -211,12 +211,10 @@ PHP_HTTP_API STATUS _http_send_etag_ex(const char *etag, size_t etag_len, char *
+ 	}
+ 
+ 	/* remember */
+-	STR_FREE(HTTP_G(send).unquoted_etag);
+-	HTTP_G(send).unquoted_etag = estrdup(etag);
++	STR_SET(HTTP_G(send).unquoted_etag, estrndup(etag, etag_len));
+ 
+-	etag_header = ecalloc(1, sizeof("ETag: \"\"") + etag_len);
+-	sprintf(etag_header, "ETag: \"%s\"", etag);
+-	status = http_send_header_string(etag_header);
++	etag_len = spprintf(&etag_header, 0, "ETag: \"%s\"", etag);
++	status = http_send_header_string_ex(etag_header, etag_len, 1);
+ 	
+ 	if (sent_header) {
+ 		*sent_header = etag_header;
+diff --git a/php_http_request_method_api.h b/php_http_request_method_api.h
+index 362b5dc..ed0d8a7 100644
+--- a/php_http_request_method_api.h
++++ b/php_http_request_method_api.h
+@@ -69,8 +69,8 @@ PHP_HTTP_API const char *_http_request_method_name(http_request_method m TSRMLS_
+ #define http_request_method_exists(u, l, c) _http_request_method_exists((u), (l), (c) TSRMLS_CC)
+ PHP_HTTP_API unsigned long _http_request_method_exists(zend_bool by_name, unsigned long id, const char *name TSRMLS_DC);
+ 
+-#define http_request_method_register(m) _http_request_method_register((m) TSRMLS_CC)
+-PHP_HTTP_API unsigned long _http_request_method_register(const char *method TSRMLS_DC);
++#define http_request_method_register(m, l) _http_request_method_register((m), (l) TSRMLS_CC)
++PHP_HTTP_API unsigned long _http_request_method_register(const char *method, size_t method_name_len TSRMLS_DC);
+ 
+ #define http_request_method_unregister(mn) _http_request_method_unregister((mn) TSRMLS_CC)
+ PHP_HTTP_API STATUS _http_request_method_unregister(unsigned long method TSRMLS_DC);
+diff --git a/php_http_send_api.h b/php_http_send_api.h
+index 8845afd..0c5b1f5 100644
+--- a/php_http_send_api.h
++++ b/php_http_send_api.h
+@@ -31,11 +31,11 @@ typedef enum {
+ #define http_send_header(n, v, r) _http_send_header_ex((n), strlen(n), (v), strlen(v), (r) TSRMLS_CC)
+ #define http_send_header_ex(n, nl, v, vl, r, s) _http_send_header_ex((n), (nl), (v), (vl), (r), (s) TSRMLS_CC)
+ PHP_HTTP_API STATUS _http_send_header_ex(const char *name, size_t name_len, const char *value, size_t value_len, zend_bool replace, char **sent_header TSRMLS_DC);
+-#define http_send_header_string(h) _http_send_status_header_ex(0, (h), 1 TSRMLS_CC)
+-#define http_send_header_string_ex(h, r) _http_send_status_header_ex(0, (h), (r) TSRMLS_CC)
+-#define http_send_status_header(s, h) _http_send_status_header_ex((s), (h), 1 TSRMLS_CC)
+-#define http_send_status_header_ex(s, h, r) _http_send_status_header_ex((s), (h), (r) TSRMLS_CC)
+-PHP_HTTP_API STATUS _http_send_status_header_ex(int status, const char *header, zend_bool replace TSRMLS_DC);
++#define http_send_header_string(h) _http_send_status_header_ex(0, (h), strlen(h), 1 TSRMLS_CC)
++#define http_send_header_string_ex(h, l, r) _http_send_status_header_ex(0, (h), (l), (r) TSRMLS_CC)
++#define http_send_status_header(s, h) _http_send_status_header_ex((s), (h), (h)?strlen(h):0, 1 TSRMLS_CC)
++#define http_send_status_header_ex(s, h, l, r) _http_send_status_header_ex((s), (h), (l), (r) TSRMLS_CC)
++PHP_HTTP_API STATUS _http_send_status_header_ex(int status, const char *header, size_t header_len, zend_bool replace TSRMLS_DC);
+ 
+ #define http_send_last_modified(t) _http_send_last_modified_ex((t), NULL TSRMLS_CC)
+ #define http_send_last_modified_ex(t, s) _http_send_last_modified_ex((t), (s) TSRMLS_CC)
+

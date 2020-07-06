@@ -1,0 +1,114 @@
+commit 43ae55058ad99c869a9ae39d039490e8a3680520
+Author: Dan McDonald <danmcd@nexenta.com>
+Date:   Thu Feb 7 19:27:18 2013 -0500
+
+    3534 Disable EEE support in igb for I350
+    Reviewed by: Robert Mustacchi <rm@joyent.com>
+    Reviewed by: Jason King <jason.brian.king@gmail.com>
+    Reviewed by: Marcel Telka <marcel@telka.sk>
+    Reviewed by: Sebastien Roy <sebastien.roy@delphix.com>
+    Approved by: Richard Lowe <richlowe@richlowe.net>
+
+diff --git a/usr/src/uts/common/io/igb/igb_82575.c b/usr/src/uts/common/io/igb/igb_82575.c
+index 15241e7664..f3f69474ec 100644
+--- a/usr/src/uts/common/io/igb/igb_82575.c
++++ b/usr/src/uts/common/io/igb/igb_82575.c
+@@ -25,6 +25,7 @@
+ 
+ /*
+  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2013, Nexenta Systems, Inc. All rights reserved.
+  */
+ 
+ /* IntelVersion: 1.146.2.2 v3_3_14_3_BHSW1 */
+@@ -307,8 +308,8 @@ e1000_init_mac_params_82575(struct e1000_hw *hw)
+ 		mac->rar_entry_count = E1000_RAR_ENTRIES_82580;
+ 	if (mac->type == e1000_i350) {
+ 		mac->rar_entry_count = E1000_RAR_ENTRIES_I350;
+-		/* Enable EEE default settings for i350 */
+-		dev_spec->eee_disable = B_FALSE;
++		/* Disable EEE default settings for i350 */
++		dev_spec->eee_disable = B_TRUE;
+ 	}
+ 	/* Set if part includes ASF firmware */
+ 	mac->asf_firmware_present = true;
+diff --git a/usr/src/uts/common/io/igb/igb_gld.c b/usr/src/uts/common/io/igb/igb_gld.c
+index 56c5f3deb5..ed247bebe4 100644
+--- a/usr/src/uts/common/io/igb/igb_gld.c
++++ b/usr/src/uts/common/io/igb/igb_gld.c
+@@ -25,6 +25,7 @@
+ 
+ /*
+  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2013, Nexenta Systems, Inc. All rights reserved.
+  */
+ 
+ #include "igb_sw.h"
+@@ -1385,6 +1386,32 @@ igb_set_priv_prop(igb_t *igb, const char *pr_name,
+ 	struct e1000_hw *hw = &igb->hw;
+ 	int i;
+ 
++	if (strcmp(pr_name, "_eee_support") == 0) {
++		if (pr_val == NULL)
++			return (EINVAL);
++		(void) ddi_strtol(pr_val, (char **)NULL, 0, &result);
++		switch (result) {
++		case 0:
++		case 1:
++			if (hw->mac.type != e1000_i350) {
++				/*
++				 * For now, only supported on I350.
++				 * Add new mac.type values (or use < instead)
++				 * as new cards offer up EEE.
++				 */
++				return (ENXIO);
++			}
++			/* Must set this prior to the set call. */
++			hw->dev_spec._82575.eee_disable = !result;
++			if (e1000_set_eee_i350(hw) != E1000_SUCCESS)
++				err = EIO;
++			break;
++		default:
++			err = EINVAL;
++			/* FALLTHRU */
++		}
++		return (err);
++	}
+ 	if (strcmp(pr_name, "_tx_copy_thresh") == 0) {
+ 		if (pr_val == NULL) {
+ 			err = EINVAL;
+@@ -1507,6 +1534,13 @@ igb_get_priv_prop(igb_t *igb, const char *pr_name, uint_t pr_valsize,
+ 		value = igb->param_adv_pause_cap;
+ 	} else if (strcmp(pr_name, "_adv_asym_pause_cap") == 0) {
+ 		value = igb->param_adv_asym_pause_cap;
++	} else if (strcmp(pr_name, "_eee_support") == 0) {
++		/*
++		 * For now, only supported on I350.  Add new mac.type values
++		 * (or use < instead) as new cards offer up EEE.
++		 */
++		value = (igb->hw.mac.type != e1000_i350) ? 0 :
++		    !(igb->hw.dev_spec._82575.eee_disable);
+ 	} else if (strcmp(pr_name, "_tx_copy_thresh") == 0) {
+ 		value = igb->tx_copy_thresh;
+ 	} else if (strcmp(pr_name, "_tx_recycle_thresh") == 0) {
+diff --git a/usr/src/uts/common/io/igb/igb_main.c b/usr/src/uts/common/io/igb/igb_main.c
+index c4e4e33ae9..7864a3193f 100644
+--- a/usr/src/uts/common/io/igb/igb_main.c
++++ b/usr/src/uts/common/io/igb/igb_main.c
+@@ -25,6 +25,7 @@
+ 
+ /*
+  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2013, Nexenta Systems, Inc. All rights reserved.
+  */
+ 
+ #include "igb_sw.h"
+@@ -123,6 +124,7 @@ static void igb_fm_fini(igb_t *);
+ static void igb_release_multicast(igb_t *);
+ 
+ char *igb_priv_props[] = {
++	"_eee_support",
+ 	"_tx_copy_thresh",
+ 	"_tx_recycle_thresh",
+ 	"_tx_overload_thresh",
+

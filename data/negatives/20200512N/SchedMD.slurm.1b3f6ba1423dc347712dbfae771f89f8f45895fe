@@ -1,0 +1,177 @@
+commit 1b3f6ba1423dc347712dbfae771f89f8f45895fe
+Author: Danny Auble <da@llnl.gov>
+Date:   Tue Dec 30 23:52:48 2008 +0000
+
+    ok added functionality to multifactor plugin to determine usage with the qos usage_factor
+
+diff --git a/src/plugins/accounting_storage/mysql/accounting_storage_mysql.c b/src/plugins/accounting_storage/mysql/accounting_storage_mysql.c
+index 2d1f8beaec..6af87f4850 100644
+--- a/src/plugins/accounting_storage/mysql/accounting_storage_mysql.c
++++ b/src/plugins/accounting_storage/mysql/accounting_storage_mysql.c
+@@ -822,6 +822,16 @@ static int _setup_qos_limits(acct_qos_rec_t *qos,
+ 			   qos->job_flags);
+ 	}
+ 
++	if((int)qos->usage_factor >= 0) {
++		xstrcat(*cols, ", usage_factor");
++		xstrfmtcat(*vals, ", %f", qos->usage_factor);
++		xstrfmtcat(*extra, ", usage_factor=%f", qos->usage_factor);
++	} else if((int)qos->usage_factor == INFINITE) {
++		xstrcat(*cols, ", usage_factor");
++		xstrcat(*vals, ", 1");
++		xstrcat(*extra, ", usage_factor=1");
++	}
++
+ 	return SLURM_SUCCESS;
+ 
+ }
+diff --git a/src/plugins/priority/multifactor/priority_multifactor.c b/src/plugins/priority/multifactor/priority_multifactor.c
+index 0437109c12..5932b53917 100644
+--- a/src/plugins/priority/multifactor/priority_multifactor.c
++++ b/src/plugins/priority/multifactor/priority_multifactor.c
+@@ -508,6 +508,8 @@ static void *_decay_thread(void *no_data)
+ 			/* apply new usage */
+ 			if(!IS_JOB_PENDING(job_ptr) &&
+ 			   job_ptr->start_time && job_ptr->assoc_ptr) {
++				acct_qos_rec_t *qos = 
++					(acct_qos_rec_t *)job_ptr->qos_ptr;
+ 				acct_association_rec_t *assoc =	
+ 					(acct_association_rec_t *)
+ 					job_ptr->assoc_ptr;
+@@ -530,12 +532,18 @@ static void *_decay_thread(void *no_data)
+ 
+ 				debug4("job %u ran for %d seconds",
+ 				       job_ptr->job_id, run_delta);
++
+ 				/* figure out the decayed new usage to
+ 				   add */
+ 				real_decay = ((double)run_delta 
+ 					      * (double)job_ptr->total_procs)
+ 					* pow(decay_factor, (double)run_delta);
+ 
++				/* now apply the usage factor for this
++				   qos */
++				if(qos && qos->usage_factor > 0)
++					real_decay *= qos->usage_factor;
++
+ 				slurm_mutex_lock(&assoc_mgr_association_lock);
+ 				while(assoc) {
+ 					assoc->used_shares +=
+diff --git a/src/sacctmgr/common.c b/src/sacctmgr/common.c
+index c3d1f6f781..32d4569e58 100644
+--- a/src/sacctmgr/common.c
++++ b/src/sacctmgr/common.c
+@@ -653,6 +653,30 @@ extern int get_uint64(char *in_value, uint64_t *out_value, char *type)
+ 	return SLURM_SUCCESS;
+ }
+ 
++extern int get_double(char *in_value, double *out_value, char *type)
++{
++	char *ptr = NULL, *meat = NULL;
++	double num;
++	
++	if(!(meat = strip_quotes(in_value, NULL, 1))) {
++		error("Problem with strip_quotes");
++		return SLURM_ERROR;
++	}
++	num = strtod(meat, &ptr);
++	if ((num == 0) && ptr && ptr[0]) {
++		error("Invalid value for %s (%s)", type, meat);
++		xfree(meat);
++		return SLURM_ERROR;
++	}
++	xfree(meat);
++	
++	if (num < 0)
++		*out_value = (double) INFINITE;		/* flag to clear */
++	else
++		*out_value = (double) num;
++	return SLURM_SUCCESS;
++}
++
+ extern int addto_qos_char_list(List char_list, List qos_list, char *names, 
+ 			       int option)
+ {
+diff --git a/src/sacctmgr/qos_functions.c b/src/sacctmgr/qos_functions.c
+index e1c36fec22..5b5ce94d01 100644
+--- a/src/sacctmgr/qos_functions.c
++++ b/src/sacctmgr/qos_functions.c
+@@ -324,6 +324,14 @@ static int _set_rec(int *start, int argc, char *argv[],
+ 			if (get_uint(argv[i]+end, &qos->priority,
+ 			    "Priority") == SLURM_SUCCESS)
+ 				set = 1;
++		} else if (!strncasecmp (argv[i], "UsageFactor", 
++					 MAX(command_len, 3))) {
++			if(!qos)
++				continue;
++			
++			if (get_double(argv[i]+end, &qos->usage_factor,
++			    "UsageFactor") == SLURM_SUCCESS)
++				set = 1;
+ 		} else {
+ 			printf(" Unknown option: %s\n"
+ 			       " Use keyword 'where' to modify condition\n",
+@@ -412,6 +420,8 @@ extern int sacctmgr_add_qos(int argc, char *argv[])
+ 
+ 			qos->priority = start_qos->priority;
+ 
++			qos->usage_factor = start_qos->usage_factor;
++
+ 			xstrfmtcat(qos_str, "  %s\n", name);
+ 			list_append(qos_list, qos);
+ 		}
+@@ -501,6 +511,7 @@ extern int sacctmgr_list_qos(int argc, char *argv[])
+ 		PRINT_MAXN,
+ 		PRINT_MAXS,
+ 		PRINT_MAXW,
++		PRINT_UF,
+ 	};
+ 
+ 	_set_cond(&i, argc, argv, qos_cond, format_list);
+@@ -614,7 +625,7 @@ extern int sacctmgr_list_qos(int argc, char *argv[])
+ 			field->print_routine = print_fields_time;
+ 		} else if(!strncasecmp("Name", object, MAX(command_len, 1))) {
+ 			field->type = PRINT_NAME;
+-			field->name = xstrdup("NAME");
++			field->name = xstrdup("Name");
+ 			field->len = 10;
+ 			field->print_routine = print_fields_str;
+ 		} else if(!strncasecmp("Priority", object,
+@@ -623,6 +634,12 @@ extern int sacctmgr_list_qos(int argc, char *argv[])
+ 			field->name = xstrdup("Priority");
+ 			field->len = 10;
+ 			field->print_routine = print_fields_int;
++		} else if(!strncasecmp("UsageFactor", object,
++				       MAX(command_len, 1))) {
++			field->type = PRINT_UF;
++			field->name = xstrdup("UsageFactor");
++			field->len = 11;
++			field->print_routine = print_fields_double;
+ 		} else {
+ 			exit_code=1;
+ 			fprintf(stderr, "Unknown field '%s'\n", object);
+@@ -750,6 +767,11 @@ extern int sacctmgr_list_qos(int argc, char *argv[])
+ 					field, qos->priority,
+ 					(curr_inx == field_count));
+ 				break;
++			case PRINT_UF:
++				field->print_routine(
++					field, qos->usage_factor,
++					(curr_inx == field_count));
++				break;
+ 			default:
+ 				field->print_routine(
+ 					field, NULL,
+diff --git a/src/sacctmgr/sacctmgr.h b/src/sacctmgr/sacctmgr.h
+index 74b84f1163..1be0734158 100644
+--- a/src/sacctmgr/sacctmgr.h
++++ b/src/sacctmgr/sacctmgr.h
+@@ -138,6 +138,7 @@ extern int commit_check(char *warning);
+ extern int get_uint(char *in_value, uint32_t *out_value, char *type);
+ extern int get_uint16(char *in_value, uint16_t *out_value, char *type);
+ extern int get_uint64(char *in_value, uint64_t *out_value, char *type);
++extern int get_double(char *in_value, double *out_value, char *type);
+ extern int addto_qos_char_list(List char_list, List qos_list, char *names, 
+ 			       int option);
+ extern int addto_action_char_list(List char_list, char *names);
+

@@ -1,0 +1,263 @@
+commit 66ac0280197981f88774e74b60c8e5f9f07c1dba
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Fri Jun 18 16:59:42 2010 +0200
+
+    block: don't allocate a payload for discard request
+    
+    Allocating a fixed payload for discard requests always was a horrible hack,
+    and it's not coming to byte us when adding support for discard in DM/MD.
+    
+    So change the code to leave the allocation of a payload to the lowlevel
+    driver.  Unfortunately that means we'll need another hack, which allows
+    us to update the various block layer length fields indicating that we
+    have a payload.  Instead of hiding this in sd.c, which we already partially
+    do for UNMAP support add a documented helper in the core block layer for it.
+    
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Acked-by: Mike Snitzer <snitzer@redhat.com>
+    Signed-off-by: Jens Axboe <jaxboe@fusionio.com>
+
+diff --git a/block/blk-core.c b/block/blk-core.c
+index 66c3cfe94d0a..3531d8e1da04 100644
+--- a/block/blk-core.c
++++ b/block/blk-core.c
+@@ -1135,6 +1135,38 @@ void blk_put_request(struct request *req)
+ }
+ EXPORT_SYMBOL(blk_put_request);
+ 
++/**
++ * blk_add_request_payload - add a payload to a request
++ * @rq: request to update
++ * @page: page backing the payload
++ * @len: length of the payload.
++ *
++ * This allows to later add a payload to an already submitted request by
++ * a block driver.  The driver needs to take care of freeing the payload
++ * itself.
++ *
++ * Note that this is a quite horrible hack and nothing but handling of
++ * discard requests should ever use it.
++ */
++void blk_add_request_payload(struct request *rq, struct page *page,
++		unsigned int len)
++{
++	struct bio *bio = rq->bio;
++
++	bio->bi_io_vec->bv_page = page;
++	bio->bi_io_vec->bv_offset = 0;
++	bio->bi_io_vec->bv_len = len;
++
++	bio->bi_size = len;
++	bio->bi_vcnt = 1;
++	bio->bi_phys_segments = 1;
++
++	rq->__data_len = rq->resid_len = len;
++	rq->nr_phys_segments = 1;
++	rq->buffer = bio_data(bio);
++}
++EXPORT_SYMBOL_GPL(blk_add_request_payload);
++
+ void init_request_from_bio(struct request *req, struct bio *bio)
+ {
+ 	req->cpu = bio->bi_comp_cpu;
+diff --git a/block/blk-lib.c b/block/blk-lib.c
+index d0216b9f22d4..e16185b0d8e1 100644
+--- a/block/blk-lib.c
++++ b/block/blk-lib.c
+@@ -19,7 +19,6 @@ static void blkdev_discard_end_io(struct bio *bio, int err)
+ 
+ 	if (bio->bi_private)
+ 		complete(bio->bi_private);
+-	__free_page(bio_page(bio));
+ 
+ 	bio_put(bio);
+ }
+@@ -43,7 +42,6 @@ int blkdev_issue_discard(struct block_device *bdev, sector_t sector,
+ 	int type = flags & BLKDEV_IFL_BARRIER ?
+ 		DISCARD_BARRIER : DISCARD_NOBARRIER;
+ 	struct bio *bio;
+-	struct page *page;
+ 	int ret = 0;
+ 
+ 	if (!q)
+@@ -53,35 +51,21 @@ int blkdev_issue_discard(struct block_device *bdev, sector_t sector,
+ 		return -EOPNOTSUPP;
+ 
+ 	while (nr_sects && !ret) {
+-		unsigned int sector_size = q->limits.logical_block_size;
+ 		unsigned int max_discard_sectors =
+ 			min(q->limits.max_discard_sectors, UINT_MAX >> 9);
+ 
+ 		bio = bio_alloc(gfp_mask, 1);
+-		if (!bio)
+-			goto out;
++		if (!bio) {
++			ret = -ENOMEM;
++			break;
++		}
++
+ 		bio->bi_sector = sector;
+ 		bio->bi_end_io = blkdev_discard_end_io;
+ 		bio->bi_bdev = bdev;
+ 		if (flags & BLKDEV_IFL_WAIT)
+ 			bio->bi_private = &wait;
+ 
+-		/*
+-		 * Add a zeroed one-sector payload as that's what
+-		 * our current implementations need.  If we'll ever need
+-		 * more the interface will need revisiting.
+-		 */
+-		page = alloc_page(gfp_mask | __GFP_ZERO);
+-		if (!page)
+-			goto out_free_bio;
+-		if (bio_add_pc_page(q, bio, page, sector_size, 0) < sector_size)
+-			goto out_free_page;
+-
+-		/*
+-		 * And override the bio size - the way discard works we
+-		 * touch many more blocks on disk than the actual payload
+-		 * length.
+-		 */
+ 		if (nr_sects > max_discard_sectors) {
+ 			bio->bi_size = max_discard_sectors << 9;
+ 			nr_sects -= max_discard_sectors;
+@@ -103,13 +87,8 @@ int blkdev_issue_discard(struct block_device *bdev, sector_t sector,
+ 			ret = -EIO;
+ 		bio_put(bio);
+ 	}
++
+ 	return ret;
+-out_free_page:
+-	__free_page(page);
+-out_free_bio:
+-	bio_put(bio);
+-out:
+-	return -ENOMEM;
+ }
+ EXPORT_SYMBOL(blkdev_issue_discard);
+ 
+diff --git a/drivers/scsi/sd.c b/drivers/scsi/sd.c
+index a3fdf4dc59da..86da819c70eb 100644
+--- a/drivers/scsi/sd.c
++++ b/drivers/scsi/sd.c
+@@ -411,22 +411,25 @@ static void sd_prot_op(struct scsi_cmnd *scmd, unsigned int dif)
+ }
+ 
+ /**
+- * sd_prepare_discard - unmap blocks on thinly provisioned device
++ * scsi_setup_discard_cmnd - unmap blocks on thinly provisioned device
++ * @sdp: scsi device to operate one
+  * @rq: Request to prepare
+  *
+  * Will issue either UNMAP or WRITE SAME(16) depending on preference
+  * indicated by target device.
+  **/
+-static int sd_prepare_discard(struct request *rq)
++static int scsi_setup_discard_cmnd(struct scsi_device *sdp, struct request *rq)
+ {
+ 	struct scsi_disk *sdkp = scsi_disk(rq->rq_disk);
+ 	struct bio *bio = rq->bio;
+ 	sector_t sector = bio->bi_sector;
+-	unsigned int num = bio_sectors(bio);
++	unsigned int nr_sectors = bio_sectors(bio);
++	unsigned int len;
++	struct page *page;
+ 
+ 	if (sdkp->device->sector_size == 4096) {
+ 		sector >>= 3;
+-		num >>= 3;
++		nr_sectors >>= 3;
+ 	}
+ 
+ 	rq->cmd_type = REQ_TYPE_BLOCK_PC;
+@@ -434,31 +437,35 @@ static int sd_prepare_discard(struct request *rq)
+ 
+ 	memset(rq->cmd, 0, rq->cmd_len);
+ 
++	page = alloc_page(GFP_ATOMIC | __GFP_ZERO);
++	if (!page)
++		return BLKPREP_DEFER;
++
+ 	if (sdkp->unmap) {
+-		char *buf = kmap_atomic(bio_page(bio), KM_USER0);
++		char *buf = page_address(page);
+ 
++		rq->cmd_len = 10;
+ 		rq->cmd[0] = UNMAP;
+ 		rq->cmd[8] = 24;
+-		rq->cmd_len = 10;
+-
+-		/* Ensure that data length matches payload */
+-		rq->__data_len = bio->bi_size = bio->bi_io_vec->bv_len = 24;
+ 
+ 		put_unaligned_be16(6 + 16, &buf[0]);
+ 		put_unaligned_be16(16, &buf[2]);
+ 		put_unaligned_be64(sector, &buf[8]);
+-		put_unaligned_be32(num, &buf[16]);
++		put_unaligned_be32(nr_sectors, &buf[16]);
+ 
+-		kunmap_atomic(buf, KM_USER0);
++		len = 24;
+ 	} else {
++		rq->cmd_len = 16;
+ 		rq->cmd[0] = WRITE_SAME_16;
+ 		rq->cmd[1] = 0x8; /* UNMAP */
+ 		put_unaligned_be64(sector, &rq->cmd[2]);
+-		put_unaligned_be32(num, &rq->cmd[10]);
+-		rq->cmd_len = 16;
++		put_unaligned_be32(nr_sectors, &rq->cmd[10]);
++
++		len = sdkp->device->sector_size;
+ 	}
+ 
+-	return BLKPREP_OK;
++	blk_add_request_payload(rq, page, len);
++	return scsi_setup_blk_pc_cmnd(sdp, rq);
+ }
+ 
+ /**
+@@ -485,10 +492,10 @@ static int sd_prep_fn(struct request_queue *q, struct request *rq)
+ 	 * Discard request come in as REQ_TYPE_FS but we turn them into
+ 	 * block PC requests to make life easier.
+ 	 */
+-	if (rq->cmd_flags & REQ_DISCARD)
+-		ret = sd_prepare_discard(rq);
+-
+-	if (rq->cmd_type == REQ_TYPE_BLOCK_PC) {
++	if (rq->cmd_flags & REQ_DISCARD) {
++		ret = scsi_setup_discard_cmnd(sdp, rq);
++		goto out;
++	} else if (rq->cmd_type == REQ_TYPE_BLOCK_PC) {
+ 		ret = scsi_setup_blk_pc_cmnd(sdp, rq);
+ 		goto out;
+ 	} else if (rq->cmd_type != REQ_TYPE_FS) {
+@@ -1163,6 +1170,15 @@ static int sd_done(struct scsi_cmnd *SCpnt)
+ 	int sense_valid = 0;
+ 	int sense_deferred = 0;
+ 
++	/*
++	 * If this is a discard request that originated from the kernel
++	 * we need to free our payload here.  Note that we need to check
++	 * the request flag as the normal payload rules apply for
++	 * pass-through UNMAP / WRITE SAME requests.
++	 */
++	if (SCpnt->request->cmd_flags & REQ_DISCARD)
++		__free_page(bio_page(SCpnt->request->bio));
++
+ 	if (result) {
+ 		sense_valid = scsi_command_normalize_sense(SCpnt, &sshdr);
+ 		if (sense_valid)
+diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
+index 3fc0f5908619..204fbe22354d 100644
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -705,6 +705,8 @@ extern struct request *blk_make_request(struct request_queue *, struct bio *,
+ 					gfp_t);
+ extern void blk_insert_request(struct request_queue *, struct request *, int, void *);
+ extern void blk_requeue_request(struct request_queue *, struct request *);
++extern void blk_add_request_payload(struct request *rq, struct page *page,
++		unsigned int len);
+ extern int blk_rq_check_limits(struct request_queue *q, struct request *rq);
+ extern int blk_lld_busy(struct request_queue *q);
+ extern int blk_rq_prep_clone(struct request *rq, struct request *rq_src,
+

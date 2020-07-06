@@ -1,0 +1,65 @@
+commit aff3bd331f866df2c8c5c6dc777ca1062ef3356b
+Author: Miroslav Suchý <msuchy@redhat.com>
+Date:   Tue Nov 1 14:18:15 2016 +0100
+
+    lib: refuse to parse negative number as unsigned int
+    
+    man 3 strtoul:
+    Negative values are considered valid input and are silently converted
+    to the equivalent unsigned long int value.
+    
+    addressing:
+    lt-map_string_get_set_as_various_types: libreport_types.at:193: main: Assertion `!try_get_map_string_item_as_uint(map, key, &retval) || !"Converts '-1' to unsigned number"' failed.
+    /builddir/build/BUILD/libreport-2.8.0.35.g20e5/tests/testsuite.dir/at-groups/36/test-source: line 262:  4688 Aborted                 (core dumped) $PRE_AT_CHECK ./map_string_get_set_as_various_types
+    stdout:
+    ./libreport_types.at:44: exit code was 134, expected 0
+    36. libreport_types.at:44: 36. map_string_get_set_as_various_types (libreport_types.at:44): FAILED (libreport_types.at:44)
+    
+    Signed-off-by: Jakub Filak <jfilak@redhat.com>
+
+diff --git a/src/lib/abrt_types.c b/src/lib/abrt_types.c
+index faab6f40..ab780afa 100644
+--- a/src/lib/abrt_types.c
++++ b/src/lib/abrt_types.c
+@@ -131,16 +131,35 @@ int try_get_map_string_item_as_uint(map_string_t *ms, const char *key, unsigned
+     GET_ITEM_OR_RETURN(option, ms, key);
+ 
+     char *endptr = NULL;
+-    errno = 0;
+-    unsigned long raw_value = strtoul(option, &endptr, 10);
+ 
+-    /* Check for various possible errors */
+-    if (raw_value > UINT_MAX || errno == ERANGE)
++    /* Check just negative number, positive ranges will be tested later */
++    errno = 0;
++    long raw_signed_value = strtol(option, &endptr, 10);
++    if (raw_signed_value < 0)
+     {
+-        log_warning("Value of option '%s' is out of unsigned integer range", key);
++        log_warning("Value of option '%s' is out of unsigned integer range (bellow zero)", key);
+         return 0;
+     }
+ 
++    unsigned long raw_value;
++    if (raw_signed_value < INT_MAX)
++    {   // no need to convert it again, this is already between 0 and maximal value of strtol()
++        raw_value = raw_signed_value;
++    }
++    else
++    {
++        errno = 0;
++        raw_value = strtoul(option, &endptr, 10);
++
++        /* Check range */
++        if (raw_value > UINT_MAX || errno == ERANGE)
++        {
++            log_warning("Value of option '%s' is out of unsigned integer range", key);
++            return 0;
++        }
++    }
++
++    /* Check for other possible errors */
+     if ((errno != 0 && raw_value == 0)
+         || (endptr == option) /* empty */
+         || (endptr[0] != '\0') /* trailing non-digits */)
+

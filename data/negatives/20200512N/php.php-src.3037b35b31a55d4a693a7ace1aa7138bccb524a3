@@ -1,0 +1,158 @@
+commit 3037b35b31a55d4a693a7ace1aa7138bccb524a3
+Author: Sascha Schumann <sas@php.net>
+Date:   Wed Nov 6 17:59:03 2002 +0000
+
+    emalloc never returns 0, so we can simplify the code paths.
+    also replace ecalloc with emalloc+memset, so that the latter can be inlined.
+
+diff --git a/ext/dba/dba.c b/ext/dba/dba.c
+index d68a291f57..8213166afd 100644
+--- a/ext/dba/dba.c
++++ b/ext/dba/dba.c
+@@ -369,12 +369,12 @@ static void php_dba_open(INTERNAL_FUNCTION_PARAMETERS, int persistent)
+ 			RETURN_FALSE;
+ 	}
+ 			
+-	info = ecalloc(sizeof(dba_info), 1);
++	info = emalloc(sizeof(dba_info));
++	memset(info, 0, sizeof(dba_info));
+ 	info->path = estrdup(Z_STRVAL_PP(args[0]));
+ 	info->mode = modenr;
+ 	info->argc = ac - 3;
+ 	info->argv = args + 3;
+-	/* info->hnd is NULL here */
+ 
+ 	if (hptr->open(info, &error TSRMLS_CC) != SUCCESS) {
+ 		dba_close(info TSRMLS_CC);
+diff --git a/ext/dba/dba_cdb.c b/ext/dba/dba_cdb.c
+index eac2576aec..87a96e8dca 100644
+--- a/ext/dba/dba_cdb.c
++++ b/ext/dba/dba_cdb.c
+@@ -104,17 +104,8 @@ DBA_OPEN_FUNC(cdb)
+ 			return FAILURE;
+ 	}
+ 
+-	cdb = ecalloc(sizeof(dba_cdb), 1);
+-	if (!cdb) {
+-	pinfo->dbf = cdb;
+-#if DBA_CDB_BUILTIN
+-		php_stream_close(file);
+-#else
+-		close(file);
+-#endif
+-		*error = "Out of memory";
+-		return FAILURE;
+-	}
++	cdb = emalloc(sizeof(dba_cdb));
++	memset(cdb, 0, sizeof(dba_cdb));
+ 
+ #if DBA_CDB_BUILTIN
+ 	if (make) {
+diff --git a/ext/dba/dba_db2.c b/ext/dba/dba_db2.c
+index eb6942f84a..580e6f62e2 100644
+--- a/ext/dba/dba_db2.c
++++ b/ext/dba/dba_db2.c
+@@ -76,11 +76,8 @@ DBA_OPEN_FUNC(db2)
+ 		return FAILURE;
+ 	}
+ 
+-	info->dbf = ecalloc(sizeof(dba_db2_data), 1);
+-	if (!info->dbf) {
+-		*error = "Out of memory";
+-		return FAILURE;
+-	}
++	info->dbf = emalloc(sizeof(dba_db2_data));
++	memset(info->dbf, 0, sizeof(dba_db2_data));
+ 	((dba_db2_data *) info->dbf)->dbp = dbp;
+ 	return SUCCESS;
+ }
+diff --git a/ext/dba/dba_db3.c b/ext/dba/dba_db3.c
+index 5dd3af58f7..df9396dede 100644
+--- a/ext/dba/dba_db3.c
++++ b/ext/dba/dba_db3.c
+@@ -78,10 +78,6 @@ DBA_OPEN_FUNC(db3)
+ 		dba_db3_data *data;
+ 
+ 		data = emalloc(sizeof(*data));
+-		if (!data) {
+-			*error = "Out of memory";
+-			return FAILURE;
+-		}
+ 		data->dbp = dbp;
+ 		data->cursor = NULL;
+ 		info->dbf = data;
+diff --git a/ext/dba/dba_dbm.c b/ext/dba/dba_dbm.c
+index 5763fad41e..4eca420786 100644
+--- a/ext/dba/dba_dbm.c
++++ b/ext/dba/dba_dbm.c
+@@ -78,11 +78,8 @@ DBA_OPEN_FUNC(dbm)
+ 		return FAILURE;
+ 	}
+ 
+-	info->dbf = ecalloc(sizeof(dba_dbm_data), 1);
+-	if (!info->dbf) {
+-		*error = "Out of memory";
+-		return FAILURE;
+-	}
++	info->dbf = emalloc(sizeof(dba_dbm_data));
++	memset(info->dbf, 0, sizeof(dba_dbm_data));
+ 	return SUCCESS;
+ }
+ 
+diff --git a/ext/dba/dba_flatfile.c b/ext/dba/dba_flatfile.c
+index d64a7feec1..986b59cd19 100644
+--- a/ext/dba/dba_flatfile.c
++++ b/ext/dba/dba_flatfile.c
+@@ -68,11 +68,8 @@ DBA_OPEN_FUNC(flatfile)
+ 	int retries = 0;
+ #endif
+ 
+-	info->dbf = ecalloc(sizeof(flatfile), 1);
+-	if (!info->dbf) {
+-		*error = "Out of memory";
+-		return FAILURE;
+-	}
++	info->dbf = emalloc(sizeof(flatfile));
++	memset(info->dbf, 0, sizeof(flatfile));
+ 
+ 	switch(info->mode) {
+ 		case DBA_READER:
+diff --git a/ext/dba/dba_gdbm.c b/ext/dba/dba_gdbm.c
+index 9343685d3b..386c8f0874 100644
+--- a/ext/dba/dba_gdbm.c
++++ b/ext/dba/dba_gdbm.c
+@@ -59,12 +59,8 @@ DBA_OPEN_FUNC(gdbm)
+ 	dbf = gdbm_open(info->path, 0, gmode, filemode, NULL);
+ 	
+ 	if(dbf) {
+-		info->dbf = ecalloc(sizeof(dba_gdbm_data), 1);
+-		if (!info->dbf) {
+-			*error = "Out of memory";
+-			gdbm_close(dbf);
+-			return FAILURE;
+-		}
++		info->dbf = emalloc(sizeof(dba_gdbm_data));
++		memset(info->dbf, 0, sizeof(dba_gdbm_data));
+ 		((dba_gdbm_data *) info->dbf)->dbf = dbf;
+ 		return SUCCESS;
+ 	}
+diff --git a/ext/dba/dba_ndbm.c b/ext/dba/dba_ndbm.c
+index a362cfc2cc..06583c780b 100644
+--- a/ext/dba/dba_ndbm.c
++++ b/ext/dba/dba_ndbm.c
+@@ -65,12 +65,8 @@ DBA_OPEN_FUNC(ndbm)
+ 
+ 	dbf = dbm_open(info->path, gmode, filemode);
+ 	
+-	if(dbf) {
+-		pinfo->dbf = dbf;
+-		return SUCCESS;
+-	}
+-	*error = "Out of memory";
+-	return FAILURE;
++	pinfo->dbf = dbf;
++	return SUCCESS;
+ }
+ 
+ DBA_CLOSE_FUNC(ndbm)
+

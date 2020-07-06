@@ -1,0 +1,122 @@
+commit bbbee90829304d156c12b171c0ac7e6e1aba8b90
+Author: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date:   Fri May 29 14:25:58 2009 +0200
+
+    perf_counter: Ammend cleanup in fork() fail
+    
+    When fork() fails we cannot use perf_counter_exit_task() since that
+    assumes to operate on current. Write a new helper that cleans up
+    unused/clean contexts.
+    
+    Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Cc: Mike Galbraith <efault@gmx.de>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Cc: Corey Ashford <cjashfor@linux.vnet.ibm.com>
+    Cc: Marcelo Tosatti <mtosatti@redhat.com>
+    Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+    Cc: John Kacur <jkacur@redhat.com>
+    LKML-Reference: <new-submission>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/include/linux/perf_counter.h b/include/linux/perf_counter.h
+index 717bf3b59ba4..519a41bba249 100644
+--- a/include/linux/perf_counter.h
++++ b/include/linux/perf_counter.h
+@@ -579,6 +579,7 @@ extern void perf_counter_task_sched_out(struct task_struct *task,
+ extern void perf_counter_task_tick(struct task_struct *task, int cpu);
+ extern int perf_counter_init_task(struct task_struct *child);
+ extern void perf_counter_exit_task(struct task_struct *child);
++extern void perf_counter_free_task(struct task_struct *task);
+ extern void perf_counter_do_pending(void);
+ extern void perf_counter_print_debug(void);
+ extern void __perf_disable(void);
+@@ -644,6 +645,7 @@ static inline void
+ perf_counter_task_tick(struct task_struct *task, int cpu)		{ }
+ static inline int perf_counter_init_task(struct task_struct *child)	{ return 0; }
+ static inline void perf_counter_exit_task(struct task_struct *child)	{ }
++static inline void perf_counter_free_task(struct task_struct *task)	{ }
+ static inline void perf_counter_do_pending(void)			{ }
+ static inline void perf_counter_print_debug(void)			{ }
+ static inline void perf_disable(void)					{ }
+diff --git a/kernel/fork.c b/kernel/fork.c
+index c07c3335ceac..23bf757ed321 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1298,7 +1298,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
+ bad_fork_cleanup_audit:
+ 	audit_free(p);
+ bad_fork_cleanup_policy:
+-	perf_counter_exit_task(p);
++	perf_counter_free_task(p);
+ #ifdef CONFIG_NUMA
+ 	mpol_put(p->mempolicy);
+ bad_fork_cleanup_cgroup:
+diff --git a/kernel/perf_counter.c b/kernel/perf_counter.c
+index 0c000d305e0e..79c3f26541d3 100644
+--- a/kernel/perf_counter.c
++++ b/kernel/perf_counter.c
+@@ -3538,8 +3538,7 @@ static void sync_child_counter(struct perf_counter *child_counter,
+ }
+ 
+ static void
+-__perf_counter_exit_task(struct task_struct *child,
+-			 struct perf_counter *child_counter,
++__perf_counter_exit_task(struct perf_counter *child_counter,
+ 			 struct perf_counter_context *child_ctx)
+ {
+ 	struct perf_counter *parent_counter;
+@@ -3605,7 +3604,7 @@ void perf_counter_exit_task(struct task_struct *child)
+ again:
+ 	list_for_each_entry_safe(child_counter, tmp, &child_ctx->counter_list,
+ 				 list_entry)
+-		__perf_counter_exit_task(child, child_counter, child_ctx);
++		__perf_counter_exit_task(child_counter, child_ctx);
+ 
+ 	/*
+ 	 * If the last counter was a group counter, it will have appended all
+@@ -3620,6 +3619,44 @@ void perf_counter_exit_task(struct task_struct *child)
+ 	put_ctx(child_ctx);
+ }
+ 
++/*
++ * free an unexposed, unused context as created by inheritance by
++ * init_task below, used by fork() in case of fail.
++ */
++void perf_counter_free_task(struct task_struct *task)
++{
++	struct perf_counter_context *ctx = task->perf_counter_ctxp;
++	struct perf_counter *counter, *tmp;
++
++	if (!ctx)
++		return;
++
++	mutex_lock(&ctx->mutex);
++again:
++	list_for_each_entry_safe(counter, tmp, &ctx->counter_list, list_entry) {
++		struct perf_counter *parent = counter->parent;
++
++		if (WARN_ON_ONCE(!parent))
++			continue;
++
++		mutex_lock(&parent->child_mutex);
++		list_del_init(&counter->child_list);
++		mutex_unlock(&parent->child_mutex);
++
++		fput(parent->filp);
++
++		list_del_counter(counter, ctx);
++		free_counter(counter);
++	}
++
++	if (!list_empty(&ctx->counter_list))
++		goto again;
++
++	mutex_unlock(&ctx->mutex);
++
++	put_ctx(ctx);
++}
++
+ /*
+  * Initialize the perf_counter context in task_struct
+  */
+

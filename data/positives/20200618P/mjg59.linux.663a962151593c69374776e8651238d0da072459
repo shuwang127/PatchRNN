@@ -1,0 +1,53 @@
+commit 663a962151593c69374776e8651238d0da072459
+Author: Pavel Shilovsky <pshilovsky@samba.org>
+Date:   Sat May 24 16:42:02 2014 +0400
+
+    CIFS: Fix memory leaks in SMB2_open
+    
+    Cc: <stable@vger.kernel.org> # v3.12+
+    Signed-off-by: Pavel Shilovsky <pshilovsky@samba.org>
+    Reviewed-by: Shirish Pargaonkar <spargaonkar@suse.com>
+    Signed-off-by: Steve French <smfrench@gmail.com>
+
+diff --git a/fs/cifs/smb2pdu.c b/fs/cifs/smb2pdu.c
+index b0037b609c54..b0b260dbb19d 100644
+--- a/fs/cifs/smb2pdu.c
++++ b/fs/cifs/smb2pdu.c
+@@ -1097,6 +1097,7 @@ SMB2_open(const unsigned int xid, struct cifs_open_parms *oparms, __le16 *path,
+ 	int rc = 0;
+ 	unsigned int num_iovecs = 2;
+ 	__u32 file_attributes = 0;
++	char *dhc_buf = NULL, *lc_buf = NULL;
+ 
+ 	cifs_dbg(FYI, "create/open\n");
+ 
+@@ -1163,6 +1164,7 @@ SMB2_open(const unsigned int xid, struct cifs_open_parms *oparms, __le16 *path,
+ 			kfree(copy_path);
+ 			return rc;
+ 		}
++		lc_buf = iov[num_iovecs-1].iov_base;
+ 	}
+ 
+ 	if (*oplock == SMB2_OPLOCK_LEVEL_BATCH) {
+@@ -1177,9 +1179,10 @@ SMB2_open(const unsigned int xid, struct cifs_open_parms *oparms, __le16 *path,
+ 		if (rc) {
+ 			cifs_small_buf_release(req);
+ 			kfree(copy_path);
+-			kfree(iov[num_iovecs-1].iov_base);
++			kfree(lc_buf);
+ 			return rc;
+ 		}
++		dhc_buf = iov[num_iovecs-1].iov_base;
+ 	}
+ 
+ 	rc = SendReceive2(xid, ses, iov, num_iovecs, &resp_buftype, 0);
+@@ -1211,6 +1214,8 @@ SMB2_open(const unsigned int xid, struct cifs_open_parms *oparms, __le16 *path,
+ 		*oplock = rsp->OplockLevel;
+ creat_exit:
+ 	kfree(copy_path);
++	kfree(lc_buf);
++	kfree(dhc_buf);
+ 	free_rsp_buf(resp_buftype, rsp);
+ 	return rc;
+ }
+

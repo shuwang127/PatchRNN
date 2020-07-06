@@ -1,0 +1,64 @@
+commit 77fec1b05b3517b0cd211c3771558a9003158754
+Author: Poul-Henning Kamp <phk@FreeBSD.org>
+Date:   Thu Nov 26 08:39:30 2015 +0000
+
+    Cache a checkpoint when we iterate over busy objects, so we don't
+    have to walk the full list all the time.
+    
+    This is a minimal fix for backporting to 4.1.x
+    
+    Fixes:  #1798
+    Fixes:  #1788
+
+diff --git a/bin/varnishd/cache/cache_obj.c b/bin/varnishd/cache/cache_obj.c
+index 54dd26f84..53fe080e3 100644
+--- a/bin/varnishd/cache/cache_obj.c
++++ b/bin/varnishd/cache/cache_obj.c
+@@ -93,6 +93,8 @@ struct objiter {
+ 	struct storage			*st;
+ 	struct worker			*wrk;
+ 	ssize_t				len;
++	struct storage			*checkpoint;
++	ssize_t				checkpoint_len;
+ };
+ 
+ void *
+@@ -126,6 +128,7 @@ ObjIter(struct objcore *oc, void *oix, void **p, ssize_t *l)
+ 	struct objiter *oi;
+ 	ssize_t ol;
+ 	ssize_t nl;
++	ssize_t sl;
+ 	const struct storeobj_methods *om = obj_getmethods(oc);
+ 
+ 	AN(oix);
+@@ -167,7 +170,15 @@ ObjIter(struct objcore *oc, void *oix, void **p, ssize_t *l)
+ 		}
+ 		Lck_Lock(&oi->bo->mtx);
+ 		AZ(VTAILQ_EMPTY(&oi->obj->list));
+-		VTAILQ_FOREACH(oi->st, &oi->obj->list, list) {
++		if (oi->checkpoint == NULL) {
++			oi->st = VTAILQ_FIRST(&oi->obj->list);
++			sl = 0;
++		} else {
++			oi->st = oi->checkpoint;
++			sl = oi->checkpoint_len;
++			ol -= oi->checkpoint_len;
++		}
++		while (oi->st != NULL) {
+ 			if (oi->st->len > ol) {
+ 				*p = oi->st->ptr + ol;
+ 				*l = oi->st->len - ol;
+@@ -178,6 +189,12 @@ ObjIter(struct objcore *oc, void *oix, void **p, ssize_t *l)
+ 			assert(ol >= 0);
+ 			nl -= oi->st->len;
+ 			assert(nl > 0);
++			sl += oi->st->len;
++			oi->st = VTAILQ_NEXT(oi->st, list);
++			if (VTAILQ_NEXT(oi->st, list) != NULL) {
++				oi->checkpoint = oi->st;
++				oi->checkpoint_len = sl;
++			}
+ 		}
+ 		CHECK_OBJ_NOTNULL(oi->obj, OBJECT_MAGIC);
+ 		CHECK_OBJ_NOTNULL(oi->st, STORAGE_MAGIC);
+

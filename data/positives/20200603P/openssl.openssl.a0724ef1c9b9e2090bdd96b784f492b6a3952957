@@ -1,0 +1,67 @@
+commit a0724ef1c9b9e2090bdd96b784f492b6a3952957
+Author: Viktor Dukhovni <openssl-users@dukhovni.org>
+Date:   Tue Sep 1 21:47:12 2015 -0400
+
+    Better handling of verify param id peername field
+    
+    Initialize pointers in param id by the book (explicit NULL assignment,
+    rather than just memset 0).
+    
+    In x509_verify_param_zero() set peername to NULL after freeing it.
+    
+    In x509_vfy.c's internal check_hosts(), avoid potential leak of
+    possibly already non-NULL peername.  This is only set when a check
+    succeeds, so don't need to do this repeatedly in the loop.
+    
+    Reviewed-by: Richard Levitte <levitte@openssl.org>
+
+diff --git a/crypto/x509/x509_vfy.c b/crypto/x509/x509_vfy.c
+index 7d770c52ab..45d53a0f48 100644
+--- a/crypto/x509/x509_vfy.c
++++ b/crypto/x509/x509_vfy.c
+@@ -767,6 +767,10 @@ static int check_hosts(X509 *x, X509_VERIFY_PARAM_ID *id)
+     int n = sk_OPENSSL_STRING_num(id->hosts);
+     char *name;
+ 
++    if (id->peername != NULL) {
++        OPENSSL_free(id->peername);
++        id->peername = NULL;
++    }
+     for (i = 0; i < n; ++i) {
+         name = sk_OPENSSL_STRING_value(id->hosts, i);
+         if (X509_check_host(x, name, 0, id->hostflags, &id->peername) > 0)
+diff --git a/crypto/x509/x509_vpm.c b/crypto/x509/x509_vpm.c
+index 5d8c5f800a..eedc2179a6 100644
+--- a/crypto/x509/x509_vpm.c
++++ b/crypto/x509/x509_vpm.c
+@@ -148,6 +148,7 @@ static void x509_verify_param_zero(X509_VERIFY_PARAM *param)
+     sk_OPENSSL_STRING_pop_free(paramid->hosts, str_free);
+     paramid->hosts = NULL;
+     OPENSSL_free(paramid->peername);
++    paramid->peername = NULL;
+     OPENSSL_free(paramid->email);
+     paramid->email = NULL;
+     paramid->emaillen = 0;
+@@ -164,13 +165,20 @@ X509_VERIFY_PARAM *X509_VERIFY_PARAM_new(void)
+     param = OPENSSL_malloc(sizeof(*param));
+     if (!param)
+         return NULL;
++    memset(param, 0, sizeof(*param));
++
+     paramid = OPENSSL_malloc(sizeof(*paramid));
+     if (!paramid) {
+         OPENSSL_free(param);
+         return NULL;
+     }
+-    memset(param, 0, sizeof(*param));
+     memset(paramid, 0, sizeof(*paramid));
++    /* Exotic platforms may have non-zero bit representation of NULL */
++    paramid->hosts = NULL;
++    paramid->peername = NULL;
++    paramid->email = NULL;
++    paramid->ip = NULL;
++
+     param->id = paramid;
+     x509_verify_param_zero(param);
+     return param;
+

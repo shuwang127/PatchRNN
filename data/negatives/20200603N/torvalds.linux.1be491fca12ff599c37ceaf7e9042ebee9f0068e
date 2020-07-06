@@ -1,0 +1,77 @@
+commit 1be491fca12ff599c37ceaf7e9042ebee9f0068e
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Sun Jul 5 14:51:06 2009 +0200
+
+    rfkill: prep for rfkill API changes
+    
+    We've designed the /dev/rfkill API in a way that we
+    can increase the event struct by adding members at
+    the end, should it become necessary. To validate the
+    events, userspace and the kernel need to have the
+    proper event size to check for -- when reading from
+    the other end they need to verify that it's at least
+    version 1 of the event API, with the current struct
+    size, so define a constant for that and make the
+    code a little more 'future proof'.
+    
+    Not that I expect that we'll have to change the event
+    size any time soon, but it's better to write the code
+    in a way that lends itself to extending.
+    
+    Due to the current size of the event struct, the code
+    is currently equivalent, but should the event struct
+    ever need to be increased the new code might not need
+    changing.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/include/linux/rfkill.h b/include/linux/rfkill.h
+index 2ce29831feb6..f3d5812693d6 100644
+--- a/include/linux/rfkill.h
++++ b/include/linux/rfkill.h
+@@ -82,6 +82,20 @@ struct rfkill_event {
+ 	__u8  soft, hard;
+ } __packed;
+ 
++/*
++ * We are planning to be backward and forward compatible with changes
++ * to the event struct, by adding new, optional, members at the end.
++ * When reading an event (whether the kernel from userspace or vice
++ * versa) we need to accept anything that's at least as large as the
++ * version 1 event size, but might be able to accept other sizes in
++ * the future.
++ *
++ * One exception is the kernel -- we already have two event sizes in
++ * that we've made the 'hard' member optional since our only option
++ * is to ignore it anyway.
++ */
++#define RFKILL_EVENT_SIZE_V1	8
++
+ /* ioctl for turning off rfkill-input (if present) */
+ #define RFKILL_IOC_MAGIC	'R'
+ #define RFKILL_IOC_NOINPUT	1
+diff --git a/net/rfkill/core.c b/net/rfkill/core.c
+index 79693fe2001e..47497c97c8d9 100644
+--- a/net/rfkill/core.c
++++ b/net/rfkill/core.c
+@@ -1076,10 +1076,16 @@ static ssize_t rfkill_fop_write(struct file *file, const char __user *buf,
+ 	struct rfkill_event ev;
+ 
+ 	/* we don't need the 'hard' variable but accept it */
+-	if (count < sizeof(ev) - 1)
++	if (count < RFKILL_EVENT_SIZE_V1 - 1)
+ 		return -EINVAL;
+ 
+-	if (copy_from_user(&ev, buf, sizeof(ev) - 1))
++	/*
++	 * Copy as much data as we can accept into our 'ev' buffer,
++	 * but tell userspace how much we've copied so it can determine
++	 * our API version even in a write() call, if it cares.
++	 */
++	count = min(count, sizeof(ev));
++	if (copy_from_user(&ev, buf, count))
+ 		return -EFAULT;
+ 
+ 	if (ev.op != RFKILL_OP_CHANGE && ev.op != RFKILL_OP_CHANGE_ALL)
+

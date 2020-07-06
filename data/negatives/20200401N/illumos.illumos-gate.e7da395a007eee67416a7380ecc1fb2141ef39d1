@@ -1,0 +1,408 @@
+commit e7da395a007eee67416a7380ecc1fb2141ef39d1
+Author: Owen Roberts <Owen.Roberts@Sun.Com>
+Date:   Fri Jun 19 11:32:47 2009 -0700
+
+    PSARC 2009/309 Increase the maximum default ufs log size (ldl_maxlogsize) from 64 Mbytes to 512 Mbytes.
+    6709826 ufs log size should be large enough by default to avoid panic described in Sun Alert 200854
+    6758800 lufs_alloc() can create a log smaller than ldl_minlogsize
+
+diff --git a/usr/src/uts/common/fs/ufs/lufs.c b/usr/src/uts/common/fs/ufs/lufs.c
+index beb84f61f6..8d49b12ac0 100644
+--- a/usr/src/uts/common/fs/ufs/lufs.c
++++ b/usr/src/uts/common/fs/ufs/lufs.c
+@@ -19,7 +19,7 @@
+  * CDDL HEADER END
+  */
+ /*
+- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
++ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
+  */
+ 
+@@ -65,10 +65,12 @@ struct kmem_cache	*lufs_bp;
+ /* Tunables */
+ uint_t		ldl_maxlogsize	= LDL_MAXLOGSIZE;
+ uint_t		ldl_minlogsize	= LDL_MINLOGSIZE;
++uint_t		ldl_softlogcap	= LDL_SOFTLOGCAP;
+ uint32_t	ldl_divisor	= LDL_DIVISOR;
+ uint32_t	ldl_mintransfer	= LDL_MINTRANSFER;
+ uint32_t	ldl_maxtransfer	= LDL_MAXTRANSFER;
+ uint32_t	ldl_minbufsize	= LDL_MINBUFSIZE;
++uint32_t	ldl_cgsizereq	= 0;
+ 
+ /* Generation of header ids */
+ static kmutex_t	genid_mutex;
+@@ -656,7 +658,7 @@ errout:
+  *	Assumes the file system is write locked and is not logging
+  */
+ static int
+-lufs_alloc(struct ufsvfs *ufsvfsp, struct fiolog *flp, cred_t *cr)
++lufs_alloc(struct ufsvfs *ufsvfsp, struct fiolog *flp, size_t minb, cred_t *cr)
+ {
+ 	int		error = 0;
+ 	buf_t		*bp = NULL;
+@@ -689,7 +691,7 @@ lufs_alloc(struct ufsvfs *ufsvfsp, struct fiolog *flp, cred_t *cr)
+ 	ip = ufs_alloc_inode(ufsvfsp, UFSROOTINO);
+ 	ip->i_mode = IFSHAD;		/* make the dummy a shadow inode */
+ 	rw_enter(&ip->i_contents, RW_WRITER);
+-	fno = contigpref(ufsvfsp, nb + fs->fs_bsize);
++	fno = contigpref(ufsvfsp, nb + fs->fs_bsize, minb);
+ 	error = alloc(ip, fno, fs->fs_bsize, &fno, cr);
+ 	if (error)
+ 		goto errout;
+@@ -733,7 +735,7 @@ lufs_alloc(struct ufsvfs *ufsvfsp, struct fiolog *flp, cred_t *cr)
+ 	while (nb) {
+ 		error = alloc(ip, fno + fs->fs_frag, fs->fs_bsize, &fno, cr);
+ 		if (error) {
+-			if (tb < ldl_minlogsize)
++			if (tb < minb)
+ 				goto errout;
+ 			error = 0;
+ 			break;
+@@ -760,6 +762,12 @@ lufs_alloc(struct ufsvfs *ufsvfsp, struct fiolog *flp, cred_t *cr)
+ 		tb += fs->fs_bsize;
+ 		nb -= fs->fs_bsize;
+ 	}
++
++	if (tb < minb) {	/* Failed to reach minimum log size */
++		error = ENOSPC;
++		goto errout;
++	}
++
+ 	ebp->nbytes = (uint32_t)tb;
+ 	setsum(&ebp->chksum, (int32_t *)bp->b_un.b_addr, fs->fs_bsize);
+ 	UFS_BWRITE2(ufsvfsp, bp);
+@@ -983,6 +991,10 @@ lufs_enable(struct vnode *vp, struct fiolog *flp, cred_t *cr)
+ 	struct ulockfs	*ulp;
+ 	vfs_t		*vfsp = ufsvfsp->vfs_vfs;
+ 	uint64_t	tmp_nbytes_actual;
++	uint64_t	cg_minlogsize;
++	uint32_t	cgsize;
++	static int	minlogsizewarn = 0;
++	static int	maxlogsizewarn = 0;
+ 
+ 	/*
+ 	 * Check if logging is already enabled
+@@ -1003,6 +1015,22 @@ recheck:
+ 	reclaim = 0;
+ 	flp->error = FIOLOG_ENONE;
+ 
++	/*
++	 * The size of the ufs log is determined using the following rules:
++	 *
++	 * 1) If no size is requested the log size is calculated as a
++	 *    ratio of the total file system size. By default this is
++	 *    1MB of log per 1GB of file system. This calculation is then
++	 *    capped at the log size specified by ldl_softlogcap.
++	 * 2) The log size requested may then be increased based on the
++	 *    number of cylinder groups contained in the file system.
++	 *    To prevent a hang the log has to be large enough to contain a
++	 *    single transaction that alters every cylinder group in the file
++	 *    system. This is calculated as cg_minlogsize.
++	 * 3) Finally a check is made that the log size requested is within
++	 *    the limits of ldl_minlogsize and ldl_maxlogsize.
++	 */
++
+ 	/*
+ 	 * Adjust requested log size
+ 	 */
+@@ -1011,7 +1039,59 @@ recheck:
+ 		tmp_nbytes_actual =
+ 		    (((uint64_t)fs->fs_size) / ldl_divisor) << fs->fs_fshift;
+ 		flp->nbytes_actual = (uint_t)MIN(tmp_nbytes_actual, INT_MAX);
++		/*
++		 * The 1MB per 1GB log size allocation only applies up to
++		 * ldl_softlogcap size of log.
++		 */
++		flp->nbytes_actual = MIN(flp->nbytes_actual, ldl_softlogcap);
++	}
++
++	cgsize = ldl_cgsizereq ? ldl_cgsizereq : LDL_CGSIZEREQ(fs);
++
++	/*
++	 * Determine the log size required based on the number of cylinder
++	 * groups in the file system. The log has to be at least this size
++	 * to prevent possible hangs due to log space exhaustion.
++	 */
++	cg_minlogsize = cgsize * fs->fs_ncg;
++
++	/*
++	 * Ensure that the minimum log size isn't so small that it could lead
++	 * to a full log hang.
++	 */
++	if (ldl_minlogsize < LDL_MINLOGSIZE) {
++		ldl_minlogsize = LDL_MINLOGSIZE;
++		if (!minlogsizewarn) {
++			cmn_err(CE_WARN, "ldl_minlogsize too small, increasing "
++			    "to 0x%x", LDL_MINLOGSIZE);
++			minlogsizewarn = 1;
++		}
++	}
++
++	/*
++	 * Ensure that the maximum log size isn't greater than INT_MAX as the
++	 * logical log offset fields would overflow.
++	 */
++	if (ldl_maxlogsize > INT_MAX) {
++		ldl_maxlogsize = INT_MAX;
++		if (!maxlogsizewarn) {
++			cmn_err(CE_WARN, "ldl_maxlogsize too large, reducing "
++			    "to 0x%x", INT_MAX);
++			maxlogsizewarn = 1;
++		}
+ 	}
++
++	if (cg_minlogsize > ldl_maxlogsize) {
++		cmn_err(CE_WARN,
++		    "%s: reducing calculated log size from 0x%x to "
++		    "ldl_maxlogsize (0x%x).", fs->fs_fsmnt, (int)cg_minlogsize,
++		    ldl_maxlogsize);
++	}
++
++	cg_minlogsize = MAX(cg_minlogsize, ldl_minlogsize);
++	cg_minlogsize = MIN(cg_minlogsize, ldl_maxlogsize);
++
++	flp->nbytes_actual = MAX(flp->nbytes_actual, cg_minlogsize);
+ 	flp->nbytes_actual = MAX(flp->nbytes_actual, ldl_minlogsize);
+ 	flp->nbytes_actual = MIN(flp->nbytes_actual, ldl_maxlogsize);
+ 	flp->nbytes_actual = blkroundup(fs, flp->nbytes_actual);
+@@ -1106,7 +1186,7 @@ recheck:
+ 		goto recheck;
+ 	}
+ 
+-	error = lufs_alloc(ufsvfsp, flp, cr);
++	error = lufs_alloc(ufsvfsp, flp, cg_minlogsize, cr);
+ 	if (error)
+ 		goto errout;
+ 
+diff --git a/usr/src/uts/common/fs/ufs/ufs_alloc.c b/usr/src/uts/common/fs/ufs/ufs_alloc.c
+index d1e4f28763..b3cf0ae28f 100644
+--- a/usr/src/uts/common/fs/ufs/ufs_alloc.c
++++ b/usr/src/uts/common/fs/ufs/ufs_alloc.c
+@@ -19,7 +19,7 @@
+  * CDDL HEADER END
+  */
+ /*
+- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
++ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
+  */
+ 
+@@ -68,6 +68,7 @@
+ #include <fs/fs_subr.h>
+ #include <sys/cmn_err.h>
+ #include <sys/policy.h>
++#include <sys/fs/ufs_log.h>
+ 
+ static ino_t	hashalloc();
+ static daddr_t	fragextend();
+@@ -75,6 +76,7 @@ static daddr_t	alloccg();
+ static daddr_t	alloccgblk();
+ static ino_t	ialloccg();
+ static daddr_t	mapsearch();
++static int	findlogstartcg();
+ 
+ extern int	inside[], around[];
+ extern uchar_t	*fragtbl[];
+@@ -1944,12 +1946,13 @@ ufs_freesp(struct vnode *vp, struct flock64 *lp, int flag, cred_t *cr)
+  * writing the ufs log file to, minimizing future disk head seeking
+  */
+ daddr_t
+-contigpref(ufsvfs_t *ufsvfsp, size_t nb)
++contigpref(ufsvfs_t *ufsvfsp, size_t nb, size_t minb)
+ {
+ 	struct fs	*fs	= ufsvfsp->vfs_fs;
+ 	daddr_t		nblk	= lblkno(fs, blkroundup(fs, nb));
++	daddr_t		minblk	= lblkno(fs, blkroundup(fs, minb));
+ 	daddr_t		savebno, curbno, cgbno;
+-	int		cg, cgblks, savecg, savenblk, curnblk;
++	int		cg, cgblks, savecg, savenblk, curnblk, startcg;
+ 	uchar_t		*blksfree;
+ 	buf_t		*bp;
+ 	struct cg	*cgp;
+@@ -1957,12 +1960,13 @@ contigpref(ufsvfs_t *ufsvfsp, size_t nb)
+ 	savenblk = 0;
+ 	savecg = 0;
+ 	savebno = 0;
+-	for (cg = 0; cg < fs->fs_ncg; ++cg) {
+ 
+-		/* not enough free blks for a contig check */
+-		if (fs->fs_cs(fs, cg).cs_nbfree < nblk)
+-			continue;
++	if ((startcg = findlogstartcg(fs, nblk, minblk)) == -1)
++		cg = 0;	/* Nothing suitable found */
++	else
++		cg = startcg;
+ 
++	for (; cg < fs->fs_ncg; ++cg) {
+ 		/*
+ 		 * find the largest contiguous range in this cg
+ 		 */
+@@ -1979,9 +1983,14 @@ contigpref(ufsvfs_t *ufsvfsp, size_t nb)
+ 		cgbno = 0;
+ 		while (cgbno < cgblks && savenblk < nblk) {
+ 			/* find a free block */
+-			for (; cgbno < cgblks; ++cgbno)
+-				if (isblock(fs, blksfree, cgbno))
+-					break;
++			for (; cgbno < cgblks; ++cgbno) {
++				if (isblock(fs, blksfree, cgbno)) {
++					if (startcg != -1)
++						goto done;
++					else
++						break;
++				}
++			}
+ 			curbno = cgbno;
+ 			/* count the number of free blocks */
+ 			for (curnblk = 0; cgbno < cgblks; ++cgbno) {
+@@ -2001,6 +2010,13 @@ contigpref(ufsvfs_t *ufsvfsp, size_t nb)
+ 			break;
+ 	}
+ 
++done:
++	if (startcg != -1) {
++		brelse(bp);
++		savecg = startcg;
++		savebno = cgbno;
++	}
++
+ 	/* convert block offset in cg to frag offset in cg */
+ 	savebno = blkstofrags(fs, savebno);
+ 
+@@ -2009,3 +2025,78 @@ contigpref(ufsvfs_t *ufsvfsp, size_t nb)
+ 
+ 	return (savebno);
+ }
++
++/*
++ * The object of this routine is to find a start point for the UFS log.
++ * Ideally the space should be allocated from the smallest possible number
++ * of contiguous cylinder groups. This is found by using a sliding window
++ * technique. The smallest window of contiguous cylinder groups, which is
++ * still able to accommodate the target, is found by moving the window
++ * through the cylinder groups in a single pass. The end of the window is
++ * advanced until the space is accommodated, then the start is advanced until
++ * it no longer fits, the end is then advanced again and so on until the
++ * final cylinder group is reached. The first suitable instance is recorded
++ * and its starting cg number is returned.
++ *
++ * If we are not able to find a minimum amount of space, represented by
++ * minblk, or to do so uses more than the available extents, then return -1.
++ */
++
++int
++findlogstartcg(struct fs *fs, daddr_t requested, daddr_t minblk)
++{
++	int	 ncgs;		 /* number of cylinder groups */
++	daddr_t target;		 /* amount of space sought */
++	int	 cwidth, ctotal; /* current window width and total */
++	int	 bwidth, btotal; /* best window width and total so far */
++	int	 s;	/* index of the first element in the current window */
++	int	 e;	/* index of the first element + the width */
++			/*  (i.e. 1 + index of last element) */
++	int	 bs; /* index of the first element in the best window so far */
++	int	 header, max_extents;
++
++	target = requested;
++	ncgs = fs->fs_ncg;
++
++	header = sizeof (extent_block_t) - sizeof (extent_t);
++	max_extents = ((fs->fs_bsize)-header) / sizeof (extent_t);
++	cwidth = ctotal = 0;
++	btotal = -1;
++	bwidth = ncgs;
++	s = e = 0;
++	while (e < ncgs) {
++	/* Advance the end of the window until it accommodates the target. */
++		while (ctotal < target && e < ncgs) {
++			ctotal += fs->fs_cs(fs, e).cs_nbfree;
++			e++;
++		}
++
++		/*
++		 * Advance the start of the window until it no longer
++		 * accommodates the target.
++		 */
++		while (ctotal >= target && s < e) {
++			/* See if this is the smallest window so far. */
++			cwidth = e - s;
++			if (cwidth <= bwidth) {
++				if (cwidth == bwidth && ctotal <= btotal)
++					goto more;
++				bwidth = cwidth;
++				btotal = ctotal;
++				bs = s;
++			}
++more:
++			ctotal -= fs->fs_cs(fs, s).cs_nbfree;
++			s++;
++		}
++	}
++
++	/*
++	 * If we cannot allocate the minimum required or we use too many
++	 * extents to do so, return -1.
++	 */
++	if (btotal < minblk || bwidth > max_extents)
++		bs = -1;
++
++	return (bs);
++}
+diff --git a/usr/src/uts/common/sys/fs/ufs_inode.h b/usr/src/uts/common/sys/fs/ufs_inode.h
+index ae92f3c53d..847a28291a 100644
+--- a/usr/src/uts/common/sys/fs/ufs_inode.h
++++ b/usr/src/uts/common/sys/fs/ufs_inode.h
+@@ -878,7 +878,7 @@ extern	int	ufs_allocsp(struct vnode *, struct flock64 *, cred_t *);
+ extern	int	ufs_freesp(struct vnode *, struct flock64 *, int, cred_t *);
+ extern	ino_t	dirpref(inode_t *);
+ extern	daddr_t	blkpref(struct inode *, daddr_t, int, daddr32_t *);
+-extern	daddr_t	contigpref(ufsvfs_t *, size_t);
++extern	daddr_t	contigpref(ufsvfs_t *, size_t, size_t);
+ 
+ extern	int	ufs_rdwri(enum uio_rw, int, struct inode *, caddr_t, ssize_t,
+ 	offset_t, enum uio_seg, int *, cred_t *);
+diff --git a/usr/src/uts/common/sys/fs/ufs_log.h b/usr/src/uts/common/sys/fs/ufs_log.h
+index d82716e16c..d71aff1d1e 100644
+--- a/usr/src/uts/common/sys/fs/ufs_log.h
++++ b/usr/src/uts/common/sys/fs/ufs_log.h
+@@ -19,7 +19,7 @@
+  * CDDL HEADER END
+  */
+ /*
+- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
++ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
+  */
+ 
+@@ -96,13 +96,26 @@ typedef struct ic_extent_block {
+  */
+ #define	LDL_DIVISOR		1024 /* 1024 gives 1MB per 1GB */
+ 
++/*
++ * This gives the maximum size of log for which the 1MB per 1GB rule
++ * applies. The size of the log will only be greater than this based
++ * on the cylinder group space requirements.
++ */
++#define	LDL_SOFTLOGCAP		(256 * 1024 * 1024)
++
+ /*
+  * But set reasonable min/max units
+- *   BUT never set LDL_MAXLOGSIZE to greater than LDL_REALMAXLOGSIZE.  The
+- *   scan code will break (See sect_trailer).
+  */
+ #define	LDL_MINLOGSIZE		(1024 * 1024)
+-#define	LDL_MAXLOGSIZE		(64 * 1024 * 1024)
++#define	LDL_MAXLOGSIZE		(512 * 1024 * 1024)
++
++/*
++ * Log space requirement per cylinder group. This needs to accommodate a
++ * cg delta (inc. header) and have a factor to cover other deltas involved
++ * in a single transaction which could touch all cyl groups in a file system.
++ */
++#define	LDL_CGSIZEREQ(fs) \
++	((fs)->fs_cgsize + ((fs)->fs_cgsize >> 1))
+ 
+ #define	LDL_MINBUFSIZE		(32 * 1024)
+ #define	LDL_USABLE_BSIZE	(DEV_BSIZE - sizeof (sect_trailer_t))
+

@@ -1,0 +1,84 @@
+commit 940001762ac514810e305aab356983829e5fa82a
+Author: Ying Xue <ying.xue@windriver.com>
+Date:   Wed Sep 3 09:22:36 2014 +0800
+
+    lib/rhashtable: allow user to set the minimum shifts of shrinking
+    
+    Although rhashtable library allows user to specify a quiet big size
+    for user's created hash table, the table may be shrunk to a
+    very small size - HASH_MIN_SIZE(4) after object is removed from
+    the table at the first time. Subsequently, even if the total amount
+    of objects saved in the table is quite lower than user's initial
+    setting in a long time, the hash table size is still dynamically
+    adjusted by rhashtable_shrink() or rhashtable_expand() each time
+    object is inserted or removed from the table. However, as
+    synchronize_rcu() has to be called when table is shrunk or
+    expanded by the two functions, we should permit user to set the
+    minimum table size through configuring the minimum number of shifts
+    according to user specific requirement, avoiding these expensive
+    actions of shrinking or expanding because of calling synchronize_rcu().
+    
+    Signed-off-by: Ying Xue <ying.xue@windriver.com>
+    Acked-by: Thomas Graf <tgraf@suug.ch>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/linux/rhashtable.h b/include/linux/rhashtable.h
+index 36826c0166c5..fb298e9d6d3a 100644
+--- a/include/linux/rhashtable.h
++++ b/include/linux/rhashtable.h
+@@ -44,6 +44,7 @@ struct rhashtable;
+  * @head_offset: Offset of rhash_head in struct to be hashed
+  * @hash_rnd: Seed to use while hashing
+  * @max_shift: Maximum number of shifts while expanding
++ * @min_shift: Minimum number of shifts while shrinking
+  * @hashfn: Function to hash key
+  * @obj_hashfn: Function to hash object
+  * @grow_decision: If defined, may return true if table should expand
+@@ -57,6 +58,7 @@ struct rhashtable_params {
+ 	size_t			head_offset;
+ 	u32			hash_rnd;
+ 	size_t			max_shift;
++	size_t			min_shift;
+ 	rht_hashfn_t		hashfn;
+ 	rht_obj_hashfn_t	obj_hashfn;
+ 	bool			(*grow_decision)(const struct rhashtable *ht,
+diff --git a/lib/rhashtable.c b/lib/rhashtable.c
+index a2c78810ebc1..8dfec3f26d4c 100644
+--- a/lib/rhashtable.c
++++ b/lib/rhashtable.c
+@@ -298,7 +298,7 @@ int rhashtable_shrink(struct rhashtable *ht, gfp_t flags)
+ 
+ 	ASSERT_RHT_MUTEX(ht);
+ 
+-	if (tbl->size <= HASH_MIN_SIZE)
++	if (ht->shift <= ht->p.min_shift)
+ 		return 0;
+ 
+ 	ntbl = bucket_table_alloc(tbl->size / 2, flags);
+@@ -506,9 +506,10 @@ void *rhashtable_lookup_compare(const struct rhashtable *ht, u32 hash,
+ }
+ EXPORT_SYMBOL_GPL(rhashtable_lookup_compare);
+ 
+-static size_t rounded_hashtable_size(unsigned int nelem)
++static size_t rounded_hashtable_size(struct rhashtable_params *params)
+ {
+-	return max(roundup_pow_of_two(nelem * 4 / 3), HASH_MIN_SIZE);
++	return max(roundup_pow_of_two(params->nelem_hint * 4 / 3),
++		   1UL << params->min_shift);
+ }
+ 
+ /**
+@@ -566,8 +567,11 @@ int rhashtable_init(struct rhashtable *ht, struct rhashtable_params *params)
+ 	    (!params->key_len && !params->obj_hashfn))
+ 		return -EINVAL;
+ 
++	params->min_shift = max_t(size_t, params->min_shift,
++				  ilog2(HASH_MIN_SIZE));
++
+ 	if (params->nelem_hint)
+-		size = rounded_hashtable_size(params->nelem_hint);
++		size = rounded_hashtable_size(params);
+ 
+ 	tbl = bucket_table_alloc(size, GFP_KERNEL);
+ 	if (tbl == NULL)
+

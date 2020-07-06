@@ -1,0 +1,55 @@
+commit 4f4443088b763ca4ac7521e9b4a881b52c294dec
+Author: Vlad Yasevich <vladislav.yasevich@hp.com>
+Date:   Mon Oct 30 18:54:32 2006 -0800
+
+    [SCTP]: Correctly set IP id for SCTP traffic
+    
+    Make SCTP 1-1 style and peeled-off associations behave like TCP when
+    setting IP id. In both cases, we set the inet_sk(sk)->daddr and initialize
+    inet_sk(sk)->id to a random value.
+    
+    Signed-off-by: Vlad Yasevich <vladislav.yasevich@hp.com>
+    Signed-off-by: Sridhar Samudrala <sri@us.ibm.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/sctp/protocol.c b/net/sctp/protocol.c
+index fac7674438a4..5b4f82fd98f8 100644
+--- a/net/sctp/protocol.c
++++ b/net/sctp/protocol.c
+@@ -591,7 +591,7 @@ static struct sock *sctp_v4_create_accept_sk(struct sock *sk,
+ 	newinet->dport = htons(asoc->peer.port);
+ 	newinet->daddr = asoc->peer.primary_addr.v4.sin_addr.s_addr;
+ 	newinet->pmtudisc = inet->pmtudisc;
+-      	newinet->id = 0;
++      	newinet->id = asoc->next_tsn ^ jiffies;
+ 
+ 	newinet->uc_ttl = -1;
+ 	newinet->mc_loop = 1;
+diff --git a/net/sctp/socket.c b/net/sctp/socket.c
+index 9f34dec6ff8e..935bc9187fd8 100644
+--- a/net/sctp/socket.c
++++ b/net/sctp/socket.c
+@@ -3372,6 +3372,7 @@ SCTP_STATIC int sctp_do_peeloff(struct sctp_association *asoc,
+ {
+ 	struct sock *sk = asoc->base.sk;
+ 	struct socket *sock;
++	struct inet_sock *inetsk;
+ 	int err = 0;
+ 
+ 	/* An association cannot be branched off from an already peeled-off
+@@ -3389,6 +3390,14 @@ SCTP_STATIC int sctp_do_peeloff(struct sctp_association *asoc,
+ 	 * asoc to the newsk.
+ 	 */
+ 	sctp_sock_migrate(sk, sock->sk, asoc, SCTP_SOCKET_UDP_HIGH_BANDWIDTH);
++
++	/* Make peeled-off sockets more like 1-1 accepted sockets.
++	 * Set the daddr and initialize id to something more random
++	 */
++	inetsk = inet_sk(sock->sk);
++	inetsk->daddr = asoc->peer.primary_addr.v4.sin_addr.s_addr;
++	inetsk->id = asoc->next_tsn ^ jiffies;
++
+ 	*sockp = sock;
+ 
+ 	return err;
+

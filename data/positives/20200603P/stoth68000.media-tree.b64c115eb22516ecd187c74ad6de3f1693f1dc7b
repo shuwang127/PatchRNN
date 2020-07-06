@@ -1,0 +1,78 @@
+commit b64c115eb22516ecd187c74ad6de3f1693f1dc7b
+Author: Dave Airlie <airlied@redhat.com>
+Date:   Tue Sep 14 20:14:38 2010 +1000
+
+    drm: fix race between driver loading and userspace open.
+    
+    Not 100% sure this is due to BKL removal, its most likely a combination
+    of that + userspace timing changes in udev/plymouth. The drm adds the sysfs
+    device before the driver has completed internal loading, this causes udev
+    to make the node and plymouth to open it before we've completed loading.
+    
+    The proper solution is to delay the sysfs manipulation until later in loading
+    however this causes knock on issues with sysfs connector nodes, so we can use
+    the global mutex to serialise loading and userspace opens.
+    
+    Reported-by: Toni Spets (hifi on #radeon)
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/drm_pci.c b/drivers/gpu/drm/drm_pci.c
+index e20f78b542a7..f5bd9e590c80 100644
+--- a/drivers/gpu/drm/drm_pci.c
++++ b/drivers/gpu/drm/drm_pci.c
+@@ -164,6 +164,8 @@ int drm_get_pci_dev(struct pci_dev *pdev, const struct pci_device_id *ent,
+ 	dev->hose = pdev->sysdata;
+ #endif
+ 
++	mutex_lock(&drm_global_mutex);
++
+ 	if ((ret = drm_fill_in_dev(dev, ent, driver))) {
+ 		printk(KERN_ERR "DRM: Fill_in_dev failed.\n");
+ 		goto err_g2;
+@@ -199,6 +201,7 @@ int drm_get_pci_dev(struct pci_dev *pdev, const struct pci_device_id *ent,
+ 		 driver->name, driver->major, driver->minor, driver->patchlevel,
+ 		 driver->date, pci_name(pdev), dev->primary->index);
+ 
++	mutex_unlock(&drm_global_mutex);
+ 	return 0;
+ 
+ err_g4:
+@@ -210,6 +213,7 @@ int drm_get_pci_dev(struct pci_dev *pdev, const struct pci_device_id *ent,
+ 	pci_disable_device(pdev);
+ err_g1:
+ 	kfree(dev);
++	mutex_unlock(&drm_global_mutex);
+ 	return ret;
+ }
+ EXPORT_SYMBOL(drm_get_pci_dev);
+diff --git a/drivers/gpu/drm/drm_platform.c b/drivers/gpu/drm/drm_platform.c
+index 460e9a3afa8d..92d1d0fb7b75 100644
+--- a/drivers/gpu/drm/drm_platform.c
++++ b/drivers/gpu/drm/drm_platform.c
+@@ -53,6 +53,8 @@ int drm_get_platform_dev(struct platform_device *platdev,
+ 	dev->platformdev = platdev;
+ 	dev->dev = &platdev->dev;
+ 
++	mutex_lock(&drm_global_mutex);
++
+ 	ret = drm_fill_in_dev(dev, NULL, driver);
+ 
+ 	if (ret) {
+@@ -87,6 +89,8 @@ int drm_get_platform_dev(struct platform_device *platdev,
+ 
+ 	list_add_tail(&dev->driver_item, &driver->device_list);
+ 
++	mutex_unlock(&drm_global_mutex);
++
+ 	DRM_INFO("Initialized %s %d.%d.%d %s on minor %d\n",
+ 		 driver->name, driver->major, driver->minor, driver->patchlevel,
+ 		 driver->date, dev->primary->index);
+@@ -100,6 +104,7 @@ int drm_get_platform_dev(struct platform_device *platdev,
+ 		drm_put_minor(&dev->control);
+ err_g1:
+ 	kfree(dev);
++	mutex_unlock(&drm_global_mutex);
+ 	return ret;
+ }
+ EXPORT_SYMBOL(drm_get_platform_dev);
+

@@ -1,0 +1,54 @@
+commit cac9f12e94caf10517031cc3b5ce9bc667fbf5a2
+Author: miod <miod@openbsd.org>
+Date:   Sun Aug 17 11:11:34 2014 +0000
+
+    On kernels compiled with R10000 support, ignore (by simply returning)
+    `bus error upon instruction fetch' exceptions where the faulting address is
+    in the kernel, and at the very beginning of an I$ cache line.
+    (I've experienced these on an R16000 Fuel since several months already)
+
+diff --git a/sys/arch/mips64/mips64/trap.c b/sys/arch/mips64/mips64/trap.c
+index 42ad8fa8ca7..86449bfe4c2 100644
+--- a/sys/arch/mips64/mips64/trap.c
++++ b/sys/arch/mips64/mips64/trap.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: trap.c,v 1.98 2014/06/12 20:52:15 kettenis Exp $	*/
++/*	$OpenBSD: trap.c,v 1.99 2014/08/17 11:11:34 miod Exp $	*/
+ 
+ /*
+  * Copyright (c) 1988 University of Utah.
+@@ -784,6 +784,33 @@ fault_common_no_miss:
+ 		}
+ 		goto err;
+ 
++#ifdef CPU_R10000
++	case T_BUS_ERR_IFETCH:
++		/*
++		 * At least R16000 processor have been found triggering
++		 * reproduceable bus error on instruction fetch in the
++		 * kernel code, which are trivially recoverable (and
++		 * look like an obscure errata to me).
++		 *
++		 * Thus, ignore these exceptions if the faulting address
++		 * is in the kernel and at the beginning of an I$ cache
++		 * line.
++		 */
++	    {
++		extern void *kernel_text;
++		extern void *etext;
++		vaddr_t va;
++
++		va = (vaddr_t)trapframe->pc;
++		if (trapframe->cause & CR_BR_DELAY)
++			va += 4;
++		if ((va & (/* R10K_L1I_LINE - 1 */ 64UL - 1)) == 0 &&
++		    va > (vaddr_t)&kernel_text && va < (vaddr_t)&etext)
++			return;
++	    }
++		goto err;
++#endif
++
+ 	default:
+ 	err:
+ 		disableintr();
+

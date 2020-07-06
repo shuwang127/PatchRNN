@@ -1,0 +1,79 @@
+commit 087d7e56deffb611a098e7e257388a41edbeef1f
+Author: Yinghai Lu <yinghai@kernel.org>
+Date:   Tue Aug 4 08:59:59 2009 -0700
+
+    x86: Fix MSI-X initialization by using online_mask for x2apic target_cpus
+    
+    found a system where x2apic reports an MSI-X irq initialization
+    failure:
+    
+    [  302.859446] igbvf 0000:81:10.4: enabling device (0000 -> 0002)
+    [  302.874369] igbvf 0000:81:10.4: using 64bit DMA mask
+    [  302.879023] igbvf 0000:81:10.4: using 64bit consistent DMA mask
+    [  302.894386] igbvf 0000:81:10.4: enabling bus mastering
+    [  302.898171] igbvf 0000:81:10.4: setting latency timer to 64
+    [  302.914050] reserve_memtype added 0xefb08000-0xefb0c000, track uncached-minus, req uncached-minus, ret uncached-minus
+    [  302.933839] reserve_memtype added 0xefb28000-0xefb29000, track uncached-minus, req uncached-minus, ret uncached-minus
+    [  302.940367]   alloc irq_desc for 265 on node 4
+    [  302.956874]   alloc kstat_irqs on node 4
+    [  302.959452] alloc irq_2_iommu on node 0
+    [  302.974328] igbvf 0000:81:10.4: irq 265 for MSI/MSI-X
+    [  302.977778]   alloc irq_desc for 266 on node 4
+    [  302.980347]   alloc kstat_irqs on node 4
+    [  302.995312] free_memtype request 0xefb28000-0xefb29000
+    [  302.998816] igbvf 0000:81:10.4: Failed to initialize MSI-X interrupts.
+    
+    ... it turns out that when trying to enable MSI-X,
+    __assign_irq_vector(new, cfg_new, apic->target_cpus()) can not
+    get vector because for x2apic target-cpus returns cpumask_of(0)
+    
+    Update that to online_mask like xapic.
+    
+    Signed-off-by: Yinghai Lu <yinghai@kernel.org>
+    Acked-by: Suresh Siddha <suresh.b.siddha@intel.com>
+    LKML-Reference: <4A785AFF.3050902@kernel.org>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/arch/x86/kernel/apic/x2apic_cluster.c b/arch/x86/kernel/apic/x2apic_cluster.c
+index 2ed4e2bb3b32..a5371ec36776 100644
+--- a/arch/x86/kernel/apic/x2apic_cluster.c
++++ b/arch/x86/kernel/apic/x2apic_cluster.c
+@@ -17,11 +17,13 @@ static int x2apic_acpi_madt_oem_check(char *oem_id, char *oem_table_id)
+ 	return x2apic_enabled();
+ }
+ 
+-/* Start with all IRQs pointing to boot CPU.  IRQ balancing will shift them. */
+-
++/*
++ * need to use more than cpu 0, because we need more vectors when
++ * MSI-X are used.
++ */
+ static const struct cpumask *x2apic_target_cpus(void)
+ {
+-	return cpumask_of(0);
++	return cpu_online_mask;
+ }
+ 
+ /*
+diff --git a/arch/x86/kernel/apic/x2apic_phys.c b/arch/x86/kernel/apic/x2apic_phys.c
+index 0b631c6a2e00..a8989aadc99a 100644
+--- a/arch/x86/kernel/apic/x2apic_phys.c
++++ b/arch/x86/kernel/apic/x2apic_phys.c
+@@ -27,11 +27,13 @@ static int x2apic_acpi_madt_oem_check(char *oem_id, char *oem_table_id)
+ 		return 0;
+ }
+ 
+-/* Start with all IRQs pointing to boot CPU.  IRQ balancing will shift them. */
+-
++/*
++ * need to use more than cpu 0, because we need more vectors when
++ * MSI-X are used.
++ */
+ static const struct cpumask *x2apic_target_cpus(void)
+ {
+-	return cpumask_of(0);
++	return cpu_online_mask;
+ }
+ 
+ static void x2apic_vector_allocation_domain(int cpu, struct cpumask *retmask)
+

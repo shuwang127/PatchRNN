@@ -1,0 +1,101 @@
+commit 852db46d55e85b475a72e665ca08d3317769ceef
+Author: John Stultz <johnstul@us.ibm.com>
+Date:   Tue Jul 13 17:56:28 2010 -0700
+
+    clocksource: Add __clocksource_updatefreq_hz/khz methods
+    
+    To properly handle clocksources that change frequencies
+    at the clocksource->enable() point, this patch adds
+    a method that will update the clocksource's mult/shift and
+    max_idle_ns values.
+    
+    Signed-off-by: John Stultz <johnstul@us.ibm.com>
+    LKML-Reference: <1279068988-21864-12-git-send-email-johnstul@us.ibm.com>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/include/linux/clocksource.h b/include/linux/clocksource.h
+index 21677d99a161..c37b21ad5a3b 100644
+--- a/include/linux/clocksource.h
++++ b/include/linux/clocksource.h
+@@ -292,6 +292,8 @@ clocks_calc_mult_shift(u32 *mult, u32 *shift, u32 from, u32 to, u32 minsec);
+  */
+ extern int
+ __clocksource_register_scale(struct clocksource *cs, u32 scale, u32 freq);
++extern void
++__clocksource_updatefreq_scale(struct clocksource *cs, u32 scale, u32 freq);
+ 
+ static inline int clocksource_register_hz(struct clocksource *cs, u32 hz)
+ {
+@@ -303,6 +305,15 @@ static inline int clocksource_register_khz(struct clocksource *cs, u32 khz)
+ 	return __clocksource_register_scale(cs, 1000, khz);
+ }
+ 
++static inline void __clocksource_updatefreq_hz(struct clocksource *cs, u32 hz)
++{
++	__clocksource_updatefreq_scale(cs, 1, hz);
++}
++
++static inline void __clocksource_updatefreq_khz(struct clocksource *cs, u32 khz)
++{
++	__clocksource_updatefreq_scale(cs, 1000, khz);
++}
+ 
+ static inline void
+ clocksource_calc_mult_shift(struct clocksource *cs, u32 freq, u32 minsec)
+diff --git a/kernel/time/clocksource.c b/kernel/time/clocksource.c
+index c543d21b4e54..c18d7efa1b4b 100644
+--- a/kernel/time/clocksource.c
++++ b/kernel/time/clocksource.c
+@@ -639,19 +639,18 @@ static void clocksource_enqueue(struct clocksource *cs)
+ #define MAX_UPDATE_LENGTH 5 /* Seconds */
+ 
+ /**
+- * __clocksource_register_scale - Used to install new clocksources
++ * __clocksource_updatefreq_scale - Used update clocksource with new freq
+  * @t:		clocksource to be registered
+  * @scale:	Scale factor multiplied against freq to get clocksource hz
+  * @freq:	clocksource frequency (cycles per second) divided by scale
+  *
+- * Returns -EBUSY if registration fails, zero otherwise.
++ * This should only be called from the clocksource->enable() method.
+  *
+  * This *SHOULD NOT* be called directly! Please use the
+- * clocksource_register_hz() or clocksource_register_khz helper functions.
++ * clocksource_updatefreq_hz() or clocksource_updatefreq_khz helper functions.
+  */
+-int __clocksource_register_scale(struct clocksource *cs, u32 scale, u32 freq)
++void __clocksource_updatefreq_scale(struct clocksource *cs, u32 scale, u32 freq)
+ {
+-
+ 	/*
+ 	 * Ideally we want to use  some of the limits used in
+ 	 * clocksource_max_deferment, to provide a more informed
+@@ -662,7 +661,27 @@ int __clocksource_register_scale(struct clocksource *cs, u32 scale, u32 freq)
+ 				      NSEC_PER_SEC/scale,
+ 				      MAX_UPDATE_LENGTH*scale);
+ 	cs->max_idle_ns = clocksource_max_deferment(cs);
++}
++EXPORT_SYMBOL_GPL(__clocksource_updatefreq_scale);
++
++/**
++ * __clocksource_register_scale - Used to install new clocksources
++ * @t:		clocksource to be registered
++ * @scale:	Scale factor multiplied against freq to get clocksource hz
++ * @freq:	clocksource frequency (cycles per second) divided by scale
++ *
++ * Returns -EBUSY if registration fails, zero otherwise.
++ *
++ * This *SHOULD NOT* be called directly! Please use the
++ * clocksource_register_hz() or clocksource_register_khz helper functions.
++ */
++int __clocksource_register_scale(struct clocksource *cs, u32 scale, u32 freq)
++{
++
++	/* Intialize mult/shift and max_idle_ns */
++	__clocksource_updatefreq_scale(cs, scale, freq);
+ 
++	/* Add clocksource to the clcoksource list */
+ 	mutex_lock(&clocksource_mutex);
+ 	clocksource_enqueue(cs);
+ 	clocksource_select();
+

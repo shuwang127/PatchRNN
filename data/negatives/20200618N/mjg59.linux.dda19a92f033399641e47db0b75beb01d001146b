@@ -1,0 +1,75 @@
+commit dda19a92f033399641e47db0b75beb01d001146b
+Author: Jonas Aaberg <jonas.aberg@stericsson.com>
+Date:   Sat Nov 24 00:10:29 2012 -0800
+
+    Input: gpio_keys - disable hardware on suspend
+    
+    Disable hardware if active when suspending if the hw can not
+    wake the system from suspend.
+    
+    [Dmitry Torokhov: use input_dev->users instead of a separate flag]
+    
+    Signed-off-by: Jonas Aaberg <jonas.aberg@stericsson.com>
+    Signed-off-by: Philippe Langlais <philippe.langlais@linaro.org>
+    Reviewed-by: Bengt Jonsson <bengt.g.jonsson@stericsson.com>
+    Signed-off-by: Lee Jones <lee.jones@linaro.org>
+    Signed-off-by: Dmitry Torokhov <dmitry.torokhov@gmail.com>
+
+diff --git a/drivers/input/keyboard/gpio_keys.c b/drivers/input/keyboard/gpio_keys.c
+index c7764ca17b88..79435de0caa8 100644
+--- a/drivers/input/keyboard/gpio_keys.c
++++ b/drivers/input/keyboard/gpio_keys.c
+@@ -803,6 +803,7 @@ static int gpio_keys_remove(struct platform_device *pdev)
+ static int gpio_keys_suspend(struct device *dev)
+ {
+ 	struct gpio_keys_drvdata *ddata = dev_get_drvdata(dev);
++	struct input_dev *input = ddata->input;
+ 	int i;
+ 
+ 	if (device_may_wakeup(dev)) {
+@@ -811,6 +812,11 @@ static int gpio_keys_suspend(struct device *dev)
+ 			if (bdata->button->wakeup)
+ 				enable_irq_wake(bdata->irq);
+ 		}
++	} else {
++		mutex_lock(&input->mutex);
++		if (input->users)
++			gpio_keys_close(input);
++		mutex_unlock(&input->mutex);
+ 	}
+ 
+ 	return 0;
+@@ -819,16 +825,27 @@ static int gpio_keys_suspend(struct device *dev)
+ static int gpio_keys_resume(struct device *dev)
+ {
+ 	struct gpio_keys_drvdata *ddata = dev_get_drvdata(dev);
++	struct input_dev *input = ddata->input;
++	int error = 0;
+ 	int i;
+ 
+-	for (i = 0; i < ddata->pdata->nbuttons; i++) {
+-		struct gpio_button_data *bdata = &ddata->data[i];
+-		if (bdata->button->wakeup && device_may_wakeup(dev))
+-			disable_irq_wake(bdata->irq);
++	if (device_may_wakeup(dev)) {
++		for (i = 0; i < ddata->pdata->nbuttons; i++) {
++			struct gpio_button_data *bdata = &ddata->data[i];
++			if (bdata->button->wakeup)
++				disable_irq_wake(bdata->irq);
++		}
++	} else {
++		mutex_lock(&input->mutex);
++		if (input->users)
++			error = gpio_keys_open(input);
++		mutex_unlock(&input->mutex);
+ 	}
+ 
+-	gpio_keys_report_state(ddata);
++	if (error)
++		return error;
+ 
++	gpio_keys_report_state(ddata);
+ 	return 0;
+ }
+ #endif
+

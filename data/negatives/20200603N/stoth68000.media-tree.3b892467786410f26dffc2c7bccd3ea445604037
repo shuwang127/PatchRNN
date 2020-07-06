@@ -1,0 +1,157 @@
+commit 3b892467786410f26dffc2c7bccd3ea445604037
+Author: Takashi Iwai <tiwai@suse.de>
+Date:   Thu Nov 15 16:17:24 2007 +0100
+
+    [ALSA] Check value range in ctl callbacks
+    
+    Check the value ranges in ctl put callbacks properly (in the rest drivers).
+    
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+    Signed-off-by: Jaroslav Kysela <perex@perex.cz>
+
+diff --git a/sound/drivers/mts64.c b/sound/drivers/mts64.c
+index dcc90f995294..68070cccc6be 100644
+--- a/sound/drivers/mts64.c
++++ b/sound/drivers/mts64.c
+@@ -461,13 +461,14 @@ static int snd_mts64_ctl_smpte_switch_put(struct snd_kcontrol* kctl,
+ {
+ 	struct mts64 *mts = snd_kcontrol_chip(kctl);
+ 	int changed = 0;
++	int val = !!uctl->value.integer.value[0];
+ 
+ 	spin_lock_irq(&mts->lock);
+-	if (mts->smpte_switch == uctl->value.integer.value[0])
++	if (mts->smpte_switch == val)
+ 		goto __out;
+ 
+ 	changed = 1;
+-	mts->smpte_switch = uctl->value.integer.value[0];
++	mts->smpte_switch = val;
+ 	if (mts->smpte_switch) {
+ 		mts64_smpte_start(mts->pardev->port,
+ 				  mts->time[0], mts->time[1],
+@@ -541,12 +542,13 @@ static int snd_mts64_ctl_smpte_time_put(struct snd_kcontrol *kctl,
+ {
+ 	struct mts64 *mts = snd_kcontrol_chip(kctl);
+ 	int idx = kctl->private_value;
++	unsigned int time = uctl->value.integer.value[0] % 60;
+ 	int changed = 0;
+ 
+ 	spin_lock_irq(&mts->lock);
+-	if (mts->time[idx] != uctl->value.integer.value[0]) {
++	if (mts->time[idx] != time) {
+ 		changed = 1;
+-		mts->time[idx] = uctl->value.integer.value[0];
++		mts->time[idx] = time;
+ 	}
+ 	spin_unlock_irq(&mts->lock);
+ 
+@@ -636,6 +638,8 @@ static int snd_mts64_ctl_smpte_fps_put(struct snd_kcontrol *kctl,
+ 	struct mts64 *mts = snd_kcontrol_chip(kctl);
+ 	int changed = 0;
+ 
++	if (uctl->value.enumerated.item[0] >= 5)
++		return -EINVAL;
+ 	spin_lock_irq(&mts->lock);
+ 	if (mts->fps != uctl->value.enumerated.item[0]) {
+ 		changed = 1;
+diff --git a/sound/i2c/other/pt2258.c b/sound/i2c/other/pt2258.c
+index 00c83d8b32b1..987d2c9a7a64 100644
+--- a/sound/i2c/other/pt2258.c
++++ b/sound/i2c/other/pt2258.c
+@@ -113,6 +113,8 @@ static int pt2258_stereo_volume_put(struct snd_kcontrol *kcontrol,
+ 
+ 	val0 = 79 - ucontrol->value.integer.value[0];
+ 	val1 = 79 - ucontrol->value.integer.value[1];
++	if (val0 < 0 || val0 > 79 || val1 < 0 || val1 > 79)
++		return -EINVAL;
+ 	if (val0 == pt->volume[base] && val1 == pt->volume[base + 1])
+ 		return 0;
+ 
+diff --git a/sound/isa/opti9xx/miro.c b/sound/isa/opti9xx/miro.c
+index d295936611f8..c2baf4cfb958 100644
+--- a/sound/isa/opti9xx/miro.c
++++ b/sound/isa/opti9xx/miro.c
+@@ -483,6 +483,10 @@ static int snd_miro_put_double(struct snd_kcontrol *kcontrol,
+ 
+ 		/* equalizer elements */
+ 
++		if (left < -0x7f || left > 0x7f ||
++		    right < -0x7f || right > 0x7f)
++			return -EINVAL;
++
+ 		if (left_old > 0x80) 
+ 			left_old = 0x80 - left_old;
+ 		if (right_old > 0x80) 
+@@ -520,6 +524,10 @@ static int snd_miro_put_double(struct snd_kcontrol *kcontrol,
+ 
+ 		/* non-equalizer elements */
+ 
++		if (left < 0 || left > 0x20 ||
++		    right < 0 || right > 0x20)
++			return -EINVAL;
++
+ 		left_old = 0x20 - left_old;
+ 		right_old = 0x20 - right_old;
+ 
+diff --git a/sound/sh/aica.c b/sound/sh/aica.c
+index 8861d2f7796e..12c41df255a1 100644
+--- a/sound/sh/aica.c
++++ b/sound/sh/aica.c
+@@ -523,11 +523,14 @@ static int aica_pcmvolume_put(struct snd_kcontrol *kcontrol,
+ 			      struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_card_aica *dreamcastcard;
++	unsigned int vol;
+ 	dreamcastcard = kcontrol->private_data;
+ 	if (unlikely(!dreamcastcard->channel))
+ 		return -ETXTBSY;
+-	if (unlikely(dreamcastcard->channel->vol ==
+-		     ucontrol->value.integer.value[0]))
++	vol = ucontrol->value.integer.value[0];
++	if (vol > 0xff)
++		return -EINVAL;
++	if (unlikely(dreamcastcard->channel->vol == vol))
+ 		return 0;
+ 	dreamcastcard->channel->vol = ucontrol->value.integer.value[0];
+ 	dreamcastcard->master_volume = ucontrol->value.integer.value[0];
+diff --git a/sound/sparc/amd7930.c b/sound/sparc/amd7930.c
+index 07962a35f241..b1d431587158 100644
+--- a/sound/sparc/amd7930.c
++++ b/sound/sparc/amd7930.c
+@@ -859,7 +859,7 @@ static int snd_amd7930_put_volume(struct snd_kcontrol *kctl, struct snd_ctl_elem
+ 	spin_lock_irqsave(&amd->lock, flags);
+ 
+ 	if (*swval != ucontrol->value.integer.value[0]) {
+-		*swval = ucontrol->value.integer.value[0];
++		*swval = ucontrol->value.integer.value[0] & 0xff;
+ 		__amd7930_update_map(amd);
+ 		change = 1;
+ 	} else
+diff --git a/sound/sparc/dbri.c b/sound/sparc/dbri.c
+index 376b98691c96..af1bf4bf9459 100644
+--- a/sound/sparc/dbri.c
++++ b/sound/sparc/dbri.c
+@@ -2279,9 +2279,20 @@ static int snd_cs4215_put_volume(struct snd_kcontrol *kcontrol,
+ 	struct snd_dbri *dbri = snd_kcontrol_chip(kcontrol);
+ 	struct dbri_streaminfo *info =
+ 				&dbri->stream_info[kcontrol->private_value];
++	unsigned int vol[2];
+ 	int changed = 0;
+ 
+-	if (info->left_gain != ucontrol->value.integer.value[0]) {
++	vol[0] = ucontrol->value.integer.value[0];
++	vol[1] = ucontrol->value.integer.value[1];
++	if (kcontrol->private_value == DBRI_PLAY) {
++		if (vol[0] > DBRI_MAX_VOLUME || vol[1] > DBRI_MAX_VOLUME)
++			return -EINVAL;
++	} else {
++		if (vol[0] > DBRI_MAX_GAIN || vol[1] > DBRI_MAX_GAIN)
++			return -EINVAL;
++	}
++
++	if (info->left_gain != 
+ 		info->left_gain = ucontrol->value.integer.value[0];
+ 		changed = 1;
+ 	}
+

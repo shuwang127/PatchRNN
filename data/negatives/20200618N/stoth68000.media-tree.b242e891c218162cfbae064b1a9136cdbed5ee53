@@ -1,0 +1,137 @@
+commit b242e891c218162cfbae064b1a9136cdbed5ee53
+Author: Ivo van Doorn <ivdoorn@gmail.com>
+Date:   Thu Nov 15 23:41:31 2007 +0100
+
+    rt2x00: Request usb_maxpacket() once
+    
+    The usb max packet size won't change during the
+    device's presence. We should store it in a
+    variable inside rt2x00dev and use that.
+    This should also fix a division error when the
+    device is being hot-unplugged while a frame is
+    being send out.
+    
+    Signed-off-by: Ivo van Doorn <IvDoorn@gmail.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/rt2x00/rt2500usb.c b/drivers/net/wireless/rt2x00/rt2500usb.c
+index 277a020b35e9..50775f9234cc 100644
+--- a/drivers/net/wireless/rt2x00/rt2500usb.c
++++ b/drivers/net/wireless/rt2x00/rt2500usb.c
+@@ -1032,7 +1032,7 @@ static void rt2500usb_write_tx_desc(struct rt2x00_dev *rt2x00dev,
+ }
+ 
+ static int rt2500usb_get_tx_data_len(struct rt2x00_dev *rt2x00dev,
+-				     int maxpacket, struct sk_buff *skb)
++				     struct sk_buff *skb)
+ {
+ 	int length;
+ 
+@@ -1041,7 +1041,7 @@ static int rt2500usb_get_tx_data_len(struct rt2x00_dev *rt2x00dev,
+ 	 * but it must _not_ be a multiple of the USB packet size.
+ 	 */
+ 	length = roundup(skb->len, 2);
+-	length += (2 * !(length % maxpacket));
++	length += (2 * !(length % rt2x00dev->usb_maxpacket));
+ 
+ 	return length;
+ }
+@@ -1643,7 +1643,6 @@ static int rt2500usb_beacon_update(struct ieee80211_hw *hw,
+ 	struct data_entry *beacon;
+ 	struct data_entry *guardian;
+ 	int pipe = usb_sndbulkpipe(usb_dev, 1);
+-	int max_packet = usb_maxpacket(usb_dev, pipe, 1);
+ 	int length;
+ 
+ 	/*
+@@ -1672,7 +1671,7 @@ static int rt2500usb_beacon_update(struct ieee80211_hw *hw,
+ 							 ring->desc_size),
+ 				skb->len - ring->desc_size, control);
+ 
+-	length = rt2500usb_get_tx_data_len(rt2x00dev, max_packet, skb);
++	length = rt2500usb_get_tx_data_len(rt2x00dev, skb);
+ 
+ 	usb_fill_bulk_urb(beacon->priv, usb_dev, pipe,
+ 			  skb->data, length, rt2500usb_beacondone, beacon);
+diff --git a/drivers/net/wireless/rt2x00/rt2x00.h b/drivers/net/wireless/rt2x00/rt2x00.h
+index d1ad5251a77a..c8f16f161c28 100644
+--- a/drivers/net/wireless/rt2x00/rt2x00.h
++++ b/drivers/net/wireless/rt2x00/rt2x00.h
+@@ -418,7 +418,7 @@ struct rt2x00lib_ops {
+ 	int (*write_tx_data) (struct rt2x00_dev *rt2x00dev,
+ 			      struct data_ring *ring, struct sk_buff *skb,
+ 			      struct ieee80211_tx_control *control);
+-	int (*get_tx_data_len) (struct rt2x00_dev *rt2x00dev, int maxpacket,
++	int (*get_tx_data_len) (struct rt2x00_dev *rt2x00dev,
+ 				struct sk_buff *skb);
+ 	void (*kick_tx_queue) (struct rt2x00_dev *rt2x00dev,
+ 			       unsigned int queue);
+@@ -598,6 +598,11 @@ struct rt2x00_dev {
+ 	 */
+ 	u32 *rf;
+ 
++	/*
++	 * USB Max frame size (for rt2500usb & rt73usb).
++	 */
++	u16 usb_maxpacket;
++
+ 	/*
+ 	 * Current TX power value.
+ 	 */
+diff --git a/drivers/net/wireless/rt2x00/rt2x00usb.c b/drivers/net/wireless/rt2x00/rt2x00usb.c
+index 73cc726c4046..1f5675dd329f 100644
+--- a/drivers/net/wireless/rt2x00/rt2x00usb.c
++++ b/drivers/net/wireless/rt2x00/rt2x00usb.c
+@@ -159,7 +159,6 @@ int rt2x00usb_write_tx_data(struct rt2x00_dev *rt2x00dev,
+ 	    interface_to_usbdev(rt2x00dev_usb(rt2x00dev));
+ 	struct data_entry *entry = rt2x00_get_data_entry(ring);
+ 	int pipe = usb_sndbulkpipe(usb_dev, 1);
+-	int max_packet = usb_maxpacket(usb_dev, pipe, 1);
+ 	u32 length;
+ 
+ 	if (rt2x00_ring_full(ring)) {
+@@ -194,8 +193,7 @@ int rt2x00usb_write_tx_data(struct rt2x00_dev *rt2x00dev,
+ 	 * length of the data to usb_fill_bulk_urb. Pass the skb
+ 	 * to the driver to determine what the length should be.
+ 	 */
+-	length = rt2x00dev->ops->lib->get_tx_data_len(rt2x00dev,
+-						      max_packet, skb);
++	length = rt2x00dev->ops->lib->get_tx_data_len(rt2x00dev, skb);
+ 
+ 	/*
+ 	 * Initialize URB and send the frame to the device.
+@@ -490,6 +488,11 @@ int rt2x00usb_probe(struct usb_interface *usb_intf,
+ 	rt2x00dev->ops = ops;
+ 	rt2x00dev->hw = hw;
+ 
++	rt2x00dev->usb_maxpacket =
++	    usb_maxpacket(usb_dev, usb_sndbulkpipe(usb_dev, 1), 1);
++	if (!rt2x00dev->usb_maxpacket)
++		rt2x00dev->usb_maxpacket = 1;
++
+ 	retval = rt2x00usb_alloc_reg(rt2x00dev);
+ 	if (retval)
+ 		goto exit_free_device;
+diff --git a/drivers/net/wireless/rt2x00/rt73usb.c b/drivers/net/wireless/rt2x00/rt73usb.c
+index dc640bf6b5eb..c0671c2e6e73 100644
+--- a/drivers/net/wireless/rt2x00/rt73usb.c
++++ b/drivers/net/wireless/rt2x00/rt73usb.c
+@@ -1251,7 +1251,7 @@ static void rt73usb_write_tx_desc(struct rt2x00_dev *rt2x00dev,
+ }
+ 
+ static int rt73usb_get_tx_data_len(struct rt2x00_dev *rt2x00dev,
+-				   int maxpacket, struct sk_buff *skb)
++				   struct sk_buff *skb)
+ {
+ 	int length;
+ 
+@@ -1260,7 +1260,7 @@ static int rt73usb_get_tx_data_len(struct rt2x00_dev *rt2x00dev,
+ 	 * but it must _not_ be a multiple of the USB packet size.
+ 	 */
+ 	length = roundup(skb->len, 4);
+-	length += (4 * !(length % maxpacket));
++	length += (4 * !(length % rt2x00dev->usb_maxpacket));
+ 
+ 	return length;
+ }
+

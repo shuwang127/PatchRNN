@@ -1,0 +1,182 @@
+commit f94361612a69bea8afb4dde4c17a98f8fd915244
+Author: Stefano Sabatini <stefano.sabatini-lala@poste.it>
+Date:   Wed Sep 19 12:38:07 2007 +0000
+
+    Make parse_date return INT64_MIN in case of unparsable input.
+    Patch by Stefano Sabatini: [stefano sabatini-lala poste it]
+    Original thread:
+    [FFmpeg-devel] [PATCH] Enhace documentation forlibavformat/utils.c:parse_date
+    Date: 08/17/2007 09:40 PM
+    
+    Originally committed as revision 10533 to svn://svn.ffmpeg.org/ffmpeg/trunk
+
+diff --git a/ffmpeg.c b/ffmpeg.c
+index 905c3427f..068778061 100644
+--- a/ffmpeg.c
++++ b/ffmpeg.c
+@@ -2491,24 +2491,35 @@ static void opt_map_meta_data(const char *arg)
+     m->in_file = strtol(p, (char **)&p, 0);
+ }
+ 
++static int64_t parse_time_or_die(const char *timestr, int is_duration)
++{
++    int64_t us = parse_date(timestr, is_duration);
++    if (us == INT64_MIN) {
++        fprintf(stderr, "Invalid %s specification: %s\n",
++                is_duration ? "duration" : "date", timestr);
++        exit(1);
++    }
++    return us;
++}
++
+ static void opt_recording_time(const char *arg)
+ {
+-    recording_time = parse_date(arg, 1);
++    recording_time = parse_time_or_die(arg, 1);
+ }
+ 
+ static void opt_start_time(const char *arg)
+ {
+-    start_time = parse_date(arg, 1);
++    start_time = parse_time_or_die(arg, 1);
+ }
+ 
+ static void opt_rec_timestamp(const char *arg)
+ {
+-    rec_timestamp = parse_date(arg, 0) / 1000000;
++    rec_timestamp = parse_time_or_die(arg, 0) / 1000000;
+ }
+ 
+ static void opt_input_ts_offset(const char *arg)
+ {
+-    input_ts_offset = parse_date(arg, 1);
++    input_ts_offset = parse_time_or_die(arg, 1);
+ }
+ 
+ static enum CodecID find_codec_or_die(const char *name, int type, int encoder)
+diff --git a/ffplay.c b/ffplay.c
+index bf109ad1e..6ec1bcb34 100644
+--- a/ffplay.c
++++ b/ffplay.c
+@@ -2406,6 +2406,10 @@ static void opt_sync(const char *arg)
+ static void opt_seek(const char *arg)
+ {
+     start_time = parse_date(arg, 1);
++    if (start_time == INT64_MIN) {
++        fprintf(stderr, "Invalid duration specification: %s\n", arg);
++        exit(1);
++    }
+ }
+ 
+ static void opt_debug(const char *arg)
+diff --git a/ffserver.c b/ffserver.c
+index 96eb4fe0f..90bc90897 100644
+--- a/ffserver.c
++++ b/ffserver.c
+@@ -1887,7 +1887,11 @@ static int open_input_stream(HTTPContext *c, const char *info)
+         buf_size = FFM_PACKET_SIZE;
+         /* compute position (absolute time) */
+         if (find_info_tag(buf, sizeof(buf), "date", info))
++        {
+             stream_pos = parse_date(buf, 0);
++            if (stream_pos == INT64_MIN)
++                return -1;
++        }
+         else if (find_info_tag(buf, sizeof(buf), "buffer", info)) {
+             int prebuffer = strtol(buf, 0, 10);
+             stream_pos = av_gettime() - prebuffer * (int64_t)1000000;
+@@ -1898,7 +1902,11 @@ static int open_input_stream(HTTPContext *c, const char *info)
+         buf_size = 0;
+         /* compute position (relative time) */
+         if (find_info_tag(buf, sizeof(buf), "date", info))
++        {
+             stream_pos = parse_date(buf, 1);
++            if (stream_pos == INT64_MIN)
++                return -1;
++        }
+         else
+             stream_pos = 0;
+     }
+diff --git a/libavformat/avformat.h b/libavformat/avformat.h
+index a58200c31..0ca5f41a2 100644
+--- a/libavformat/avformat.h
++++ b/libavformat/avformat.h
+@@ -21,8 +21,8 @@
+ #ifndef AVFORMAT_H
+ #define AVFORMAT_H
+ 
+-#define LIBAVFORMAT_VERSION_INT ((51<<16)+(13<<8)+3)
+-#define LIBAVFORMAT_VERSION     51.13.3
++#define LIBAVFORMAT_VERSION_INT ((51<<16)+(13<<8)+4)
++#define LIBAVFORMAT_VERSION     51.13.4
+ #define LIBAVFORMAT_BUILD       LIBAVFORMAT_VERSION_INT
+ 
+ #define LIBAVFORMAT_IDENT       "Lavf" AV_STRINGIFY(LIBAVFORMAT_VERSION)
+@@ -794,19 +794,30 @@ attribute_deprecated int parse_image_size(int *width_ptr, int *height_ptr, const
+ attribute_deprecated int parse_frame_rate(int *frame_rate, int *frame_rate_base, const char *arg);
+ 
+ /**
+- * Converts date string to number of seconds since Jan 1st, 1970.
+- *
++ * Parses \p datestr and returns a corresponding number of microseconds.
++ * @param datestr String representing a date or a duration.
++ * - If a date the syntax is:
+  * @code
+- * Syntax:
+- * - If not a duration:
+  *  [{YYYY-MM-DD|YYYYMMDD}]{T| }{HH[:MM[:SS[.m...]]][Z]|HH[MM[SS[.m...]]][Z]}
+- * Time is localtime unless Z is suffixed to the end. In this case GMT
+- * Return the date in micro seconds since 1970
+- *
+- * - If a duration:
+- *  HH[:MM[:SS[.m...]]]
+- *  S+[.m...]
+  * @endcode
++ * Time is localtime unless Z is appended, in which case it is
++ * interpreted as UTC.
++ * If the year-month-day part isn't specified it takes the current
++ * year-month-day.
++ * Returns the number of microseconds since 1st of January, 1970 up to
++ * the time of the parsed date or INT64_MIN if \p datestr cannot be
++ * successfully parsed.
++ * - If a duration the syntax is:
++ * @code
++ *  [-]HH[:MM[:SS[.m...]]]
++ *  [-]S+[.m...]
++ * @endcode
++ * Returns the number of microseconds contained in a time interval
++ * with the specified duration or INT64_MIN if \p datestr cannot be
++ * succesfully parsed.
++ * @param duration Flag which tells how to interpret \p datestr, if
++ * not zero \p datestr is interpreted as a duration, otherwise as a
++ * date.
+  */
+ int64_t parse_date(const char *datestr, int duration);
+ 
+diff --git a/libavformat/utils.c b/libavformat/utils.c
+index b018de99d..dcdd5f010 100644
+--- a/libavformat/utils.c
++++ b/libavformat/utils.c
+@@ -2621,6 +2621,9 @@ int64_t parse_date(const char *datestr, int duration)
+         if (!q) {
+             /* parse datestr as S+ */
+             dt.tm_sec = strtol(p, (char **)&q, 10);
++            if (q == p)
++                /* the parsing didn't succeed */
++                return INT64_MIN;
+             dt.tm_min = 0;
+             dt.tm_hour = 0;
+         }
+@@ -2628,10 +2631,7 @@ int64_t parse_date(const char *datestr, int duration)
+ 
+     /* Now we have all the fields that we can get */
+     if (!q) {
+-        if (duration)
+-            return 0;
+-        else
+-            return now * INT64_C(1000000);
++        return INT64_MIN;
+     }
+ 
+     if (duration) {
+

@@ -1,0 +1,109 @@
+commit f8fffa458368ed3d57385698f775880db629bd1a
+Author: Yinghai Lu <Yinghai.Lu@Sun.COM>
+Date:   Sun Feb 24 21:36:28 2008 -0800
+
+    x86: apic_is_clustered_box for vsmp
+    
+    quad core 8 socket system will have apic id lifting.the apic id range could
+    be [4, 0x23]. and apic_is_clustered_box will think that need to three clusters
+    and that is larger than 2. So it is treated as a clustered_box.
+    
+    and will get:
+    
+       Marking TSC unstable due to TSCs unsynchronized
+    
+    even if the CPUs have X86_FEATURE_CONSTANT_TSC set.
+    
+    this quick fix will check if the cpu is from AMD.
+    
+    but vsmp still needs that checking...
+    
+    this patch is fix to make sure that vsmp not to be passed.
+    
+    Signed-off-by: Yinghai Lu <yinghai.lu@sun.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/arch/x86/kernel/apic_64.c b/arch/x86/kernel/apic_64.c
+index ac2405ed504d..f6eb01d8923a 100644
+--- a/arch/x86/kernel/apic_64.c
++++ b/arch/x86/kernel/apic_64.c
+@@ -1182,9 +1182,9 @@ __cpuinit int apic_is_clustered_box(void)
+ 	 * there is not this kind of box with AMD CPU yet.
+ 	 * Some AMD box with quadcore cpu and 8 sockets apicid
+ 	 * will be [4, 0x23] or [8, 0x27] could be thought to
+-	 * have three apic_clusters. So go out early.
++	 * vsmp box still need checking...
+ 	 */
+-	if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD)
++	if (!is_vsmp_box() && (boot_cpu_data.x86_vendor == X86_VENDOR_AMD))
+ 		return 0;
+ 
+ 	bios_cpu_apicid = x86_bios_cpu_apicid_early_ptr;
+diff --git a/arch/x86/kernel/vsmp_64.c b/arch/x86/kernel/vsmp_64.c
+index 54202b1805da..a00961d42e75 100644
+--- a/arch/x86/kernel/vsmp_64.c
++++ b/arch/x86/kernel/vsmp_64.c
+@@ -72,19 +72,34 @@ static unsigned __init vsmp_patch(u8 type, u16 clobbers, void *ibuf,
+ 
+ }
+ 
++static int vsmp = -1;
++
++int is_vsmp_box(void)
++{
++	if (vsmp != -1)
++		return vsmp;
++
++	vsmp = 0;
++	if (!early_pci_allowed())
++		return vsmp;
++
++	/* Check if we are running on a ScaleMP vSMP box */
++	if (read_pci_config(0, 0x1f, 0, PCI_VENDOR_ID) ==
++	     (PCI_VENDOR_ID_SCALEMP || (PCI_DEVICE_ID_SCALEMP_VSMP_CTL << 16)))
++		vsmp = 1;
++
++	return vsmp;
++}
++
+ void __init vsmp_init(void)
+ {
+ 	void *address;
+ 	unsigned int cap, ctl, cfg;
+ 
+-	if (!early_pci_allowed())
++	if (!is_vsmp_box())
+ 		return;
+ 
+-	/* Check if we are running on a ScaleMP vSMP box */
+-	if ((read_pci_config_16(0, 0x1f, 0, PCI_VENDOR_ID) !=
+-	     PCI_VENDOR_ID_SCALEMP) ||
+-	    (read_pci_config_16(0, 0x1f, 0, PCI_DEVICE_ID) !=
+-	     PCI_DEVICE_ID_SCALEMP_VSMP_CTL))
++	if (!early_pci_allowed())
+ 		return;
+ 
+ 	/* If we are, use the distinguished irq functions */
+diff --git a/include/asm-x86/apic.h b/include/asm-x86/apic.h
+index bcfc07fd3661..f0321a427e16 100644
+--- a/include/asm-x86/apic.h
++++ b/include/asm-x86/apic.h
+@@ -51,12 +51,17 @@ extern unsigned boot_cpu_id;
+  */
+ #ifdef CONFIG_PARAVIRT
+ #include <asm/paravirt.h>
++extern int is_vsmp_box(void);
+ #else
+ #define apic_write native_apic_write
+ #define apic_write_atomic native_apic_write_atomic
+ #define apic_read native_apic_read
+ #define setup_boot_clock setup_boot_APIC_clock
+ #define setup_secondary_clock setup_secondary_APIC_clock
++static int inline is_vsmp_box(void)
++{
++	return 0;
++}
+ #endif
+ 
+ static inline void native_apic_write(unsigned long reg, u32 v)
+

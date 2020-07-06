@@ -1,0 +1,324 @@
+commit 2305623bc0ac5e1a4c0818c87cd12528b52bc15c
+Author: claudio <claudio@openbsd.org>
+Date:   Fri Sep 11 07:42:35 2015 +0000
+
+    in6_embedscope() needs to lose some weight. Remove the last argument.
+    In all but two calls NULL is passed and in the other 2 cases the ifp
+    is only used to maybe feed it to in6_selecthlim() to select the hoplimit
+    for the link. Since in6_embedscope() only works on link-local addresses
+    it does not matter what hop limit we select since the destination is
+    directly reachable.
+    OK florian@ mpi@
+
+diff --git a/sys/net/pfkeyv2_convert.c b/sys/net/pfkeyv2_convert.c
+index cbad909ec6b..350231661d6 100644
+--- a/sys/net/pfkeyv2_convert.c
++++ b/sys/net/pfkeyv2_convert.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: pfkeyv2_convert.c,v 1.54 2015/06/11 15:59:17 mikeb Exp $	*/
++/*	$OpenBSD: pfkeyv2_convert.c,v 1.55 2015/09/11 07:42:35 claudio Exp $	*/
+ /*
+  * The author of this code is Angelos D. Keromytis (angelos@keromytis.org)
+  *
+@@ -483,9 +483,9 @@ import_flow(struct sockaddr_encap *flow, struct sockaddr_encap *flowmask,
+ #ifdef INET6
+ 	case AF_INET6:
+ 		in6_embedscope(&src->sin6.sin6_addr, &src->sin6,
+-		    NULL, NULL);
++		    NULL);
+ 		in6_embedscope(&dst->sin6.sin6_addr, &dst->sin6,
+-		    NULL, NULL);
++		    NULL);
+ 
+ 		/* netmask handling */
+ 		rt_maskedcopy(&src->sa, &src->sa, &srcmask->sa);
+diff --git a/sys/net/pipex.c b/sys/net/pipex.c
+index 385d4f86ec5..91f19ab712b 100644
+--- a/sys/net/pipex.c
++++ b/sys/net/pipex.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: pipex.c,v 1.76 2015/09/10 17:52:05 claudio Exp $	*/
++/*	$OpenBSD: pipex.c,v 1.77 2015/09/11 07:42:35 claudio Exp $	*/
+ 
+ /*-
+  * Copyright (c) 2009 Internet Initiative Japan Inc.
+@@ -1976,7 +1976,7 @@ pipex_l2tp_output(struct mbuf *m0, struct pipex_session *session)
+ 		ip6->ip6_nxt = IPPROTO_UDP;
+ 		ip6->ip6_src = session->local.sin6.sin6_addr;
+ 		(void)in6_embedscope(&ip6->ip6_dst,
+-		    &session->peer.sin6, NULL, NULL);
++		    &session->peer.sin6, NULL);
+ 		/* ip6->ip6_plen will be filled in ip6_output. */
+ 
+ 		if (ip6_output(m0, NULL, NULL, 0, NULL, NULL, NULL) != 0) {
+diff --git a/sys/netinet/ip_ipip.c b/sys/netinet/ip_ipip.c
+index 5d8031ede7d..145e4bbdd90 100644
+--- a/sys/netinet/ip_ipip.c
++++ b/sys/netinet/ip_ipip.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ip_ipip.c,v 1.66 2015/09/09 20:19:26 dlg Exp $ */
++/*	$OpenBSD: ip_ipip.c,v 1.67 2015/09/11 07:42:35 claudio Exp $ */
+ /*
+  * The authors of this code are John Ioannidis (ji@tla.org),
+  * Angelos D. Keromytis (kermit@csd.uch.gr) and
+@@ -517,8 +517,8 @@ ipip_output(struct mbuf *m, struct tdb *tdb, struct mbuf **mp, int dummy,
+ 		ip6o->ip6_vfc |= IPV6_VERSION;
+ 		ip6o->ip6_plen = htons(m->m_pkthdr.len - sizeof(*ip6o));
+ 		ip6o->ip6_hlim = ip_defttl;
+-		in6_embedscope(&ip6o->ip6_src, &tdb->tdb_src.sin6, NULL, NULL);
+-		in6_embedscope(&ip6o->ip6_dst, &tdb->tdb_dst.sin6, NULL, NULL);
++		in6_embedscope(&ip6o->ip6_src, &tdb->tdb_src.sin6, NULL);
++		in6_embedscope(&ip6o->ip6_dst, &tdb->tdb_dst.sin6, NULL);
+ 
+ 		if (tp == IPVERSION) {
+ 			/* Save ECN notification */
+diff --git a/sys/netinet/tcp_usrreq.c b/sys/netinet/tcp_usrreq.c
+index 8dc00e67f38..c5388a0e2ed 100644
+--- a/sys/netinet/tcp_usrreq.c
++++ b/sys/netinet/tcp_usrreq.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: tcp_usrreq.c,v 1.127 2015/08/27 17:10:45 bluhm Exp $	*/
++/*	$OpenBSD: tcp_usrreq.c,v 1.128 2015/09/11 07:42:35 claudio Exp $	*/
+ /*	$NetBSD: tcp_usrreq.c,v 1.20 1996/02/13 23:44:16 christos Exp $	*/
+ 
+ /*
+@@ -794,11 +794,11 @@ tcp_ident(void *oldp, size_t *oldlenp, void *newp, size_t newlen, int dodrop)
+ #ifdef INET6
+ 	case AF_INET6:
+ 		fin6 = (struct sockaddr_in6 *)&tir.faddr;
+-		error = in6_embedscope(&f6, fin6, NULL, NULL);
++		error = in6_embedscope(&f6, fin6, NULL);
+ 		if (error)
+ 			return EINVAL;	/*?*/
+ 		lin6 = (struct sockaddr_in6 *)&tir.laddr;
+-		error = in6_embedscope(&l6, lin6, NULL, NULL);
++		error = in6_embedscope(&l6, lin6, NULL);
+ 		if (error)
+ 			return EINVAL;	/*?*/
+ 		break;
+diff --git a/sys/netinet/udp_usrreq.c b/sys/netinet/udp_usrreq.c
+index d92b1055701..365f2f23b8d 100644
+--- a/sys/netinet/udp_usrreq.c
++++ b/sys/netinet/udp_usrreq.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: udp_usrreq.c,v 1.206 2015/09/10 17:52:05 claudio Exp $	*/
++/*	$OpenBSD: udp_usrreq.c,v 1.207 2015/09/11 07:42:35 claudio Exp $	*/
+ /*	$NetBSD: udp_usrreq.c,v 1.28 1996/03/16 23:54:03 christos Exp $	*/
+ 
+ /*
+@@ -742,7 +742,7 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *d)
+ 		cmdarg = NULL;
+ 		/* XXX: translate addresses into internal form */
+ 		sa6 = *satosin6(sa);
+-		if (in6_embedscope(&sa6.sin6_addr, &sa6, NULL, NULL)) {
++		if (in6_embedscope(&sa6.sin6_addr, &sa6, NULL)) {
+ 			/* should be impossible */
+ 			return;
+ 		}
+@@ -756,14 +756,14 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *d)
+ 		/* XXX: assuming M is valid in this case */
+ 		sa6.sin6_scope_id = in6_addr2scopeid(m->m_pkthdr.ph_ifidx,
+ 		    ip6cp->ip6c_finaldst);
+-		if (in6_embedscope(ip6cp->ip6c_finaldst, &sa6, NULL, NULL)) {
++		if (in6_embedscope(ip6cp->ip6c_finaldst, &sa6, NULL)) {
+ 			/* should be impossible */
+ 			return;
+ 		}
+ 	} else {
+ 		/* XXX: translate addresses into internal form */
+ 		sa6 = *satosin6(sa);
+-		if (in6_embedscope(&sa6.sin6_addr, &sa6, NULL, NULL)) {
++		if (in6_embedscope(&sa6.sin6_addr, &sa6, NULL)) {
+ 			/* should be impossible */
+ 			return;
+ 		}
+@@ -789,7 +789,7 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *d)
+ 		sa6_src.sin6_addr = ip6->ip6_src;
+ 		sa6_src.sin6_scope_id = in6_addr2scopeid(m->m_pkthdr.ph_ifidx,
+ 		    &ip6->ip6_src);
+-		if (in6_embedscope(&sa6_src.sin6_addr, &sa6_src, NULL, NULL)) {
++		if (in6_embedscope(&sa6_src.sin6_addr, &sa6_src, NULL)) {
+ 			/* should be impossible */
+ 			return;
+ 		}
+diff --git a/sys/netinet6/icmp6.c b/sys/netinet6/icmp6.c
+index f9fbdd4843e..b5fd30e3042 100644
+--- a/sys/netinet6/icmp6.c
++++ b/sys/netinet6/icmp6.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: icmp6.c,v 1.165 2015/09/10 17:52:05 claudio Exp $	*/
++/*	$OpenBSD: icmp6.c,v 1.166 2015/09/11 07:42:35 claudio Exp $	*/
+ /*	$KAME: icmp6.c,v 1.217 2001/06/20 15:03:29 jinmei Exp $	*/
+ 
+ /*
+@@ -908,8 +908,7 @@ icmp6_notify_error(struct mbuf *m, int off, int icmp6len, int code)
+ 			icmp6dst.sin6_addr = *finaldst;
+ 		icmp6dst.sin6_scope_id = in6_addr2scopeid(m->m_pkthdr.ph_ifidx,
+ 		    &icmp6dst.sin6_addr);
+-		if (in6_embedscope(&icmp6dst.sin6_addr, &icmp6dst,
+-				   NULL, NULL)) {
++		if (in6_embedscope(&icmp6dst.sin6_addr, &icmp6dst, NULL)) {
+ 			/* should be impossbile */
+ 			nd6log((LOG_DEBUG,
+ 			    "icmp6_notify_error: in6_embedscope failed\n"));
+@@ -926,8 +925,7 @@ icmp6_notify_error(struct mbuf *m, int off, int icmp6len, int code)
+ 		icmp6src.sin6_addr = eip6->ip6_src;
+ 		icmp6src.sin6_scope_id = in6_addr2scopeid(m->m_pkthdr.ph_ifidx,
+ 		    &icmp6src.sin6_addr);
+-		if (in6_embedscope(&icmp6src.sin6_addr, &icmp6src,
+-				   NULL, NULL)) {
++		if (in6_embedscope(&icmp6src.sin6_addr, &icmp6src, NULL)) {
+ 			/* should be impossbile */
+ 			nd6log((LOG_DEBUG,
+ 			    "icmp6_notify_error: in6_embedscope failed\n"));
+@@ -1217,13 +1215,13 @@ icmp6_reflect(struct mbuf *m, size_t off)
+ 	sa6_src.sin6_len = sizeof(sa6_src);
+ 	sa6_src.sin6_addr = ip6->ip6_dst;
+ 	in6_recoverscope(&sa6_src, &ip6->ip6_dst);
+-	in6_embedscope(&ip6->ip6_dst, &sa6_src, NULL, NULL);
++	in6_embedscope(&ip6->ip6_dst, &sa6_src, NULL);
+ 	bzero(&sa6_dst, sizeof(sa6_dst));
+ 	sa6_dst.sin6_family = AF_INET6;
+ 	sa6_dst.sin6_len = sizeof(sa6_dst);
+ 	sa6_dst.sin6_addr = t;
+ 	in6_recoverscope(&sa6_dst, &t);
+-	in6_embedscope(&t, &sa6_dst, NULL, NULL);
++	in6_embedscope(&t, &sa6_dst, NULL);
+ 
+ 	/*
+ 	 * If the incoming packet was addressed directly to us (i.e. unicast),
+diff --git a/sys/netinet6/in6.h b/sys/netinet6/in6.h
+index 73be3994fda..452d17d55f2 100644
+--- a/sys/netinet6/in6.h
++++ b/sys/netinet6/in6.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: in6.h,v 1.84 2015/09/10 17:52:05 claudio Exp $	*/
++/*	$OpenBSD: in6.h,v 1.85 2015/09/11 07:42:35 claudio Exp $	*/
+ /*	$KAME: in6.h,v 1.83 2001/03/29 02:55:07 jinmei Exp $	*/
+ 
+ /*
+@@ -436,7 +436,7 @@ int	in6_mask2len(struct in6_addr *, u_char *);
+ struct inpcb;
+ 
+ int	in6_embedscope(struct in6_addr *, const struct sockaddr_in6 *,
+-	    struct inpcb *, struct ifnet **);
++	    struct inpcb *);
+ void	in6_recoverscope(struct sockaddr_in6 *, const struct in6_addr *);
+ void	in6_clearscope(struct in6_addr *);
+ 
+diff --git a/sys/netinet6/in6_pcb.c b/sys/netinet6/in6_pcb.c
+index cb8acc98634..79d6947e006 100644
+--- a/sys/netinet6/in6_pcb.c
++++ b/sys/netinet6/in6_pcb.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: in6_pcb.c,v 1.71 2015/09/10 17:52:05 claudio Exp $	*/
++/*	$OpenBSD: in6_pcb.c,v 1.72 2015/09/11 07:42:35 claudio Exp $	*/
+ 
+ /*
+  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
+@@ -194,7 +194,7 @@ in6_pcbbind(struct inpcb *inp, struct mbuf *nam, struct proc *p)
+ 			return EAFNOSUPPORT;
+ 
+ 		/* KAME hack: embed scopeid */
+-		if (in6_embedscope(&sin6->sin6_addr, sin6, inp, NULL) != 0)
++		if (in6_embedscope(&sin6->sin6_addr, sin6, inp) != 0)
+ 			return EINVAL;
+ 		/* this must be cleared for ifa_ifwithaddr() */
+ 		sin6->sin6_scope_id = 0;
+@@ -418,7 +418,7 @@ in6_pcbconnect(struct inpcb *inp, struct mbuf *nam)
+ 	sin6 = &tmp;
+ 
+ 	/* KAME hack: embed scopeid */
+-	if (in6_embedscope(&sin6->sin6_addr, sin6, inp, &ifp) != 0)
++	if (in6_embedscope(&sin6->sin6_addr, sin6, inp) != 0)
+ 		return EINVAL;
+ 	/* this must be cleared for ifa_ifwithaddr() */
+ 	sin6->sin6_scope_id = 0;
+diff --git a/sys/netinet6/in6_src.c b/sys/netinet6/in6_src.c
+index d040eeb32db..3b370fddfb6 100644
+--- a/sys/netinet6/in6_src.c
++++ b/sys/netinet6/in6_src.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: in6_src.c,v 1.56 2015/09/10 17:52:05 claudio Exp $	*/
++/*	$OpenBSD: in6_src.c,v 1.57 2015/09/11 07:42:35 claudio Exp $	*/
+ /*	$KAME: in6_src.c,v 1.36 2001/02/06 04:08:17 itojun Exp $	*/
+ 
+ /*
+@@ -586,15 +586,13 @@ in6_selecthlim(struct inpcb *in6p, struct ifnet *ifp)
+  */
+ int
+ in6_embedscope(struct in6_addr *in6, const struct sockaddr_in6 *sin6,
+-    struct inpcb *in6p, struct ifnet **ifpp)
++    struct inpcb *in6p)
+ {
+ 	struct ifnet *ifp = NULL;
+ 	u_int32_t scopeid;
+ 
+ 	*in6 = sin6->sin6_addr;
+ 	scopeid = sin6->sin6_scope_id;
+-	if (ifpp)
+-		*ifpp = NULL;
+ 
+ 	/*
+ 	 * don't try to read sin6->sin6_addr beyond here, since the caller may
+@@ -616,8 +614,8 @@ in6_embedscope(struct in6_addr *in6, const struct sockaddr_in6 *sin6,
+ 				return ENXIO;  /* XXX EINVAL? */
+ 			in6->s6_addr16[1] = htons(pi->ipi6_ifindex);
+ 		} else if (in6p && IN6_IS_ADDR_MULTICAST(in6) &&
+-			   in6p->inp_moptions6 &&
+-			   (ifp = if_get(in6p->inp_moptions6->im6o_ifidx))) {
++		    in6p->inp_moptions6 &&
++		    (ifp = if_get(in6p->inp_moptions6->im6o_ifidx))) {
+ 			in6->s6_addr16[1] = htons(ifp->if_index);
+ 		} else if (scopeid) {
+ 			ifp = if_get(scopeid);
+@@ -626,9 +624,7 @@ in6_embedscope(struct in6_addr *in6, const struct sockaddr_in6 *sin6,
+ 			/*XXX assignment to 16bit from 32bit variable */
+ 			in6->s6_addr16[1] = htons(scopeid & 0xffff);
+ 		}
+-
+-		if (ifpp)
+-			*ifpp = ifp;
++		if_put(ifp);
+ 	}
+ 
+ 	return 0;
+diff --git a/sys/netinet6/raw_ip6.c b/sys/netinet6/raw_ip6.c
+index f27ae94e8b9..6f337022c08 100644
+--- a/sys/netinet6/raw_ip6.c
++++ b/sys/netinet6/raw_ip6.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: raw_ip6.c,v 1.82 2015/09/10 17:52:05 claudio Exp $	*/
++/*	$OpenBSD: raw_ip6.c,v 1.83 2015/09/11 07:42:35 claudio Exp $	*/
+ /*	$KAME: raw_ip6.c,v 1.69 2001/03/04 15:55:44 itojun Exp $	*/
+ 
+ /*
+@@ -402,7 +402,7 @@ rip6_output(struct mbuf *m, ...)
+ 	/* KAME hack: embed scopeid */
+ 	origoptp = in6p->inp_outputopts6;
+ 	in6p->inp_outputopts6 = optp;
+-	if (in6_embedscope(&ip6->ip6_dst, dstsock, in6p, &oifp) != 0) {
++	if (in6_embedscope(&ip6->ip6_dst, dstsock, in6p) != 0) {
+ 		error = EINVAL;
+ 		goto bad;
+ 	}
+diff --git a/sys/netinet6/udp6_output.c b/sys/netinet6/udp6_output.c
+index 22555928ea2..67e0c0249cd 100644
+--- a/sys/netinet6/udp6_output.c
++++ b/sys/netinet6/udp6_output.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: udp6_output.c,v 1.35 2015/06/08 22:19:28 krw Exp $	*/
++/*	$OpenBSD: udp6_output.c,v 1.36 2015/09/11 07:42:35 claudio Exp $	*/
+ /*	$KAME: udp6_output.c,v 1.21 2001/02/07 11:51:54 itojun Exp $	*/
+ 
+ /*
+@@ -151,7 +151,7 @@ udp6_output(struct inpcb *in6p, struct mbuf *m, struct mbuf *addr6,
+ 		fport = sin6->sin6_port; /* allow 0 port */
+ 
+ 		/* KAME hack: embed scopeid */
+-		if (in6_embedscope(&sin6->sin6_addr, sin6, in6p, NULL) != 0) {
++		if (in6_embedscope(&sin6->sin6_addr, sin6, in6p) != 0) {
+ 			error = EINVAL;
+ 			goto release;
+ 		}
+

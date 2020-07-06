@@ -1,0 +1,64 @@
+commit f461a1d80c865e5ec4d24107adbab8b010b60e32
+Author: Julia Lawall <julia@diku.dk>
+Date:   Wed Sep 10 13:57:43 2008 +0200
+
+    arch/x86/kernel/kdebugfs.c: introduce missing kfree
+    
+    Error handling code following a kmalloc should free the allocated data.
+    Note that at the point of the change, node has not yet been stored in d, so
+    it is not affected by the existing cleanup code.
+    
+    The semantic match that finds the problem is as follows:
+    (http://www.emn.fr/x-info/coccinelle/)
+    
+    // <smpl>
+    @r exists@
+    local idexpression x;
+    statement S;
+    expression E;
+    identifier f,l;
+    position p1,p2;
+    expression *ptr != NULL;
+    @@
+    
+    (
+    if ((x@p1 = \(kmalloc\|kzalloc\|kcalloc\)(...)) == NULL) S
+    |
+    x@p1 = \(kmalloc\|kzalloc\|kcalloc\)(...);
+    ...
+    if (x == NULL) S
+    )
+    <... when != x
+         when != if (...) { <+...x...+> }
+    x->f = E
+    ...>
+    (
+     return \(0\|<+...x...+>\|ptr\);
+    |
+     return@p2 ...;
+    )
+    
+    @script:python@
+    p1 << r.p1;
+    p2 << r.p2;
+    @@
+    
+    print "* file: %s kmalloc %s return %s" % (p1[0].file,p1[0].line,p2[0].line)
+    // </smpl>
+    
+    Signed-off-by: Julia Lawall <julia@diku.dk>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/arch/x86/kernel/kdebugfs.c b/arch/x86/kernel/kdebugfs.c
+index f2d43bc75514..ff7d3b0124f1 100644
+--- a/arch/x86/kernel/kdebugfs.c
++++ b/arch/x86/kernel/kdebugfs.c
+@@ -139,6 +139,7 @@ static int __init create_setup_data_nodes(struct dentry *parent)
+ 		if (PageHighMem(pg)) {
+ 			data = ioremap_cache(pa_data, sizeof(*data));
+ 			if (!data) {
++				kfree(node);
+ 				error = -ENXIO;
+ 				goto err_dir;
+ 			}
+

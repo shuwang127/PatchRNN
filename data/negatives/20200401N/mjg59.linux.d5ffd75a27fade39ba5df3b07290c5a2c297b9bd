@@ -1,0 +1,75 @@
+commit d5ffd75a27fade39ba5df3b07290c5a2c297b9bd
+Author: Nicholas Nunley <nicholasx.d.nunley@intel.com>
+Date:   Tue Apr 27 19:47:49 2010 -0700
+
+    ixgbe: disable MSI-X by default on certain Cisco adapters
+    
+    Due to an errata in 82598 parts MSI-X needs to be disabled
+    in certain ixgbe devices designed to transfer peer-to-peer
+    traffic on the PCIe bus. This patch sets the default
+    interrupt type to MSI rather than MSI-X for specific Cisco
+    ixgbe adapters.
+    
+    Signed-off-by: Nicholas Nunley <nicholasx.d.nunley@intel.com>
+    Acked-by: John Ronciak <john.ronciak@intel.com>
+    Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ixgbe/ixgbe.h b/drivers/net/ixgbe/ixgbe.h
+index 79c35ae3718c..ec6bcc0660c6 100644
+--- a/drivers/net/ixgbe/ixgbe.h
++++ b/drivers/net/ixgbe/ixgbe.h
+@@ -104,6 +104,10 @@
+ #define MAX_EMULATION_MAC_ADDRS         16
+ #define VMDQ_P(p)   ((p) + adapter->num_vfs)
+ 
++#define IXGBE_SUBDEV_ID_82598AF_MEZZ		0x0049
++#define IXGBE_SUBDEV_ID_82598AF_MENLO_Q_MEZZ	0x004a
++#define IXGBE_SUBDEV_ID_82598AF_MENLO_E_MEZZ	0x004b
++
+ struct vf_data_storage {
+ 	unsigned char vf_mac_addresses[ETH_ALEN];
+ 	u16 vf_mc_hashes[IXGBE_MAX_VF_MC_ENTRIES];
+diff --git a/drivers/net/ixgbe/ixgbe_main.c b/drivers/net/ixgbe/ixgbe_main.c
+index 2ae5a5159ce4..ff59f88dc7a1 100644
+--- a/drivers/net/ixgbe/ixgbe_main.c
++++ b/drivers/net/ixgbe/ixgbe_main.c
+@@ -4314,6 +4314,9 @@ static int ixgbe_set_interrupt_capability(struct ixgbe_adapter *adapter)
+ 	int err = 0;
+ 	int vector, v_budget;
+ 
++	if (!(adapter->flags & IXGBE_FLAG_MSIX_CAPABLE))
++		goto try_msi;
++
+ 	/*
+ 	 * It's easy to be greedy for MSI-X vectors, but it really
+ 	 * doesn't do us much good if we have a lot more vectors
+@@ -4345,7 +4348,7 @@ static int ixgbe_set_interrupt_capability(struct ixgbe_adapter *adapter)
+ 		if (adapter->flags & IXGBE_FLAG_MSIX_ENABLED)
+ 			goto out;
+ 	}
+-
++try_msi:
+ 	adapter->flags &= ~IXGBE_FLAG_DCB_ENABLED;
+ 	adapter->flags &= ~IXGBE_FLAG_RSS_ENABLED;
+ 	adapter->flags &= ~IXGBE_FLAG_FDIR_HASH_CAPABLE;
+@@ -4626,6 +4629,18 @@ static int __devinit ixgbe_sw_init(struct ixgbe_adapter *adapter)
+ 	adapter->ring_feature[RING_F_RSS].indices = rss;
+ 	adapter->flags |= IXGBE_FLAG_RSS_ENABLED;
+ 	adapter->ring_feature[RING_F_DCB].indices = IXGBE_MAX_DCB_INDICES;
++	adapter->flags |= IXGBE_FLAG_MSIX_CAPABLE;
++	if (adapter->hw.device_id == IXGBE_DEV_ID_82598AF_DUAL_PORT) {
++		switch (adapter->hw.subsystem_device_id) {
++		case IXGBE_SUBDEV_ID_82598AF_MEZZ:
++		case IXGBE_SUBDEV_ID_82598AF_MENLO_Q_MEZZ:
++		case IXGBE_SUBDEV_ID_82598AF_MENLO_E_MEZZ:
++			adapter->flags &= ~IXGBE_FLAG_MSIX_CAPABLE;
++			break;
++		default:
++			break;
++		}
++	}
+ 	if (hw->mac.type == ixgbe_mac_82598EB) {
+ 		if (hw->device_id == IXGBE_DEV_ID_82598AT)
+ 			adapter->flags |= IXGBE_FLAG_FAN_FAIL_CAPABLE;
+

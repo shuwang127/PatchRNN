@@ -1,0 +1,132 @@
+commit 7cc677e561b9e40e87f9fbeb64b443ce5f1b52e4
+Author: Simon Barber <simon.barber@meraki.net>
+Date:   Tue Sep 12 15:35:47 2017 -0700
+
+    wireless-timeline: handle generators that report incorrect MCS for some frames
+    
+    Macbook and QCA generators sometimes report the minimum MCS for subframes
+    in an aggregate that have FCS errors.
+    
+    Change-Id: I77d1a81f5b3d0e3d0755adcb889f1237b0257814
+    Reviewed-on: https://code.wireshark.org/review/23521
+    Petri-Dish: Alexis La Goutte <alexis.lagoutte@gmail.com>
+    Tested-by: Petri Dish Buildbot <buildbot-no-reply@wireshark.org>
+    Reviewed-by: Michael Mann <mmann78@netscape.net>
+
+diff --git a/epan/dissectors/packet-ieee80211-radio.c b/epan/dissectors/packet-ieee80211-radio.c
+index 3b42b4be75..ecde74458b 100644
+--- a/epan/dissectors/packet-ieee80211-radio.c
++++ b/epan/dissectors/packet-ieee80211-radio.c
+@@ -392,6 +392,7 @@ struct previous_frame_info {
+   gboolean has_tsf_timestamp;
+   guint64 tsf_timestamp;
+   guint phy;
++  union ieee_802_11_phy_info phy_info;
+   guint prev_length;
+   struct wlan_radio *radio_info;
+ };
+@@ -522,9 +523,8 @@ dissect_wlan_radio_phdr (tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree,
+         /* this is the second frame in an aggregate
+          * where we first detect the aggregate */
+         current_aggregate = wmem_new0(wmem_file_scope(), struct aggregate);
+-        /* TODO work around macbook FCS frame PHY errors here */
+-        current_aggregate->phy = phdr->phy;
+-        current_aggregate->phy_info = phdr->phy_info;
++        current_aggregate->phy = previous_frame.phy;
++        current_aggregate->phy_info = previous_frame.phy_info;
+ 
+         /* go back to the first frame in the aggregate,
+          * and mark it as part of this aggregate */
+@@ -544,9 +544,34 @@ dissect_wlan_radio_phdr (tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree,
+       wlan_radio_info->prior_aggregate_data = previous_frame.prev_length;
+       previous_frame.prev_length += frame_length;
+ 
+-      /* TODO work around macbook FCS frame PHY errors - check phy/fcs and
+-       * update if necessary */
++      /* work around macbook/QCA FCS error frame PHY rate bug here
++       * Some Macbook generators and some QCA generators erroneously report
++       * low PHY rates for some subframes within an aggregate that have FCS errors.
++       * All subframes must have the same PHY rate.
++       * Here we take the highest reported rate for the aggregate. */
++      switch (phdr->phy) {
++      case PHDR_802_11_PHY_11N:
++        {
++          struct ieee_802_11n *info_n = &phy_info->info_11n;
++          struct ieee_802_11n *agg_info_n = &current_aggregate->phy_info.info_11n;
+ 
++          if (info_n->has_mcs_index && agg_info_n->has_mcs_index &&
++              info_n->mcs_index > agg_info_n->mcs_index)
++              current_aggregate->phy_info = *phy_info;
++        }
++        break;
++
++      case PHDR_802_11_PHY_11AC:
++        {
++          struct ieee_802_11ac *info_ac = &phy_info->info_11ac;
++          struct ieee_802_11ac *agg_info_ac = &current_aggregate->phy_info.info_11ac;
++
++          if (info_ac->mcs[0] > agg_info_ac->mcs[0])
++              current_aggregate->phy_info = *phy_info;
++        }
++        break;
++      }
++      /* TODO record a warning if the PHY rate does not match the aggregate */
+       phy = current_aggregate->phy;
+       phy_info = &current_aggregate->phy_info;
+     } else {
+@@ -556,6 +581,7 @@ dissect_wlan_radio_phdr (tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree,
+     previous_frame.has_tsf_timestamp = phdr->has_tsf_timestamp;
+     previous_frame.tsf_timestamp = phdr->tsf_timestamp;
+     previous_frame.phy = phdr->phy;
++    previous_frame.phy_info = phdr->phy_info;
+   } else {
+     /* this frame has already been seen, so get its info structure */
+     wlan_radio_info = (struct wlan_radio *) p_get_proto_data(wmem_file_scope(), pinfo, proto_wlan_radio, 0);
+@@ -944,7 +970,7 @@ dissect_wlan_radio_phdr (tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree,
+ 
+     case PHDR_802_11_PHY_11N:
+     {
+-      struct ieee_802_11n *info_n = &phdr->phy_info.info_11n;
++      struct ieee_802_11n *info_n = &phy_info->info_11n;
+ 
+       /* We have all the fields required to calculate the duration */
+       static const guint Nhtdltf[4] = {1, 2, 4, 4};
+diff --git a/ui/qt/wireless_timeline.cpp b/ui/qt/wireless_timeline.cpp
+index 1bcfea5bbf..4f16159026 100644
+--- a/ui/qt/wireless_timeline.cpp
++++ b/ui/qt/wireless_timeline.cpp
+@@ -61,6 +61,15 @@
+ 
+ #include "ui/main_statusbar.h"
+ 
++/* we start rendering this number of microseconds left of the left edge - to ensure
++ * NAV lines are drawn correctly, and that small errors in time order don't prevent some
++ * frames from being rendered.
++ * These errors in time order can come from generators that record PHY rate incorrectly
++ * in some circumstances.
++ */
++#define RENDER_EARLY 40000
++
++
+ const float fraction = 0.8F;
+ const float base = 0.1F;
+ class pcolor : public QColor
+@@ -277,7 +286,7 @@ void WirelessTimeline::captureFileReadFinished()
+             statusbar_push_temporary_msg("Packet number %u does not include TSF timestamp, not showing timeline.", n);
+             return;
+         }
+-        if (w->ifs < -15000) {
++        if (w->ifs < -RENDER_EARLY) {
+             statusbar_push_temporary_msg("Packet number %u has large negative jump in TSF, not showing timeline. Perhaps TSF reference point is set wrong?", n);
+             return;
+         }
+@@ -525,7 +534,7 @@ WirelessTimeline::paintEvent(QPaintEvent *qpe)
+     }
+ 
+     QGraphicsScene qs;
+-    for (packet = find_packet_tsf(start_tsf + left/zoom - 40000); packet <= cfile.count; packet++) {
++    for (packet = find_packet_tsf(start_tsf + left/zoom - RENDER_EARLY); packet <= cfile.count; packet++) {
+         frame_data *fdata = frame_data_sequence_find(cfile.frames, packet);
+         struct wlan_radio *ri = get_wlan_radio(fdata->num);
+         float x, width, red, green, blue;
+

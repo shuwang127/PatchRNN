@@ -1,0 +1,242 @@
+commit 620dcd2493af2ab0ee2dffc40636f62b52fe5281
+Author: dwight <dwight@10gen.com>
+Date:   Mon Feb 13 21:30:36 2012 -0500
+
+    fairly substantial simplification of the write intent journaling code. probably quite a bit faster; testing still to be done. it will use more memory though.
+
+diff --git a/src/mongo/db/dur.cpp b/src/mongo/db/dur.cpp
+index a9728568be..18fbe0e347 100644
+--- a/src/mongo/db/dur.cpp
++++ b/src/mongo/db/dur.cpp
+@@ -395,8 +395,8 @@ namespace mongo {
+                         ss << "journal error warning views mismatch " << mmf->filename() << ' ' << (hex) << low << ".." << high << " len:" << high-low+1;
+                         log() << ss.str() << endl;
+                         log() << "priv loc: " << (void*)(p+low) << ' ' << endl;
+-                        set<WriteIntent>& b = commitJob.writes();
+-                        (void)b; // mark as unused. Useful for inspection in debugger
++                        //vector<WriteIntent>& _intents = commitJob.wi()._intents;
++                        //(void) _intents; // mark as unused. Useful for inspection in debugger
+ 
+                         // should we abort() here so this isn't unnoticed in some circumstances?
+                         massert(13599, "Written data does not match in-memory view. Missing WriteIntent?", false);
+@@ -764,9 +764,6 @@ namespace mongo {
+                     for( unsigned i = 1; i <= 2; i++ ) {
+                         if( commitJob._notify.nWaiting() )
+                             break;
+-                        // once more concurrency in commitJob::note(), we can then perhaps get rid of this deferral optimization, 
+-                        // which would be wise as there is some compexity to futures
+-                        commitJob.wi()._deferred.invoke();
+                         sleepmillis(oneThird);
+                     }
+ 
+diff --git a/src/mongo/db/dur_commitjob.cpp b/src/mongo/db/dur_commitjob.cpp
+index 295bc04412..90c2fe1041 100644
+--- a/src/mongo/db/dur_commitjob.cpp
++++ b/src/mongo/db/dur_commitjob.cpp
+@@ -29,10 +29,6 @@ namespace mongo {
+         BOOST_STATIC_ASSERT( UncommittedBytesLimit > BSONObjMaxInternalSize * 3 );
+         BOOST_STATIC_ASSERT( sizeof(void*)==4 || UncommittedBytesLimit > BSONObjMaxInternalSize * 6 );
+ 
+-        void Writes::D::go(const Writes::D& d) {
+-            commitJob.wi()._insertWriteIntent(d.p, d.len);
+-        }
+-
+         void WriteIntent::absorb(const WriteIntent& other) {
+             dassert(overlaps(other));
+ 
+@@ -47,9 +43,8 @@ namespace mongo {
+             d.dbMutex.assertAtLeastReadLocked();
+             commitJob.groupCommitMutex.dassertLocked();
+             _alreadyNoted.clear();
+-            _writes.clear();
++            _intents.clear();
+             _durOps.clear();
+-            _drained = false;
+ #if defined(DEBUG_WRITE_INTENT)
+             cout << "_debug clear\n";
+             _debug.clear();
+@@ -66,54 +61,6 @@ namespace mongo {
+         }
+ #endif
+ 
+-        void Writes::_insertWriteIntent(void* p, int len) {
+-            WriteIntent wi(p, len);
+-
+-            if (_writes.empty()) {
+-                _writes.insert(wi);
+-                return;
+-            }
+-
+-            typedef set<WriteIntent>::const_iterator iterator; // shorter
+-
+-            iterator closest = _writes.lower_bound(wi);
+-            // closest.end() >= wi.end()
+-
+-            if ((closest != _writes.end() && closest->overlaps(wi)) || // high end
+-                    (closest != _writes.begin() && (--closest)->overlaps(wi))) { // low end
+-                if (closest->contains(wi))
+-                    return; // nothing to do
+-
+-                // find overlapping range and merge into wi
+-                iterator   end(closest);
+-                iterator begin(closest);
+-                while (  end->overlaps(wi)) { wi.absorb(*end); ++end; if (end == _writes.end()) break; }  // look forwards
+-                while (begin->overlaps(wi)) { wi.absorb(*begin); if (begin == _writes.begin()) break; --begin; } // look backwards
+-                if (!begin->overlaps(wi)) ++begin; // make inclusive
+-
+-                DEV { // ensure we're not deleting anything we shouldn't
+-                    for (iterator it(begin); it != end; ++it) {
+-                        assert(wi.contains(*it));
+-                    }
+-                }
+-
+-                _writes.erase(begin, end);
+-                _writes.insert(wi);
+-
+-                DEV { // ensure there are no overlaps
+-                    // this can be very slow - n^2 - so make it RARELY
+-                    RARELY {
+-                        for (iterator it(_writes.begin()), end(boost::prior(_writes.end())); it != end; ++it) {
+-                            assert(!it->overlaps(*boost::next(it)));
+-                        }
+-                    }
+-                }
+-            }
+-            else { // no entries overlapping wi
+-                _writes.insert(closest, wi);
+-            }
+-        }
+-
+         /** note an operation other than a "basic write" */
+         void CommitJob::noteOp(shared_ptr<DurOp> p) {
+             dassert( cmdLine.dur );
+@@ -153,8 +100,12 @@ namespace mongo {
+             // be read locked here.  but must be at least read locked to avoid race with
+             // remapprivateview
+             DEV notesThisLock++;
+-            DEV d.dbMutex.assertWriteLocked();
++
++            //DEV d.dbMutex.assertWriteLocked();
++            log() << "TODO temp finish concurrency" << endl;
++
+             dassert( cmdLine.dur );
++
+             cc().writeHappened();
+             if( !_wi._alreadyNoted.checkAndSet(p, len) ) {
+                 MemoryMappedFile::makeWritable(p, len);
+@@ -191,8 +142,6 @@ namespace mongo {
+ 
+                 // remember intent. we will journal it in a bit
+                 _wi.insertWriteIntent(p, len);
+-                wassert( _wi._writes.size() <  2000000 );
+-                //assert(  _wi._writes.size() < 20000000 );
+ 
+                 {
+                     // a bit over conservative in counting pagebytes used
+diff --git a/src/mongo/db/dur_commitjob.h b/src/mongo/db/dur_commitjob.h
+index 197525f203..45965cce86 100644
+--- a/src/mongo/db/dur_commitjob.h
++++ b/src/mongo/db/dur_commitjob.h
+@@ -110,33 +110,17 @@ namespace mongo {
+ 
+         /** our record of pending/uncommitted write intents */
+         class Writes : boost::noncopyable {
+-            struct D {
+-                void *p;
+-                unsigned len;
+-                static void go(const D& d);
+-            };
+         public:
+-            TaskQueue<D> _deferred;
++            vector<WriteIntent> _intents;
+             Already<127> _alreadyNoted;
+-            set<WriteIntent> _writes;
+             vector< shared_ptr<DurOp> > _durOps; // all the ops other than basic writes
+-            bool _drained; // _deferred is drained?  for asserting/testing
+ 
+             /** reset the Writes structure (empties all the above) */
+             void clear();
+ 
+-            /** merges into set (ie non-deferred version) */
+-            void _insertWriteIntent(void* p, int len);
+-
+             void insertWriteIntent(void* p, int len) {
+-#if defined(DEBUG_WRITE_INTENT)
+-                if( _debug[p] < len )
+-                    _debug[p] = len;
+-#endif
+-                D d;
+-                d.p = p;
+-                d.len = len;
+-                _deferred.defer(d);
++                _intents.push_back(WriteIntent(p,len));
++                wassert( _intents.size() < 2000000 );
+             }
+ 
+ #ifdef _DEBUG
+@@ -173,15 +157,6 @@ namespace mongo {
+             /** note an operation other than a "basic write" */
+             void noteOp(shared_ptr<DurOp> p);
+ 
+-            set<WriteIntent>& writes() {
+-                if( !_wi._drained ) {
+-                    // generally, you don't want to use the set until it is prepared (after deferred ops are applied)
+-                    // thus this assert here.
+-                    assert(false);
+-                }
+-                return _wi._writes;
+-            }
+-
+             vector< shared_ptr<DurOp> >& ops() { 
+                 dassert( Lock::isRW() );
+                 groupCommitMutex.dassertLocked();
+diff --git a/src/mongo/db/dur_preplogbuffer.cpp b/src/mongo/db/dur_preplogbuffer.cpp
+index 2bbad73b73..f398610272 100644
+--- a/src/mongo/db/dur_preplogbuffer.cpp
++++ b/src/mongo/db/dur_preplogbuffer.cpp
+@@ -121,11 +121,26 @@ namespace mongo {
+             scoped_lock lk(privateViews._mutex());
+ 
+             // each time events switch to a different database we journal a JDbContext
++            // switches will be rare as we sort by memory location first and we batch commit.
+             RelativePath lastDbPath;
+ 
+-            for( set<WriteIntent>::iterator i = commitJob.writes().begin(); i != commitJob.writes().end(); i++ ) {
+-                prepBasicWrite_inlock(bb, &(*i), lastDbPath);
++            vector<WriteIntent>& _intents = commitJob.wi()._intents;
++            assert( !_intents.empty() );
++            sort(_intents.begin(), _intents.end());
++
++            WriteIntent last;
++            for( vector<WriteIntent>::const_iterator i = _intents.begin(); i != _intents.end(); i++ ) { 
++                if( i->start() < last.end() ) { 
++                    // overlaps
++                    last.absorb(*i);
++                }
++                else { 
++                    // discontinuous
++                    prepBasicWrite_inlock(bb, &last, lastDbPath);
++                    last = *i;
++                }
+             }
++            prepBasicWrite_inlock(bb, &last, lastDbPath);
+         }
+ 
+         static void resetLogBuffer(/*out*/JSectHeader& h, AlignedBuilder& bb) {
+@@ -143,14 +158,7 @@ namespace mongo {
+         */
+         static void _PREPLOGBUFFER(JSectHeader& h, AlignedBuilder& bb) {
+             assert( cmdLine.dur );
+-
+-            {
+-                // now that we are locked, fully drain deferred notes of write intents
+-                assert( Lock::isRW() );
+-                Writes& writes = commitJob.wi();
+-                writes._deferred.invoke();
+-                writes._drained = true;
+-            }
++            assert( Lock::isRW() );
+ 
+             resetLogBuffer(h, bb); // adds JSectHeader
+ 
+

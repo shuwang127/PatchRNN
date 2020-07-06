@@ -1,0 +1,115 @@
+commit 167bf96dd87d2a8360cb9e9783006876dac4f579
+Author: Sujith Manoharan <c_manoha@qca.qualcomm.com>
+Date:   Wed Sep 10 19:16:00 2014 +0530
+
+    ath9k: Fix beacon miss handling
+    
+    The NoA duration for a GO is half the beacon interval
+    and a concurrent context like a STA can be active only
+    for that duration, before switching back to the GO's
+    operating channel.
+    
+    Currently, when multiple beacons are missed, the dwell
+    time for the STA context is extended to improve the
+    chances of receiving a beacon. But the NoA is not updated
+    and this will cause problems since the GO is offline
+    for a period that is longer than the advertised duration.
+    
+    Fix this by ensuring that the NoA is updated first before
+    extending the time slot for the STA context. Also make
+    sure that non-periodic NoA is used for a one-time, longer
+    absence period.
+    
+    Signed-off-by: Sujith Manoharan <c_manoha@qca.qualcomm.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/ath/ath9k/ath9k.h b/drivers/net/wireless/ath/ath9k/ath9k.h
+index 305db1a6889a..660c1515bb7d 100644
+--- a/drivers/net/wireless/ath/ath9k/ath9k.h
++++ b/drivers/net/wireless/ath/ath9k/ath9k.h
+@@ -380,6 +380,7 @@ struct ath_chanctx_sched {
+ 	bool offchannel_pending;
+ 	bool wait_switch;
+ 	bool force_noa_update;
++	bool extend_absence;
+ 	enum ath_chanctx_state state;
+ 	u8 beacon_miss;
+ 
+diff --git a/drivers/net/wireless/ath/ath9k/channel.c b/drivers/net/wireless/ath/ath9k/channel.c
+index a42fd85def2a..a1b3282bd29e 100644
+--- a/drivers/net/wireless/ath/ath9k/channel.c
++++ b/drivers/net/wireless/ath/ath9k/channel.c
+@@ -371,13 +371,6 @@ void ath_chanctx_event(struct ath_softc *sc, struct ieee80211_vif *vif,
+ 		sc->sched.switch_start_time = tsf_time;
+ 		sc->cur_chan->last_beacon = sc->sched.next_tbtt;
+ 
+-		/* If at least two consecutive beacons were missed on the STA
+-		 * chanctx, stay on the STA channel for one extra beacon period,
+-		 * to resync the timer properly.
+-		 */
+-		if (ctx->active && sc->sched.beacon_miss >= 2)
+-			sc->sched.offchannel_duration = 3 * beacon_int / 2;
+-
+ 		/*
+ 		 * If an offchannel switch is scheduled to happen after
+ 		 * a beacon transmission, update the NoA with one-shot
+@@ -405,6 +398,26 @@ void ath_chanctx_event(struct ath_softc *sc, struct ieee80211_vif *vif,
+ 			break;
+ 		}
+ 
++
++		/*
++		 * Clear the extend_absence flag if it had been
++		 * set during the previous beacon transmission,
++		 * since we need to revert to the normal NoA
++		 * schedule.
++		 */
++		if (ctx->active && sc->sched.extend_absence) {
++			avp->noa_duration = 0;
++			sc->sched.extend_absence = false;
++		}
++
++		/* If at least two consecutive beacons were missed on the STA
++		 * chanctx, stay on the STA channel for one extra beacon period,
++		 * to resync the timer properly.
++		 */
++		if (ctx->active && sc->sched.beacon_miss >= 2) {
++			avp->noa_duration = 0;
++			sc->sched.extend_absence = true;
++		}
+ 		/* Prevent wrap-around issues */
+ 		if (avp->noa_duration && tsf_time - avp->noa_start > BIT(30))
+ 			avp->noa_duration = 0;
+@@ -418,11 +431,17 @@ void ath_chanctx_event(struct ath_softc *sc, struct ieee80211_vif *vif,
+ 		    (!avp->noa_duration || sc->sched.force_noa_update)) {
+ 			avp->noa_index++;
+ 			avp->noa_start = tsf_time;
+-			avp->noa_duration =
+-				TU_TO_USEC(cur_conf->beacon_interval) / 2 +
+-				sc->sched.channel_switch_time;
+ 
+-			if (test_bit(ATH_OP_SCANNING, &common->op_flags))
++			if (sc->sched.extend_absence)
++				avp->noa_duration = (3 * beacon_int / 2) +
++					sc->sched.channel_switch_time;
++			else
++				avp->noa_duration =
++					TU_TO_USEC(cur_conf->beacon_interval) / 2 +
++					sc->sched.channel_switch_time;
++
++			if (test_bit(ATH_OP_SCANNING, &common->op_flags) ||
++			    sc->sched.extend_absence)
+ 				avp->periodic_noa = false;
+ 			else
+ 				avp->periodic_noa = true;
+@@ -520,7 +539,8 @@ void ath_chanctx_event(struct ath_softc *sc, struct ieee80211_vif *vif,
+ 		sc->sched.wait_switch = false;
+ 
+ 		tsf_time = TU_TO_USEC(cur_conf->beacon_interval) / 2;
+-		if (sc->sched.beacon_miss >= 2) {
++
++		if (sc->sched.extend_absence) {
+ 			sc->sched.beacon_miss = 0;
+ 			tsf_time *= 3;
+ 		}
+

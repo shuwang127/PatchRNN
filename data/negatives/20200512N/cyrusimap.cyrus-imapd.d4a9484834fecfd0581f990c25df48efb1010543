@@ -1,0 +1,110 @@
+commit d4a9484834fecfd0581f990c25df48efb1010543
+Author: Robert Stepanek <rsto@paranoia.at>
+Date:   Wed May 17 17:47:52 2017 +0200
+
+    search_expr.c: register as cyrus module and simplify initialization
+
+diff --git a/imap/cyr_virusscan.c b/imap/cyr_virusscan.c
+index 62fab0dfd..d8eba7cd3 100644
+--- a/imap/cyr_virusscan.c
++++ b/imap/cyr_virusscan.c
+@@ -300,8 +300,6 @@ int main (int argc, char *argv[]) {
+             fatal(error_message(r), EC_CONFIG);
+         }
+ 
+-        search_attr_init();
+-
+         srock.searchargs = new_searchargs("*", GETSEARCH_CHARSET_KEYWORD,
+                                           &scan_namespace, NULL, NULL, 1);
+         c = get_search_program(scan_in, scan_out, srock.searchargs);
+diff --git a/imap/http_jmap.c b/imap/http_jmap.c
+index 9f1b1738b..e51895a4b 100644
+--- a/imap/http_jmap.c
++++ b/imap/http_jmap.c
+@@ -166,8 +166,6 @@ static void jmap_init(struct buf *serverinfo __attribute__((unused)))
+     for (mp = jmap_calendar_messages; mp->name; mp++) {
+         ptrarray_append(&messages, mp);
+     }
+-
+-    search_attr_init();
+ }
+ 
+ 
+diff --git a/imap/imapd.c b/imap/imapd.c
+index bedec3954..d9d394544 100644
+--- a/imap/imapd.c
++++ b/imap/imapd.c
+@@ -847,8 +847,6 @@ int service_init(int argc, char **argv, char **envp)
+     apns_enabled =
+       (events & EVENT_APPLEPUSHSERVICE) && config_getstring(IMAPOPT_APS_TOPIC);
+ 
+-    search_attr_init();
+-
+     /* create connection to the SNMP listener, if available. */
+     snmp_connect(); /* ignore return code */
+     snmp_set_str(SERVER_NAME_VERSION,CYRUS_VERSION);
+diff --git a/imap/search_expr.c b/imap/search_expr.c
+index b3270d37a..31d4df385 100644
+--- a/imap/search_expr.c
++++ b/imap/search_expr.c
+@@ -2041,6 +2041,19 @@ enum search_cost {
+     SEARCH_COST_BODY
+ };
+ 
++static int search_attr_initialized = 0;
++
++static void done_cb(void *rock __attribute__((unused))) {
++    /* do nothing */
++}
++
++static void init_internal() {
++    if (!search_attr_initialized) {
++        search_attr_init();
++        cyrus_modules_add(done_cb, NULL);
++    }
++}
++
+ /*
+  * Call search_attr_init() before doing any work with search
+  * expressions.
+@@ -2448,6 +2461,8 @@ EXPORTED void search_attr_init(void)
+     construct_hash_table(&attrs_by_name, VECTOR_SIZE(attrs), 0);
+     for (i = 0 ; i < VECTOR_SIZE(attrs) ; i++)
+         hash_insert(attrs[i].name, (void *)&attrs[i], &attrs_by_name);
++
++    search_attr_initialized = 1;
+ }
+ 
+ /*
+@@ -2460,6 +2475,8 @@ EXPORTED const search_attr_t *search_attr_find(const char *name)
+ {
+     char tmp[128];
+ 
++    init_internal();
++
+     strlcpy(tmp, name, sizeof(tmp));
+     lcase(tmp);
+     return hash_lookup(tmp, &attrs_by_name);
+@@ -2492,6 +2509,8 @@ EXPORTED const search_attr_t *search_attr_find_field(const char *field)
+         NULL
+     };
+ 
++    init_internal();
++
+     /* some header fields can be reduced to search terms */
+     if (!strcasecmp(field, "bcc") ||
+         !strcasecmp(field, "cc") ||
+diff --git a/imap/search_test.c b/imap/search_test.c
+index 5a11ec43f..07826be7b 100644
+--- a/imap/search_test.c
++++ b/imap/search_test.c
+@@ -302,8 +302,6 @@ int main(int argc, char **argv)
+     cyrus_init(alt_config, "search_test",
+                CYRUSINIT_PERROR, CONFIG_NEED_PARTITION_DATA);
+ 
+-    search_attr_init();
+-
+     char *freeme = NULL;
+ 
+     switch (mode) {
+

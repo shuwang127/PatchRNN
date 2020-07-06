@@ -1,0 +1,96 @@
+commit 0273038df61349868d368dd9254eb629425a3378
+Author: Rui Miguel Silva <rui.silva@linaro.org>
+Date:   Tue Feb 2 14:23:16 2016 +0000
+
+    greybus: spi: add device_type field to device config
+    
+    Add device_type field in device config operation to get the type of
+    device and try to expose less the kernel internal over greybus.
+    This include the spidev, spi-nor will fetch the correct nor id over
+    jede and a modalias that will have the previous behavior (name will set
+    the driver to be loaded).
+    
+    As at it, fix a trivial error path and return immediately.
+    
+    Tested: using gbsim and confirming that a spidev and mtd device were
+    created.
+    
+    Signed-off-by: Rui Miguel Silva <rui.silva@linaro.org>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@google.com>
+
+diff --git a/drivers/staging/greybus/greybus_protocols.h b/drivers/staging/greybus/greybus_protocols.h
+index 89db93282cac..cd64ac84dad2 100644
+--- a/drivers/staging/greybus/greybus_protocols.h
++++ b/drivers/staging/greybus/greybus_protocols.h
+@@ -737,6 +737,10 @@ struct gb_spi_device_config_response {
+ 	__le16	mode;
+ 	__u8	bits_per_word;
+ 	__le32	max_speed_hz;
++	__u8	device_type;
++#define GB_SPI_SPI_DEV		0x00
++#define GB_SPI_SPI_NOR		0x01
++#define GB_SPI_SPI_MODALIAS	0x02
+ 	__u8	name[32];
+ } __packed;
+ 
+diff --git a/drivers/staging/greybus/kernel_ver.h b/drivers/staging/greybus/kernel_ver.h
+index 1f8d6a1bb6da..18bf8dff0f86 100644
+--- a/drivers/staging/greybus/kernel_ver.h
++++ b/drivers/staging/greybus/kernel_ver.h
+@@ -305,4 +305,12 @@ static inline bool led_sysfs_is_disabled(struct led_classdev *led_cdev)
+ #define PSY_HAVE_PUT
+ #endif
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
++#define SPI_DEV_MODALIAS "spidev"
++#define SPI_NOR_MODALIAS "spi-nor"
++#else
++#define SPI_DEV_MODALIAS "spidev"
++#define SPI_NOR_MODALIAS "m25p80"
++#endif
++
+ #endif	/* __GREYBUS_KERNEL_VER_H */
+diff --git a/drivers/staging/greybus/spi.c b/drivers/staging/greybus/spi.c
+index ad4a1d62587d..c00492cc632e 100644
+--- a/drivers/staging/greybus/spi.c
++++ b/drivers/staging/greybus/spi.c
+@@ -285,6 +285,7 @@ static int gb_spi_setup_device(struct gb_spi *spi, u8 cs)
+ 	struct spi_board_info spi_board = { {0} };
+ 	struct spi_device *spidev;
+ 	int ret;
++	u8 dev_type;
+ 
+ 	request.chip_select = cs;
+ 
+@@ -294,7 +295,20 @@ static int gb_spi_setup_device(struct gb_spi *spi, u8 cs)
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	memcpy(spi_board.modalias, response.name, sizeof(spi_board.modalias));
++	dev_type = response.device_type;
++
++	if (dev_type == GB_SPI_SPI_DEV)
++		strlcpy(spi_board.modalias, SPI_DEV_MODALIAS,
++			sizeof(spi_board.modalias));
++	else if (dev_type == GB_SPI_SPI_NOR)
++		strlcpy(spi_board.modalias, SPI_NOR_MODALIAS,
++			sizeof(spi_board.modalias));
++	else if (dev_type == GB_SPI_SPI_MODALIAS)
++		memcpy(spi_board.modalias, response.name,
++		       sizeof(spi_board.modalias));
++	else
++		return -EINVAL;
++
+ 	spi_board.mode		= le16_to_cpu(response.mode);
+ 	spi_board.bus_num	= master->bus_num;
+ 	spi_board.chip_select	= cs;
+@@ -302,7 +316,7 @@ static int gb_spi_setup_device(struct gb_spi *spi, u8 cs)
+ 
+ 	spidev = spi_new_device(master, &spi_board);
+ 	if (!spidev)
+-		ret = -EINVAL;
++		return -EINVAL;
+ 
+ 	return 0;
+ }
+

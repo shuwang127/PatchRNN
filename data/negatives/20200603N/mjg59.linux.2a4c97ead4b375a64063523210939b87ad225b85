@@ -1,0 +1,101 @@
+commit 2a4c97ead4b375a64063523210939b87ad225b85
+Author: Maciej Sosnowski <maciej.sosnowski@intel.com>
+Date:   Wed Nov 24 17:29:30 2010 +0000
+
+    RDMA/nes: Fix bonding on iw_nes
+    
+    Enable configuring bonds on nes devices by adding missing support for
+    master net_device to the driver.
+    
+    Signed-off-by: Maciej Sosnowski <maciej.sosnowski@intel.com>
+    Signed-off-by: Roland Dreier <rolandd@cisco.com>
+
+diff --git a/drivers/infiniband/hw/nes/nes.c b/drivers/infiniband/hw/nes/nes.c
+index 0c9f0aa5d4ea..e17f52c21947 100644
+--- a/drivers/infiniband/hw/nes/nes.c
++++ b/drivers/infiniband/hw/nes/nes.c
+@@ -144,6 +144,7 @@ static int nes_inetaddr_event(struct notifier_block *notifier,
+ 	struct nes_device *nesdev;
+ 	struct net_device *netdev;
+ 	struct nes_vnic *nesvnic;
++	unsigned int is_bonded;
+ 
+ 	nes_debug(NES_DBG_NETDEV, "nes_inetaddr_event: ip address %pI4, netmask %pI4.\n",
+ 		  &ifa->ifa_address, &ifa->ifa_mask);
+@@ -152,7 +153,8 @@ static int nes_inetaddr_event(struct notifier_block *notifier,
+ 				nesdev, nesdev->netdev[0]->name);
+ 		netdev = nesdev->netdev[0];
+ 		nesvnic = netdev_priv(netdev);
+-		if (netdev == event_netdev) {
++		is_bonded = (netdev->master == event_netdev);
++		if ((netdev == event_netdev) || is_bonded) {
+ 			if (nesvnic->rdma_enabled == 0) {
+ 				nes_debug(NES_DBG_NETDEV, "Returning without processing event for %s since"
+ 						" RDMA is not enabled.\n",
+@@ -169,7 +171,10 @@ static int nes_inetaddr_event(struct notifier_block *notifier,
+ 					nes_manage_arp_cache(netdev, netdev->dev_addr,
+ 							ntohl(nesvnic->local_ipaddr), NES_ARP_DELETE);
+ 					nesvnic->local_ipaddr = 0;
+-					return NOTIFY_OK;
++					if (is_bonded)
++						continue;
++					else
++						return NOTIFY_OK;
+ 					break;
+ 				case NETDEV_UP:
+ 					nes_debug(NES_DBG_NETDEV, "event:UP\n");
+@@ -178,15 +183,24 @@ static int nes_inetaddr_event(struct notifier_block *notifier,
+ 						nes_debug(NES_DBG_NETDEV, "Interface already has local_ipaddr\n");
+ 						return NOTIFY_OK;
+ 					}
++					/* fall through */
++				case NETDEV_CHANGEADDR:
+ 					/* Add the address to the IP table */
+-					nesvnic->local_ipaddr = ifa->ifa_address;
++					if (netdev->master)
++						nesvnic->local_ipaddr =
++							((struct in_device *)netdev->master->ip_ptr)->ifa_list->ifa_address;
++					else
++						nesvnic->local_ipaddr = ifa->ifa_address;
+ 
+ 					nes_write_indexed(nesdev,
+ 							NES_IDX_DST_IP_ADDR+(0x10*PCI_FUNC(nesdev->pcidev->devfn)),
+-							ntohl(ifa->ifa_address));
++							ntohl(nesvnic->local_ipaddr));
+ 					nes_manage_arp_cache(netdev, netdev->dev_addr,
+ 							ntohl(nesvnic->local_ipaddr), NES_ARP_ADD);
+-					return NOTIFY_OK;
++					if (is_bonded)
++						continue;
++					else
++						return NOTIFY_OK;
+ 					break;
+ 				default:
+ 					break;
+diff --git a/drivers/infiniband/hw/nes/nes_cm.c b/drivers/infiniband/hw/nes/nes_cm.c
+index 25ad0f9944c0..009ec814d517 100644
+--- a/drivers/infiniband/hw/nes/nes_cm.c
++++ b/drivers/infiniband/hw/nes/nes_cm.c
+@@ -1107,6 +1107,7 @@ static int nes_addr_resolve_neigh(struct nes_vnic *nesvnic, u32 dst_ip, int arpi
+ 	struct flowi fl;
+ 	struct neighbour *neigh;
+ 	int rc = arpindex;
++	struct net_device *netdev;
+ 	struct nes_adapter *nesadapter = nesvnic->nesdev->nesadapter;
+ 
+ 	memset(&fl, 0, sizeof fl);
+@@ -1117,7 +1118,12 @@ static int nes_addr_resolve_neigh(struct nes_vnic *nesvnic, u32 dst_ip, int arpi
+ 		return rc;
+ 	}
+ 
+-	neigh = neigh_lookup(&arp_tbl, &rt->rt_gateway, nesvnic->netdev);
++	if (nesvnic->netdev->master)
++		netdev = nesvnic->netdev->master;
++	else
++		netdev = nesvnic->netdev;
++
++	neigh = neigh_lookup(&arp_tbl, &rt->rt_gateway, netdev);
+ 	if (neigh) {
+ 		if (neigh->nud_state & NUD_VALID) {
+ 			nes_debug(NES_DBG_CM, "Neighbor MAC address for 0x%08X"
+

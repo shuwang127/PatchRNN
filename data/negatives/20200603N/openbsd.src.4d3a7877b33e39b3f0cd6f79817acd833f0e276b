@@ -1,0 +1,68 @@
+commit 4d3a7877b33e39b3f0cd6f79817acd833f0e276b
+Author: dlg <dlg@openbsd.org>
+Date:   Mon Mar 31 04:46:59 2014 +0000
+
+    ahci dva things are 64bit and surprisingly aligned nicely to 64bit too.
+    
+    ok jmatthew@
+
+diff --git a/sys/dev/ic/ahci.c b/sys/dev/ic/ahci.c
+index 8900408340c..59464fbe720 100644
+--- a/sys/dev/ic/ahci.c
++++ b/sys/dev/ic/ahci.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ahci.c,v 1.10 2014/03/31 03:58:35 dlg Exp $ */
++/*	$OpenBSD: ahci.c,v 1.11 2014/03/31 04:46:59 dlg Exp $ */
+ 
+ /*
+  * Copyright (c) 2006 David Gwynne <dlg@openbsd.org>
+@@ -570,10 +570,9 @@ nomem:
+ 		ccb->ccb_port = ap;
+ 		ccb->ccb_cmd_hdr = &hdr[i];
+ 		ccb->ccb_cmd_table = &table[i];
+-		dva = AHCI_DMA_DVA(ap->ap_dmamem_cmd_table) +
+-		    ccb->ccb_slot * sizeof(struct ahci_cmd_table);
+-		ccb->ccb_cmd_hdr->ctba_hi = htole32((u_int32_t)(dva >> 32));
+-		ccb->ccb_cmd_hdr->ctba_lo = htole32((u_int32_t)dva);
++		htolem64(&ccb->ccb_cmd_hdr->ctba,
++		    AHCI_DMA_DVA(ap->ap_dmamem_cmd_table) +
++		    ccb->ccb_slot * sizeof(struct ahci_cmd_table));
+ 
+ 		ccb->ccb_xa.fis =
+ 		    (struct ata_fis_h2d *)ccb->ccb_cmd_table->cfis;
+@@ -3270,9 +3269,7 @@ ahci_hibernate_io(dev_t dev, daddr_t blkno, vaddr_t addr, size_t size,
+ 		my->ccb->ccb_cmd_table = &my->cmd_table;
+ 		item_phys = page_phys + ((void *)&my->cmd_table - page);
+ #endif
+-		my->ccb->ccb_cmd_hdr->ctba_hi =
+-		    htole32((u_int32_t)(item_phys >> 32));
+-		my->ccb->ccb_cmd_hdr->ctba_lo = htole32((u_int32_t)item_phys);
++		htolem64(&my->ccb->ccb_cmd_hdr->ctba, item_phys);
+ 
+ 		my->ccb->ccb_xa.fis =
+ 		    (struct ata_fis_h2d *)my->ccb->ccb_cmd_table->cfis;
+diff --git a/sys/dev/ic/ahcivar.h b/sys/dev/ic/ahcivar.h
+index 4fd9aea3270..5b2dabefc3d 100644
+--- a/sys/dev/ic/ahcivar.h
++++ b/sys/dev/ic/ahcivar.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ahcivar.h,v 1.5 2014/03/31 03:38:46 dlg Exp $ */
++/*	$OpenBSD: ahcivar.h,v 1.6 2014/03/31 04:46:59 dlg Exp $ */
+ 
+ /*
+  * Copyright (c) 2006 David Gwynne <dlg@openbsd.org>
+@@ -40,11 +40,10 @@ struct ahci_cmd_hdr {
+ 
+ 	u_int32_t		prdbc; /* transferred byte count */
+ 
+-	u_int32_t		ctba_lo;
+-	u_int32_t		ctba_hi;
++	u_int64_t		ctba;
+ 
+ 	u_int32_t		reserved[4];
+-} __packed;
++} __packed __aligned(8);
+ 
+ struct ahci_rfis {
+ 	u_int8_t		dsfis[28];
+

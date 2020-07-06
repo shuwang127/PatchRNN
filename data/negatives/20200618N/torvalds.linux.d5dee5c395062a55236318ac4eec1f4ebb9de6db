@@ -1,0 +1,92 @@
+commit d5dee5c395062a55236318ac4eec1f4ebb9de6db
+Author: Jan Kara <jack@suse.cz>
+Date:   Mon Apr 28 02:16:23 2008 -0700
+
+    reiserfs: unpack tails on quota files
+    
+    Quota files cannot have tails because quota_write and quota_read functions do
+    not support them.  So far when quota files did have tail, we just refused to
+    turn quotas on it.  Sadly this check has been wrong and so there are now
+    plenty installations where quota files don't have NOTAIL flag set and so now
+    after fixing the check, they suddently fail to turn quotas on.  Since it's
+    easy to unpack the tail from kernel, do this from reiserfs_quota_on() which
+    solves the problem and is generally nicer to users anyway.
+    
+    Signed-off-by: Jan Kara <jack@suse.cz>
+    Reported-by: <urhausen@urifabi.net>
+    Cc: Jeff Mahoney <jeffm@suse.com>
+    Cc: Chris Mason <chris.mason@oracle.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/reiserfs/ioctl.c b/fs/reiserfs/ioctl.c
+index 74363a7aacbc..830332021ed4 100644
+--- a/fs/reiserfs/ioctl.c
++++ b/fs/reiserfs/ioctl.c
+@@ -12,8 +12,6 @@
+ #include <linux/smp_lock.h>
+ #include <linux/compat.h>
+ 
+-static int reiserfs_unpack(struct inode *inode, struct file *filp);
+-
+ /*
+ ** reiserfs_ioctl - handler for ioctl for inode
+ ** supported commands:
+@@ -159,7 +157,7 @@ int reiserfs_prepare_write(struct file *f, struct page *page,
+ ** Function try to convert tail from direct item into indirect.
+ ** It set up nopack attribute in the REISERFS_I(inode)->nopack
+ */
+-static int reiserfs_unpack(struct inode *inode, struct file *filp)
++int reiserfs_unpack(struct inode *inode, struct file *filp)
+ {
+ 	int retval = 0;
+ 	int index;
+diff --git a/fs/reiserfs/super.c b/fs/reiserfs/super.c
+index a4c9770a6012..ed424d708e69 100644
+--- a/fs/reiserfs/super.c
++++ b/fs/reiserfs/super.c
+@@ -2025,6 +2025,7 @@ static int reiserfs_quota_on(struct super_block *sb, int type, int format_id,
+ {
+ 	int err;
+ 	struct nameidata nd;
++	struct inode *inode;
+ 
+ 	if (!(REISERFS_SB(sb)->s_mount_opt & (1 << REISERFS_QUOTA)))
+ 		return -EINVAL;
+@@ -2039,12 +2040,18 @@ static int reiserfs_quota_on(struct super_block *sb, int type, int format_id,
+ 		path_put(&nd.path);
+ 		return -EXDEV;
+ 	}
++	inode = nd.path.dentry->d_inode;
+ 	/* We must not pack tails for quota files on reiserfs for quota IO to work */
+-	if (!(REISERFS_I(nd.path.dentry->d_inode)->i_flags & i_nopack_mask)) {
+-		reiserfs_warning(sb,
+-				 "reiserfs: Quota file must have tail packing disabled.");
+-		path_put(&nd.path);
+-		return -EINVAL;
++	if (!(REISERFS_I(inode)->i_flags & i_nopack_mask)) {
++		err = reiserfs_unpack(inode, NULL);
++		if (err) {
++			reiserfs_warning(sb,
++				"reiserfs: Unpacking tail of quota file failed"
++				" (%d). Cannot turn on quotas.", err);
++			path_put(&nd.path);
++			return -EINVAL;
++		}
++		mark_inode_dirty(inode);
+ 	}
+ 	/* Not journalling quota? No more tests needed... */
+ 	if (!REISERFS_SB(sb)->s_qf_names[USRQUOTA] &&
+diff --git a/include/linux/reiserfs_fs.h b/include/linux/reiserfs_fs.h
+index 8e7eff2cd0ab..4aacaeecb56f 100644
+--- a/include/linux/reiserfs_fs.h
++++ b/include/linux/reiserfs_fs.h
+@@ -2176,6 +2176,7 @@ int reiserfs_ioctl(struct inode *inode, struct file *filp,
+ 		   unsigned int cmd, unsigned long arg);
+ long reiserfs_compat_ioctl(struct file *filp,
+ 		   unsigned int cmd, unsigned long arg);
++int reiserfs_unpack(struct inode *inode, struct file *filp);
+ 
+ /* ioctl's command */
+ #define REISERFS_IOC_UNPACK		_IOW(0xCD,1,long)
+

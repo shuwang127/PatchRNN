@@ -1,0 +1,48 @@
+commit 10975933da3d65f8833d4ce98dcc2ecc63a695d6
+Author: Miklos Szeredi <mszeredi@suse.cz>
+Date:   Thu Nov 20 16:08:59 2014 +0100
+
+    init: fix read-write root mount
+    
+    If mount flags don't have MS_RDONLY, iso9660 returns EACCES without actually
+    checking if it's an iso image.
+    
+    This tricks mount_block_root() into retrying with MS_RDONLY.  This results
+    in a read-only root despite the "rw" boot parameter if the actual
+    filesystem was checked after iso9660.
+    
+    I believe the behavior of iso9660 is okay, while that of mount_block_root()
+    is not.  It should rather try all types without MS_RDONLY and only then
+    retry with MS_RDONLY.
+    
+    This change also makes the code more robust against the case when EACCES is
+    returned despite MS_RDONLY, which would've resulted in a lockup.
+    
+    Signed-off-by: Miklos Szeredi <mszeredi@suse.cz>
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/init/do_mounts.c b/init/do_mounts.c
+index 9b3565c41502..eb410083e8e0 100644
+--- a/init/do_mounts.c
++++ b/init/do_mounts.c
+@@ -395,8 +395,6 @@ void __init mount_block_root(char *name, int flags)
+ 			case 0:
+ 				goto out;
+ 			case -EACCES:
+-				flags |= MS_RDONLY;
+-				goto retry;
+ 			case -EINVAL:
+ 				continue;
+ 		}
+@@ -419,6 +417,10 @@ void __init mount_block_root(char *name, int flags)
+ #endif
+ 		panic("VFS: Unable to mount root fs on %s", b);
+ 	}
++	if (!(flags & MS_RDONLY)) {
++		flags |= MS_RDONLY;
++		goto retry;
++	}
+ 
+ 	printk("List of all partitions:\n");
+ 	printk_all_partitions();
+

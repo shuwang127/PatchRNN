@@ -1,0 +1,195 @@
+commit 0cb201e5f8d26cf66c6c7034d4364340a05f0c35
+Author: matthieu <matthieu@openbsd.org>
+Date:   Sun Apr 9 12:22:56 2006 +0000
+
+    On macppc and sparc64, if allowaperture=0 only allow mmap()-ing of
+    the framebuffer memory in WSDISPLAYIO_MODE_DUMBFB mode.
+
+diff --git a/sys/arch/macppc/pci/vgafb.c b/sys/arch/macppc/pci/vgafb.c
+index 6127243d98d..c36e6ea56ed 100644
+--- a/sys/arch/macppc/pci/vgafb.c
++++ b/sys/arch/macppc/pci/vgafb.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: vgafb.c,v 1.27 2006/01/01 11:59:39 miod Exp $	*/
++/*	$OpenBSD: vgafb.c,v 1.28 2006/04/09 12:22:56 matthieu Exp $	*/
+ /*	$NetBSD: vga.c,v 1.3 1996/12/02 22:24:54 cgd Exp $	*/
+ 
+ /*
+@@ -100,6 +100,10 @@ int	vgafb_putcmap(struct vgafb_config *vc, struct wsdisplay_cmap *cm);
+ #define FONT_WIDTH 8
+ #define FONT_HEIGHT 16
+ 
++#ifdef APERTURE
++extern int allowaperture;
++#endif
++
+ /*
+  * The following functions implement back-end configuration grabbing
+  * and attachment.
+@@ -258,6 +262,7 @@ vgafb_ioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
+ 		return vgafb_putcmap(vc, (struct wsdisplay_cmap *)data);
+ 
+ 	case WSDISPLAYIO_SMODE:
++		vc->vc_mode = *(u_int *)data;
+ 		/* track the state of the display,
+ 		 * if returning to WSDISPLAYIO_MODE_EMUL
+ 		 * restore the last palette, workaround for 
+@@ -338,34 +343,47 @@ vgafb_mmap(void *v, off_t offset, int prot)
+ 	struct vgafb_config *vc = v;
+ 	bus_space_handle_t h;
+ 
+-	/* memsize... */
+-	if (offset >= 0x00000 && offset < vc->memsize)
+-		h = vc->vc_paddr + offset;
+-	/* XXX the following are probably wrong. we want physical addresses 
+-	   here, not virtual ones */
+-	else if (offset >= 0x10000000 && offset < 0x10040000 )
+-		/* 256KB of iohb */
+-		h = vc->vc_ioh_b;
+-	else if (offset >= 0x10040000 && offset < 0x10080000)
+-		/* 256KB of iohc */
+-		h = vc->vc_ioh_c;
+-	else if (offset >= 0x18880000 && offset < 0x100c0000)
+-		/* 256KB of iohd */
+-		h = vc->vc_ioh_d;
+-	else if (offset >= 0x20000000 && offset < 0x20000000+vc->mmiosize)
+-		/* mmiosize... */
+-		h = vc->vc_mmioh + (offset - 0x20000000);
+-	else if (offset >= vc->membase && (offset < vc->membase+vc->memsize)) {
++	switch (vc->vc_mode) {
++	case WSDISPLAYIO_MODE_MAPPED:
++#ifdef APERTURE
++		if (allowaperture == 0) {
++			h = -1;
++			break;
++		}
++#endif	
++		/* XXX the following are probably wrong. 
++		   we want physical addresses here, not virtual ones */
++		if (offset >= 0x10000000 && offset < 0x10040000 )
++			/* 256KB of iohb */
++			h = vc->vc_ioh_b;
++		else if (offset >= 0x10040000 && offset < 0x10080000)
++			/* 256KB of iohc */
++			h = vc->vc_ioh_c;
++		else if (offset >= 0x18880000 && offset < 0x100c0000)
++			/* 256KB of iohd */
++			h = vc->vc_ioh_d;
++		else if (offset >= 0x20000000 && offset < 0x20000000+vc->mmiosize)
++			/* mmiosize... */
++			h = vc->vc_mmioh + (offset - 0x20000000);
++		else if (offset >= vc->membase && (offset < vc->membase+vc->memsize)) {
+ 		/* allow mmapping of memory */
+-		h = offset;
+-	} else if (offset >= vc->mmiobase &&
+-	    (offset < vc->mmiobase+vc->mmiosize)) {
+-		/* allow mmapping of mmio space */
+-		h = offset;
+-	} else {
+-		h = -1;
+-	}
++			h = offset;
++		} else if (offset >= vc->mmiobase &&
++		    (offset < vc->mmiobase+vc->mmiosize)) {
++			/* allow mmapping of mmio space */
++			h = offset;
++			
++		} else {
++			h = -1;
++		}
++		break;
++
++	case WSDISPLAYIO_MODE_DUMBFB:
++		if (offset >= 0x00000 && offset < vc->memsize)
++			h = vc->vc_paddr + offset;
++		break;
+ 
++	}
+ 	return h;
+ }
+ 
+diff --git a/sys/arch/macppc/pci/vgafbvar.h b/sys/arch/macppc/pci/vgafbvar.h
+index 681ff222473..34d56ffe769 100644
+--- a/sys/arch/macppc/pci/vgafbvar.h
++++ b/sys/arch/macppc/pci/vgafbvar.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: vgafbvar.h,v 1.10 2003/11/12 20:08:31 miod Exp $	*/
++/*	$OpenBSD: vgafbvar.h,v 1.11 2006/04/09 12:22:56 matthieu Exp $	*/
+ /*	$NetBSD: vgavar.h,v 1.2 1996/11/23 06:06:43 cgd Exp $	*/
+ 
+ /*
+@@ -65,6 +65,7 @@ struct vgafb_config {
+ 
+ 	int vc_backlight_on;
+ 	int nscreens;
++	u_int vc_mode;
+ };
+ 
+ int	vgafb_common_probe(bus_space_tag_t, bus_space_tag_t,
+diff --git a/sys/arch/sparc64/dev/vgafb.c b/sys/arch/sparc64/dev/vgafb.c
+index f99324da786..bee822c6695 100644
+--- a/sys/arch/sparc64/dev/vgafb.c
++++ b/sys/arch/sparc64/dev/vgafb.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: vgafb.c,v 1.42 2005/07/17 17:13:38 miod Exp $	*/
++/*	$OpenBSD: vgafb.c,v 1.43 2006/04/09 12:22:56 matthieu Exp $	*/
+ 
+ /*
+  * Copyright (c) 2001 Jason L. Wright (jason@thought.net)
+@@ -109,6 +109,12 @@ struct cfdriver vgafb_cd = {
+ 	NULL, "vgafb", DV_DULL
+ };
+ 
++int defective_fb_node;
++
++#ifdef APERTURE
++extern int allowaperture;
++#endif
++
+ int
+ vgafbmatch(parent, vcf, aux)
+ 	struct device *parent;
+@@ -146,11 +152,19 @@ vgafbattach(parent, self, aux)
+ 
+ 	printf("\n");
+ 
+-	if (vgafb_mapregs(sc, pa))
+-		return;
+-
+ 	sc->sc_console = vgafb_is_console(sc->sc_node);
+ 
++	if (vgafb_mapregs(sc, pa)) {
++		/*
++		 * If we are the console device, but can't attach,
++		 * we'll let the next video device hijack the console
++		 * even if it is not, from the PROMs point of view.
++		 */
++		if (sc->sc_console)
++			defective_fb_node = sc->sc_node;
++		return;
++	}
++
+ 	fb_setsize(&sc->sc_sunfb, 8, 1152, 900, sc->sc_node, 0);
+ 	if (sc->sc_sunfb.sf_depth == 24) {
+ 		sc->sc_sunfb.sf_depth = 32;
+@@ -372,6 +386,10 @@ vgafb_mmap(v, off, prot)
+ 
+ 	switch (sc->sc_mode) {
+ 	case WSDISPLAYIO_MODE_MAPPED:
++#ifdef APERTURE
++		if (allowaperture == 0)
++			return (-1);
++#endif
+ 		if (off >= sc->sc_mem_addr &&
+ 		    off < (sc->sc_mem_addr + sc->sc_mem_size))
+ 			return (bus_space_mmap(sc->sc_mem_t,
+@@ -401,7 +419,7 @@ vgafb_is_console(node)
+ {
+ 	extern int fbnode;
+ 
+-	return (fbnode == node);
++	return (fbnode == node || defective_fb_node != 0);
+ }
+ 
+ int
+

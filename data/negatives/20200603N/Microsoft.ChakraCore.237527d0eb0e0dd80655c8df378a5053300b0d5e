@@ -1,0 +1,89 @@
+commit 237527d0eb0e0dd80655c8df378a5053300b0d5e
+Author: Lei Shi <leish@microsoft.com>
+Date:   Thu Sep 29 15:31:51 2016 -0700
+
+    report number allocator allocated pages by the server
+
+diff --git a/lib/Common/Memory/AllocationPolicyManager.h b/lib/Common/Memory/AllocationPolicyManager.h
+index 769c6f4cd..b9d9b845c 100644
+--- a/lib/Common/Memory/AllocationPolicyManager.h
++++ b/lib/Common/Memory/AllocationPolicyManager.h
+@@ -63,19 +63,20 @@ typedef bool (__stdcall * PageAllocatorMemoryAllocationCallback)(__in LPVOID con
+         memoryLimit = newLimit;
+     }
+ 
+-    bool RequestAlloc(DECLSPEC_GUARD_OVERFLOW size_t byteCount)
++    bool RequestAlloc(DECLSPEC_GUARD_OVERFLOW size_t byteCount, bool externalAlloc = false)
+     {
+         if (supportConcurrency)
+         {
+             AutoCriticalSection auto_cs(&cs);
+-            return RequestAllocImpl(byteCount);
++            return RequestAllocImpl(byteCount, externalAlloc);
+         }
+         else
+         {
+-            return RequestAllocImpl(byteCount);
++            return RequestAllocImpl(byteCount, externalAlloc);
+         }
+     }
+ 
++
+     void ReportFailure(size_t byteCount)
+     {
+         if (supportConcurrency)
+@@ -119,7 +120,7 @@ typedef bool (__stdcall * PageAllocatorMemoryAllocationCallback)(__in LPVOID con
+     }
+ 
+ private:
+-    inline bool RequestAllocImpl(size_t byteCount)
++    inline bool RequestAllocImpl(size_t byteCount, bool externalAlloc = false)
+     {
+         size_t newCurrentMemory = currentMemory + byteCount;
+ 
+@@ -131,6 +132,12 @@ typedef bool (__stdcall * PageAllocatorMemoryAllocationCallback)(__in LPVOID con
+             {
+                 memoryAllocationCallback(context, MemoryAllocateEvent::MemoryFailure, byteCount);
+             }
++            
++            // oopjit number allocator allocated pages, we can't stop it from allocating so just increase the usage number
++            if (externalAlloc)
++            {
++                currentMemory = newCurrentMemory;
++            }
+ 
+             return false;
+         }
+diff --git a/lib/Common/Memory/PageAllocator.cpp b/lib/Common/Memory/PageAllocator.cpp
+index c7175029d..490ce9b57 100644
+--- a/lib/Common/Memory/PageAllocator.cpp
++++ b/lib/Common/Memory/PageAllocator.cpp
+@@ -735,7 +735,7 @@ PageSegmentBase<T> *
+ PageAllocatorBase<T>::AllocPageSegment(DListBase<PageSegmentBase<T>>& segmentList, PageAllocatorBase<T> * pageAllocator, void* address, uint pageCount, uint committedCount)
+ {
+     PageSegmentBase<T> * segment = segmentList.PrependNode(&NoThrowNoMemProtectHeapAllocator::Instance, pageAllocator, address, pageCount, committedCount);
+-
++    pageAllocator->ReportExternalAlloc(pageCount * AutoSystemInfo::PageSize);
+     return segment;
+ }
+ 
+diff --git a/lib/Common/Memory/PageAllocator.h b/lib/Common/Memory/PageAllocator.h
+index 954227baa..a27d1cfbe 100644
+--- a/lib/Common/Memory/PageAllocator.h
++++ b/lib/Common/Memory/PageAllocator.h
+@@ -725,6 +725,14 @@ class PageAllocatorBase
+         return true;
+     }
+ 
++    void ReportExternalAlloc(size_t byteCount)
++    {
++        if (policyManager != nullptr)
++        {
++            policyManager->RequestAlloc(byteCount, true);
++        }
++    }
++
+     void ReportFree(size_t byteCount)
+     {
+         if (policyManager != nullptr)
+

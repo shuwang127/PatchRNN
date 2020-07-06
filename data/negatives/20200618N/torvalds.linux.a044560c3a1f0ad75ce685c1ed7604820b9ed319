@@ -1,0 +1,101 @@
+commit a044560c3a1f0ad75ce685c1ed7604820b9ed319
+Author: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date:   Mon Aug 10 11:16:52 2009 +0200
+
+    perf_counter: Correct PERF_SAMPLE_RAW output
+    
+    PERF_SAMPLE_* output switches should unconditionally output the
+    correct format, as they are the only way to unambiguously parse
+    the PERF_EVENT_SAMPLE data.
+    
+    Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Acked-by: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+    Cc: Mike Galbraith <efault@gmx.de>
+    Cc: Paul Mackerras <paulus@samba.org>
+    LKML-Reference: <1249896447.17467.74.camel@twins>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/include/linux/perf_counter.h b/include/linux/perf_counter.h
+index 2aabe43c1d04..a9d823a93fe8 100644
+--- a/include/linux/perf_counter.h
++++ b/include/linux/perf_counter.h
+@@ -369,6 +369,8 @@ enum perf_event_type {
+ 	 *
+ 	 *	{ u64			nr,
+ 	 *	  u64			ips[nr];  } && PERF_SAMPLE_CALLCHAIN
++	 *	{ u32			size;
++	 *	  char                  data[size];}&& PERF_SAMPLE_RAW
+ 	 * };
+ 	 */
+ 	PERF_EVENT_SAMPLE		= 9,
+diff --git a/include/trace/ftrace.h b/include/trace/ftrace.h
+index 7fb16d90e7b1..7167b9b97da2 100644
+--- a/include/trace/ftrace.h
++++ b/include/trace/ftrace.h
+@@ -685,7 +685,8 @@ static void ftrace_profile_##call(proto)				\
+ 	pc = preempt_count();						\
+ 									\
+ 	__data_size = ftrace_get_offsets_##call(&__data_offsets, args); \
+-	__entry_size = ALIGN(__data_size + sizeof(*entry), sizeof(u64));\
++	__entry_size = ALIGN(__data_size + sizeof(*entry) + sizeof(u32),\
++			     sizeof(u64));				\
+ 									\
+ 	do {								\
+ 		char raw_data[__entry_size];				\
+diff --git a/kernel/perf_counter.c b/kernel/perf_counter.c
+index 546e62d62941..5229d1666fa5 100644
+--- a/kernel/perf_counter.c
++++ b/kernel/perf_counter.c
+@@ -2646,7 +2646,6 @@ static void perf_counter_output(struct perf_counter *counter, int nmi,
+ 		u64 counter;
+ 	} group_entry;
+ 	struct perf_callchain_entry *callchain = NULL;
+-	struct perf_raw_record *raw = NULL;
+ 	int callchain_size = 0;
+ 	u64 time;
+ 	struct {
+@@ -2716,9 +2715,15 @@ static void perf_counter_output(struct perf_counter *counter, int nmi,
+ 	}
+ 
+ 	if (sample_type & PERF_SAMPLE_RAW) {
+-		raw = data->raw;
+-		if (raw)
+-			header.size += raw->size;
++		int size = sizeof(u32);
++
++		if (data->raw)
++			size += data->raw->size;
++		else
++			size += sizeof(u32);
++
++		WARN_ON_ONCE(size & (sizeof(u64)-1));
++		header.size += size;
+ 	}
+ 
+ 	ret = perf_output_begin(&handle, counter, header.size, nmi, 1);
+@@ -2784,8 +2789,21 @@ static void perf_counter_output(struct perf_counter *counter, int nmi,
+ 		}
+ 	}
+ 
+-	if ((sample_type & PERF_SAMPLE_RAW) && raw)
+-		perf_output_copy(&handle, raw->data, raw->size);
++	if (sample_type & PERF_SAMPLE_RAW) {
++		if (data->raw) {
++			perf_output_put(&handle, data->raw->size);
++			perf_output_copy(&handle, data->raw->data, data->raw->size);
++		} else {
++			struct {
++				u32	size;
++				u32	data;
++			} raw = {
++				.size = sizeof(u32),
++				.data = 0,
++			};
++			perf_output_put(&handle, raw);
++		}
++	}
+ 
+ 	perf_output_end(&handle);
+ }
+

@@ -1,0 +1,537 @@
+commit 9178ba294b6839eeff1a91bed95515d783f3ee6c
+Author: Alexander Graf <agraf@suse.de>
+Date:   Mon Oct 13 16:01:09 2014 +0200
+
+    powerpc: Convert power off logic to pm_power_off
+    
+    The generic Linux framework to power off the machine is a function pointer
+    called pm_power_off. The trick about this pointer is that device drivers can
+    potentially implement it rather than board files.
+    
+    Today on powerpc we set pm_power_off to invoke our generic full machine power
+    off logic which then calls ppc_md.power_off to invoke machine specific power
+    off.
+    
+    However, when we want to add a power off GPIO via the "gpio-poweroff" driver,
+    this card house falls apart. That driver only registers itself if pm_power_off
+    is NULL to ensure it doesn't override board specific logic. However, since we
+    always set pm_power_off to the generic power off logic (which will just not
+    power off the machine if no ppc_md.power_off call is implemented), we can't
+    implement power off via the generic GPIO power off driver.
+    
+    To fix this up, let's get rid of the ppc_md.power_off logic and just always use
+    pm_power_off as was intended. Then individual drivers such as the GPIO power off
+    driver can implement power off logic via that function pointer.
+    
+    With this patch set applied and a few patches on top of QEMU that implement a
+    power off GPIO on the virt e500 machine, I can successfully turn off my virtual
+    machine after halt.
+    
+    Signed-off-by: Alexander Graf <agraf@suse.de>
+    [mpe: Squash into one patch and update changelog based on cover letter]
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/include/asm/machdep.h b/arch/powerpc/include/asm/machdep.h
+index 307347f8ddbd..f15f15c92544 100644
+--- a/arch/powerpc/include/asm/machdep.h
++++ b/arch/powerpc/include/asm/machdep.h
+@@ -142,7 +142,6 @@ struct machdep_calls {
+ #endif
+ 
+ 	void		(*restart)(char *cmd);
+-	void		(*power_off)(void);
+ 	void		(*halt)(void);
+ 	void		(*panic)(char *str);
+ 	void		(*cpu_die)(void);
+diff --git a/arch/powerpc/kernel/setup-common.c b/arch/powerpc/kernel/setup-common.c
+index 1362cd62b3fa..44c8d03558ac 100644
+--- a/arch/powerpc/kernel/setup-common.c
++++ b/arch/powerpc/kernel/setup-common.c
+@@ -139,8 +139,8 @@ void machine_restart(char *cmd)
+ void machine_power_off(void)
+ {
+ 	machine_shutdown();
+-	if (ppc_md.power_off)
+-		ppc_md.power_off();
++	if (pm_power_off)
++		pm_power_off();
+ #ifdef CONFIG_SMP
+ 	smp_send_stop();
+ #endif
+@@ -151,7 +151,7 @@ void machine_power_off(void)
+ /* Used by the G5 thermal driver */
+ EXPORT_SYMBOL_GPL(machine_power_off);
+ 
+-void (*pm_power_off)(void) = machine_power_off;
++void (*pm_power_off)(void);
+ EXPORT_SYMBOL_GPL(pm_power_off);
+ 
+ void machine_halt(void)
+diff --git a/arch/powerpc/platforms/44x/ppc476.c b/arch/powerpc/platforms/44x/ppc476.c
+index 58db9d083969..c11ce6516c8f 100644
+--- a/arch/powerpc/platforms/44x/ppc476.c
++++ b/arch/powerpc/platforms/44x/ppc476.c
+@@ -94,7 +94,7 @@ static int avr_probe(struct i2c_client *client,
+ {
+ 	avr_i2c_client = client;
+ 	ppc_md.restart = avr_reset_system;
+-	ppc_md.power_off = avr_power_off_system;
++	pm_power_off = avr_power_off_system;
+ 	return 0;
+ }
+ 
+diff --git a/arch/powerpc/platforms/52xx/efika.c b/arch/powerpc/platforms/52xx/efika.c
+index 3feffde9128d..6af651e69129 100644
+--- a/arch/powerpc/platforms/52xx/efika.c
++++ b/arch/powerpc/platforms/52xx/efika.c
+@@ -212,6 +212,8 @@ static int __init efika_probe(void)
+ 	DMA_MODE_READ = 0x44;
+ 	DMA_MODE_WRITE = 0x48;
+ 
++	pm_power_off = rtas_power_off;
++
+ 	return 1;
+ }
+ 
+@@ -225,7 +227,6 @@ define_machine(efika)
+ 	.init_IRQ		= mpc52xx_init_irq,
+ 	.get_irq		= mpc52xx_get_irq,
+ 	.restart		= rtas_restart,
+-	.power_off		= rtas_power_off,
+ 	.halt			= rtas_halt,
+ 	.set_rtc_time		= rtas_set_rtc_time,
+ 	.get_rtc_time		= rtas_get_rtc_time,
+diff --git a/arch/powerpc/platforms/83xx/mcu_mpc8349emitx.c b/arch/powerpc/platforms/83xx/mcu_mpc8349emitx.c
+index 463fa91ee5b6..15e8021ddef9 100644
+--- a/arch/powerpc/platforms/83xx/mcu_mpc8349emitx.c
++++ b/arch/powerpc/platforms/83xx/mcu_mpc8349emitx.c
+@@ -167,10 +167,10 @@ static int mcu_probe(struct i2c_client *client, const struct i2c_device_id *id)
+ 	if (ret)
+ 		goto err;
+ 
+-	/* XXX: this is potentially racy, but there is no lock for ppc_md */
+-	if (!ppc_md.power_off) {
++	/* XXX: this is potentially racy, but there is no lock for pm_power_off */
++	if (!pm_power_off) {
+ 		glob_mcu = mcu;
+-		ppc_md.power_off = mcu_power_off;
++		pm_power_off = mcu_power_off;
+ 		dev_info(&client->dev, "will provide power-off service\n");
+ 	}
+ 
+@@ -197,7 +197,7 @@ static int mcu_remove(struct i2c_client *client)
+ 	device_remove_file(&client->dev, &dev_attr_status);
+ 
+ 	if (glob_mcu == mcu) {
+-		ppc_md.power_off = NULL;
++		pm_power_off = NULL;
+ 		glob_mcu = NULL;
+ 	}
+ 
+diff --git a/arch/powerpc/platforms/85xx/corenet_generic.c b/arch/powerpc/platforms/85xx/corenet_generic.c
+index e56b89a792ed..1f309ccb096e 100644
+--- a/arch/powerpc/platforms/85xx/corenet_generic.c
++++ b/arch/powerpc/platforms/85xx/corenet_generic.c
+@@ -170,7 +170,7 @@ static int __init corenet_generic_probe(void)
+ 
+ 			ppc_md.get_irq = ehv_pic_get_irq;
+ 			ppc_md.restart = fsl_hv_restart;
+-			ppc_md.power_off = fsl_hv_halt;
++			pm_power_off = fsl_hv_halt;
+ 			ppc_md.halt = fsl_hv_halt;
+ #ifdef CONFIG_SMP
+ 			/*
+diff --git a/arch/powerpc/platforms/85xx/sgy_cts1000.c b/arch/powerpc/platforms/85xx/sgy_cts1000.c
+index 8162b0412117..e149c9ec26ae 100644
+--- a/arch/powerpc/platforms/85xx/sgy_cts1000.c
++++ b/arch/powerpc/platforms/85xx/sgy_cts1000.c
+@@ -120,7 +120,7 @@ static int gpio_halt_probe(struct platform_device *pdev)
+ 
+ 	/* Register our halt function */
+ 	ppc_md.halt = gpio_halt_cb;
+-	ppc_md.power_off = gpio_halt_cb;
++	pm_power_off = gpio_halt_cb;
+ 
+ 	printk(KERN_INFO "gpio-halt: registered GPIO %d (%d trigger, %d"
+ 	       " irq).\n", gpio, trigger, irq);
+@@ -137,7 +137,7 @@ static int gpio_halt_remove(struct platform_device *pdev)
+ 		free_irq(irq, halt_node);
+ 
+ 		ppc_md.halt = NULL;
+-		ppc_md.power_off = NULL;
++		pm_power_off = NULL;
+ 
+ 		gpio_free(gpio);
+ 
+diff --git a/arch/powerpc/platforms/cell/celleb_setup.c b/arch/powerpc/platforms/cell/celleb_setup.c
+index 34e8ce2976aa..90be8ec51686 100644
+--- a/arch/powerpc/platforms/cell/celleb_setup.c
++++ b/arch/powerpc/platforms/cell/celleb_setup.c
+@@ -142,6 +142,7 @@ static int __init celleb_probe_beat(void)
+ 	powerpc_firmware_features |= FW_FEATURE_CELLEB_ALWAYS
+ 		| FW_FEATURE_BEAT | FW_FEATURE_LPAR;
+ 	hpte_init_beat_v3();
++	pm_power_off = beat_power_off;
+ 
+ 	return 1;
+ }
+@@ -190,6 +191,7 @@ static int __init celleb_probe_native(void)
+ 
+ 	powerpc_firmware_features |= FW_FEATURE_CELLEB_ALWAYS;
+ 	hpte_init_native();
++	pm_power_off = rtas_power_off;
+ 
+ 	return 1;
+ }
+@@ -204,7 +206,6 @@ define_machine(celleb_beat) {
+ 	.setup_arch		= celleb_setup_arch_beat,
+ 	.show_cpuinfo		= celleb_show_cpuinfo,
+ 	.restart		= beat_restart,
+-	.power_off		= beat_power_off,
+ 	.halt			= beat_halt,
+ 	.get_rtc_time		= beat_get_rtc_time,
+ 	.set_rtc_time		= beat_set_rtc_time,
+@@ -230,7 +231,6 @@ define_machine(celleb_native) {
+ 	.setup_arch		= celleb_setup_arch_native,
+ 	.show_cpuinfo		= celleb_show_cpuinfo,
+ 	.restart		= rtas_restart,
+-	.power_off		= rtas_power_off,
+ 	.halt			= rtas_halt,
+ 	.get_boot_time		= rtas_get_boot_time,
+ 	.get_rtc_time		= rtas_get_rtc_time,
+diff --git a/arch/powerpc/platforms/cell/qpace_setup.c b/arch/powerpc/platforms/cell/qpace_setup.c
+index 6e3409d590ac..d328140dc6f5 100644
+--- a/arch/powerpc/platforms/cell/qpace_setup.c
++++ b/arch/powerpc/platforms/cell/qpace_setup.c
+@@ -127,6 +127,7 @@ static int __init qpace_probe(void)
+ 		return 0;
+ 
+ 	hpte_init_native();
++	pm_power_off = rtas_power_off;
+ 
+ 	return 1;
+ }
+@@ -137,7 +138,6 @@ define_machine(qpace) {
+ 	.setup_arch		= qpace_setup_arch,
+ 	.show_cpuinfo		= qpace_show_cpuinfo,
+ 	.restart		= rtas_restart,
+-	.power_off		= rtas_power_off,
+ 	.halt			= rtas_halt,
+ 	.get_boot_time		= rtas_get_boot_time,
+ 	.get_rtc_time		= rtas_get_rtc_time,
+diff --git a/arch/powerpc/platforms/cell/setup.c b/arch/powerpc/platforms/cell/setup.c
+index 6ae25fb62015..d62aa982d530 100644
+--- a/arch/powerpc/platforms/cell/setup.c
++++ b/arch/powerpc/platforms/cell/setup.c
+@@ -259,6 +259,7 @@ static int __init cell_probe(void)
+ 		return 0;
+ 
+ 	hpte_init_native();
++	pm_power_off = rtas_power_off;
+ 
+ 	return 1;
+ }
+@@ -269,7 +270,6 @@ define_machine(cell) {
+ 	.setup_arch		= cell_setup_arch,
+ 	.show_cpuinfo		= cell_show_cpuinfo,
+ 	.restart		= rtas_restart,
+-	.power_off		= rtas_power_off,
+ 	.halt			= rtas_halt,
+ 	.get_boot_time		= rtas_get_boot_time,
+ 	.get_rtc_time		= rtas_get_rtc_time,
+diff --git a/arch/powerpc/platforms/chrp/setup.c b/arch/powerpc/platforms/chrp/setup.c
+index 5b77b1919fd2..860a59eb8ea2 100644
+--- a/arch/powerpc/platforms/chrp/setup.c
++++ b/arch/powerpc/platforms/chrp/setup.c
+@@ -585,6 +585,8 @@ static int __init chrp_probe(void)
+ 	DMA_MODE_READ = 0x44;
+ 	DMA_MODE_WRITE = 0x48;
+ 
++	pm_power_off = rtas_power_off;
++
+ 	return 1;
+ }
+ 
+@@ -597,7 +599,6 @@ define_machine(chrp) {
+ 	.show_cpuinfo		= chrp_show_cpuinfo,
+ 	.init_IRQ		= chrp_init_IRQ,
+ 	.restart		= rtas_restart,
+-	.power_off		= rtas_power_off,
+ 	.halt			= rtas_halt,
+ 	.time_init		= chrp_time_init,
+ 	.set_rtc_time		= chrp_set_rtc_time,
+diff --git a/arch/powerpc/platforms/embedded6xx/gamecube.c b/arch/powerpc/platforms/embedded6xx/gamecube.c
+index bd4ba5d7d568..fe0ed6ee285e 100644
+--- a/arch/powerpc/platforms/embedded6xx/gamecube.c
++++ b/arch/powerpc/platforms/embedded6xx/gamecube.c
+@@ -67,6 +67,8 @@ static int __init gamecube_probe(void)
+ 	if (!of_flat_dt_is_compatible(dt_root, "nintendo,gamecube"))
+ 		return 0;
+ 
++	pm_power_off = gamecube_power_off;
++
+ 	return 1;
+ }
+ 
+@@ -80,7 +82,6 @@ define_machine(gamecube) {
+ 	.probe			= gamecube_probe,
+ 	.init_early		= gamecube_init_early,
+ 	.restart		= gamecube_restart,
+-	.power_off		= gamecube_power_off,
+ 	.halt			= gamecube_halt,
+ 	.init_IRQ		= flipper_pic_probe,
+ 	.get_irq		= flipper_pic_get_irq,
+diff --git a/arch/powerpc/platforms/embedded6xx/linkstation.c b/arch/powerpc/platforms/embedded6xx/linkstation.c
+index 168e1d80b2e5..540eeb58d3f0 100644
+--- a/arch/powerpc/platforms/embedded6xx/linkstation.c
++++ b/arch/powerpc/platforms/embedded6xx/linkstation.c
+@@ -147,6 +147,9 @@ static int __init linkstation_probe(void)
+ 
+ 	if (!of_flat_dt_is_compatible(root, "linkstation"))
+ 		return 0;
++
++	pm_power_off = linkstation_power_off;
++
+ 	return 1;
+ }
+ 
+@@ -158,7 +161,6 @@ define_machine(linkstation){
+ 	.show_cpuinfo 		= linkstation_show_cpuinfo,
+ 	.get_irq 		= mpic_get_irq,
+ 	.restart 		= linkstation_restart,
+-	.power_off 		= linkstation_power_off,
+ 	.halt	 		= linkstation_halt,
+ 	.calibrate_decr 	= generic_calibrate_decr,
+ };
+diff --git a/arch/powerpc/platforms/embedded6xx/wii.c b/arch/powerpc/platforms/embedded6xx/wii.c
+index 388e29bab8f6..352592d3e44e 100644
+--- a/arch/powerpc/platforms/embedded6xx/wii.c
++++ b/arch/powerpc/platforms/embedded6xx/wii.c
+@@ -211,6 +211,8 @@ static int __init wii_probe(void)
+ 	if (!of_flat_dt_is_compatible(dt_root, "nintendo,wii"))
+ 		return 0;
+ 
++	pm_power_off = wii_power_off;
++
+ 	return 1;
+ }
+ 
+@@ -226,7 +228,6 @@ define_machine(wii) {
+ 	.init_early		= wii_init_early,
+ 	.setup_arch		= wii_setup_arch,
+ 	.restart		= wii_restart,
+-	.power_off		= wii_power_off,
+ 	.halt			= wii_halt,
+ 	.init_IRQ		= wii_pic_probe,
+ 	.get_irq		= flipper_pic_get_irq,
+diff --git a/arch/powerpc/platforms/maple/setup.c b/arch/powerpc/platforms/maple/setup.c
+index cb1b0b35a0c6..56b85cd61aaf 100644
+--- a/arch/powerpc/platforms/maple/setup.c
++++ b/arch/powerpc/platforms/maple/setup.c
+@@ -169,7 +169,7 @@ static void __init maple_use_rtas_reboot_and_halt_if_present(void)
+ 	if (rtas_service_present("system-reboot") &&
+ 	    rtas_service_present("power-off")) {
+ 		ppc_md.restart = rtas_restart;
+-		ppc_md.power_off = rtas_power_off;
++		pm_power_off = rtas_power_off;
+ 		ppc_md.halt = rtas_halt;
+ 	}
+ }
+@@ -312,6 +312,7 @@ static int __init maple_probe(void)
+ 	alloc_dart_table();
+ 
+ 	hpte_init_native();
++	pm_power_off = maple_power_off;
+ 
+ 	return 1;
+ }
+@@ -325,7 +326,6 @@ define_machine(maple) {
+ 	.pci_irq_fixup		= maple_pci_irq_fixup,
+ 	.pci_get_legacy_ide_irq	= maple_pci_get_legacy_ide_irq,
+ 	.restart		= maple_restart,
+-	.power_off		= maple_power_off,
+ 	.halt			= maple_halt,
+        	.get_boot_time		= maple_get_boot_time,
+        	.set_rtc_time		= maple_set_rtc_time,
+diff --git a/arch/powerpc/platforms/powermac/setup.c b/arch/powerpc/platforms/powermac/setup.c
+index b127a29ac526..713d36d45d1d 100644
+--- a/arch/powerpc/platforms/powermac/setup.c
++++ b/arch/powerpc/platforms/powermac/setup.c
+@@ -632,6 +632,8 @@ static int __init pmac_probe(void)
+ 	smu_cmdbuf_abs = memblock_alloc_base(4096, 4096, 0x80000000UL);
+ #endif /* CONFIG_PMAC_SMU */
+ 
++	pm_power_off = pmac_power_off;
++
+ 	return 1;
+ }
+ 
+@@ -663,7 +665,6 @@ define_machine(powermac) {
+ 	.get_irq		= NULL,	/* changed later */
+ 	.pci_irq_fixup		= pmac_pci_irq_fixup,
+ 	.restart		= pmac_restart,
+-	.power_off		= pmac_power_off,
+ 	.halt			= pmac_halt,
+ 	.time_init		= pmac_time_init,
+ 	.get_boot_time		= pmac_get_boot_time,
+diff --git a/arch/powerpc/platforms/powernv/setup.c b/arch/powerpc/platforms/powernv/setup.c
+index 3f9546d8a51f..941831d67cb2 100644
+--- a/arch/powerpc/platforms/powernv/setup.c
++++ b/arch/powerpc/platforms/powernv/setup.c
+@@ -268,7 +268,7 @@ static void __init pnv_setup_machdep_opal(void)
+ 	ppc_md.get_rtc_time = opal_get_rtc_time;
+ 	ppc_md.set_rtc_time = opal_set_rtc_time;
+ 	ppc_md.restart = pnv_restart;
+-	ppc_md.power_off = pnv_power_off;
++	pm_power_off = pnv_power_off;
+ 	ppc_md.halt = pnv_halt;
+ 	ppc_md.machine_check_exception = opal_machine_check;
+ 	ppc_md.mce_check_early_recovery = opal_mce_check_early_recovery;
+@@ -285,7 +285,7 @@ static void __init pnv_setup_machdep_rtas(void)
+ 		ppc_md.set_rtc_time = rtas_set_rtc_time;
+ 	}
+ 	ppc_md.restart = rtas_restart;
+-	ppc_md.power_off = rtas_power_off;
++	pm_power_off = rtas_power_off;
+ 	ppc_md.halt = rtas_halt;
+ }
+ #endif /* CONFIG_PPC_POWERNV_RTAS */
+diff --git a/arch/powerpc/platforms/ps3/setup.c b/arch/powerpc/platforms/ps3/setup.c
+index 3f509f86432c..009a2004b876 100644
+--- a/arch/powerpc/platforms/ps3/setup.c
++++ b/arch/powerpc/platforms/ps3/setup.c
+@@ -248,6 +248,7 @@ static int __init ps3_probe(void)
+ 	ps3_mm_init();
+ 	ps3_mm_vas_create(&htab_size);
+ 	ps3_hpte_init(htab_size);
++	pm_power_off = ps3_power_off;
+ 
+ 	DBG(" <- %s:%d\n", __func__, __LINE__);
+ 	return 1;
+@@ -278,7 +279,6 @@ define_machine(ps3) {
+ 	.calibrate_decr			= ps3_calibrate_decr,
+ 	.progress			= ps3_progress,
+ 	.restart			= ps3_restart,
+-	.power_off			= ps3_power_off,
+ 	.halt				= ps3_halt,
+ #if defined(CONFIG_KEXEC)
+ 	.kexec_cpu_down			= ps3_kexec_cpu_down,
+diff --git a/arch/powerpc/platforms/pseries/setup.c b/arch/powerpc/platforms/pseries/setup.c
+index 125c589eeef5..db0fc0c07568 100644
+--- a/arch/powerpc/platforms/pseries/setup.c
++++ b/arch/powerpc/platforms/pseries/setup.c
+@@ -659,6 +659,34 @@ static void __init pSeries_init_early(void)
+ 	pr_debug(" <- pSeries_init_early()\n");
+ }
+ 
++/**
++ * pseries_power_off - tell firmware about how to power off the system.
++ *
++ * This function calls either the power-off rtas token in normal cases
++ * or the ibm,power-off-ups token (if present & requested) in case of
++ * a power failure. If power-off token is used, power on will only be
++ * possible with power button press. If ibm,power-off-ups token is used
++ * it will allow auto poweron after power is restored.
++ */
++static void pseries_power_off(void)
++{
++	int rc;
++	int rtas_poweroff_ups_token = rtas_token("ibm,power-off-ups");
++
++	if (rtas_flash_term_hook)
++		rtas_flash_term_hook(SYS_POWER_OFF);
++
++	if (rtas_poweron_auto == 0 ||
++		rtas_poweroff_ups_token == RTAS_UNKNOWN_SERVICE) {
++		rc = rtas_call(rtas_token("power-off"), 2, 1, NULL, -1, -1);
++		printk(KERN_INFO "RTAS power-off returned %d\n", rc);
++	} else {
++		rc = rtas_call(rtas_poweroff_ups_token, 0, 1, NULL);
++		printk(KERN_INFO "RTAS ibm,power-off-ups returned %d\n", rc);
++	}
++	for (;;);
++}
++
+ /*
+  * Called very early, MMU is off, device-tree isn't unflattened
+  */
+@@ -741,6 +769,8 @@ static int __init pSeries_probe(void)
+ 	else
+ 		hpte_init_native();
+ 
++	pm_power_off = pseries_power_off;
++
+ 	pr_debug("Machine is%s LPAR !\n",
+ 	         (powerpc_firmware_features & FW_FEATURE_LPAR) ? "" : " not");
+ 
+@@ -754,34 +784,6 @@ static int pSeries_pci_probe_mode(struct pci_bus *bus)
+ 	return PCI_PROBE_NORMAL;
+ }
+ 
+-/**
+- * pSeries_power_off - tell firmware about how to power off the system.
+- *
+- * This function calls either the power-off rtas token in normal cases
+- * or the ibm,power-off-ups token (if present & requested) in case of
+- * a power failure. If power-off token is used, power on will only be
+- * possible with power button press. If ibm,power-off-ups token is used
+- * it will allow auto poweron after power is restored.
+- */
+-static void pSeries_power_off(void)
+-{
+-	int rc;
+-	int rtas_poweroff_ups_token = rtas_token("ibm,power-off-ups");
+-
+-	if (rtas_flash_term_hook)
+-		rtas_flash_term_hook(SYS_POWER_OFF);
+-
+-	if (rtas_poweron_auto == 0 ||
+-		rtas_poweroff_ups_token == RTAS_UNKNOWN_SERVICE) {
+-		rc = rtas_call(rtas_token("power-off"), 2, 1, NULL, -1, -1);
+-		printk(KERN_INFO "RTAS power-off returned %d\n", rc);
+-	} else {
+-		rc = rtas_call(rtas_poweroff_ups_token, 0, 1, NULL);
+-		printk(KERN_INFO "RTAS ibm,power-off-ups returned %d\n", rc);
+-	}
+-	for (;;);
+-}
+-
+ #ifndef CONFIG_PCI
+ void pSeries_final_fixup(void) { }
+ #endif
+@@ -796,7 +798,6 @@ define_machine(pseries) {
+ 	.pcibios_fixup		= pSeries_final_fixup,
+ 	.pci_probe_mode		= pSeries_pci_probe_mode,
+ 	.restart		= rtas_restart,
+-	.power_off		= pSeries_power_off,
+ 	.halt			= rtas_halt,
+ 	.panic			= rtas_os_term,
+ 	.get_boot_time		= rtas_get_boot_time,
+diff --git a/arch/powerpc/sysdev/fsl_soc.c b/arch/powerpc/sysdev/fsl_soc.c
+index ffd1169ebaab..1e04568da3b9 100644
+--- a/arch/powerpc/sysdev/fsl_soc.c
++++ b/arch/powerpc/sysdev/fsl_soc.c
+@@ -238,7 +238,7 @@ void fsl_hv_restart(char *cmd)
+ /*
+  * Halt the current partition
+  *
+- * This function should be assigned to the ppc_md.power_off and ppc_md.halt
++ * This function should be assigned to the pm_power_off and ppc_md.halt
+  * function pointers, to shut down the partition when we're running under
+  * the Freescale hypervisor.
+  */
+diff --git a/arch/powerpc/xmon/xmon.c b/arch/powerpc/xmon/xmon.c
+index b988b5addf86..506d25681fe3 100644
+--- a/arch/powerpc/xmon/xmon.c
++++ b/arch/powerpc/xmon/xmon.c
+@@ -981,7 +981,8 @@ static void bootcmds(void)
+ 	else if (cmd == 'h')
+ 		ppc_md.halt();
+ 	else if (cmd == 'p')
+-		ppc_md.power_off();
++		if (pm_power_off)
++			pm_power_off();
+ }
+ 
+ static int cpu_cmd(void)
+

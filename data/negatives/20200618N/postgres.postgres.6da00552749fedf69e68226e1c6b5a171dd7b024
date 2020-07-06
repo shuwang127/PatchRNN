@@ -1,0 +1,65 @@
+commit 6da00552749fedf69e68226e1c6b5a171dd7b024
+Author: Bruce Momjian <bruce@momjian.us>
+Date:   Wed Jan 1 06:01:16 1997 +0000
+
+    Fix for SELECT INTO ... GROUP/ORDER BY where table already exists unlink error.
+
+diff --git a/src/backend/access/heap/heapam.c b/src/backend/access/heap/heapam.c
+index a98cb2e177..c6489a3a12 100644
+--- a/src/backend/access/heap/heapam.c
++++ b/src/backend/access/heap/heapam.c
+@@ -7,7 +7,7 @@
+  *
+  *
+  * IDENTIFICATION
+- *    $Header: /cvsroot/pgsql/src/backend/access/heap/heapam.c,v 1.8 1996/11/05 09:53:01 scrappy Exp $
++ *    $Header: /cvsroot/pgsql/src/backend/access/heap/heapam.c,v 1.9 1997/01/01 06:01:03 momjian Exp $
+  *
+  *
+  * INTERFACE ROUTINES
+@@ -495,6 +495,10 @@ heap_open(Oid relationId)
+     IncrHeapAccessStat(global_open);
+     
+     r = (Relation) RelationIdGetRelation(relationId);
++
++    if(RelationIsValid(r) && r->rd_istemp) {
++        r->rd_tmpunlinked = FALSE; /* now we can unlink it */
++    }
+     
+     if (RelationIsValid(r) && r->rd_rel->relkind == RELKIND_INDEX) {
+ 	elog(WARN, "%s is an index relation", r->rd_rel->relname.data);
+@@ -524,6 +528,10 @@ heap_openr(char *relationName)
+     
+     r = RelationNameGetRelation(relationName);
+     
++    if(RelationIsValid(r) && r->rd_istemp) {
++        r->rd_tmpunlinked = FALSE; /* now we can unlink it */
++    }
++
+     if (RelationIsValid(r) && r->rd_rel->relkind == RELKIND_INDEX) {
+ 	elog(WARN, "%s is an index relation", r->rd_rel->relname.data);
+     }
+diff --git a/src/backend/catalog/heap.c b/src/backend/catalog/heap.c
+index 65c48c3336..50609272b6 100644
+--- a/src/backend/catalog/heap.c
++++ b/src/backend/catalog/heap.c
+@@ -7,7 +7,7 @@
+  *
+  *
+  * IDENTIFICATION
+- *    $Header: /cvsroot/pgsql/src/backend/catalog/heap.c,v 1.9 1996/12/31 06:58:27 vadim Exp $
++ *    $Header: /cvsroot/pgsql/src/backend/catalog/heap.c,v 1.10 1997/01/01 06:01:16 momjian Exp $
+  *
+  * INTERFACE ROUTINES
+  *	heap_creatr()		- Create an uncataloged heap relation
+@@ -303,7 +303,8 @@ heap_creatr(char *name,
+      */
+ 
+     rdesc->rd_istemp = isTemp;
+-
++    rdesc->rd_tmpunlinked = TRUE;	/* change once table is opened */
++    
+     /* ----------------
+      *	have the storage manager create the relation.
+      * ----------------
+

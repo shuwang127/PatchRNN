@@ -1,0 +1,82 @@
+commit 48c59f4b915caf4007e6d5a1f34b10fe10210b72
+Author: Julia Lawall <julia@diku.dk>
+Date:   Fri Apr 1 16:23:45 2011 +0200
+
+    drivers/staging/intel_sst/intel_sst_app_interface.c: introduce missing kfree
+    
+    Stream_bufs is initialized at the beginning of the function, and then the
+    #ifdef code declares a new variable with the same name and initializes
+    that.  If the if in the ifdef is taken, the then branch returns, implying
+    that the first stream_bufs is never used and is leaked.  The first
+    initialization is thus moved down after the ifdef.
+    
+    The semantic match that finds the problem is as follows:
+    (http://www.emn.fr/x-info/coccinelle/)
+    
+    // <smpl>
+    @r exists@
+    local idexpression x;
+    statement S;
+    expression E;
+    identifier f,f1,l;
+    position p1,p2;
+    expression *ptr != NULL;
+    @@
+    
+    x@p1 = \(kmalloc\|kzalloc\|kcalloc\)(...);
+    ...
+    if (x == NULL) S
+    <... when != x
+         when != if (...) { <+...x...+> }
+    (
+    x->f1 = E
+    |
+     (x->f1 == NULL || ...)
+    |
+     f(...,x->f1,...)
+    )
+    ...>
+    (
+     return \(0\|<+...x...+>\|ptr\);
+    |
+     return@p2 ...;
+    )
+    
+    @script:python@
+    p1 << r.p1;
+    p2 << r.p2;
+    @@
+    
+    print "* file: %s kmalloc %s return %s" % (p1[0].file,p1[0].line,p2[0].line)
+    // </smpl>
+    
+    Signed-off-by: Julia Lawall <julia@diku.dk>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/staging/intel_sst/intel_sst_app_interface.c b/drivers/staging/intel_sst/intel_sst_app_interface.c
+index 1d0621260ea8..d7454e210aae 100644
+--- a/drivers/staging/intel_sst/intel_sst_app_interface.c
++++ b/drivers/staging/intel_sst/intel_sst_app_interface.c
+@@ -418,10 +418,6 @@ static int snd_sst_fill_kernel_list(struct stream_info *stream,
+ 	static int sent_offset;
+ 	static unsigned long sent_index;
+ 
+-	stream_bufs = kzalloc(sizeof(*stream_bufs), GFP_KERNEL);
+-	if (!stream_bufs)
+-		return -ENOMEM;
+-	stream_bufs->addr = sst_drv_ctx->mmap_mem;
+ #ifdef CONFIG_MRST_RAR_HANDLER
+ 	if (stream->ops == STREAM_OPS_PLAYBACK_DRM) {
+ 		for (index = stream->sg_index; index < nr_segs; index++) {
+@@ -448,6 +444,10 @@ static int snd_sst_fill_kernel_list(struct stream_info *stream,
+ 		return retval;
+ 	}
+ #endif
++	stream_bufs = kzalloc(sizeof(*stream_bufs), GFP_KERNEL);
++	if (!stream_bufs)
++		return -ENOMEM;
++	stream_bufs->addr = sst_drv_ctx->mmap_mem;
+ 	mmap_len = sst_drv_ctx->mmap_len;
+ 	stream_bufs->addr = sst_drv_ctx->mmap_mem;
+ 	bufp = stream->cur_ptr;
+

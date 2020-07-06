@@ -1,0 +1,89 @@
+commit 636e41ac6928bc49885b7bc3cc675203b890fdce
+Author: Larry Greenfield <leg@andrew.cmu.edu>
+Date:   Tue Feb 26 20:32:54 2002 +0000
+
+    . make sure to reread header after write lock during recovery
+    
+    . make sure to release read lock after consistency() check
+
+diff --git a/lib/cyrusdb_skiplist.c b/lib/cyrusdb_skiplist.c
+index 2dbc5c3bc..fcc44836c 100644
+--- a/lib/cyrusdb_skiplist.c
++++ b/lib/cyrusdb_skiplist.c
+@@ -1,5 +1,5 @@
+ /* skip-list.c -- generic skip list routines
+- * $Id: cyrusdb_skiplist.c,v 1.25 2002/02/25 19:12:22 leg Exp $
++ * $Id: cyrusdb_skiplist.c,v 1.26 2002/02/26 20:32:54 leg Exp $
+  *
+  * Copyright (c) 1998, 2000, 2002 Carnegie Mellon University.
+  * All rights reserved.
+@@ -164,7 +164,11 @@ struct txn {
+ };
+ 
+ static time_t global_recovery = 0;
+-static int do_fsync = 1;
++static int do_fsync = 2;
++
++#define FSYNC(fd) (do_fsync && fsync(fd))
++#define FDATASYNC(fd) ((do_fsync == 1 && fdatasync(fd)) || \
++                       (do_fsync == 2 && fsync(fd)))
+ 
+ static int myinit(const char *dbdir, int myflags)
+ {
+@@ -507,6 +511,8 @@ static int write_lock(struct db *db, const char *altname)
+     map_refresh(db->fd, 0, &db->map_base, &db->map_len, sbuf.st_size,
+ 		fname, 0);
+     
++    /* printf("%d: write lock: %d\n", getpid(), db->map_ino); */
++
+     return 0;
+ }
+ 
+@@ -551,6 +557,8 @@ static int read_lock(struct db *db)
+     db->map_size = sbuf.st_size;
+     db->map_ino = sbuf.st_ino;
+     
++    /* printf("%d: read lock: %d\n", getpid(), db->map_ino); */
++
+     map_refresh(db->fd, 0, &db->map_base, &db->map_len, sbuf.st_size,
+ 		db->fname, 0);
+ 
+@@ -564,6 +572,8 @@ static int unlock(struct db *db)
+ 	return CYRUSDB_IOERROR;
+     }
+ 
++    /* printf("%d: unlock: %d\n", getpid(), db->map_ino); */
++
+     return 0;
+ }
+ 
+@@ -798,7 +808,6 @@ static int fetch(struct db *mydb,
+ {
+     return myfetch(mydb, key, keylen, data, datalen, mytid);
+ }
+-
+ static int fetchlock(struct db *db, 
+ 		     const char *key, int keylen,
+ 		     const char **data, int *datalen,
+@@ -1584,6 +1593,8 @@ static int consistent(struct db *db) /* xxx */
+ 	offset = FORWARD(ptr, 0);
+     }
+ 
++    unlock(db);
++
+     return 0;
+ }
+ 
+@@ -1601,6 +1612,11 @@ static int recovery(struct db *db)
+ 	return r;
+     }
+ 
++    if ((r = read_header(db)) < 0) {
++	unlock(db);
++	return r;
++    }
++
+     if (global_recovery && db->last_recovery >= global_recovery) {
+ 	/* someone beat us to it */
+ 	unlock(db);
+

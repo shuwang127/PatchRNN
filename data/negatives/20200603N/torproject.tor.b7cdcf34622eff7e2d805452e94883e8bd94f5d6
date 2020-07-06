@@ -1,0 +1,354 @@
+commit b7cdcf34622eff7e2d805452e94883e8bd94f5d6
+Author: Nick Mathewson <nickm@torproject.org>
+Date:   Wed Apr 6 05:33:32 2005 +0000
+
+    Hopefully, this will make ORs much faster, and not break them: keep a big splay tree of (circid,orconn)->circuit mappings to make circuit_get_by_circid_conn much faster.
+    
+    
+    svn:r4020
+
+diff --git a/src/or/circuitbuild.c b/src/or/circuitbuild.c
+index 03c818ad6..8aa7549aa 100644
+--- a/src/or/circuitbuild.c
++++ b/src/or/circuitbuild.c
+@@ -59,7 +59,7 @@ static uint16_t get_unique_circ_id_by_conn(connection_t *conn) {
+       return 0;
+     }
+     test_circ_id |= high_bit;
+-  } while (circuit_get_by_circ_id_conn(test_circ_id, conn));
++  } while (circuit_get_by_circid_orconn(test_circ_id, conn));
+   return test_circ_id;
+ }
+ 
+@@ -391,7 +391,8 @@ circuit_deliver_create_cell(circuit_t *circ, char *payload) {
+   tor_assert(circ->n_conn->type == CONN_TYPE_OR);
+   tor_assert(payload);
+ 
+-  circ->n_circ_id = get_unique_circ_id_by_conn(circ->n_conn);
++  circuit_set_circid_orconn(circ, get_unique_circ_id_by_conn(circ->n_conn),
++                            circ->n_conn, N_CONN_CHANGED);
+   if (!circ->n_circ_id) {
+     log_fn(LOG_WARN,"failed to get unique circID.");
+     return -1;
+diff --git a/src/or/circuitlist.c b/src/or/circuitlist.c
+index 0b742afe7..8716d10a5 100644
+--- a/src/or/circuitlist.c
++++ b/src/or/circuitlist.c
+@@ -11,12 +11,10 @@ const char circuitlist_c_id[] = "$Id$";
+  **/
+ 
+ #include "or.h"
++#include "tree.h"
+ 
+ /********* START VARIABLES **********/
+ 
+-/** A global list of all circuits at this hop. */
+-circuit_t *global_circuitlist=NULL;
+-
+ /** Array of strings to make circ-\>state human-readable */
+ const char *circuit_state_to_string[] = {
+   "doing handshakes",        /* 0 */
+@@ -25,12 +23,91 @@ const char *circuit_state_to_string[] = {
+   "open"                     /* 3 */
+ };
+ 
+-/********* END VARIABLES ************/
++/** A global list of all circuits at this hop. */
++circuit_t *global_circuitlist=NULL;
+ 
+ static void circuit_free(circuit_t *circ);
+ static void circuit_free_cpath(crypt_path_t *cpath);
+ static void circuit_free_cpath_node(crypt_path_t *victim);
+ 
++/********* END VARIABLES ************/
++
++struct orconn_circid_circuit_map_t {
++  SPLAY_ENTRY(orconn_circid_circuit_map_t) node;
++  connection_t *or_conn;
++  uint16_t circ_id;
++  circuit_t *circuit;
++};
++
++static int compare_orconn_circid_entries(struct orconn_circid_circuit_map_t *a,
++                                         struct orconn_circid_circuit_map_t *b)
++{
++  if (a->or_conn < b->or_conn)
++    return -1;
++  else if (a->or_conn > b->or_conn)
++    return 1;
++  else if (a->circ_id < b->circ_id)
++    return -1;
++  else if (a->circ_id > b->circ_id)
++    return 1;
++  else
++    return 0;
++};
++SPLAY_HEAD(orconn_circid_tree, orconn_circid_circuit_map_t) orconn_circid_circuit_map = SPLAY_INITIALIZER(orconn_circid_circuit_map);
++SPLAY_PROTOTYPE(orconn_circid_tree, orconn_circid_circuit_map_t, node, compare_orconn_circid_entries);
++SPLAY_GENERATE(orconn_circid_tree, orconn_circid_circuit_map_t, node, compare_orconn_circid_entries);
++
++void
++circuit_set_circid_orconn(circuit_t *circ, uint16_t id,
++                          connection_t *conn,
++                          enum which_conn_changed_t which)
++{
++  uint16_t old_id;
++  connection_t *old_conn;
++  struct orconn_circid_circuit_map_t search;
++  struct orconn_circid_circuit_map_t *found;
++
++  tor_assert(!conn || conn->type == CONN_TYPE_OR);
++
++  if (which == P_CONN_CHANGED) {
++    old_id = circ->p_circ_id;
++    old_conn = circ->p_conn;
++    circ->p_circ_id = id;
++    circ->p_conn = conn;
++  } else {
++    old_id = circ->n_circ_id;
++    old_conn = circ->n_conn;
++    circ->n_circ_id = id;
++    circ->n_conn = conn;
++  }
++
++  if (old_conn) {
++    search.circ_id = old_id;
++    search.or_conn = old_conn;
++    found = SPLAY_FIND(orconn_circid_tree, &orconn_circid_circuit_map, &search);
++    if (found) {
++      SPLAY_REMOVE(orconn_circid_tree, &orconn_circid_circuit_map, found);
++    }
++    tor_free(found);
++  }
++
++  if (conn == NULL)
++    return;
++
++  search.circ_id = id;
++  search.or_conn = conn;
++  found = SPLAY_FIND(orconn_circid_tree, &orconn_circid_circuit_map, &search);
++  if (found) {
++    found->circuit = circ;
++  } else {
++    found = tor_malloc_zero(sizeof(struct orconn_circid_circuit_map_t));
++    found->circ_id = id;
++    found->or_conn = conn;
++    found->circuit = circ;
++    SPLAY_INSERT(orconn_circid_tree, &orconn_circid_circuit_map, found);
++  }
++}
++
+ /** Add <b>circ</b> to the global list of circuits. This is called only from
+  * within circuit_new.
+  */
+@@ -84,13 +161,12 @@ circuit_t *circuit_new(uint16_t p_circ_id, connection_t *p_conn) {
+ 
+   circ->timestamp_created = time(NULL);
+ 
+-  circ->p_circ_id = p_circ_id;
+-  circ->p_conn = p_conn;
+-
+   circ->state = CIRCUIT_STATE_ONIONSKIN_PENDING;
+ 
+   /* CircIDs */
+-  circ->p_circ_id = p_circ_id;
++  if (p_conn) {
++    circuit_set_circid_orconn(circ, p_circ_id, p_conn, P_CONN_CHANGED);
++  }
+   /* circ->n_circ_id remains 0 because we haven't identified the next hop yet */
+ 
+   circ->package_window = CIRCWINDOW_START;
+@@ -127,6 +203,9 @@ static void circuit_free(circuit_t *circ) {
+   if (circ->rend_splice) {
+     circ->rend_splice->rend_splice = NULL;
+   }
++  /* Remove from map. */
++  circuit_set_circid_orconn(circ, 0, NULL, P_CONN_CHANGED);
++  circuit_set_circid_orconn(circ, 0, NULL, N_CONN_CHANGED);
+ 
+   memset(circ, 0xAA, sizeof(circuit_t)); /* poison memory */
+   tor_free(circ);
+@@ -208,36 +287,19 @@ circuit_get_by_global_id(uint32_t id)
+  *    in p_streams or n_streams.
+  * Return NULL if no such circuit exists.
+  */
+-circuit_t *circuit_get_by_circ_id_conn(uint16_t circ_id, connection_t *conn) {
+-  circuit_t *circ;
+-  connection_t *tmpconn;
++circuit_t *circuit_get_by_circid_orconn(uint16_t circ_id, connection_t *conn) {
++  struct orconn_circid_circuit_map_t search;
++  struct orconn_circid_circuit_map_t *found;
+ 
+-  for (circ=global_circuitlist;circ;circ = circ->next) {
+-    if (circ->marked_for_close)
+-      continue;
++  tor_assert(conn->type == CONN_TYPE_OR);
+ 
+-    if (circ->p_circ_id == circ_id) {
+-      if (circ->p_conn == conn)
+-        return circ;
+-      for (tmpconn = circ->p_streams; tmpconn; tmpconn = tmpconn->next_stream) {
+-        if (tmpconn == conn)
+-          return circ;
+-      }
+-    }
+-    if (circ->n_circ_id == circ_id) {
+-      if (circ->n_conn == conn)
+-        return circ;
+-      for (tmpconn = circ->n_streams; tmpconn; tmpconn = tmpconn->next_stream) {
+-        if (tmpconn == conn)
+-          return circ;
+-      }
+-      for (tmpconn = circ->resolving_streams; tmpconn; tmpconn = tmpconn->next_stream) {
+-        if (tmpconn == conn)
+-          return circ;
+-      }
+-    }
+-  }
+-  return NULL;
++  search.circ_id = circ_id;
++  search.or_conn = conn;
++  found = SPLAY_FIND(orconn_circid_tree, &orconn_circid_circuit_map, &search);
++  if (found && found->circuit && !found->circuit->marked_for_close)
++    return found->circuit;
++  else
++    return NULL;
+ }
+ 
+ /** Return a circ such that circ is attached to <b>conn</b>, either as
+@@ -526,9 +588,14 @@ void assert_circuit_ok(const circuit_t *c)
+   if (c->n_conn) {
+     tor_assert(c->n_conn->type == CONN_TYPE_OR);
+     tor_assert(!memcmp(c->n_conn->identity_digest, c->n_conn_id_digest, DIGEST_LEN));
++    if (c->n_circ_id)
++      tor_assert(c == circuit_get_by_circid_orconn(c->n_circ_id, c->n_conn));
+   }
+-  if (c->p_conn)
++  if (c->p_conn) {
+     tor_assert(c->p_conn->type == CONN_TYPE_OR);
++    if (c->p_circ_id)
++      tor_assert(c == circuit_get_by_circid_orconn(c->p_circ_id, c->p_conn));
++  }
+   for (conn = c->p_streams; conn; conn = conn->next_stream)
+     tor_assert(conn->type == CONN_TYPE_AP);
+   for (conn = c->n_streams; conn; conn = conn->next_stream)
+diff --git a/src/or/circuituse.c b/src/or/circuituse.c
+index 91da4ff26..756baea85 100644
+--- a/src/or/circuituse.c
++++ b/src/or/circuituse.c
+@@ -483,10 +483,12 @@ void circuit_about_to_close_connection(connection_t *conn) {
+       circuit_n_conn_done(conn, 0);
+       /* Now close all the attached circuits on it. */
+       while ((circ = circuit_get_by_conn(conn))) {
+-        if (circ->n_conn == conn) /* it's closing in front of us */
+-          circ->n_conn = NULL;
+-        if (circ->p_conn == conn) /* it's closing behind us */
+-          circ->p_conn = NULL;
++        if (circ->n_conn == conn)
++          /* it's closing in front of us */
++          circuit_set_circid_orconn(circ, 0, NULL, P_CONN_CHANGED);
++        if (circ->p_conn == conn)
++          /* it's closing behind us */
++          circuit_set_circid_orconn(circ, 0, NULL, N_CONN_CHANGED);
+         circuit_mark_for_close(circ);
+       }
+       return;
+diff --git a/src/or/command.c b/src/or/command.c
+index 98bbae252..30b81b213 100644
+--- a/src/or/command.c
++++ b/src/or/command.c
+@@ -173,7 +173,7 @@ static void command_process_create_cell(cell_t *cell, connection_t *conn) {
+     conn->circ_id_type = CIRC_ID_TYPE_HIGHER;
+   }
+ 
+-  circ = circuit_get_by_circ_id_conn(cell->circ_id, conn);
++  circ = circuit_get_by_circid_orconn(cell->circ_id, conn);
+ 
+   if (circ) {
+     log_fn(LOG_WARN,"received CREATE cell (circID %d) for known circ. Dropping.", cell->circ_id);
+@@ -205,7 +205,7 @@ static void command_process_create_cell(cell_t *cell, connection_t *conn) {
+ static void command_process_created_cell(cell_t *cell, connection_t *conn) {
+   circuit_t *circ;
+ 
+-  circ = circuit_get_by_circ_id_conn(cell->circ_id, conn);
++  circ = circuit_get_by_circid_orconn(cell->circ_id, conn);
+ 
+   if (!circ) {
+     log_fn(LOG_INFO,"(circID %d) unknown circ (probably got a destroy earlier). Dropping.", cell->circ_id);
+@@ -245,7 +245,7 @@ static void command_process_created_cell(cell_t *cell, connection_t *conn) {
+ static void command_process_relay_cell(cell_t *cell, connection_t *conn) {
+   circuit_t *circ;
+ 
+-  circ = circuit_get_by_circ_id_conn(cell->circ_id, conn);
++  circ = circuit_get_by_circid_orconn(cell->circ_id, conn);
+ 
+   if (!circ) {
+     log_fn(LOG_INFO,"unknown circuit %d on connection to %s:%d. Dropping.",
+@@ -290,7 +290,7 @@ static void command_process_relay_cell(cell_t *cell, connection_t *conn) {
+ static void command_process_destroy_cell(cell_t *cell, connection_t *conn) {
+   circuit_t *circ;
+ 
+-  circ = circuit_get_by_circ_id_conn(cell->circ_id, conn);
++  circ = circuit_get_by_circid_orconn(cell->circ_id, conn);
+ 
+   if (!circ) {
+     log_fn(LOG_INFO,"unknown circuit %d on connection to %s:%d. Dropping.",
+@@ -305,10 +305,10 @@ static void command_process_destroy_cell(cell_t *cell, connection_t *conn) {
+ 
+   if (cell->circ_id == circ->p_circ_id) {
+     /* the destroy came from behind */
+-    circ->p_conn = NULL;
++    circuit_set_circid_orconn(circ, 0, NULL, P_CONN_CHANGED);
+     circuit_mark_for_close(circ);
+   } else { /* the destroy came from ahead */
+-    circ->n_conn = NULL;
++    circuit_set_circid_orconn(circ, 0, NULL, N_CONN_CHANGED);
+     if (CIRCUIT_IS_ORIGIN(circ)) {
+       circuit_mark_for_close(circ);
+     } else {
+diff --git a/src/or/cpuworker.c b/src/or/cpuworker.c
+index f27de2f42..e820f939b 100644
+--- a/src/or/cpuworker.c
++++ b/src/or/cpuworker.c
+@@ -146,7 +146,7 @@ int connection_cpu_process_inbuf(connection_t *conn) {
+      * case there are multiple connections.) */
+     p_conn = connection_exact_get_by_addr_port(addr,port);
+     if (p_conn)
+-      circ = circuit_get_by_circ_id_conn(circ_id, p_conn);
++      circ = circuit_get_by_circid_orconn(circ_id, p_conn);
+ 
+     if (success == 0) {
+       log_fn(LOG_INFO,"decoding onionskin failed. Closing.");
+diff --git a/src/or/or.h b/src/or/or.h
+index b555ffd37..1233ee721 100644
+--- a/src/or/or.h
++++ b/src/or/or.h
+@@ -1165,9 +1165,13 @@ void onion_append_to_cpath(crypt_path_t **head_ptr, crypt_path_t *new_hop);
+ /********************************* circuitlist.c ***********************/
+ 
+ extern const char *circuit_state_to_string[];
++enum which_conn_changed_t { P_CONN_CHANGED=1, N_CONN_CHANGED=0 };
++void circuit_set_circid_orconn(circuit_t *circ, uint16_t id,
++                               connection_t *conn,
++                               enum which_conn_changed_t which);
+ void circuit_close_all_marked(void);
+ circuit_t *circuit_new(uint16_t p_circ_id, connection_t *p_conn);
+-circuit_t *circuit_get_by_circ_id_conn(uint16_t circ_id, connection_t *conn);
++circuit_t *circuit_get_by_circid_orconn(uint16_t circ_id, connection_t *conn);
+ circuit_t *circuit_get_by_conn(connection_t *conn);
+ circuit_t *circuit_get_by_global_id(uint32_t id);
+ circuit_t *circuit_get_by_rend_query_and_purpose(const char *rend_query, uint8_t purpose);
+diff --git a/src/or/relay.c b/src/or/relay.c
+index ee4389dcf..5bc8dc46c 100644
+--- a/src/or/relay.c
++++ b/src/or/relay.c
+@@ -898,7 +898,7 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
+       }
+       if (circ->n_conn) {
+         connection_send_destroy(circ->n_circ_id, circ->n_conn);
+-        circ->n_conn = NULL;
++        circuit_set_circid_orconn(circ, 0, NULL, N_CONN_CHANGED);
+       }
+       log_fn(LOG_DEBUG, "Processed 'truncate', replying.");
+       connection_edge_send_command(NULL, circ, RELAY_COMMAND_TRUNCATED,
+

@@ -1,0 +1,1369 @@
+commit 436c089ad03b2c37a3b59e530e4051b15d7876f4
+Author: Ole John Aske <ole.john.aske@sun.com>
+Date:   Tue Sep 1 13:39:41 2009 +0200
+
+    - Implemented signal building for ordered index scan w/ (single) hi/low bound pairs
+    - Moved a few one-liner methods from *.cpp into their respective header files
+      to encourage inlining of these.
+
+diff --git a/storage/ndb/ndbapi-examples/ndbapi_multi_cursor/main.cpp b/storage/ndb/ndbapi-examples/ndbapi_multi_cursor/main.cpp
+index bca0b42117f..fe92f369fb0 100644
+--- a/storage/ndb/ndbapi-examples/ndbapi_multi_cursor/main.cpp
++++ b/storage/ndb/ndbapi-examples/ndbapi_multi_cursor/main.cpp
+@@ -16,7 +16,7 @@
+ /**************************************************************
+  *
+  * NOTE THAT THIS TOOL CAN ONLY BE RUN AGAINST THE EMPLOYEES DATABASE 
+- * TABLES WITH WHICH IS A SEPERATE DOWNLOAD AVAILABLE AT WWW.MYSQL.COM.
++ * TABLES WHICH IS A SEPERATE DOWNLOAD AVAILABLE AT WWW.MYSQL.COM.
+  **************************************************************/
+ 
+ 
+@@ -34,6 +34,8 @@
+ 
+ #include "NdbQueryOperationImpl.hpp"
+ 
++//#define USE_RECATTR
++
+ /**
+  * Helper debugging macros
+  */
+@@ -61,10 +63,11 @@
+ ******************************************************/
+ struct ManagerRow
+ {
+-  char   dept_no[1+4+1];
++  char   dept_no[4];
+   Uint32 emp_no;
+   Int32  from_date;
+   Int32  to_date;
++  Uint32 my_key;
+ };
+ 
+ struct EmployeeRow
+@@ -112,10 +115,12 @@ const char* dept_managerDef =
+ "   emp_no       INT             NOT NULL,"
+ "   from_date    DATE            NOT NULL,"
+ "   to_date      DATE            NOT NULL,"
++"   my_key       INT             NOT NULL,"
+ "   KEY         (emp_no),"
+ "   KEY         (dept_no),"
+ "   FOREIGN KEY (emp_no)  REFERENCES employees (emp_no)    ON DELETE CASCADE,"
+ "   FOREIGN KEY (dept_no) REFERENCES departments (dept_no) ON DELETE CASCADE,"
++"   UNIQUE KEY MYINDEXNAME (my_key),"
+ "   PRIMARY KEY (emp_no,dept_no))"
+ " ENGINE=NDB";
+ 
+@@ -210,25 +215,17 @@ int createEmployeeDb()
+     printf("Created 'salaries' table\n");
+ 
+ 
+-
+-    /****/
+     printf("Insert simple test data\n");
+-    if (mysql_query(&mysql, "Insert into dept_manager(dept_no,emp_no) values ('d005',110567)") != 0) MYSQLERROR(mysql);
+-    mysql_commit(&mysql);
+ 
+-    if (mysql_query(&mysql, "Insert into employees(emp_no,dept_no) values (110567,'d005')") != 0) MYSQLERROR(mysql);
++    if (mysql_query(&mysql, "Insert into dept_manager(dept_no,emp_no,my_key) values ('d005',110567,110567)") != 0) MYSQLERROR(mysql);
+     mysql_commit(&mysql);
+-    /******/
+-
+-    /********
+-   printf("Insert simple test data\n");
+-    if (mysql_query(&mysql, "Insert into dept_manager(dept_no,emp_no) values (1005,110567)") != 0) MYSQLERROR(mysql);
++    if (mysql_query(&mysql, "Insert into dept_manager(dept_no,emp_no,my_key) values ('c005',11057,11067)") != 0) MYSQLERROR(mysql);
+     mysql_commit(&mysql);
+-
+-    if (mysql_query(&mysql, "Insert into employees(emp_no,dept_no) values (110567,1005)") != 0) MYSQLERROR(mysql);
++    if (mysql_query(&mysql, "Insert into dept_manager(dept_no,emp_no,my_key) values ('e005',210567,210567)") != 0) MYSQLERROR(mysql);
+     mysql_commit(&mysql);
+ 
+-    ************/
++    if (mysql_query(&mysql, "Insert into employees(emp_no,dept_no) values (110567,'d005')") != 0) MYSQLERROR(mysql);
++    mysql_commit(&mysql);
+ 
+     mysql_close(&mysql);
+   }
+@@ -288,6 +285,9 @@ int testQueryBuilder(Ndb &myNdb)
+   char* dept_no = "d005";
+   Uint32 emp_no = 110567;
+ 
++  ManagerRow  managerRow;
++  EmployeeRow employeeRow;
++
+   printf("\n -- Building query --\n");
+ 
+   NdbDictionary::Dictionary* myDict= myNdb.getDictionary();
+@@ -310,7 +310,7 @@ int testQueryBuilder(Ndb &myNdb)
+    */
+   NdbQueryBuilder myBuilder(myNdb);
+ 
+-#if 0
++#if 1
+   /* qt1 is 'const defined' */
+   printf("q1\n");
+   const NdbQueryDef* q1 = 0;
+@@ -374,6 +374,7 @@ int testQueryBuilder(Ndb &myNdb)
+ #endif
+ 
+ 
++#if 1
+   /* Composite operations building real *trees* aka. linked operations.
+    * (First part is identical to building 'qt2' above)
+    *
+@@ -416,7 +417,6 @@ int testQueryBuilder(Ndb &myNdb)
+     if (q4 == NULL) APIERROR(qb->getNdbError());
+   }
+ 
+-
+   ///////////////////////////////////////////////////
+   // q4 may later be executed as:
+   // (Possibly multiple ::execute() or multiple NdbQueryDef instances 
+@@ -431,19 +431,7 @@ int testQueryBuilder(Ndb &myNdb)
+   if (myQuery == NULL)
+     APIERROR(myTransaction->getNdbError());
+ 
+-#if 0
+-  ManagerRow managerRow;
+-  memset (&managerRow, 0, sizeof(managerRow));
+-  const NdbRecord* rowManagerRecord = manager->getDefaultRecord();
+-  if (rowManagerRecord == NULL) APIERROR(myDict->getNdbError());
+-
+-  // Specify result handling NdbRecord style - need the (single) NdbQueryOperation:
+-  assert(myQuery->getNoOfOperations()==2);
+-  NdbQueryOperation* op = myQuery->getQueryOperation((Uint32)0);
+-
+-  op->setResultRowBuf(rowManagerRecord, (char*)&managerRow);
+-#else
+-  
++#ifdef USE_RECATTR
+   const NdbRecAttr *key[2][2];
+ 
+   for (Uint32 i=0; i<myQuery->getNoOfOperations(); ++i)
+@@ -454,6 +442,24 @@ int testQueryBuilder(Ndb &myNdb)
+     key[i][0] =  op->getValue(table->getColumn(0));
+     key[i][1] =  op->getValue(table->getColumn(1));
+   }
++
++#else
++{
++  memset (&managerRow,  0, sizeof(managerRow));
++  memset (&employeeRow, 0, sizeof(employeeRow));
++  const NdbRecord* rowManagerRecord = manager->getDefaultRecord();
++  if (rowManagerRecord == NULL) APIERROR(myDict->getNdbError());
++
++  const NdbRecord* rowEmployeeRecord = employee->getDefaultRecord();
++  if (rowEmployeeRecord == NULL) APIERROR(myDict->getNdbError());
++
++  assert(myQuery->getNoOfOperations()==2);
++  NdbQueryOperation* op0 = myQuery->getQueryOperation(0U);
++  NdbQueryOperation* op1 = myQuery->getQueryOperation(1U);
++
++  op0->setResultRowBuf(rowManagerRecord, (char*)&managerRow);
++  op1->setResultRowBuf(rowEmployeeRecord, (char*)&employeeRow);
++}
+ #endif
+ 
+   printf("Start execute\n");
+@@ -467,10 +473,15 @@ int testQueryBuilder(Ndb &myNdb)
+   if (res == -1)
+     APIERROR(myQuery->getNdbError());
+ 
++#ifdef USE_RECATTR
+   printf("manager  emp_no: %d\n", key[0][1]->u_32_value());
+   printf("employee emp_no: %d\n", key[1][0]->u_32_value());
+-
++#else
+   // NOW: Result is available in 'managerRow' buffer
++  printf("manager  emp_no: %d\n", managerRow.emp_no);
++  printf("employee emp_no: %d\n", employeeRow.emp_no);
++#endif
++
+ 
+   myNdb.closeTransaction(myTransaction);
+   myTransaction = 0;
+@@ -523,6 +534,7 @@ int testQueryBuilder(Ndb &myNdb)
+   if (myQuery == NULL)
+     APIERROR(myTransaction->getNdbError());
+ 
++#ifdef USE_RECATTR
+   const NdbRecAttr *value_q4[2][2];
+ 
+   for (Uint32 i=0; i<myQuery->getNoOfOperations(); ++i)
+@@ -533,6 +545,24 @@ int testQueryBuilder(Ndb &myNdb)
+     value_q4[i][0] =  op->getValue(table->getColumn(0));
+     value_q4[i][1] =  op->getValue(table->getColumn(1));
+   }
++#else
++{
++  memset (&managerRow,  0, sizeof(managerRow));
++  memset (&employeeRow, 0, sizeof(employeeRow));
++  const NdbRecord* rowEmployeeRecord = employee->getDefaultRecord();
++  if (rowEmployeeRecord == NULL) APIERROR(myDict->getNdbError());
++
++  const NdbRecord* rowManagerRecord = manager->getDefaultRecord();
++  if (rowManagerRecord == NULL) APIERROR(myDict->getNdbError());
++
++  assert(myQuery->getNoOfOperations()==2);
++  NdbQueryOperation* op0 = myQuery->getQueryOperation(0U);
++  NdbQueryOperation* op1 = myQuery->getQueryOperation(1U);
++
++  op0->setResultRowBuf(rowEmployeeRecord, (char*)&employeeRow);
++  op1->setResultRowBuf(rowManagerRecord, (char*)&managerRow);
++}
++#endif
+ 
+   printf("Start execute\n");
+   if (myTransaction->execute( NdbTransaction::NoCommit ) == -1)
+@@ -545,18 +575,24 @@ int testQueryBuilder(Ndb &myNdb)
+   if (res == -1)
+     APIERROR(myQuery->getNdbError());
+ 
++#ifdef USE_RECATTR
+   printf("employee emp_no: %d\n", value_q4[0][0]->u_32_value());
+   printf("manager  emp_no: %d\n", value_q4[1][1]->u_32_value());
+ 
++#else
++  printf("employee emp_no: %d\n", employeeRow.emp_no);
++  printf("manager  emp_no: %d\n", managerRow.emp_no);
++#endif
++
+   // NOW: Result is available in 'managerRow' buffer
+ 
+   myNdb.closeTransaction(myTransaction);
+   myTransaction = 0;
++#endif
+ 
+   /////////////////////////////////////////////////
+ 
+ #if 0
+-
+   // Example: ::readTuple() using Index for unique key lookup
+   printf("q5\n");
+ 
+@@ -565,14 +601,15 @@ int testQueryBuilder(Ndb &myNdb)
+     NdbQueryBuilder* qb = &myBuilder; //myDict->getQueryBuilder();
+ 
+     // Lookup Primary key for manager table
+-    const NdbDictionary::Index *myPIndex= myDict->getIndex("PRIMARY", manager->getName());
++    const NdbDictionary::Index *myPIndex= myDict->getIndex("MYINDEXNAME$unique", manager->getName());
+     if (myPIndex == NULL)
+       APIERROR(myDict->getNdbError());
+ 
+     // Manager index-key defined as parameter, NB: Reversed order compared to hash key
+     const NdbQueryOperand* managerKey[] =  // Manager PK index is {"emp_no","dept_no", }
+-    {  qb->constValue(110567),             // emp_no  = 110567
+-       qb->constValue("d005"),             // dept_no = "d005"
++    {
++       //qb->constValue(110567),   // emp_no  = 110567
++       qb->paramValue(),
+        0
+     };
+     // Lookup on a single tuple with key define by 'managerKey' param. tuple
+@@ -583,13 +620,64 @@ int testQueryBuilder(Ndb &myNdb)
+     if (q5 == NULL) APIERROR(qb->getNdbError());
+   }
+ 
+-  // Example: ::readTuple() using Index for unique key lookup
+-  printf("q6\n");
++  myTransaction= myNdb.startTransaction();
++  if (myTransaction == NULL) APIERROR(myNdb.getNdbError());
++
++  void* paramList_q5[] = {&emp_no};
++  myQuery = myTransaction->createQuery(q5,paramList_q5);
++  if (myQuery == NULL)
++    APIERROR(myTransaction->getNdbError());
++
++#ifdef USE_RECATTR
++  const NdbRecAttr *value_q5[2];
++
++  NdbQueryOperation* op = myQuery->getQueryOperation(0U);
++  const NdbDictionary::Table* table = op->getQueryOperationDef().getTable();
++
++  value_q5[0] = op->getValue(table->getColumn(0));
++  value_q5[1] = op->getValue(table->getColumn(1));
++#else
++{
++  memset (&managerRow, 0, sizeof(managerRow));
++  const NdbRecord* rowManagerRecord = manager->getDefaultRecord();
++  if (rowManagerRecord == NULL) APIERROR(myDict->getNdbError());
++
++  // Specify result handling NdbRecord style - need the (single) NdbQueryOperation:
++  NdbQueryOperation* op = myQuery->getQueryOperation(0U);
++
++  op->setResultRowBuf(rowManagerRecord, (char*)&managerRow);
++}
++#endif
++
++  printf("Start execute\n");
++  if (myTransaction->execute( NdbTransaction::NoCommit ) == -1)
++    APIERROR(myTransaction->getNdbError());
++  printf("Done executed\n");
++
++  // All NdbQuery operations are handled as scans with cursor placed 'before'
++  // first record: Fetch next to retrieve result:
++  res = myQuery->nextResult();
++  if (res == -1)
++    APIERROR(myQuery->getNdbError());
++
++#ifdef USE_RECATTR
++  printf("employee emp_no: %d\n", value_q5[1]->u_32_value());
++#else
++  printf("employee emp_no: %d\n", managerRow.emp_no);
++#endif
++
++  myNdb.closeTransaction(myTransaction);
++  myTransaction = 0;
++#endif
++
++#if 1
++  printf("q6: Table scan + linked lookup\n");
+ 
+   const NdbQueryDef* q6 = 0;
+   {
+     NdbQueryBuilder* qb = &myBuilder; //myDict->getQueryBuilder();
+ 
++/****
+     // Lookup Primary key for manager table
+     const NdbDictionary::Index *myPIndex= myDict->getIndex("PRIMARY", manager->getName());
+     if (myPIndex == NULL)
+@@ -606,7 +694,7 @@ int testQueryBuilder(Ndb &myNdb)
+     const NdbQueryIndexBound  bound        (low, NULL);   // emp_no = [110567, oo]
+     const NdbQueryIndexBound  bound_illegal(low, high);   // 'high' is char type -> illegal
+     const NdbQueryIndexBound  boundEq(low);
+-
++****/
+     // Lookup on a single tuple with key define by 'managerKey' param. tuple
+ //  const NdbQueryScanOperationDef* scanManager = qb->scanIndex(myPIndex, manager, &boundEq);
+     const NdbQueryScanOperationDef* scanManager = qb->scanTable(manager);
+@@ -627,7 +715,6 @@ int testQueryBuilder(Ndb &myNdb)
+     if (q6 == NULL) APIERROR(qb->getNdbError());
+   }
+ 
+-
+   myTransaction= myNdb.startTransaction();
+   if (myTransaction == NULL) APIERROR(myNdb.getNdbError());
+ 
+@@ -635,43 +722,204 @@ int testQueryBuilder(Ndb &myNdb)
+   if (myQuery == NULL)
+     APIERROR(myTransaction->getNdbError());
+ 
+-  const NdbRecAttr* value[2][2];
++#ifdef USE_RECATTR
++  const NdbRecAttr* value_q6[2][2];
+ 
+   for (Uint32 i=0; i<myQuery->getNoOfOperations(); ++i)
+   {
+     NdbQueryOperation* op = myQuery->getQueryOperation(i);
+     const NdbDictionary::Table* table = op->getQueryOperationDef().getTable();
+ 
+-    value[i][0] =  op->getValue(table->getColumn(0));
+-    value[i][1] =  op->getValue(table->getColumn(1));
++    value_q6[i][0] =  op->getValue(table->getColumn(0));
++    value_q6[i][1] =  op->getValue(table->getColumn(1));
++  }
++#else
++{
++  int err;
++  const NdbRecord* rowManagerRecord = manager->getDefaultRecord();
++  if (rowManagerRecord == NULL) APIERROR(myDict->getNdbError());
+ 
+-    for (Uint32 col=2; col<table->getNoOfColumns(); col++)
+-    {
+-      op->getValue(table->getColumn(col));
++  assert(myQuery->getNoOfOperations()==2);
++  NdbQueryOperation* op0 = myQuery->getQueryOperation(0U);
++  err = op0->setResultRowBuf(rowManagerRecord, (char*)&managerRow);
++  assert (err==0);
++//if (err == NULL) APIERROR(op0->getNdbError());
++
++  const NdbRecord* rowEmployeeRecord = employee->getDefaultRecord();
++  if (rowEmployeeRecord == NULL) APIERROR(myDict->getNdbError());
++
++  NdbQueryOperation* op1 = myQuery->getQueryOperation(1U);
++  err = op1->setResultRowBuf(rowEmployeeRecord, (char*)&employeeRow);
++  assert (err==0);
++//if (err == NULL) APIERROR(op1->getNdbError());
++}
++#endif
++
++  printf("Start execute\n");
++  if (myTransaction->execute( NdbTransaction::NoCommit ) == -1)
++    APIERROR(myTransaction->getNdbError());
++  printf("Done executed\n");
++
++  while (true) {
++    memset (&managerRow,  0, sizeof(managerRow));
++    memset (&employeeRow, 0, sizeof(employeeRow));
++
++    // All NdbQuery operations are handled as scans with cursor placed 'before'
++    // first record: Fetch next to retrieve result:
++    NdbQuery::NextResultOutcome res = myQuery->nextResult();
++
++    if (res == NdbQuery::NextResult_error) {
++      APIERROR(myQuery->getNdbError());
++    } else if (res!=NdbQuery::NextResult_gotRow) {
++      break;
+     }
++
++#ifdef USE_RECATTR
++    printf("manager  emp_no: %d\n", value_q6[0][1]->u_32_value());
++    printf("employee emp_no: %d\n", value_q6[1][0]->u_32_value());
++#else
++    // NOW: Result is available in row buffers
++    printf("manager  emp_no: %d\n", managerRow.emp_no);
++    printf("employee emp_no: %d\n", employeeRow.emp_no);
++#endif
++
++  };
++  printf("EOF\n");
++//  myQuery->close();
++
++  myNdb.closeTransaction(myTransaction);
++  myTransaction = 0;
++#endif
++
++#if 1
++  printf("Ordered index scan + lookup\n");
++
++  const NdbQueryDef* q6_1 = 0;
++  {
++    NdbQueryBuilder* qb = &myBuilder; //myDict->getQueryBuilder();
++
++    // Lookup Primary key for manager table
++    const NdbDictionary::Index *myPIndex= myDict->getIndex("PRIMARY", manager->getName());
++    if (myPIndex == NULL)
++      APIERROR(myDict->getNdbError());
++
++    const NdbQueryOperand* low[] =  // Manager PK index is {"emp_no","dept_no", }
++    {
++//     qb->constValue(110567),      // emp_no  = 110567
++       qb->paramValue(),
++       qb->constValue("d005"),      // dept_no = "d005"
++       0
++    };
++    const NdbQueryOperand* high[] =  // Manager PK index is {"emp_no","dept_no", }
++    {  qb->constValue("illegal key"),
++       0
++    };
++    const NdbQueryIndexBound  bound        (low, NULL);   // emp_no = [110567, oo]
++    const NdbQueryIndexBound  bound_illegal(low, high);   // 'high' is char type -> illegal
++    const NdbQueryIndexBound  boundEq(low);
++
++    // Lookup on a single tuple with key define by 'managerKey' param. tuple
++    const NdbQueryScanOperationDef* scanManager = qb->scanIndex(myPIndex, manager, &boundEq);
++    if (scanManager == NULL) APIERROR(qb->getNdbError());
++
++    // THEN: employee table is joined:
++    //    A linked value is used to let employee lookup refer values
++    //    from the parent operation on manager.
++
++    const NdbQueryOperand* empJoinKey[] =       // Employee is indexed om {"emp_no"}
++    {  qb->linkedValue(scanManager, "emp_no"),  // where '= readManger.emp_no'
++       0
++    };
++    const NdbQueryLookupOperationDef* readEmployee = qb->readTuple(employee, empJoinKey);
++    if (readEmployee == NULL) APIERROR(qb->getNdbError());
++
++    q6_1 = qb->prepare();
++    if (q6_1 == NULL) APIERROR(qb->getNdbError());
++  }
++
++  myTransaction= myNdb.startTransaction();
++  if (myTransaction == NULL) APIERROR(myNdb.getNdbError());
++
++  void* paramList_q6_1[] = {&emp_no};
++  myQuery = myTransaction->createQuery(q6_1, paramList_q6_1);
++  if (myQuery == NULL)
++    APIERROR(myTransaction->getNdbError());
++
++#ifdef USE_RECATTR
++  const NdbRecAttr* value_q6_1[2][2];
++
++  for (Uint32 i=0; i<myQuery->getNoOfOperations(); ++i)
++  {
++    NdbQueryOperation* op = myQuery->getQueryOperation(i);
++    const NdbDictionary::Table* table = op->getQueryOperationDef().getTable();
++
++    value_q6_1[i][0] =  op->getValue(table->getColumn(0));
++    value_q6_1[i][1] =  op->getValue(table->getColumn(1));
+   }
++#else
++{
++  int err;
++  const NdbRecord* rowManagerRecord = manager->getDefaultRecord();
++  if (rowManagerRecord == NULL) APIERROR(myDict->getNdbError());
++
++  assert(myQuery->getNoOfOperations()==2);
++  NdbQueryOperation* op0 = myQuery->getQueryOperation(0U);
++  err = op0->setResultRowBuf(rowManagerRecord, (char*)&managerRow);
++  assert (err==0);
++//if (err == NULL) APIERROR(op0->getNdbError());
++
++/****/
++  const NdbRecord* rowEmployeeRecord = employee->getDefaultRecord();
++  if (rowEmployeeRecord == NULL) APIERROR(myDict->getNdbError());
++
++  NdbQueryOperation* op1 = myQuery->getQueryOperation(1U);
++  err = op1->setResultRowBuf(rowEmployeeRecord, (char*)&employeeRow);
++  assert (err==0);
++//if (err == NULL) APIERROR(op1->getNdbError());
++/****/
++
++}
++#endif
+ 
+   printf("Start execute\n");
+   if (myTransaction->execute( NdbTransaction::NoCommit ) == -1)
+     APIERROR(myTransaction->getNdbError());
+   printf("Done executed\n");
+ 
+-  // All NdbQuery operations are handled as scans with cursor placed 'before'
+-  // first record: Fetch next to retrieve result:
+-  res = myQuery->nextResult();
+-  if (res == -1)
+-    APIERROR(myQuery->getNdbError());
++  while (true) {
++    memset (&managerRow,  0, sizeof(managerRow));
++    memset (&employeeRow, 0, sizeof(employeeRow));
+ 
+-  printf("manager  emp_no: %d\n", value[0][1]->u_32_value());
+-  printf("employee emp_no: %d\n", value[1][0]->u_32_value());
++    // All NdbQuery operations are handled as scans with cursor placed 'before'
++    // first record: Fetch next to retrieve result:
++    NdbQuery::NextResultOutcome res = myQuery->nextResult();
+ 
+-  // NOW: Result is available in 'managerRow' buffer
++    if (res == NdbQuery::NextResult_error) {
++      APIERROR(myQuery->getNdbError());
++    } else if (res!=NdbQuery::NextResult_gotRow) {
++      break;
++    }
++
++#ifdef USE_RECATTR
++    printf("manager  emp_no: %d\n", value_q6_1[0][1]->u_32_value());
++    printf("employee emp_no: %d\n", value_q6_1[1][0]->u_32_value());
++#else
++    // NOW: Result is available in row buffers
++    printf("manager  emp_no: %d\n", managerRow.emp_no);
++    printf("employee emp_no: %d\n", employeeRow.emp_no);
++#endif
++
++  };
++  printf("EOF\n");
++//  myQuery->close();
+ 
+   myNdb.closeTransaction(myTransaction);
+   myTransaction = 0;
+ #endif
+ 
+ 
++
++
+   return 0;
+ }
+ 
+diff --git a/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp b/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp
+index 02eb8e88f2a..864a241b67d 100644
+--- a/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp
++++ b/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp
+@@ -24,6 +24,7 @@
+ #include <signaldata/RouteOrd.hpp>
+ #include <signaldata/TransIdAI.hpp>
+ #include <signaldata/DiGetNodes.hpp>
++#include <signaldata/AttrInfo.hpp>
+ #include <Interpreter.hpp>
+ #include <AttributeHeader.hpp>
+ #include <KeyDescriptor.hpp>
+@@ -454,10 +455,21 @@ Dbspj::execSCAN_FRAGREQ(Signal* signal)
+     do_init(requestPtr.p, req, signal->getSendersBlockRef());
+ 
+     Uint32 len_cnt;
+-
++    Uint32 prefix_size=0;
+     {
+       SectionReader r0(ssPtr, getSectionSegmentPool());
+-      r0.step(6);
++
++      /**
++       * Calculate size of optional sections prefix in attrinfo.
++       * This part is skipped by SPJ, and later regenerated when 
++       * the SCANREQ is transmitted to LQH.
++       */
++      for (Uint32 i=0; i<AttrInfo::SectionSizeInfoLength; i++)
++      { Uint32 tmp;
++        ndbrequire(r0.getWord(&tmp));
++        prefix_size += tmp;
++      }
++      r0.step(prefix_size);
+ 
+       err = DbspjErr::ZeroLengthQueryTree;
+       if (unlikely(!r0.getWord(&len_cnt)))
+@@ -472,11 +484,15 @@ Dbspj::execSCAN_FRAGREQ(Signal* signal)
+       SectionReader paramReader(ssPtr, getSectionSegmentPool());
+ 
+       /**
+-       * I just couldnt remove the 6 (added by scan-code) initial words...
+-       *   so I simply step over them here
++       * I just couldnt remove the 'SectionSizeInfoLength++'
++       * (added by scan-code) initial words...
++       *  so I simply step over them here
++       *
++       * TODO: Eliminate append of these words when SPJ API build
++       *       this signal.
+        */
+-      treeReader.step(6);
+-      paramReader.step(6);
++      treeReader.step(AttrInfo::SectionSizeInfoLength+prefix_size);
++      paramReader.step(AttrInfo::SectionSizeInfoLength+prefix_size);
+ 
+       paramReader.step(len); // skip over tree to parameters
+ 
+@@ -615,14 +631,6 @@ Dbspj::build(Build_context& ctx,
+       goto error;
+     }
+ 
+-    err = DbspjErr::UnknowQueryOperation;
+-    const OpInfo* info = getOpInfo(node_op);
+-    if (unlikely(info == 0))
+-    {
+-      DEBUG_CRASH();
+-      goto error;
+-    }
+-
+     err = DbspjErr::InvalidTreeNodeSpecification;
+     if (unlikely(tree.getWords(m_buffer0, node_len) == false))
+     {
+@@ -637,12 +645,6 @@ Dbspj::build(Build_context& ctx,
+       goto error;
+     }
+ 
+-    if (unlikely(node_op != param_op))
+-    {
+-      DEBUG_CRASH();
+-      goto error;
+-    }
+-
+     printf("node: ");
+     for (Uint32 i = 0; i<node_len; i++)
+       printf("0x%.8x ", m_buffer0[i]);
+@@ -653,6 +655,19 @@ Dbspj::build(Build_context& ctx,
+       printf("0x%.8x ", m_buffer1[i]);
+     printf("\n");
+ 
++    err = DbspjErr::UnknowQueryOperation;
++    if (unlikely(node_op != param_op))
++    {
++      DEBUG_CRASH();
++      goto error;
++    }
++    const OpInfo* info = getOpInfo(node_op);
++    if (unlikely(info == 0))
++    {
++      DEBUG_CRASH();
++      goto error;
++    }
++
+     QueryNode* qn = (QueryNode*)m_buffer0;
+     QueryNodeParameters * qp = (QueryNodeParameters*)m_buffer1;
+     qn->len = node_len;
+@@ -835,9 +850,9 @@ void
+ Dbspj::execLQHKEYREF(Signal* signal)
+ {
+   jamEntry();
+-  DEBUG("execLQHKEYREF");
+ 
+   const LqhKeyRef* ref = (LqhKeyRef*)signal->getDataPtr();
++  DEBUG("execLQHKEYREF, errorCode:" << ref->errorCode);
+   Ptr<TreeNode> treeNodePtr;
+   m_treenode_pool.getPtr(treeNodePtr, ref->connectPtr);
+ 
+@@ -871,10 +886,23 @@ Dbspj::execLQHKEYCONF(Signal* signal)
+ }
+ 
+ void
+-Dbspj::execSCAN_FRAGREF(Signal*)
++Dbspj::execSCAN_FRAGREF(Signal* signal)
+ {
+   jamEntry();
+-  DEBUG("execSCAN_FRAGREF");
++  const ScanFragRef * ref = (ScanFragRef*)signal->getDataPtr();
++
++  DEBUG("execSCAN_FRAGREF, errorCode:" << ref->errorCode);
++
++  // FIXME: signal 'SCAN_FRAGREF' to TC
++  Ptr<TreeNode> treeNodePtr;
++  m_treenode_pool.getPtr(treeNodePtr, ref->senderData);
++  Ptr<Request> requestPtr;
++  m_request_pool.getPtr(requestPtr, treeNodePtr.p->m_requestPtrI);
++
++  ndbrequire(treeNodePtr.p->m_info&&treeNodePtr.p->m_info->m_execSCAN_FRAGREF);
++  (this->*(treeNodePtr.p->m_info->m_execSCAN_FRAGREF))(signal,
++                                                       requestPtr,
++                                                       treeNodePtr);
+ }
+ 
+ void
+@@ -1811,6 +1839,10 @@ Dbspj::scanFrag_start(Signal* signal,
+   ScanFragReq * dst =(ScanFragReq*)treeNodePtr.p->m_scanfrag_data.m_scanFragReq;
+   Uint32 dst_requestInfo = dst->requestInfo;
+ 
++  if (ScanFragReq::getRangeScanFlag(requestInfo))
++  { ScanFragReq::setRangeScanFlag(dst_requestInfo,1);
++  }
++
+   dst->fragmentNoKeyLen = fragId;
+   dst->requestInfo = dst_requestInfo;
+   dst->batch_size_bytes = batch_size_bytes;
+@@ -1824,7 +1856,6 @@ Dbspj::scanFrag_start(Signal* signal,
+   ndbassert(dst->transId2 == transId2);
+ #endif
+ 
+-  ndbassert(keyInfo.i == RNIL);
+   treeNodePtr.p->m_send.m_keyInfoPtrI = keyInfo.i;
+ 
+   scanFrag_send(signal, requestPtr, treeNodePtr);
+@@ -1915,7 +1946,7 @@ Dbspj::scanFrag_send(Signal* signal,
+   if (handle.m_cnt > 1)
+   {
+     printf("KEYINFO: ");
+-    print(handle.m_ptr[0], stdout);
++    print(handle.m_ptr[1], stdout);
+   }
+ #endif
+ 
+@@ -2003,8 +2034,10 @@ Dbspj::scanFrag_execSCAN_FRAGCONF(Signal* signal,
+   treeNodePtr.p->m_scanfrag_data.m_rows_expecting = rows;
+   if (treeNodePtr.p->m_bits & TreeNode::T_LEAF)
+   {
+-    /* If this is a leaf node, then no rows will be sent to the SPJ block,
+-     *  as there are no child operations to instantiate.*/
++    /**
++     * If this is a leaf node, then no rows will be sent to the SPJ block,
++     * as there are no child operations to instantiate.
++     */
+     treeNodePtr.p->m_scanfrag_data.m_rows_received = rows;
+   }
+   treeNodePtr.p->m_scanfrag_data.m_scan_fragconf_received = true;
+diff --git a/storage/ndb/src/ndbapi/NdbQueryBuilder.cpp b/storage/ndb/src/ndbapi/NdbQueryBuilder.cpp
+index 88d2b0a143b..15d6d9e25b8 100644
+--- a/storage/ndb/src/ndbapi/NdbQueryBuilder.cpp
++++ b/storage/ndb/src/ndbapi/NdbQueryBuilder.cpp
+@@ -18,6 +18,7 @@
+ 
+ #include "NdbQueryBuilder.hpp"
+ #include "NdbQueryBuilderImpl.hpp"
++#include "NdbIndexScanOperation.hpp"  // Temp intil we remove NdbOperation dependencies
+ #include <ndb_global.h>
+ #include <Vector.hpp>
+ #include "signaldata/QueryTree.hpp"
+@@ -26,6 +27,7 @@
+ #include "NdbDictionary.hpp"
+ #include "NdbDictionaryImpl.hpp"
+ #include "AttributeHeader.hpp"
++#include "NdbRecord.hpp"              // Temp as above
+ #include "NdbOut.hpp"
+ 
+ 
+@@ -244,6 +246,11 @@ public:
+                            Uint32      ix)
+   : NdbQueryOperationDefImpl(table,ident,ix)
+   {}
++
++protected:
++  int serialize(Uint32Buffer& serializedDef,
++                const NdbTableImpl& tableOrIndex) const;
++
+ }; // class NdbQueryScanOperationDefImpl
+ 
+ class NdbQueryTableScanOperationDefImpl : public NdbQueryScanOperationDefImpl
+@@ -800,7 +807,7 @@ NdbQueryBuilder::scanIndex(const NdbDictionary::Index* index,
+ 
+   NdbQueryIndexScanOperationDefImpl* op =
+     new NdbQueryIndexScanOperationDefImpl(indexImpl, tableImpl,
+-                                          bound,ident,
++                                          bound, ident,
+                                           m_pimpl->m_operations.size());
+   returnErrIf(op==0, 4000);
+ 
+@@ -1046,13 +1053,16 @@ NdbQueryLookupOperationDefImpl
+     getTable().getNoOfPrimaryKeys() :
+     static_cast<int>(getIndex()->getNoOfColumns());
+   int keyNo;
+-  for(keyNo = 0; keyNo<keyCount; keyNo++){
++  for(keyNo = 0; keyNo<keyCount; keyNo++)
++  {
+     switch(m_keys[keyNo]->getKind()){
+     case NdbQueryOperandImpl::Const:
+     {
+       const NdbConstOperandImpl* const constOp 
+         = static_cast<const NdbConstOperandImpl*>(m_keys[keyNo]);
+-      ndbOperation.equal(keyNo, static_cast<const char*>(constOp->getAddr()));
++      int ret = 
++        ndbOperation.equal(keyNo, static_cast<const char*>(constOp->getAddr()));
++      assert(!ret);
+       break;
+     }
+     case NdbQueryOperandImpl::Param:
+@@ -1062,12 +1072,14 @@ NdbQueryLookupOperationDefImpl
+       int paramNo = paramOp->getParamIx();
+       assert(actualParam != NULL);
+       assert(actualParam[paramNo] != NULL);
+-      ndbOperation.equal(keyNo, 
+-                         static_cast<const char*>(actualParam[paramNo]));
++      int ret = 
++        ndbOperation.equal(keyNo, 
++                           static_cast<const char*>(actualParam[paramNo]));
++      assert(!ret);
+       break;
+     }
++    case NdbQueryOperandImpl::Linked:    // Root operation cannot have linked operands.
+     default:
+-      // Root operation cannot have linked operands.
+       assert(false);
+     }
+   }
+@@ -1075,6 +1087,62 @@ NdbQueryLookupOperationDefImpl
+   assert(m_keys[keyNo] == NULL);
+ }
+ 
++/**
++ * Helper function for NdbQueryIndexScanOperationDefImpl::materializeRootOperands()
++ * Fill in values for either a low or high bound as defined in boundDef[].
++ */
++static void 
++fillBoundValues (const NdbRecord* key_rec,
++                 char* buffer, Uint32& cnt,
++                 NdbQueryOperandImpl* const boundDef[],
++                 const constVoidPtr actualParam[])
++{
++  assert (key_rec->flags & NdbRecord::RecHasAllKeys);
++
++  /**
++   * Serialize upper/lower bounds definitions.
++   */
++  Uint32 keyNo;
++  const Uint32 keyCount = key_rec->key_index_length;
++  assert (keyCount <= key_rec->noOfColumns);
++  for (keyNo = 0; keyNo<keyCount; keyNo++)
++  {
++    const NdbQueryOperandImpl* bound = boundDef[keyNo];
++    if (bound == NULL)
++      break;
++
++    assert (key_rec->key_indexes[keyNo] <= key_rec->noOfColumns);
++    const NdbRecord::Attr& attr = key_rec->columns[key_rec->key_indexes[keyNo]];
++    assert (attr.flags & NdbRecord::IsKey);
++    Uint32 offset = attr.offset;
++
++    switch(bound->getKind()){
++    case NdbQueryOperandImpl::Const:
++    {
++      const NdbConstOperandImpl* constOp = static_cast<const NdbConstOperandImpl*>(bound);
++      assert (key_rec->columns[keyNo].maxSize >= constOp->getLength());
++      memcpy(buffer+offset, constOp->getAddr(), constOp->getLength());
++      break;
++    }
++    case NdbQueryOperandImpl::Param:
++    {
++      const NdbParamOperandImpl* const paramOp 
++        = static_cast<const NdbParamOperandImpl*>(bound);
++      int paramNo = paramOp->getParamIx();
++      assert(actualParam != NULL);
++      assert(actualParam[paramNo] != NULL);
++      memcpy(buffer+offset, actualParam[paramNo], key_rec->columns[keyNo].maxSize);
++      break;
++    }
++    case NdbQueryOperandImpl::Linked:    // Root operation cannot have linked operands.
++    default:
++      assert(false);
++    }
++  }
++  cnt = keyNo;
++} // fillBoundValues()
++
++
+ 
+ void 
+ NdbQueryIndexScanOperationDefImpl
+@@ -1082,8 +1150,35 @@ NdbQueryIndexScanOperationDefImpl
+                           const constVoidPtr actualParam[]) const
+ {
+   assert(getQueryOperationIx()==0); // Should only be called for root operation.
+-  assert (getQueryOperationId()==(getIndex() ?1 :0));
+-  assert(false); // TODO: Implement this.
++
++  char low[1024], high[1024];
++  NdbIndexScanOperation::IndexBound bound;
++  const NdbRecord* key_rec = m_index.getDefaultRecord();
++  assert (key_rec->flags & NdbRecord::RecHasAllKeys);
++
++  /**
++   * Fill in upper and lower bounds as declared with specified values.
++   */
++  fillBoundValues (key_rec, low, bound.low_key_count, m_bound.low, actualParam);
++  bound.low_key = low;
++
++  if (m_bound.eqBound)
++  { // low / high are the same
++    bound.high_key = bound.low_key;
++    bound.high_key_count = bound.low_key_count;
++  }
++  else
++  {
++    fillBoundValues (key_rec, high, bound.high_key_count, m_bound.high, actualParam);
++    bound.high_key = high;
++  }
++  bound.low_inclusive=m_bound.lowIncl;
++  bound.high_inclusive=m_bound.highIncl;
++  bound.range_no=0;
++
++  NdbIndexScanOperation& inxOp = static_cast<NdbIndexScanOperation&>(ndbOperation);
++  int err = inxOp.setBound(key_rec,bound);
++  assert (!err);
+ }
+ 
+ void 
+@@ -1092,6 +1187,7 @@ NdbQueryTableScanOperationDefImpl
+                           const constVoidPtr actualParam[]) const
+ {
+   // TODO: Implement this.
++  // ... Or does it not make sense for a plain scan.....
+ }
+ 
+ 
+@@ -1236,11 +1332,11 @@ NdbQueryOperationDefImpl::appendParentList(Uint32Buffer& serializedDef) const
+   parentSeq.finish();
+ }
+ 
+-static void
++static Uint32
+ appendKeyPattern(Uint32Buffer& serializedDef,
+-                 QN_LookupNode& node,
+                  const NdbQueryOperandImpl* const *m_keys)
+ {
++  Uint32 appendedPattern = 0;
+   if (m_keys[0]!=NULL)
+   {
+     Uint32Slice keyPattern(serializedDef);
+@@ -1248,22 +1344,22 @@ appendKeyPattern(Uint32Buffer& serializedDef,
+     int keyPatternPos = 1; // Length at offs '0' set later
+     int paramCnt = 0;
+     int keyNo = 0;
+-    const NdbQueryOperandImpl* op = m_keys[0];
++    const NdbQueryOperandImpl* key = m_keys[0];
+     do
+     {
+-      switch(op->getKind()){
++      switch(key->getKind()){
+       case NdbQueryOperandImpl::Linked:
+       {
+-        node.requestInfo |= DABits::NI_KEY_LINKED;
+-        const NdbLinkedOperandImpl& linkedOp = *static_cast<const NdbLinkedOperandImpl*>(op);
++        appendedPattern |= DABits::NI_KEY_LINKED;
++        const NdbLinkedOperandImpl& linkedOp = *static_cast<const NdbLinkedOperandImpl*>(key);
+         keyPattern.get(keyPatternPos++) = QueryPattern::col(linkedOp.getLinkedColumnIx());
+         break;
+       }
+       case NdbQueryOperandImpl::Const:
+       {
+-        node.requestInfo |= DABits::NI_KEY_CONSTS;
++        appendedPattern |= DABits::NI_KEY_CONSTS;
+         const NdbConstOperandImpl& constOp 
+-	  = *static_cast<const NdbConstOperandImpl*>(op);
++	  = *static_cast<const NdbConstOperandImpl*>(key);
+      
+         // No of words needed for storing the constant data.
+         const Uint32 wordCount =  AttributeHeader::getDataSize(constOp.getLength());
+@@ -1274,21 +1370,23 @@ appendKeyPattern(Uint32Buffer& serializedDef,
+       }
+       case NdbQueryOperandImpl::Param:
+       {
+-        node.requestInfo |= DABits::NI_KEY_PARAMS;
++        appendedPattern |= DABits::NI_KEY_PARAMS;
+         paramCnt++;
+-        const NdbParamOperandImpl& paramOp = *static_cast<const NdbParamOperandImpl*>(op);
++        const NdbParamOperandImpl& paramOp = *static_cast<const NdbParamOperandImpl*>(key);
+         keyPattern.get(keyPatternPos++) = QueryPattern::param(paramOp.getParamIx());
+         break;
+       }
+       default:
+         assert(false);
+       }
+-      op = m_keys[++keyNo];
+-    } while (op!=NULL);
++      key = m_keys[++keyNo];
++    } while (key!=NULL);
+ 
+     // Set total length of key pattern.
+     keyPattern.get(0) = (paramCnt << 16) | (keyPatternPos-1);
+   }
++
++  return appendedPattern;
+ } // appendKeyPattern
+ 
+ int
+@@ -1296,7 +1394,6 @@ NdbQueryLookupOperationDefImpl
+ ::serializeOperation(Uint32Buffer& serializedDef) const
+ {
+   assert (m_keys[0]!=NULL);
+-  assert (!getIndex());
+ 
+   Uint32Slice nodeBuffer(serializedDef);
+   QN_LookupNode& node = reinterpret_cast<QN_LookupNode&>
+@@ -1319,7 +1416,9 @@ NdbQueryLookupOperationDefImpl
+   }
+ 
+   // Part2: Append m_keys[] values specifying lookup key.
+-  appendKeyPattern(serializedDef, node, m_keys);
++//if (getQueryOperationIx() > 0) {
++    node.requestInfo |= appendKeyPattern(serializedDef, m_keys);
++//}
+ 
+   /* Add the projection that should be send to the SPJ block such that 
+    * child operations can be instantiated.*/
+@@ -1358,7 +1457,6 @@ NdbQueryIndexOperationDefImpl
+ ::serializeOperation(Uint32Buffer& serializedDef) const
+ {
+   assert (m_keys[0]!=NULL);
+-  assert (getIndex());
+ 
+   /**
+    * Serialize index as a seperate lookupNode
+@@ -1379,7 +1477,9 @@ NdbQueryIndexOperationDefImpl
+     }
+ 
+     // Part2: m_keys[] are the keys to be used for index
+-    appendKeyPattern(serializedDef, node, m_keys);
++//  if (getQueryOperationIx() > 0) {
++      node.requestInfo |= appendKeyPattern(serializedDef, m_keys);
++//  }
+ 
+     /* Basetable is executed as child operation of index:
+      * Add projection of NDB$PK column which is hidden *after* last index column.
+@@ -1471,14 +1571,14 @@ NdbQueryIndexOperationDefImpl
+ 
+ 
+ int
+-NdbQueryTableScanOperationDefImpl
+-::serializeOperation(Uint32Buffer& serializedDef) const
++NdbQueryScanOperationDefImpl::serialize(Uint32Buffer& serializedDef,
++                                        const NdbTableImpl& tableOrIndex) const
+ {
+   Uint32Slice nodeBuffer(serializedDef);
+   QN_ScanFragNode& node = reinterpret_cast<QN_ScanFragNode&>
+     (nodeBuffer.get(0, QN_ScanFragNode::NodeSize));
+-  node.tableId = getTable().getObjectId();
+-  node.tableVersion = getTable().getObjectVersion();
++  node.tableId = tableOrIndex.getObjectId();
++  node.tableVersion = tableOrIndex.getObjectVersion();
+   node.requestInfo = 0;
+ 
+   // Optional part1: Make list of parent nodes.
+@@ -1487,8 +1587,9 @@ NdbQueryTableScanOperationDefImpl
+     appendParentList (serializedDef);
+   }
+ 
+-  /* Add the projection that should be send to the SPJ block such that 
+-   * child operations can be instantiated.*/
++  /** Add the projection that should be send to the SPJ block such that 
++   *  child operations can be instantiated.
++   */
+   if (getNoOfChildOperations()>0){
+     node.requestInfo |= DABits::NI_LINKED_ATTR;
+     Uint16Sequence spjProjSeq(serializedDef);
+@@ -1514,17 +1615,24 @@ NdbQueryTableScanOperationDefImpl
+   ndbout << endl;
+ #endif
+   return 0;
++} // NdbQueryScanOperationDefImpl::serialize
++
++
++int
++NdbQueryTableScanOperationDefImpl
++::serializeOperation(Uint32Buffer& serializedDef) const
++{
++  return NdbQueryScanOperationDefImpl::serialize(serializedDef, getTable());
+ } // NdbQueryTableScanOperationDefImpl::serializeOperation
+ 
++
+ int
+ NdbQueryIndexScanOperationDefImpl
+ ::serializeOperation(Uint32Buffer& serializedDef) const
+ {
+-  assert (getQueryOperationId() > 0);
+-  // TODO:Implement this
+-  assert(false);
+-  return 0;
+-}
++  return NdbQueryScanOperationDefImpl::serialize(serializedDef, *m_index.getIndexTable());
++} // NdbQueryIndexScanOperationDefImpl::serializeOperation
++
+ 
+ // Instantiate Vector templates
+ template class Vector<NdbQueryOperationDefImpl*>;
+diff --git a/storage/ndb/src/ndbapi/NdbQueryBuilderImpl.hpp b/storage/ndb/src/ndbapi/NdbQueryBuilderImpl.hpp
+index fc69c2e7ba9..17b7b3fe001 100644
+--- a/storage/ndb/src/ndbapi/NdbQueryBuilderImpl.hpp
++++ b/storage/ndb/src/ndbapi/NdbQueryBuilderImpl.hpp
+@@ -288,7 +288,7 @@ public:
+   { return m_ident; }
+ 
+   Uint32 assignQueryOperationId(Uint32& nodeId)
+-  { if (getIndex()) nodeId++;
++  { if (getType()==UniqueIndexAccess) nodeId++;
+     m_id = nodeId++;
+     return m_id;
+   }
+diff --git a/storage/ndb/src/ndbapi/NdbQueryOperation.cpp b/storage/ndb/src/ndbapi/NdbQueryOperation.cpp
+index 8c0d7953d69..83947245ca1 100644
+--- a/storage/ndb/src/ndbapi/NdbQueryOperation.cpp
++++ b/storage/ndb/src/ndbapi/NdbQueryOperation.cpp
+@@ -163,6 +163,7 @@ NdbQueryOperation::setResultRowBuf (
+                        char* resBuffer,
+                        const unsigned char* result_mask)
+ {
++  // FIXME: Errors must be set in the NdbError object owned by this operation.
+   if (unlikely(rec==0 || resBuffer==0))
+     return QRY_REQ_ARG_IS_NULL;
+   return m_impl.setResultRowBuf(rec, resBuffer, result_mask);
+@@ -174,6 +175,7 @@ NdbQueryOperation::setResultRowRef (
+                        const char* & bufRef,
+                        const unsigned char* result_mask)
+ {
++  // FIXME: Errors must be set in the NdbError object owned by this operation.
+   if (unlikely(rec==0))
+     return QRY_REQ_ARG_IS_NULL;
+   return m_impl.setResultRowRef(rec, bufRef, result_mask);
+@@ -219,17 +221,17 @@ NdbQueryImpl::NdbQueryImpl(NdbTransaction& trans,
+   //       our NdbQuery... classes.
+   const NdbQueryOperationDefImpl& root = queryDef.getQueryOperation(0U);
+   assert (root.getQueryOperationIx() == 0);
+-  assert (root.getQueryOperationId() == (root.getIndex() ?1 :0));
+-  
++  assert (root.getQueryOperationId() == (root.getType()==NdbQueryOperationDefImpl::UniqueIndexAccess) ?1 :0);
++
++  const NdbDictionary::Table* const rootTable = root.getIndex()
++    ? root.getIndex()->getIndexTable()
++    : &root.getTable();
++
+   assert(m_ndbOperation == NULL);
+   if (root.getType() == NdbQueryOperationDefImpl::PrimaryKeyAccess  ||
+       root.getType() == NdbQueryOperationDefImpl::UniqueIndexAccess)
+   {
+-    const NdbDictionary::Table* const table = root.getIndex()
+-      ? root.getIndex()->getIndexTable()
+-      : &root.getTable();
+-    
+-    NdbOperation* const lookupOp = m_transaction.getNdbOperation(table);
++    NdbOperation* const lookupOp = m_transaction.getNdbOperation(rootTable);
+     lookupOp->readTuple(NdbOperation::LM_Dirty);
+     lookupOp->m_isLinked = true; //(queryDef.getNoOfOperations()>1);
+     lookupOp->setQueryImpl(this);
+@@ -240,16 +242,18 @@ NdbQueryImpl::NdbQueryImpl(NdbTransaction& trans,
+      * yields no result.*/
+     m_tcKeyConfReceived = false;
+   }
+-  else if (root.getType() == NdbQueryOperationDefImpl::TableScan)
++  else if (root.getType() == NdbQueryOperationDefImpl::TableScan ||
++           root.getType() == NdbQueryOperationDefImpl::OrderedIndexScan)
+   {
+     NdbScanOperation* const scanOp 
+-      = m_transaction.scanTable(root.getTable().getDefaultRecord(), 
++      = m_transaction.scanTable(rootTable->getDefaultRecord(), 
+                                 NdbOperation::LM_Dirty);
++    assert(scanOp);
+     scanOp->m_isLinked = true; // if (queryDef.getNoOfOperations()> 1);
+     scanOp->setQueryImpl(this);
+     m_ndbOperation = scanOp;
+     
+-    m_parallelism = root.getTable().getFragmentCount();
++    m_parallelism = rootTable->getFragmentCount();
+     m_tcKeyConfReceived = true;
+   } else {
+     assert(false);
+@@ -461,7 +465,7 @@ NdbQueryOperationImpl::NdbQueryOperationImpl(
+   m_operationDef(def),
+   m_parents(def.getNoOfParentOperations()),
+   m_children(def.getNoOfChildOperations()),
+-  m_resultStreams(new ResultStream*[queryImpl.getParallelism()]),
++  m_resultStreams(NULL),
+   m_params(),
+   m_userProjection(def.getTable()),
+   m_resultStyle(Style_None),
+@@ -478,6 +482,7 @@ NdbQueryOperationImpl::NdbQueryOperationImpl(
+ { 
+   assert(m_id != NdbObjectIdMap::InvalidId);
+ 
++  // FIXME: Delay allocation of resultStrems[] until query is executed.
+   m_resultStreams = new ResultStream*[queryImpl.getParallelism()];
+   for(Uint32 i=0; i<m_queryImpl.getParallelism(); i++)
+   {
+@@ -502,8 +507,8 @@ NdbQueryOperationImpl::~NdbQueryOperationImpl(){
+     m_queryImpl.getNdbTransaction()->getNdb()->theImpl
+       ->theNdbObjectIdMap.unmap(m_id, this);
+   }
+-#ifndef NDEBUG // Buffer overrun check activated.
+   if(m_batchBuffer){
++#ifndef NDEBUG // Buffer overrun check activated.
+     // Check against buffer overun.
+     assert(m_batchBuffer[m_batchByteSize*getQuery().getParallelism()] == 'a' &&
+            m_batchBuffer[m_batchByteSize*getQuery().getParallelism()+1] 
+@@ -512,13 +517,15 @@ NdbQueryOperationImpl::~NdbQueryOperationImpl(){
+            == 'c' &&
+            m_batchBuffer[m_batchByteSize*getQuery().getParallelism()+3] 
+            == 'd');
+-  }
+ #endif
+-  delete[] m_batchBuffer;
+-  for(Uint32 i = 0; i<getQuery().getParallelism(); i ++){
+-    delete m_resultStreams[i];
++    delete[] m_batchBuffer;
++  }
++  if (m_resultStreams) {
++    for(Uint32 i = 0; i<getQuery().getParallelism(); i ++){
++      delete m_resultStreams[i];
++    }
++    delete[] m_resultStreams;
+   }
+-  delete[] m_resultStreams;
+ }
+ 
+ 
+@@ -546,18 +553,6 @@ NdbQueryOperationImpl::getChildOperation(Uint32 i) const
+   return *m_children[i];
+ }
+ 
+-const NdbQueryOperationDefImpl&
+-NdbQueryOperationImpl::getQueryOperationDef() const
+-{
+-  return m_operationDef;
+-}
+-
+-NdbQueryImpl& 
+-NdbQueryOperationImpl::getQuery() const
+-{
+-  return m_queryImpl;
+-}
+-
+ NdbRecAttr*
+ NdbQueryOperationImpl::getValue(
+                             const char* anAttrName,
+@@ -1126,7 +1121,7 @@ NdbQueryOperationImpl::prepareSend(Uint32Buffer& serializedParams)
+     m_resultStreams[i]->m_receiver.prepareSend();
+   }
+ 
+-  if (def.getIndex() != NULL)
++  if (def.getType() == NdbQueryOperationDefImpl::UniqueIndexAccess)
+   {
+     Uint32Slice lookupParams(serializedParams);
+     QN_LookupParameters& param = reinterpret_cast<QN_LookupParameters&>
+@@ -1158,7 +1153,7 @@ NdbQueryOperationImpl::prepareSend(Uint32Buffer& serializedParams)
+     }
+     ndbout << endl;
+ #endif
+-  }
++  } // if (UniqueIndexAccess ...
+ 
+   Uint32Slice lookupParams(serializedParams);
+   QN_LookupParameters& param = reinterpret_cast<QN_LookupParameters&>
+@@ -1168,7 +1163,8 @@ NdbQueryOperationImpl::prepareSend(Uint32Buffer& serializedParams)
+   param.resultData = m_id;
+ 
+   // SPJ block assume PARAMS to be supplied before ATTR_LIST
+-  if (def.getNoOfParameters() > 0  && def.getIndex()==NULL)
++  if (def.getNoOfParameters() > 0  && 
++      def.getType() != NdbQueryOperationDefImpl::UniqueIndexAccess)
+   {
+     // parameter values has been serialized as part of ::buildQuery()
+     // Only need to append it to rest of the serialized arguments
+@@ -1188,10 +1184,10 @@ NdbQueryOperationImpl::prepareSend(Uint32Buffer& serializedParams)
+   }
+ 
+   QueryNodeParameters::setOpLen(param.len,
+-				isScan() 
++                                isScan()
+                                   ?QueryNodeParameters::QN_SCAN_FRAG
+                                   :QueryNodeParameters::QN_LOOKUP,
+-				lookupParams.getSize());
++                                lookupParams.getSize());
+   if(m_operationDef.getQueryOperationIx()==0)
+   {
+     if(isScan())
+diff --git a/storage/ndb/src/ndbapi/NdbQueryOperationImpl.hpp b/storage/ndb/src/ndbapi/NdbQueryOperationImpl.hpp
+index 7bf22729f3e..35f97df6e9f 100644
+--- a/storage/ndb/src/ndbapi/NdbQueryOperationImpl.hpp
++++ b/storage/ndb/src/ndbapi/NdbQueryOperationImpl.hpp
+@@ -155,6 +155,7 @@ class NdbQueryOperationImpl {
+ 
+   /** For debugging.*/
+   friend NdbOut& operator<<(NdbOut& out, const NdbQueryOperationImpl&);
++
+ public:
+   STATIC_CONST (MAGIC = 0xfade1234);
+ 
+@@ -179,10 +180,16 @@ public:
+   Uint32 getNoOfChildOperations() const;
+   NdbQueryOperationImpl& getChildOperation(Uint32 i) const;
+ 
+-  const NdbQueryOperationDefImpl& getQueryOperationDef() const;
++  /** A shorthand for getting the root operation. */
++  NdbQueryOperationImpl& getRoot() const
++  { return getQuery().getRoot(); }
++
++  const NdbQueryOperationDefImpl& getQueryOperationDef() const
++  { return m_operationDef; }
+ 
+   // Get the entire query object which this operation is part of
+-  NdbQueryImpl& getQuery() const;
++  NdbQueryImpl& getQuery() const
++  { return m_queryImpl; }
+ 
+   NdbRecAttr* getValue(const char* anAttrName, char* resultBuffer);
+   NdbRecAttr* getValue(Uint32 anAttrId, char* resultBuffer);
+@@ -201,15 +208,6 @@ public:
+   bool isRowChanged() const; // Prev ::nextResult() on NdbQuery retrived a new
+                              // value for this NdbQueryOperation
+ 
+-  /** Returns an I-value for the NdbReceiver object that shall receive results
+-   * for this operation. 
+-   * @return The I-value.
+-   */
+-  /*Uint32 getResultPtr() const {
+-    return m_receiver.getId();
+-    };*/
+-
+-
+   /** Process result data for this operation. Return true if batch complete.*/
+   bool execTRANSID_AI(const Uint32* ptr, Uint32 len);
+   
+@@ -253,10 +251,8 @@ public:
+ 
+   /** Return true if this operation is a scan.*/
+   bool isScan() const {
+-    return getQueryOperationDef().getType() 
+-      == NdbQueryOperationDefImpl::TableScan ||
+-      getQueryOperationDef().getType() 
+-      == NdbQueryOperationDefImpl::OrderedIndexScan;
++    return m_operationDef.getType() == NdbQueryOperationDefImpl::TableScan ||
++           m_operationDef.getType() == NdbQueryOperationDefImpl::OrderedIndexScan;
+   }
+ 
+   const NdbQueryOperation& getInterface() const
+@@ -269,12 +265,8 @@ public:
+   /** Find max number of rows per batch per ResultStream.*/
+   void findMaxRows();
+ 
+-  Uint32 getMaxBatchRows() const { return m_maxBatchRows;}
+-
+-  /** A shorthand for getting the root operation.*/
+-  NdbQueryOperationImpl& getRoot() const { 
+-    return getQuery().getRoot();
+-  }
++  Uint32 getMaxBatchRows() const
++  { return m_maxBatchRows; }
+ 
+ private:
+   /** This class represents a projection that shall be sent to the 
+

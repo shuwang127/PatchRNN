@@ -1,0 +1,141 @@
+commit 1820ebdc72c447c92dc36a65428428ac62164bcd
+Author: Alexander Larsson <alexl@redhat.com>
+Date:   Mon Jun 19 21:16:46 2017 +0200
+
+    builder: Better handling of default-branch
+    
+    Instead of constantly looking at the option we change the
+    manifest value if its unset. This means we can access the
+    default branch outside of builder-main.c, and that we get
+    it into the serialized manifest in the build.
+
+diff --git a/builder/builder-main.c b/builder/builder-main.c
+index a33763ed..8678a432 100644
+--- a/builder/builder-main.c
++++ b/builder/builder-main.c
+@@ -438,6 +438,9 @@ main (int    argc,
+       return 1;
+     }
+ 
++  if (opt_default_branch)
++    builder_manifest_set_default_branch (manifest, opt_default_branch);
++
+   if (is_run && argc == 3)
+     return usage (context, "Program to run must be specified");
+ 
+@@ -616,7 +619,7 @@ main (int    argc,
+   if (opt_mirror_screenshots_url && !opt_export_only)
+     {
+       g_autofree char *screenshot_subdir = g_strdup_printf ("%s-%s", builder_manifest_get_id (manifest),
+-                                                            builder_manifest_get_branch (manifest, opt_default_branch));
++                                                            builder_manifest_get_branch (manifest));
+       g_autofree char *url = g_build_filename (opt_mirror_screenshots_url, screenshot_subdir, NULL);
+       g_autofree char *xml_relpath = g_strdup_printf ("files/share/app-info/xmls/%s.xml.gz", builder_manifest_get_id (manifest));
+       g_autoptr(GFile) xml = g_file_resolve_relative_path (app_dir, xml_relpath);
+@@ -668,7 +671,7 @@ main (int    argc,
+                       "--exclude=/lib/debug/*",
+                       "--include=/lib/debug/app",
+                       builder_context_get_separate_locales (build_context) ? "--exclude=/share/runtime/locale/*/*" : skip_arg,
+-                      opt_repo, app_dir_path, builder_manifest_get_branch (manifest, opt_default_branch), NULL))
++                      opt_repo, app_dir_path, builder_manifest_get_branch (manifest), NULL))
+         {
+           g_printerr ("Export failed: %s\n", error->message);
+           return 1;
+@@ -698,7 +701,7 @@ main (int    argc,
+           if (!do_export (build_context, &error, TRUE,
+                           metadata_arg,
+                           files_arg,
+-                          opt_repo, app_dir_path, builder_manifest_get_branch (manifest, opt_default_branch), NULL))
++                          opt_repo, app_dir_path, builder_manifest_get_branch (manifest), NULL))
+             {
+               g_printerr ("Export failed: %s\n", error->message);
+               return 1;
+@@ -715,7 +718,7 @@ main (int    argc,
+           if (!do_export (build_context, &error, TRUE,
+                           "--metadata=metadata.debuginfo",
+                           builder_context_get_build_runtime (build_context) ? "--files=usr/lib/debug" : "--files=files/lib/debug",
+-                          opt_repo, app_dir_path, builder_manifest_get_branch (manifest, opt_default_branch), NULL))
++                          opt_repo, app_dir_path, builder_manifest_get_branch (manifest), NULL))
+             {
+               g_printerr ("Export failed: %s\n", error->message);
+               return 1;
+@@ -732,7 +735,7 @@ main (int    argc,
+           if (!do_export (build_context, &error, TRUE,
+                           "--metadata=metadata.sources",
+                           "--files=sources",
+-                          opt_repo, app_dir_path, builder_manifest_get_branch (manifest, opt_default_branch), NULL))
++                          opt_repo, app_dir_path, builder_manifest_get_branch (manifest), NULL))
+             {
+               g_printerr ("Export failed: %s\n", error->message);
+               return 1;
+@@ -750,7 +753,7 @@ main (int    argc,
+                           "--metadata=metadata.platform",
+                           "--files=platform",
+                           builder_context_get_separate_locales (build_context) ? "--exclude=/share/runtime/locale/*/*" : skip_arg,
+-                          opt_repo, app_dir_path, builder_manifest_get_branch (manifest, opt_default_branch), NULL))
++                          opt_repo, app_dir_path, builder_manifest_get_branch (manifest), NULL))
+             {
+               g_printerr ("Export failed: %s\n", error->message);
+               return 1;
+@@ -780,7 +783,7 @@ main (int    argc,
+           if (!do_export (build_context, &error, TRUE,
+                           metadata_arg,
+                           files_arg,
+-                          opt_repo, app_dir_path, builder_manifest_get_branch (manifest, opt_default_branch), NULL))
++                          opt_repo, app_dir_path, builder_manifest_get_branch (manifest), NULL))
+             {
+               g_printerr ("Export failed: %s\n", error->message);
+               return 1;
+diff --git a/builder/builder-manifest.c b/builder/builder-manifest.c
+index 8fb93be3..d3e9da15 100644
+--- a/builder/builder-manifest.c
++++ b/builder/builder-manifest.c
+@@ -1110,21 +1110,26 @@ builder_manifest_get_runtime_version (BuilderManifest *self)
+ }
+ 
+ const char *
+-builder_manifest_get_branch (BuilderManifest *self, const char *default_branch)
++builder_manifest_get_branch (BuilderManifest *self)
+ {
+   if (self->branch)
+     return self->branch;
+ 
+-  if (default_branch)
+-    return default_branch;
+-
+   return "master";
+ }
+ 
++void
++builder_manifest_set_default_branch (BuilderManifest *self,
++                                     const char *default_branch)
++{
++  if (self->branch == NULL)
++    self->branch = g_strdup (default_branch);
++}
++
+ static const char *
+ builder_manifest_get_base_version (BuilderManifest *self)
+ {
+-  return self->base_version ? self->base_version : builder_manifest_get_branch (self, NULL);
++  return self->base_version ? self->base_version : builder_manifest_get_branch (self);
+ }
+ 
+ static char *
+diff --git a/builder/builder-manifest.h b/builder/builder-manifest.h
+index bd9c6dc3..e6808c54 100644
+--- a/builder/builder-manifest.h
++++ b/builder/builder-manifest.h
+@@ -56,8 +56,9 @@ const char *    builder_manifest_get_id_platform (BuilderManifest *self);
+ char *          builder_manifest_get_locale_id_platform (BuilderManifest *self);
+ BuilderOptions *builder_manifest_get_build_options (BuilderManifest *self);
+ GList *         builder_manifest_get_modules (BuilderManifest *self);
+-const char *    builder_manifest_get_branch (BuilderManifest *self,
+-                                             const char *default_branch);
++const char *    builder_manifest_get_branch (BuilderManifest *self);
++void            builder_manifest_set_default_branch (BuilderManifest *self,
++                                                     const char *default_branch);
+ 
+ gboolean        builder_manifest_start (BuilderManifest *self,
+                                         gboolean         allow_missing_runtimes,
+

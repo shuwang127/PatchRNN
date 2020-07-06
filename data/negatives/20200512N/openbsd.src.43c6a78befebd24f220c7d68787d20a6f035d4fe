@@ -1,0 +1,577 @@
+commit 43c6a78befebd24f220c7d68787d20a6f035d4fe
+Author: art <art@openbsd.org>
+Date:   Fri Feb 8 13:53:27 2002 +0000
+
+    - Rename FILE_{,UN}USE to FREF and FRELE. USE is a bad verb and we don't have
+      the same semantics as NetBSD anyway, so it's good to avoid name collissions.
+    - Always fdremove before freeing the file, not the other way around.
+    - falloc FREFs the file.
+    - have FILE_SET_MATURE FRELE the file (It feels like a good ortogonality to
+      falloc FREFing the file).
+    - Use closef as much as possible instead of ffree in error paths of
+      falloc:ing functions. closef is much more careful with the fd and can
+      deal with the fd being forcibly closed by dup2. Also try to avoid
+      manually calling *fo_close when closef can do that for us (this makes
+      some error paths mroe complicated (sys_socketpair and sys_pipe), but
+      others become simpler (sys_open)).
+
+diff --git a/sys/compat/svr4/svr4_net.c b/sys/compat/svr4/svr4_net.c
+index 3c04d31004d..a3aa1de3bbd 100644
+--- a/sys/compat/svr4/svr4_net.c
++++ b/sys/compat/svr4/svr4_net.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: svr4_net.c,v 1.12 2001/10/26 12:03:27 art Exp $	 */
++/*	$OpenBSD: svr4_net.c,v 1.13 2002/02/08 13:53:27 art Exp $	 */
+ /*	$NetBSD: svr4_net.c,v 1.12 1996/09/07 12:40:51 mycroft Exp $	 */
+ 
+ /*
+@@ -173,7 +173,7 @@ svr4_netopen(dev, flag, mode, p)
+ 	if ((error = socreate(family, &so, type, protocol)) != 0) {
+ 		DPRINTF(("socreate error %d\n", error));
+ 		fdremove(p->p_fd, fd);
+-		ffree(fp);
++		closef(fp);
+ 		return error;
+ 	}
+ 
+diff --git a/sys/crypto/cryptodev.c b/sys/crypto/cryptodev.c
+index e531a1ecaa9..3c2ac1f87a1 100644
+--- a/sys/crypto/cryptodev.c
++++ b/sys/crypto/cryptodev.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: cryptodev.c,v 1.28 2001/11/13 17:45:46 deraadt Exp $	*/
++/*	$OpenBSD: cryptodev.c,v 1.29 2002/02/08 13:53:28 art Exp $	*/
+ 
+ /*
+  * Copyright (c) 2001 Theo de Raadt
+@@ -541,7 +541,6 @@ cryptoioctl(dev, cmd, data, flag, p)
+ 		fcr->sesn = 0;
+ 
+ 		error = falloc(p, &f, &fd);
+-
+ 		if (error) {
+ 			FREE(fcr, M_XDATA);
+ 			return (error);
+diff --git a/sys/kern/kern_descrip.c b/sys/kern/kern_descrip.c
+index a1e9ab54de1..335cf1a5aee 100644
+--- a/sys/kern/kern_descrip.c
++++ b/sys/kern/kern_descrip.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: kern_descrip.c,v 1.47 2002/02/05 16:02:27 art Exp $	*/
++/*	$OpenBSD: kern_descrip.c,v 1.48 2002/02/08 13:53:28 art Exp $	*/
+ /*	$NetBSD: kern_descrip.c,v 1.42 1996/03/30 22:24:38 christos Exp $	*/
+ 
+ /*
+@@ -497,7 +497,7 @@ finishdup(p, old, new, retval)
+ 	 */
+ 	oldfp = fdp->fd_ofiles[new];
+ 	if (oldfp != NULL)
+-		FILE_USE(oldfp);
++		FREF(oldfp);
+ 
+ 	fp = fdp->fd_ofiles[old];
+ 	if (fp->f_count == LONG_MAX-2)
+@@ -543,7 +543,7 @@ fdrelease(p, fd)
+ 	fp = *fpp;
+ 	if (fp == NULL)
+ 		return (EBADF);
+-	FILE_USE(fp);
++	FREF(fp);
+ 	*fpp = NULL;
+ 	fdp->fd_ofileflags[fd] = 0;
+ 	fd_unused(fdp, fd);
+@@ -820,6 +820,7 @@ restart:
+ 		*resultfp = fp;
+ 	if (resultfd)
+ 		*resultfd = i;
++	FREF(fp);
+ 	return (0);
+ }
+ 
+@@ -994,7 +995,7 @@ fdfree(p)
+ 	for (i = fdp->fd_lastfile; i >= 0; i--, fpp++) {
+ 		fp = *fpp;
+ 		if (fp != NULL) {
+-			FILE_USE(fp);
++			FREF(fp);
+ 			*fpp = NULL;
+ 			(void) closef(fp, p);
+ 		}
+@@ -1059,12 +1060,12 @@ closef(struct file *fp, struct proc *p)
+ 	 * race to FIF_WANTCLOSE.
+ 	 */
+ 	if ((fp->f_iflags & FIF_WANTCLOSE) != 0) {
+-		FILE_UNUSE(fp);
++		FRELE(fp);
+ 		return (0);
+ 	}
+ 
+ 	if (--fp->f_count > 0) {
+-		FILE_UNUSE(fp);
++		FRELE(fp);
+ 		return (0);
+ 	}
+ 
+diff --git a/sys/kern/kern_event.c b/sys/kern/kern_event.c
+index 04163b72d60..5256392ac48 100644
+--- a/sys/kern/kern_event.c
++++ b/sys/kern/kern_event.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: kern_event.c,v 1.15 2002/02/05 16:02:27 art Exp $	*/
++/*	$OpenBSD: kern_event.c,v 1.16 2002/02/08 13:53:28 art Exp $	*/
+ 
+ /*-
+  * Copyright (c) 1999,2000,2001 Jonathan Lemon <jlemon@FreeBSD.org>
+@@ -339,7 +339,7 @@ sys_kevent(struct proc *p, void *v, register_t *retval)
+ 	    (fp->f_type != DTYPE_KQUEUE))
+ 		return (EBADF);
+ 
+-	FILE_USE(fp);
++	FREF(fp);
+ 
+ 	if (SCARG(uap, timeout) != NULL) {
+ 		error = copyin(SCARG(uap, timeout), &ts, sizeof(ts));
+@@ -390,7 +390,7 @@ sys_kevent(struct proc *p, void *v, register_t *retval)
+ 			    SCARG(uap, timeout), p, &n);
+ 	*retval = n;
+  done:
+-	FILE_UNUSE(fp);
++	FRELE(fp);
+ 	return (error);
+ }
+ 
+@@ -422,7 +422,7 @@ kqueue_register(struct kqueue *kq, struct kevent *kev, struct proc *p)
+ 		/* validate descriptor */
+ 		if ((fp = fd_getfile(fdp, kev->ident)) == NULL)
+ 			return (EBADF);
+-		FILE_USE(fp);
++		FREF(fp);
+ 		fp->f_count++;
+ 
+ 		if (kev->ident < fdp->fd_knlistsize) {
+@@ -469,7 +469,7 @@ kqueue_register(struct kqueue *kq, struct kevent *kev, struct proc *p)
+ 			 * apply reference count to knote structure, and
+ 			 * do not release it at the end of this routine.
+ 			 */
+-			FILE_UNUSE(fp);
++			FRELE(fp);
+ 			fp = NULL;
+ 
+ 			kn->kn_sfflags = kev->fflags;
+@@ -728,7 +728,7 @@ kqueue_close(struct file *fp, struct proc *p)
+ 		while (kn != NULL) {
+ 			kn0 = SLIST_NEXT(kn, kn_link);
+ 			if (kq == kn->kn_kq) {
+-				FILE_USE(kn->kn_fp);
++				FREF(kn->kn_fp);
+ 				kn->kn_fop->f_detach(kn);
+ 				closef(kn->kn_fp, p);
+ 				knote_free(kn);
+@@ -871,7 +871,7 @@ knote_drop(struct knote *kn, struct proc *p)
+ 	if (kn->kn_status & KN_QUEUED)
+ 		knote_dequeue(kn);
+ 	if (kn->kn_fop->f_isfd) {
+-		FILE_USE(kn->kn_fp);
++		FREF(kn->kn_fp);
+ 		closef(kn->kn_fp, p);
+ 	}
+ 	knote_free(kn);
+diff --git a/sys/kern/kern_exec.c b/sys/kern/kern_exec.c
+index b8b6b6d479a..2cc8429b7d3 100644
+--- a/sys/kern/kern_exec.c
++++ b/sys/kern/kern_exec.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: kern_exec.c,v 1.63 2002/01/20 11:27:52 art Exp $	*/
++/*	$OpenBSD: kern_exec.c,v 1.64 2002/02/08 13:53:28 art Exp $	*/
+ /*	$NetBSD: kern_exec.c,v 1.75 1996/02/09 18:59:28 christos Exp $	*/
+ 
+ /*-
+@@ -550,13 +550,13 @@ sys_execve(p, v, retval)
+ 					panic("sys_execve: falloc indx != i");
+ #endif
+ 				if ((error = cdevvp(getnulldev(), &vp)) != 0) {
+-					ffree(fp);
+ 					fdremove(p->p_fd, indx);
++					closef(fp, p);
+ 					break;
+ 				}
+ 				if ((error = VOP_OPEN(vp, flags, p->p_ucred, p)) != 0) {
+-					ffree(fp);
+ 					fdremove(p->p_fd, indx);
++					closef(fp, p);
+ 					vrele(vp);
+ 					break;
+ 				}
+diff --git a/sys/kern/sys_generic.c b/sys/kern/sys_generic.c
+index fd32b2a9959..c02c07b1eda 100644
+--- a/sys/kern/sys_generic.c
++++ b/sys/kern/sys_generic.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: sys_generic.c,v 1.33 2002/02/05 16:02:27 art Exp $	*/
++/*	$OpenBSD: sys_generic.c,v 1.34 2002/02/08 13:53:28 art Exp $	*/
+ /*	$NetBSD: sys_generic.c,v 1.24 1996/03/29 00:25:32 cgd Exp $	*/
+ 
+ /*
+@@ -91,7 +91,7 @@ sys_read(p, v, retval)
+ 	if ((fp->f_flag & FREAD) == 0)
+ 		return (EBADF);
+ 
+-	FILE_USE(fp);
++	FREF(fp);
+ 
+ 	/* dofileread() will unuse the descriptor for us */
+ 	return (dofileread(p, fd, fp, SCARG(uap, buf), SCARG(uap, nbyte),
+@@ -154,7 +154,7 @@ dofileread(p, fd, fp, buf, nbyte, offset, retval)
+ #endif
+ 	*retval = cnt;
+  out:
+-	FILE_UNUSE(fp);
++	FRELE(fp);
+ 	return (error);
+ }
+ 
+@@ -273,9 +273,6 @@ dofilereadv(p, fd, fp, iovp, iovcnt, offset, retval)
+ 	if (needfree)
+ 		free(needfree, M_IOV);
+  out:
+-#if notyet
+-	FILE_UNUSE(fp, p);
+-#endif
+ 	return (error);
+ }
+ 
+@@ -366,9 +363,6 @@ dofilewrite(p, fd, fp, buf, nbyte, offset, retval)
+ #endif
+ 	*retval = cnt;
+  out:
+-#if notyet
+-	FILE_UNUSE(fp, p);
+-#endif
+ 	return (error);
+ }
+ 
+@@ -488,9 +482,6 @@ dofilewritev(p, fd, fp, iovp, iovcnt, offset, retval)
+ 	if (needfree)
+ 		free(needfree, M_IOV);
+  out:
+-#if notyet
+-	FILE_UNUSE(fp, p);
+-#endif
+ 	return (error);
+ }
+ 
+diff --git a/sys/kern/sys_pipe.c b/sys/kern/sys_pipe.c
+index 4543cbe9678..52e6dbbbb30 100644
+--- a/sys/kern/sys_pipe.c
++++ b/sys/kern/sys_pipe.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: sys_pipe.c,v 1.41 2002/01/23 00:39:47 art Exp $	*/
++/*	$OpenBSD: sys_pipe.c,v 1.42 2002/02/08 13:53:28 art Exp $	*/
+ 
+ /*
+  * Copyright (c) 1996 John S. Dyson
+@@ -146,11 +146,13 @@ sys_opipe(p, v, retval)
+ 	FILE_SET_MATURE(wf);
+ 	return (0);
+ free3:
+-	ffree(rf);
+ 	fdremove(fdp, retval[0]);
++	closef(rf, p);
++	rpipe = NULL;
+ free2:
+ 	(void)pipeclose(wpipe);
+-	(void)pipeclose(rpipe);
++	if (rpipe != NULL)
++		(void)pipeclose(rpipe);
+ 	return (error);
+ }
+ 
+diff --git a/sys/kern/uipc_syscalls.c b/sys/kern/uipc_syscalls.c
+index e80c519f3b8..83f7283e09e 100644
+--- a/sys/kern/uipc_syscalls.c
++++ b/sys/kern/uipc_syscalls.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: uipc_syscalls.c,v 1.47 2001/12/27 22:49:35 fgsch Exp $	*/
++/*	$OpenBSD: uipc_syscalls.c,v 1.48 2002/02/08 13:53:28 art Exp $	*/
+ /*	$NetBSD: uipc_syscalls.c,v 1.19 1996/02/09 19:00:48 christos Exp $	*/
+ 
+ /*
+@@ -88,7 +88,7 @@ sys_socket(p, v, retval)
+ 			 SCARG(uap, protocol));
+ 	if (error) {
+ 		fdremove(fdp, fd);
+-		ffree(fp);
++		closef(fp, p);
+ 	} else {
+ 		fp->f_data = (caddr_t)so;
+ 		FILE_SET_MATURE(fp);
+@@ -248,7 +248,7 @@ sys_accept(p, v, retval)
+ 	/* if an error occurred, free the file descriptor */
+ 	if (error) {
+ 		fdremove(p->p_fd, tmpfd);
+-		ffree(fp);
++		closef(fp, p);
+ 	}
+ 	m_freem(nam);
+ 	splx(s);
+@@ -359,20 +359,25 @@ sys_socketpair(p, v, retval)
+ 	}
+ 	error = copyout((caddr_t)sv, (caddr_t)SCARG(uap, rsv),
+ 	    2 * sizeof (int));
+-	FILE_SET_MATURE(fp1);
+-	FILE_SET_MATURE(fp2);
+-	if (error == 0)
++	if (error == 0) {
++		FILE_SET_MATURE(fp1);
++		FILE_SET_MATURE(fp2);
+ 		return (error);
++	}
+ free4:
+-	ffree(fp2);
+ 	fdremove(fdp, sv[1]);
++	closef(fp2, p);
++	so2 = NULL;
+ free3:
+-	ffree(fp1);
+ 	fdremove(fdp, sv[0]);
++	closef(fp1, p);
++	so1 = NULL;
+ free2:
+-	(void)soclose(so2);
++	if (so2 != NULL)
++		(void)soclose(so2);
+ free1:
+-	(void)soclose(so1);
++	if (so1 != NULL)
++		(void)soclose(so1);
+ 	return (error);
+ }
+ 
+diff --git a/sys/kern/uipc_usrreq.c b/sys/kern/uipc_usrreq.c
+index 80b05f89225..56e17d9dbf3 100644
+--- a/sys/kern/uipc_usrreq.c
++++ b/sys/kern/uipc_usrreq.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: uipc_usrreq.c,v 1.17 2002/02/05 16:02:27 art Exp $	*/
++/*	$OpenBSD: uipc_usrreq.c,v 1.18 2002/02/08 13:53:28 art Exp $	*/
+ /*	$NetBSD: uipc_usrreq.c,v 1.18 1996/02/09 19:00:50 christos Exp $	*/
+ 
+ /*
+@@ -887,7 +887,7 @@ unp_gc()
+ 		if (fp->f_count == fp->f_msgcount && !(fp->f_flag & FMARK)) {
+ 			*fpp++ = fp;
+ 			nunref++;
+-			FILE_USE(fp);
++			FREF(fp);
+ 			fp->f_count++;
+ 		}
+ 	}
+@@ -957,7 +957,7 @@ unp_discard(fp)
+ 	struct file *fp;
+ {
+ 
+-	FILE_USE(fp);
++	FREF(fp);
+ 	fp->f_msgcount--;
+ 	unp_rights--;
+ 	(void) closef(fp, NULL);
+diff --git a/sys/kern/vfs_syscalls.c b/sys/kern/vfs_syscalls.c
+index ef9c29fa8c1..f60e590b6ae 100644
+--- a/sys/kern/vfs_syscalls.c
++++ b/sys/kern/vfs_syscalls.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: vfs_syscalls.c,v 1.88 2002/02/05 16:02:27 art Exp $	*/
++/*	$OpenBSD: vfs_syscalls.c,v 1.89 2002/02/08 13:53:28 art Exp $	*/
+ /*	$NetBSD: vfs_syscalls.c,v 1.71 1996/04/23 10:29:02 mycroft Exp $	*/
+ 
+ /*
+@@ -874,8 +874,6 @@ sys_open(p, v, retval)
+ 	if ((error = falloc(p, &fp, &indx)) != 0)
+ 		return (error);
+ 
+-	FILE_USE(fp);
+-
+ 	flags = FFLAGS(SCARG(uap, flags));
+ 	cmode = ((SCARG(uap, mode) &~ fdp->fd_cmask) & ALLPERMS) &~ S_ISTXT;
+ 	NDINIT(&nd, LOOKUP, FOLLOW, UIO_USERSPACE, SCARG(uap, path), p);
+@@ -895,8 +893,8 @@ sys_open(p, v, retval)
+ 		}
+ 		if (error == ERESTART)
+ 			error = EINTR;
+-		closef(fp, p);
+ 		fdremove(fdp, indx);
++		closef(fp, p);
+ 		return (error);
+ 	}
+ 	p->p_dupfd = 0;
+@@ -919,10 +917,9 @@ sys_open(p, v, retval)
+ 		VOP_UNLOCK(vp, 0, p);
+ 		error = VOP_ADVLOCK(vp, (caddr_t)fp, F_SETLK, &lf, type);
+ 		if (error) {
+-			(void) vn_close(vp, fp->f_flag, fp->f_cred, p);
+-			FILE_UNUSE(fp);
+-			ffree(fp);
++			/* closef will vn_close the file for us. */
+ 			fdremove(fdp, indx);
++			closef(fp, p);
+ 			return (error);
+ 		}
+ 		vn_lock(vp, LK_EXCLUSIVE | LK_RETRY, p);
+@@ -943,17 +940,15 @@ sys_open(p, v, retval)
+ 		}
+ 		if (error) {
+ 			VOP_UNLOCK(vp, 0, p);
+-			(void) vn_close(vp, fp->f_flag, fp->f_cred, p);
+-			FILE_UNUSE(fp);
+-			ffree(fp);
++			/* closef will close the file for us. */
+ 			fdremove(fdp, indx);
++			closef(fp, p);
+ 			return (error);
+ 		}
+ 	}
+ 	VOP_UNLOCK(vp, 0, p);
+ 	*retval = indx;
+ 	FILE_SET_MATURE(fp);
+-	FILE_UNUSE(fp);
+ 	return (0);
+ }
+ 
+@@ -1105,9 +1100,9 @@ sys_fhopen(p, v, retval)
+ 		VOP_UNLOCK(vp, 0, p);
+ 		error = VOP_ADVLOCK(vp, (caddr_t)fp, F_SETLK, &lf, type);
+ 		if (error) {
+-			(void) vn_close(vp, fp->f_flag, fp->f_cred, p);
+-			ffree(fp);
++			/* closef will vn_close the file for us. */
+ 			fdremove(fdp, indx);
++			closef(fp, p);
+ 			return (error);
+ 		}
+ 		vn_lock(vp, LK_EXCLUSIVE | LK_RETRY, p);
+@@ -1119,8 +1114,8 @@ sys_fhopen(p, v, retval)
+ 	return (0);
+ 
+ bad:
+-	ffree(fp);
+ 	fdremove(fdp, indx);
++	closef(fp, p);
+ 	if (vp != NULL)
+ 		vput(vp);
+ 	return (error);
+@@ -2651,11 +2646,11 @@ sys_pread(p, v, retval)
+ 	if ((fp->f_flag & FREAD) == 0)
+ 		return (EBADF);
+ 
+-	FILE_USE(fp);
++	FREF(fp);
+ 
+ 	vp = (struct vnode *)fp->f_data;
+ 	if (fp->f_type != DTYPE_VNODE || vp->v_type == VFIFO) {
+-		FILE_UNUSE(fp);
++		FRELE(fp);
+ 		return (ESPIPE);
+ 	}
+ 
+@@ -2706,9 +2701,6 @@ sys_preadv(p, v, retval)
+ 	    &offset, retval));
+ 
+  out:
+-#if notyet
+-	FILE_UNUSE(fp, p);
+-#endif
+ 	return (error);
+ }
+ 
+@@ -2752,9 +2744,6 @@ sys_pwrite(p, v, retval)
+ 	    &offset, retval));
+ 
+  out:
+-#if notyet
+-	FILE_UNUSE(fp, p);
+-#endif
+ 	return (error);
+ }
+ 
+@@ -2799,8 +2788,5 @@ sys_pwritev(p, v, retval)
+ 	    &offset, retval));
+ 
+  out:
+-#if notyet
+-	FILE_UNUSE(fp, p);
+-#endif
+ 	return (error);
+ }
+diff --git a/sys/miscfs/portal/portal_vfsops.c b/sys/miscfs/portal/portal_vfsops.c
+index 16d18417044..86187f81f98 100644
+--- a/sys/miscfs/portal/portal_vfsops.c
++++ b/sys/miscfs/portal/portal_vfsops.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: portal_vfsops.c,v 1.10 2002/02/05 16:02:27 art Exp $	*/
++/*	$OpenBSD: portal_vfsops.c,v 1.11 2002/02/08 13:53:28 art Exp $	*/
+ /*	$NetBSD: portal_vfsops.c,v 1.14 1996/02/09 22:40:41 christos Exp $	*/
+ 
+ /*
+@@ -187,7 +187,7 @@ portal_unmount(mp, mntflags, p)
+ 	 * daemon to wake up, and then the accept will get ECONNABORTED
+ 	 * which it interprets as a request to go and bury itself.
+ 	 */
+-	FILE_USE(VFSTOPORTAL(mp)->pm_server);
++	FREF(VFSTOPORTAL(mp)->pm_server);
+ 	soshutdown((struct socket *) VFSTOPORTAL(mp)->pm_server->f_data, 2);
+ 	/*
+ 	 * Discard reference to underlying file.  Must call closef because
+diff --git a/sys/nfs/nfs_syscalls.c b/sys/nfs/nfs_syscalls.c
+index 1843336d880..5f0e1bb6207 100644
+--- a/sys/nfs/nfs_syscalls.c
++++ b/sys/nfs/nfs_syscalls.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: nfs_syscalls.c,v 1.26 2002/02/05 16:02:27 art Exp $	*/
++/*	$OpenBSD: nfs_syscalls.c,v 1.27 2002/02/08 13:53:28 art Exp $	*/
+ /*	$NetBSD: nfs_syscalls.c,v 1.19 1996/02/18 11:53:52 fvdl Exp $	*/
+ 
+ /*
+@@ -781,7 +781,7 @@ nfsrv_zapsock(slp)
+ 	slp->ns_flag &= ~SLP_ALLFLAGS;
+ 	fp = slp->ns_fp;
+ 	if (fp) {
+-		FILE_USE(fp);
++		FREF(fp);
+ 		slp->ns_fp = NULL;
+ 		so = slp->ns_so;
+ 		so->so_upcall = NULL;
+diff --git a/sys/sys/file.h b/sys/sys/file.h
+index c8b37713515..ed71d331e6d 100644
+--- a/sys/sys/file.h
++++ b/sys/sys/file.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: file.h,v 1.15 2002/02/05 16:02:27 art Exp $	*/
++/*	$OpenBSD: file.h,v 1.16 2002/02/08 13:53:28 art Exp $	*/
+ /*	$NetBSD: file.h,v 1.11 1995/03/26 20:24:13 jtc Exp $	*/
+ 
+ /*
+@@ -92,15 +92,16 @@ struct file {
+ #define FILE_IS_USABLE(fp) \
+ 	(((fp)->f_iflags & (FIF_WANTCLOSE|FIF_LARVAL)) == 0)
+ 
+-#define FILE_SET_MATURE(fp) do {	\
+-	(fp)->f_iflags &= ~FIF_LARVAL;	\
++#define FREF(fp) do { (fp)->f_usecount++; } while (0)
++#define FRELE(fp) do {					\
++	--(fp)->f_usecount;					\
++	if (((fp)->f_iflags & FIF_WANTCLOSE) != 0)		\
++		wakeup(&(fp)->f_usecount);			\
+ } while (0)
+ 
+-#define FILE_USE(fp) do { (fp)->f_usecount++; } while (0)
+-#define FILE_UNUSE(fp) do {				\
+-	--(fp)->f_usecount;				\
+-	if (((fp)->f_iflags & FIF_WANTCLOSE) != 0)	\
+-		wakeup(&(fp)->f_usecount);		\
++#define FILE_SET_MATURE(fp) do {				\
++	(fp)->f_iflags &= ~FIF_LARVAL;				\
++	FRELE(fp);						\
+ } while (0)
+ 
+ LIST_HEAD(filelist, file);
+

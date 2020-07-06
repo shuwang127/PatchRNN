@@ -1,0 +1,96 @@
+commit 9456f0fa6d3cb944d3b9fc31c9a244e0362c26ea
+Author: Steven Rostedt <srostedt@redhat.com>
+Date:   Wed May 6 21:54:09 2009 -0400
+
+    tracing: reset ring buffer when removing modules with events
+    
+    Li Zefan found that there's a race using the event ids of events and
+    modules. When a module is loaded, an event id is incremented. We only
+    have 16 bits for event ids (65536) and there is a possible (but highly
+    unlikely) race that we could load and unload a module that registers
+    events so many times that the event id counter overflows.
+    
+    When it overflows, it then restarts and goes looking for available
+    ids. An id is available if it was added by a module and released.
+    
+    The race is if you have one module add an id, and then is removed.
+    Another module loaded can use that same event id. But if the old module
+    still had events in the ring buffer, the new module's call back would
+    get bogus data.  At best (and most likely) the output would just be
+    garbage. But if the module for some reason used pointers (not recommended)
+    then this could potentially crash.
+    
+    The safest thing to do is just reset the ring buffer if a module that
+    registered events is removed.
+    
+    [ Impact: prevent unpredictable results of event id overflows ]
+    
+    Reported-by: Li Zefan <lizf@cn.fujitsu.com>
+    LKML-Reference: <49FEAFD0.30106@cn.fujitsu.com>
+    Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+
+diff --git a/kernel/trace/trace.c b/kernel/trace/trace.c
+index 4164a344e72a..dd40d2320346 100644
+--- a/kernel/trace/trace.c
++++ b/kernel/trace/trace.c
+@@ -639,6 +639,16 @@ void tracing_reset_online_cpus(struct trace_array *tr)
+ 		tracing_reset(tr, cpu);
+ }
+ 
++void tracing_reset_current(int cpu)
++{
++	tracing_reset(&global_trace, cpu);
++}
++
++void tracing_reset_current_online_cpus(void)
++{
++	tracing_reset_online_cpus(&global_trace);
++}
++
+ #define SAVED_CMDLINES 128
+ #define NO_CMDLINE_MAP UINT_MAX
+ static unsigned map_pid_to_cmdline[PID_MAX_DEFAULT+1];
+diff --git a/kernel/trace/trace.h b/kernel/trace/trace.h
+index 777c6c3a0cde..ba25793ffe67 100644
+--- a/kernel/trace/trace.h
++++ b/kernel/trace/trace.h
+@@ -409,6 +409,8 @@ int tracing_is_enabled(void);
+ void trace_wake_up(void);
+ void tracing_reset(struct trace_array *tr, int cpu);
+ void tracing_reset_online_cpus(struct trace_array *tr);
++void tracing_reset_current(int cpu);
++void tracing_reset_current_online_cpus(void);
+ int tracing_open_generic(struct inode *inode, struct file *filp);
+ struct dentry *trace_create_file(const char *name,
+ 				 mode_t mode,
+diff --git a/kernel/trace/trace_events.c b/kernel/trace/trace_events.c
+index 8d579ff23610..6d2c842a0248 100644
+--- a/kernel/trace/trace_events.c
++++ b/kernel/trace/trace_events.c
+@@ -932,9 +932,11 @@ static void trace_module_remove_events(struct module *mod)
+ {
+ 	struct ftrace_module_file_ops *file_ops;
+ 	struct ftrace_event_call *call, *p;
++	bool found = false;
+ 
+ 	list_for_each_entry_safe(call, p, &ftrace_events, list) {
+ 		if (call->mod == mod) {
++			found = true;
+ 			if (call->enabled) {
+ 				call->enabled = 0;
+ 				call->unregfunc();
+@@ -957,6 +959,13 @@ static void trace_module_remove_events(struct module *mod)
+ 		list_del(&file_ops->list);
+ 		kfree(file_ops);
+ 	}
++
++	/*
++	 * It is safest to reset the ring buffer if the module being unloaded
++	 * registered any events.
++	 */
++	if (found)
++		tracing_reset_current_online_cpus();
+ }
+ 
+ static int trace_module_notify(struct notifier_block *self,
+

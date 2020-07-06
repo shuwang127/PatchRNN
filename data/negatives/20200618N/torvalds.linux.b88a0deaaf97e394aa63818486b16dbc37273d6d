@@ -1,0 +1,62 @@
+commit b88a0deaaf97e394aa63818486b16dbc37273d6d
+Author: Gao Pan <pandy.gao@nxp.com>
+Date:   Mon Nov 28 11:03:00 2016 +0800
+
+    spi: fsl-lpspi: read lpspi tx/rx fifo size in probe()
+    
+    The lpspi tx/rx fifo size is a read only parameter resides
+    lpspi Parameter Register. It's better to read lpspi tx/rx
+    fifo size in probe().
+    
+    Signed-off-by: Gao Pan <pandy.gao@nxp.com>
+    Signed-off-by: Mark Brown <broonie@kernel.org>
+
+diff --git a/drivers/spi/spi-fsl-lpspi.c b/drivers/spi/spi-fsl-lpspi.c
+index 47a97add0639..71eca6e3fe32 100644
+--- a/drivers/spi/spi-fsl-lpspi.c
++++ b/drivers/spi/spi-fsl-lpspi.c
+@@ -236,15 +236,9 @@ static void fsl_lpspi_set_cmd(struct fsl_lpspi_data *fsl_lpspi,
+ 
+ static void fsl_lpspi_set_watermark(struct fsl_lpspi_data *fsl_lpspi)
+ {
+-	u8 txwatermark, rxwatermark;
+ 	u32 temp;
+ 
+-	temp = readl(fsl_lpspi->base + IMX7ULP_PARAM);
+-	fsl_lpspi->txfifosize = 1 << (temp & 0x0f);
+-	fsl_lpspi->rxfifosize = 1 << ((temp >> 8) & 0x0f);
+-	rxwatermark = fsl_lpspi->txfifosize >> 1;
+-	txwatermark = fsl_lpspi->rxfifosize >> 1;
+-	temp = txwatermark | rxwatermark << 16;
++	temp = fsl_lpspi->txfifosize >> 1 | (fsl_lpspi->rxfifosize >> 1) << 16;
+ 
+ 	writel(temp, fsl_lpspi->base + IMX7ULP_FCR);
+ 
+@@ -427,6 +421,7 @@ static int fsl_lpspi_probe(struct platform_device *pdev)
+ 	struct spi_master *master;
+ 	struct resource *res;
+ 	int ret, irq;
++	u32 temp;
+ 
+ 	master = spi_alloc_master(&pdev->dev, sizeof(struct fsl_lpspi_data));
+ 	if (!master)
+@@ -476,6 +471,18 @@ static int fsl_lpspi_probe(struct platform_device *pdev)
+ 		goto out_master_put;
+ 	}
+ 
++	ret = clk_prepare_enable(fsl_lpspi->clk);
++	if (ret) {
++		dev_err(&pdev->dev, "can't enable lpspi clock, ret=%d\n", ret);
++		goto out_master_put;
++	}
++
++	temp = readl(fsl_lpspi->base + IMX7ULP_PARAM);
++	fsl_lpspi->txfifosize = 1 << (temp & 0x0f);
++	fsl_lpspi->rxfifosize = 1 << ((temp >> 8) & 0x0f);
++
++	clk_disable_unprepare(fsl_lpspi->clk);
++
+ 	ret = devm_spi_register_master(&pdev->dev, master);
+ 	if (ret < 0) {
+ 		dev_err(&pdev->dev, "spi_register_master error.\n");
+

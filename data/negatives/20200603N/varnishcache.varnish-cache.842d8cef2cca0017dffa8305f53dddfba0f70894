@@ -1,0 +1,131 @@
+commit 842d8cef2cca0017dffa8305f53dddfba0f70894
+Author: Poul-Henning Kamp <phk@phk.freebsd.dk>
+Date:   Fri Mar 7 10:58:12 2008 +0000
+
+    Keep track of how often we flush the private shm buffer due to overflows.
+    
+    
+    git-svn-id: http://www.varnish-cache.org/svn/trunk/varnish-cache@2557 d4fa192b-c00b-0410-8231-f00ffab90ce4
+
+diff --git a/bin/varnishd/cache.h b/bin/varnishd/cache.h
+index 400e8fa56..b4352a1a6 100644
+--- a/bin/varnishd/cache.h
++++ b/bin/varnishd/cache.h
+@@ -520,7 +520,7 @@ void VSLR(enum shmlogtag tag, int id, txt t);
+ void VSL(enum shmlogtag tag, int id, const char *fmt, ...);
+ void WSLR(struct worker *w, enum shmlogtag tag, int id, txt t);
+ void WSL(struct worker *w, enum shmlogtag tag, int id, const char *fmt, ...);
+-void WSL_Flush(struct worker *w);
++void WSL_Flush(struct worker *w, int overflow);
+ #define WSP(sess, tag, fmt, ...) \
+ 	WSL((sess)->wrk, tag, (sess)->fd, fmt, __VA_ARGS__)
+ #define WSPR(sess, tag, txt) \
+diff --git a/bin/varnishd/cache_center.c b/bin/varnishd/cache_center.c
+index bb686de2a..91a202e08 100644
+--- a/bin/varnishd/cache_center.c
++++ b/bin/varnishd/cache_center.c
+@@ -228,7 +228,7 @@ cnt_done(struct sess *sp)
+ 	sp->t_open = sp->t_end;
+ 	sp->t_req = NAN;
+ 	sp->t_resp = NAN;
+-	WSL_Flush(sp->wrk);
++	WSL_Flush(sp->wrk, 0);
+ 
+ 	/* If we did an ESI include, don't mess up our state */
+ 	if (sp->esis > 0)
+@@ -879,7 +879,7 @@ cnt_diag(struct sess *sp, const char *state)
+ 		WSL(sp->wrk, SLT_Debug, sp->id,
+ 		    "thr %p STP_%s sp %p obj %p vcl %p",
+ 		    pthread_self(), state, sp, sp->obj, sp->vcl);
+-		WSL_Flush(sp->wrk);
++		WSL_Flush(sp->wrk, 0);
+ 	} else {
+ 		VSL(SLT_Debug, sp->id,
+ 		    "thr %p STP_%s sp %p obj %p vcl %p",
+@@ -925,7 +925,7 @@ CNT_Session(struct sess *sp)
+ 		CHECK_OBJ_ORNULL(w->nobjhead, OBJHEAD_MAGIC);
+ 	}
+ 	assert(!isnan(w->used));
+-	WSL_Flush(w);
++	WSL_Flush(w, 0);
+ }
+ 
+ /*
+diff --git a/bin/varnishd/cache_expire.c b/bin/varnishd/cache_expire.c
+index c9ddddcfd..49b9abe77 100644
+--- a/bin/varnishd/cache_expire.c
++++ b/bin/varnishd/cache_expire.c
+@@ -280,7 +280,7 @@ exp_timer(void *arg)
+ 		CHECK_OBJ_ORNULL(oe, OBJEXP_MAGIC);
+ 		if (oe == NULL || oe->timer_when > t) { /* XXX: > or >= ? */
+ 			UNLOCK(&exp_mtx);
+-			WSL_Flush(&ww);
++			WSL_Flush(&ww, 0);
+ 			AZ(sleep(1));
+ 			VCL_Refresh(&sp->vcl);
+ 			t = TIM_real();
+diff --git a/bin/varnishd/cache_synthetic.c b/bin/varnishd/cache_synthetic.c
+index a3cf38d92..093e85500 100644
+--- a/bin/varnishd/cache_synthetic.c
++++ b/bin/varnishd/cache_synthetic.c
+@@ -59,7 +59,7 @@ SYN_ErrorPage(struct sess *sp, int status, const char *reason)
+ 	int fd;
+ 	int ttl = 0;				/* XXX: ?? */
+ 
+-	WSL_Flush(sp->wrk);
++	WSL_Flush(sp->wrk, 0);
+ 	assert(status >= 100 && status <= 999);
+ 	CHECK_OBJ_NOTNULL(sp, SESS_MAGIC);
+ 	CHECK_OBJ_NOTNULL(sp->wrk, WORKER_MAGIC);
+diff --git a/bin/varnishd/shmlog.c b/bin/varnishd/shmlog.c
+index 218b3f817..2abbe3264 100644
+--- a/bin/varnishd/shmlog.c
++++ b/bin/varnishd/shmlog.c
+@@ -170,7 +170,7 @@ VSL(enum shmlogtag tag, int id, const char *fmt, ...)
+ /*--------------------------------------------------------------------*/
+ 
+ void
+-WSL_Flush(struct worker *w)
++WSL_Flush(struct worker *w, int overflow)
+ {
+ 	unsigned char *p;
+ 	unsigned l;
+@@ -179,6 +179,7 @@ WSL_Flush(struct worker *w)
+ 	if (l == 0)
+ 		return;
+ 	LOCKSHM(&vsl_mtx);
++	VSL_stats->shm_flushes += overflow;
+ 	VSL_stats->shm_writes++;
+ 	VSL_stats->shm_records += w->wlr;
+ 	if (loghead->ptr + l + 1 >= loghead->size)
+@@ -216,7 +217,7 @@ WSLR(struct worker *w, enum shmlogtag tag, int id, txt t)
+ 
+ 	/* Wrap if necessary */
+ 	if (w->wlp + SHMLOG_NEXTTAG + l + 1 >= w->wle)
+-		WSL_Flush(w);
++		WSL_Flush(w, 1);
+ 	p = w->wlp;
+ 	w->wlp += SHMLOG_NEXTTAG + l;
+ 	assert(w->wlp < w->wle);
+@@ -247,7 +248,7 @@ WSL(struct worker *w, enum shmlogtag tag, int id, const char *fmt, ...)
+ 
+ 		/* Wrap if we cannot fit a full size record */
+ 		if (w->wlp + SHMLOG_NEXTTAG + 255 + 1 >= w->wle)
+-			WSL_Flush(w);
++			WSL_Flush(w, 1);
+ 
+ 		p = w->wlp;
+ 		n = vsnprintf((char *)(p + SHMLOG_DATA), 256, fmt, ap);
+diff --git a/include/stat_field.h b/include/stat_field.h
+index 90baaa125..c3910eba2 100644
+--- a/include/stat_field.h
++++ b/include/stat_field.h
+@@ -88,6 +88,7 @@ MAC_STAT(sess_herd,		uint64_t, 'a', "Session herd")
+ 
+ MAC_STAT(shm_records,		uint64_t, 'a', "SHM records")
+ MAC_STAT(shm_writes,		uint64_t, 'a', "SHM writes")
++MAC_STAT(shm_flushes,		uint64_t, 'a', "SHM flushes due to overflow")
+ MAC_STAT(shm_cont,		uint64_t, 'a', "SHM MTX contention")
+ 
+ MAC_STAT(sm_nreq,		uint64_t, 'a', "allocator requests")
+

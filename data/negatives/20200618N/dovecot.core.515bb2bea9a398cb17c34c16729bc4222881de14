@@ -1,0 +1,43 @@
+commit 515bb2bea9a398cb17c34c16729bc4222881de14
+Author: Timo Sirainen <tss@iki.fi>
+Date:   Wed Jun 5 16:40:01 2013 +0300
+
+    lib-http: After peer has received 100 response, don't add ambiguity timeout anymore.
+    The server should be sending the 100 responses then, and long delays
+    shouldn't be confused with them being missing.
+
+diff --git a/src/lib-http/http-client-connection.c b/src/lib-http/http-client-connection.c
+index b4c8b2343..72824010e 100644
+--- a/src/lib-http/http-client-connection.c
++++ b/src/lib-http/http-client-connection.c
+@@ -295,7 +295,7 @@ bool http_client_connection_next_request(struct http_client_connection *conn)
+ 	   (Continue) status code, the client SHOULD NOT wait for an indefinite
+ 	   period before sending the payload body.
+ 	 */
+-	if (req->payload_sync) {
++	if (req->payload_sync && !conn->peer->seen_100_response) {
+ 		i_assert(req->payload_chunked || req->payload_size > 0);
+ 		i_assert(conn->to_response == NULL);
+ 		conn->to_response =	timeout_add(HTTP_CLIENT_CONTINUE_TIMEOUT_MSECS,
+@@ -529,6 +529,8 @@ static void http_client_connection_input(struct connection *_conn)
+ 					"Got 100-continue response after timeout");
+ 				return;
+ 			}
++			conn->peer->no_payload_sync = FALSE;
++			conn->peer->seen_100_response = TRUE;
+ 			conn->payload_continue = TRUE;
+ 			http_client_connection_debug(conn,
+ 				"Got expected 100-continue response");
+diff --git a/src/lib-http/http-client-private.h b/src/lib-http/http-client-private.h
+index 023f8e9a1..396fc070f 100644
+--- a/src/lib-http/http-client-private.h
++++ b/src/lib-http/http-client-private.h
+@@ -121,6 +121,7 @@ struct http_client_peer {
+ 
+ 	unsigned int destroyed:1;        /* peer is being destroyed */
+ 	unsigned int no_payload_sync:1;  /* expect: 100-continue failed before */
++	unsigned int seen_100_response:1;/* expect: 100-continue succeeded before */
+ 	unsigned int last_connect_failed:1;
+ };
+ 
+

@@ -1,0 +1,181 @@
+commit ba58d1020a54933c6b087a3107661c8513556cb8
+Author: Chen Yu <yu.c.chen@intel.com>
+Date:   Mon Nov 28 14:35:19 2016 -0800
+
+    timekeeping: Ignore the bogus sleep time if pm_trace is enabled
+    
+    Power management suspend/resume tracing (ab)uses the RTC to store
+    suspend/resume information persistently. As a consequence the RTC value is
+    clobbered when timekeeping is resumed and tries to inject the sleep time.
+    
+    Commit a4f8f6667f09 ("timekeeping: Cap array access in timekeeping_debug")
+    plugged a out of bounds array access in the timekeeping debug code which
+    was caused by the clobbered RTC value, but we still use the clobbered RTC
+    value for sleep time injection into kernel timekeeping, which will result
+    in random adjustments depending on the stored "hash" value.
+    
+    To prevent this keep track of the RTC clobbering and ignore the invalid RTC
+    timestamp at resume. If the system resumed successfully clear the flag,
+    which marks the RTC as unusable, warn the user about the RTC clobber and
+    recommend to adjust the RTC with 'ntpdate' or 'rdate'.
+    
+    [jstultz: Fixed up pr_warn formating, and implemented suggestions from Ingo]
+    [ tglx: Rewrote changelog ]
+    
+    Originally-from: Thomas Gleixner <tglx@linutronix.de>
+    Signed-off-by: Chen Yu <yu.c.chen@intel.com>
+    Signed-off-by: John Stultz <john.stultz@linaro.org>
+    Acked-by: Pavel Machek <pavel@ucw.cz>
+    Acked-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Prarit Bhargava <prarit@redhat.com>
+    Cc: "Rafael J. Wysocki" <rjw@rjwysocki.net>
+    Cc: Richard Cochran <richardcochran@gmail.com>
+    Cc: Xunlei Pang <xlpang@redhat.com>
+    Cc: Len Brown <lenb@kernel.org>
+    Link: http://lkml.kernel.org/r/1480372524-15181-3-git-send-email-john.stultz@linaro.org
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/arch/x86/kernel/rtc.c b/arch/x86/kernel/rtc.c
+index 79c6311cd912..5b21cb7d84d6 100644
+--- a/arch/x86/kernel/rtc.c
++++ b/arch/x86/kernel/rtc.c
+@@ -64,6 +64,15 @@ void mach_get_cmos_time(struct timespec *now)
+ 	unsigned int status, year, mon, day, hour, min, sec, century = 0;
+ 	unsigned long flags;
+ 
++	/*
++	 * If pm_trace abused the RTC as storage, set the timespec to 0,
++	 * which tells the caller that this RTC value is unusable.
++	 */
++	if (!pm_trace_rtc_valid()) {
++		now->tv_sec = now->tv_nsec = 0;
++		return;
++	}
++
+ 	spin_lock_irqsave(&rtc_lock, flags);
+ 
+ 	/*
+diff --git a/drivers/base/power/trace.c b/drivers/base/power/trace.c
+index efec10b49d59..1cda505d6a85 100644
+--- a/drivers/base/power/trace.c
++++ b/drivers/base/power/trace.c
+@@ -10,6 +10,7 @@
+ #include <linux/pm-trace.h>
+ #include <linux/export.h>
+ #include <linux/rtc.h>
++#include <linux/suspend.h>
+ 
+ #include <linux/mc146818rtc.h>
+ 
+@@ -74,6 +75,9 @@
+ 
+ #define DEVSEED (7919)
+ 
++bool pm_trace_rtc_abused __read_mostly;
++EXPORT_SYMBOL_GPL(pm_trace_rtc_abused);
++
+ static unsigned int dev_hash_value;
+ 
+ static int set_magic_time(unsigned int user, unsigned int file, unsigned int device)
+@@ -104,6 +108,7 @@ static int set_magic_time(unsigned int user, unsigned int file, unsigned int dev
+ 	time.tm_min = (n % 20) * 3;
+ 	n /= 20;
+ 	mc146818_set_time(&time);
++	pm_trace_rtc_abused = true;
+ 	return n ? -1 : 0;
+ }
+ 
+@@ -239,9 +244,31 @@ int show_trace_dev_match(char *buf, size_t size)
+ 	return ret;
+ }
+ 
++static int
++pm_trace_notify(struct notifier_block *nb, unsigned long mode, void *_unused)
++{
++	switch (mode) {
++	case PM_POST_HIBERNATION:
++	case PM_POST_SUSPEND:
++		if (pm_trace_rtc_abused) {
++			pm_trace_rtc_abused = false;
++			pr_warn("Possible incorrect RTC due to pm_trace, please use 'ntpdate' or 'rdate' to reset it.\n");
++		}
++		break;
++	default:
++		break;
++	}
++	return 0;
++}
++
++static struct notifier_block pm_trace_nb = {
++	.notifier_call = pm_trace_notify,
++};
++
+ static int early_resume_init(void)
+ {
+ 	hash_value_early_read = read_magic_time();
++	register_pm_notifier(&pm_trace_nb);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/rtc/rtc-cmos.c b/drivers/rtc/rtc-cmos.c
+index dd3d59806ffa..b27a18968a1a 100644
+--- a/drivers/rtc/rtc-cmos.c
++++ b/drivers/rtc/rtc-cmos.c
+@@ -191,6 +191,13 @@ static inline void cmos_write_bank2(unsigned char val, unsigned char addr)
+ 
+ static int cmos_read_time(struct device *dev, struct rtc_time *t)
+ {
++	/*
++	 * If pm_trace abused the RTC for storage, set the timespec to 0,
++	 * which tells the caller that this RTC value is unusable.
++	 */
++	if (!pm_trace_rtc_valid())
++		return -EIO;
++
+ 	/* REVISIT:  if the clock has a "century" register, use
+ 	 * that instead of the heuristic in mc146818_get_time().
+ 	 * That'll make Y3K compatility (year > 2070) easy!
+diff --git a/include/linux/mc146818rtc.h b/include/linux/mc146818rtc.h
+index a585b4b5fa0e..0661af17a758 100644
+--- a/include/linux/mc146818rtc.h
++++ b/include/linux/mc146818rtc.h
+@@ -16,6 +16,7 @@
+ #include <asm/mc146818rtc.h>		/* register access macros */
+ #include <linux/bcd.h>
+ #include <linux/delay.h>
++#include <linux/pm-trace.h>
+ 
+ #ifdef __KERNEL__
+ #include <linux/spinlock.h>		/* spinlock_t */
+diff --git a/include/linux/pm-trace.h b/include/linux/pm-trace.h
+index ecbde7a5548e..7b78793f07d7 100644
+--- a/include/linux/pm-trace.h
++++ b/include/linux/pm-trace.h
+@@ -1,11 +1,17 @@
+ #ifndef PM_TRACE_H
+ #define PM_TRACE_H
+ 
++#include <linux/types.h>
+ #ifdef CONFIG_PM_TRACE
+ #include <asm/pm-trace.h>
+-#include <linux/types.h>
+ 
+ extern int pm_trace_enabled;
++extern bool pm_trace_rtc_abused;
++
++static inline bool pm_trace_rtc_valid(void)
++{
++	return !pm_trace_rtc_abused;
++}
+ 
+ static inline int pm_trace_is_enabled(void)
+ {
+@@ -24,6 +30,7 @@ extern int show_trace_dev_match(char *buf, size_t size);
+ 
+ #else
+ 
++static inline bool pm_trace_rtc_valid(void) { return true; }
+ static inline int pm_trace_is_enabled(void) { return 0; }
+ 
+ #define TRACE_DEVICE(dev) do { } while (0)
+

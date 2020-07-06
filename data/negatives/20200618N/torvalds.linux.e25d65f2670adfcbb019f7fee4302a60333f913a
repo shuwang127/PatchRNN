@@ -1,0 +1,47 @@
+commit e25d65f2670adfcbb019f7fee4302a60333f913a
+Author: Sara Sharon <sara.sharon@intel.com>
+Date:   Tue Jun 21 11:13:47 2016 +0300
+
+    iwlwifi: pcie: don't use vid 0
+    
+    In cases of hardware or DMA error, the vid read from
+    a zeroed location will be 0, and we will access the rxb
+    at index 0 in the global table, while it may be NULL or
+    owned by hardware.
+    Invalidate vid 0 in order to detect the situation and
+    bail out.
+    
+    Signed-off-by: Sara Sharon <sara.sharon@intel.com>
+    Signed-off-by: Luca Coelho <luciano.coelho@intel.com>
+
+diff --git a/drivers/net/wireless/intel/iwlwifi/pcie/rx.c b/drivers/net/wireless/intel/iwlwifi/pcie/rx.c
+index c1c3c6a86e59..0296c290f3a1 100644
+--- a/drivers/net/wireless/intel/iwlwifi/pcie/rx.c
++++ b/drivers/net/wireless/intel/iwlwifi/pcie/rx.c
+@@ -960,7 +960,7 @@ int iwl_pcie_rx_init(struct iwl_trans *trans)
+ 		else
+ 			list_add(&rxb->list, &def_rxq->rx_used);
+ 		trans_pcie->global_table[i] = rxb;
+-		rxb->vid = (u16)i;
++		rxb->vid = (u16)(i + 1);
+ 	}
+ 
+ 	iwl_pcie_rxq_alloc_rbs(trans, GFP_KERNEL, def_rxq);
+@@ -1249,10 +1249,13 @@ static void iwl_pcie_rx_handle(struct iwl_trans *trans, int queue)
+ 			 */
+ 			u16 vid = le32_to_cpu(rxq->used_bd[i]) & 0x0FFF;
+ 
+-			if (WARN(vid >= ARRAY_SIZE(trans_pcie->global_table),
+-				 "Invalid rxb index from HW %u\n", (u32)vid))
++			if (WARN(!vid ||
++				 vid > ARRAY_SIZE(trans_pcie->global_table),
++				 "Invalid rxb index from HW %u\n", (u32)vid)) {
++				iwl_force_nmi(trans);
+ 				goto out;
+-			rxb = trans_pcie->global_table[vid];
++			}
++			rxb = trans_pcie->global_table[vid - 1];
+ 		} else {
+ 			rxb = rxq->queue[i];
+ 			rxq->queue[i] = NULL;
+

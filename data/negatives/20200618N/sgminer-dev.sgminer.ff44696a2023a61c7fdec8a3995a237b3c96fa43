@@ -1,0 +1,50 @@
+commit ff44696a2023a61c7fdec8a3995a237b3c96fa43
+Author: Con Kolivas <kernel@kolivas.org>
+Date:   Sat May 25 23:21:11 2013 +1000
+
+    Avalon_wait_write is not effective during resets so do it after going idle.
+
+diff --git a/driver-avalon.c b/driver-avalon.c
+index d5c4661b..99b3ea54 100644
+--- a/driver-avalon.c
++++ b/driver-avalon.c
+@@ -404,6 +404,7 @@ static void avalon_idle(struct cgpu_info *avalon, int fd)
+ 		struct avalon_task at;
+ 		int ret;
+ 
++		avalon_clear_readbuf(fd);
+ 		if (unlikely(avalon_buffer_full(fd))) {
+ 			applog(LOG_WARNING, "Avalon buffer full in avalon_idle after %d tasks", i);
+ 			break;
+@@ -426,11 +427,6 @@ static int avalon_reset(struct cgpu_info *avalon, int fd)
+ 	int ret, i = 0;
+ 	struct timespec p;
+ 
+-	if (!avalon_wait_write(fd)) {
+-		applog(LOG_WARNING, "Avalon not ready for writes in avalon_reset");
+-		return 1;
+-	}
+-
+ 	/* Reset once, then send command to go idle */
+ 	ret = avalon_write(fd, &reset, 1);
+ 	if (unlikely(ret == AVA_SEND_ERROR))
+@@ -443,9 +439,6 @@ static int avalon_reset(struct cgpu_info *avalon, int fd)
+ 	p.tv_nsec = AVALON_RESET_PITCH;
+ 	nanosleep(&p, NULL);
+ 	avalon_idle(avalon, fd);
+-	avalon_wait_write(fd);
+-	avalon_clear_readbuf(fd);
+-	applog(LOG_ERR, "Avalon: Idle");
+ 
+ 	/* Reset again, then check result */
+ 	ret = avalon_write(fd, &reset, 1);
+@@ -475,6 +468,8 @@ static int avalon_reset(struct cgpu_info *avalon, int fd)
+ 		applog(LOG_WARNING, "Avalon: Reset succeeded");
+ 
+ 	avalon_idle(avalon, fd);
++	if (!avalon_wait_write(fd))
++		applog(LOG_WARNING, "Avalon: Not ready for writes?");
+ 	return 0;
+ }
+ 
+

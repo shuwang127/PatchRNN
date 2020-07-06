@@ -1,0 +1,46 @@
+commit 1f8da47805072e89454ccfdada553c2afc4dfb79
+Author: Joerg Roedel <joerg.roedel@amd.com>
+Date:   Fri Aug 7 11:49:43 2009 +0200
+
+    KVM: SVM: handle errors in vmrun emulation path appropriatly
+    
+    If nested svm fails to load the msrpm the vmrun succeeds with the old
+    msrpm which is not correct. This patch changes the logic to roll back
+    to host mode in case the msrpm cannot be loaded.
+    
+    Signed-off-by: Joerg Roedel <joerg.roedel@amd.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index d458297d54c8..53376f144d70 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -1874,6 +1874,7 @@ static int vmsave_interception(struct vcpu_svm *svm, struct kvm_run *kvm_run)
+ static int vmrun_interception(struct vcpu_svm *svm, struct kvm_run *kvm_run)
+ {
+ 	nsvm_printk("VMrun\n");
++
+ 	if (nested_svm_check_permissions(svm))
+ 		return 1;
+ 
+@@ -1884,7 +1885,18 @@ static int vmrun_interception(struct vcpu_svm *svm, struct kvm_run *kvm_run)
+ 		return 1;
+ 
+ 	if (!nested_svm_vmrun_msrpm(svm))
+-		return 1;
++		goto failed;
++
++	return 1;
++
++failed:
++
++	svm->vmcb->control.exit_code    = SVM_EXIT_ERR;
++	svm->vmcb->control.exit_code_hi = 0;
++	svm->vmcb->control.exit_info_1  = 0;
++	svm->vmcb->control.exit_info_2  = 0;
++
++	nested_svm_vmexit(svm);
+ 
+ 	return 1;
+ }
+

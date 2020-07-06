@@ -1,0 +1,72 @@
+commit 6d9285b00f776eebe459a858ebf07b56c36c60d2
+Author: Grant Likely <grant.likely@secretlab.ca>
+Date:   Tue Feb 14 14:06:51 2012 -0700
+
+    irq_domain/powerpc: Eliminate virq_is_host()
+    
+    There is only one user, and it is trivial to open-code.
+    
+    Signed-off-by: Grant Likely <grant.likely@secretlab.ca>
+    Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Milton Miller <miltonm@bga.com>
+    Tested-by: Olof Johansson <olof@lixom.net>
+
+diff --git a/arch/powerpc/include/asm/irq.h b/arch/powerpc/include/asm/irq.h
+index abdd7ef28cbf..f80f262e0597 100644
+--- a/arch/powerpc/include/asm/irq.h
++++ b/arch/powerpc/include/asm/irq.h
+@@ -58,7 +58,6 @@ extern atomic_t ppc_n_lost_interrupts;
+ struct irq_data;
+ extern irq_hw_number_t irqd_to_hwirq(struct irq_data *d);
+ extern irq_hw_number_t virq_to_hw(unsigned int virq);
+-extern bool virq_is_host(unsigned int virq, struct irq_domain *host);
+ 
+ /**
+  * irq_alloc_host - Allocate a new irq_domain data structure
+diff --git a/arch/powerpc/kernel/irq.c b/arch/powerpc/kernel/irq.c
+index 03c95f03d792..269fbd5ac62f 100644
+--- a/arch/powerpc/kernel/irq.c
++++ b/arch/powerpc/kernel/irq.c
+@@ -510,13 +510,6 @@ irq_hw_number_t virq_to_hw(unsigned int virq)
+ }
+ EXPORT_SYMBOL_GPL(virq_to_hw);
+ 
+-bool virq_is_host(unsigned int virq, struct irq_domain *host)
+-{
+-	struct irq_data *irq_data = irq_get_irq_data(virq);
+-	return irq_data ? irq_data->domain == host : false;
+-}
+-EXPORT_SYMBOL_GPL(virq_is_host);
+-
+ static int default_irq_host_match(struct irq_domain *h, struct device_node *np)
+ {
+ 	return h->of_node != NULL && h->of_node == np;
+diff --git a/arch/powerpc/sysdev/xics/xics-common.c b/arch/powerpc/sysdev/xics/xics-common.c
+index c4b3ce17029a..fb2e303d25fb 100644
+--- a/arch/powerpc/sysdev/xics/xics-common.c
++++ b/arch/powerpc/sysdev/xics/xics-common.c
+@@ -212,16 +212,16 @@ void xics_migrate_irqs_away(void)
+ 		/* We can't set affinity on ISA interrupts */
+ 		if (virq < NUM_ISA_INTERRUPTS)
+ 			continue;
+-		if (!virq_is_host(virq, xics_host))
+-			continue;
+-		irq = (unsigned int)virq_to_hw(virq);
+-		/* We need to get IPIs still. */
+-		if (irq == XICS_IPI || irq == XICS_IRQ_SPURIOUS)
+-			continue;
+ 		desc = irq_to_desc(virq);
+ 		/* We only need to migrate enabled IRQS */
+ 		if (!desc || !desc->action)
+ 			continue;
++		if (desc->irq_data.domain != xics_host)
++			continue;
++		irq = desc->irq_data.hwirq;
++		/* We need to get IPIs still. */
++		if (irq == XICS_IPI || irq == XICS_IRQ_SPURIOUS)
++			continue;
+ 		chip = irq_desc_get_chip(desc);
+ 		if (!chip || !chip->irq_set_affinity)
+ 			continue;
+

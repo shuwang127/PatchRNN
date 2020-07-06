@@ -1,0 +1,66 @@
+commit 519d0e92ede721b8b990b63dcce920ceffab1578
+Author: Guilherme Ottoni <ottoni@fb.com>
+Date:   Tue Nov 19 01:42:49 2013 -0800
+
+    Update support for perf events
+    
+    The support for LLC and dTLB more precise events don't work in perf
+    anymore, so update them to use the more generic (but less accurate)
+    events.  While here, I added support for more events in tc-print:
+    iTLB, L1I, and L1D misses.
+    
+    Ths diff also fixes a couple of issues in Func to deal with the fact
+    that a tx64 object is not created in tc-print anymore. These issues
+    were introduced when we got rid of Translator::Get() and company
+    recently, and they were seg-faulting tc-print.
+    
+    Reviewed By: @bertmaher
+    
+    Differential Revision: D1062649
+
+diff --git a/hphp/runtime/vm/func.cpp b/hphp/runtime/vm/func.cpp
+index 187c84d63f..a18838687a 100644
+--- a/hphp/runtime/vm/func.cpp
++++ b/hphp/runtime/vm/func.cpp
+@@ -144,15 +144,23 @@ void Func::resetPrologue(int numParams) {
+ }
+ 
+ void Func::initPrologues(int numParams) {
+-  auto const& stubs = tx64->uniqueStubs;
+-
+-  m_funcBody = stubs.funcBodyHelperThunk;
+-
+   int maxNumPrologues = Func::getMaxNumPrologues(numParams);
+   int numPrologues =
+     maxNumPrologues > kNumFixedPrologues ? maxNumPrologues
+                                          : kNumFixedPrologues;
+ 
++  if (tx64 == nullptr) {
++    m_funcBody = nullptr;
++    for (int i = 0; i < numPrologues; i++) {
++      m_prologueTable[i] = nullptr;
++    }
++    return;
++  }
++
++  auto const& stubs = tx64->uniqueStubs;
++
++  m_funcBody = stubs.funcBodyHelperThunk;
++
+   TRACE(2, "initPrologues func %p %d\n", this, numPrologues);
+   for (int i = 0; i < numPrologues; i++) {
+     m_prologueTable[i] = stubs.fcallHelperThunk;
+@@ -243,8 +251,10 @@ Func::~Func() {
+   int numPrologues =
+     maxNumPrologues > kNumFixedPrologues ? maxNumPrologues
+                                          : kNumFixedPrologues;
+-  tx64->smashPrologueGuards((TCA *)m_prologueTable,
+-                                            numPrologues, this);
++  if (tx64 != nullptr) {
++    tx64->smashPrologueGuards((TCA *)m_prologueTable,
++                              numPrologues, this);
++  }
+ #ifdef DEBUG
+   validate();
+   m_magic = ~m_magic;
+

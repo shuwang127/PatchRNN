@@ -1,0 +1,112 @@
+commit 066fff755a5d8edc660c010ddb08474d208eeade
+Author: Laurent Aimar <fenrir@videolan.org>
+Date:   Wed Sep 21 20:46:32 2011 +0200
+
+    vp6: Check for huffman tree build errors
+    
+    Signed-off-by: Janne Grunau <janne-libav@jannau.net>
+
+diff --git a/libavcodec/vp5.c b/libavcodec/vp5.c
+index 7743a48508..a1a38b0a03 100644
+--- a/libavcodec/vp5.c
++++ b/libavcodec/vp5.c
+@@ -118,7 +118,7 @@ static void vp5_parse_vector_models(VP56Context *s)
+                 model->vector_pdv[comp][node] = vp56_rac_gets_nn(c, 7);
+ }
+ 
+-static void vp5_parse_coeff_models(VP56Context *s)
++static int vp5_parse_coeff_models(VP56Context *s)
+ {
+     VP56RangeCoder *c = &s->c;
+     VP56Model *model = s->modelp;
+@@ -162,6 +162,7 @@ static void vp5_parse_coeff_models(VP56Context *s)
+                 for (ctx=0; ctx<6; ctx++)
+                     for (node=0; node<5; node++)
+                         model->coeff_acct[pt][ct][cg][ctx][node] = av_clip(((model->coeff_ract[pt][ct][cg][node] * vp5_ract_lc[ct][cg][node][ctx][0] + 128) >> 8) + vp5_ract_lc[ct][cg][node][ctx][1], 1, 254);
++    return 0;
+ }
+ 
+ static void vp5_parse_coeff(VP56Context *s)
+diff --git a/libavcodec/vp56.c b/libavcodec/vp56.c
+index 530b890de1..e18c59ef66 100644
+--- a/libavcodec/vp56.c
++++ b/libavcodec/vp56.c
+@@ -541,7 +541,8 @@ int ff_vp56_decode_frame(AVCodecContext *avctx, void *data, int *data_size,
+             s->mb_type = VP56_MB_INTER_NOVEC_PF;
+         }
+ 
+-        s->parse_coeff_models(s);
++        if (s->parse_coeff_models(s))
++            goto next;
+ 
+         memset(s->prev_dc, 0, sizeof(s->prev_dc));
+         s->prev_dc[1][VP56_FRAME_CURRENT] = 128;
+@@ -605,6 +606,7 @@ int ff_vp56_decode_frame(AVCodecContext *avctx, void *data, int *data_size,
+             }
+         }
+ 
++    next:
+         if (p->key_frame || golden_frame) {
+             if (s->framep[VP56_FRAME_GOLDEN]->data[0] &&
+                 s->framep[VP56_FRAME_GOLDEN] != s->framep[VP56_FRAME_GOLDEN2])
+diff --git a/libavcodec/vp56.h b/libavcodec/vp56.h
+index 8bb7251fc6..ceb516d88d 100644
+--- a/libavcodec/vp56.h
++++ b/libavcodec/vp56.h
+@@ -48,7 +48,7 @@ typedef void (*VP56Filter)(VP56Context *s, uint8_t *dst, uint8_t *src,
+ typedef void (*VP56ParseCoeff)(VP56Context *s);
+ typedef void (*VP56DefaultModelsInit)(VP56Context *s);
+ typedef void (*VP56ParseVectorModels)(VP56Context *s);
+-typedef void (*VP56ParseCoeffModels)(VP56Context *s);
++typedef int  (*VP56ParseCoeffModels)(VP56Context *s);
+ typedef int  (*VP56ParseHeader)(VP56Context *s, const uint8_t *buf,
+                                 int buf_size, int *golden_frame);
+ 
+diff --git a/libavcodec/vp6.c b/libavcodec/vp6.c
+index 657a5da7aa..6928a91a05 100644
+--- a/libavcodec/vp6.c
++++ b/libavcodec/vp6.c
+@@ -236,7 +236,7 @@ static int vp6_build_huff_tree(VP56Context *s, uint8_t coeff_model[],
+                               FF_HUFFMAN_FLAG_HNODE_FIRST);
+ }
+ 
+-static void vp6_parse_coeff_models(VP56Context *s)
++static int vp6_parse_coeff_models(VP56Context *s)
+ {
+     VP56RangeCoder *c = &s->c;
+     VP56Model *model = s->modelp;
+@@ -281,15 +281,18 @@ static void vp6_parse_coeff_models(VP56Context *s)
+ 
+     if (s->use_huffman) {
+         for (pt=0; pt<2; pt++) {
+-            vp6_build_huff_tree(s, model->coeff_dccv[pt],
+-                                vp6_huff_coeff_map, 12, &s->dccv_vlc[pt]);
+-            vp6_build_huff_tree(s, model->coeff_runv[pt],
+-                                vp6_huff_run_map, 9, &s->runv_vlc[pt]);
++            if (vp6_build_huff_tree(s, model->coeff_dccv[pt],
++                                    vp6_huff_coeff_map, 12, &s->dccv_vlc[pt]))
++                return -1;
++            if (vp6_build_huff_tree(s, model->coeff_runv[pt],
++                                    vp6_huff_run_map, 9, &s->runv_vlc[pt]))
++                return -1;
+             for (ct=0; ct<3; ct++)
+                 for (cg = 0; cg < 6; cg++)
+-                    vp6_build_huff_tree(s, model->coeff_ract[pt][ct][cg],
+-                                        vp6_huff_coeff_map, 12,
+-                                        &s->ract_vlc[pt][ct][cg]);
++                    if (vp6_build_huff_tree(s, model->coeff_ract[pt][ct][cg],
++                                            vp6_huff_coeff_map, 12,
++                                            &s->ract_vlc[pt][ct][cg]))
++                        return -1;
+         }
+         memset(s->nb_null, 0, sizeof(s->nb_null));
+     } else {
+@@ -299,6 +302,7 @@ static void vp6_parse_coeff_models(VP56Context *s)
+             for (node=0; node<5; node++)
+                 model->coeff_dcct[pt][ctx][node] = av_clip(((model->coeff_dccv[pt][node] * vp6_dccv_lc[ctx][node][0] + 128) >> 8) + vp6_dccv_lc[ctx][node][1], 1, 255);
+     }
++    return 0;
+ }
+ 
+ static void vp6_parse_vector_adjustment(VP56Context *s, VP56mv *vect)
+

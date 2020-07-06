@@ -1,0 +1,271 @@
+commit db9e77db77c934a5e0a8a9186917f95954ca9be7
+Author: Mark Grondona <mgrondona@llnl.gov>
+Date:   Wed Aug 7 16:24:41 2002 +0000
+
+     o only forward signals to hosts that have replied to launch message
+     o attempt to find absolute path to remote_argv[0] on local node
+
+diff --git a/src/srun/io.c b/src/srun/io.c
+index 926d607cca..444012aa52 100644
+--- a/src/srun/io.c
++++ b/src/srun/io.c
+@@ -38,9 +38,6 @@ void *io_thr(void *job_arg)
+ 
+ 	xassert(job != NULL);
+ 
+-	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+-	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+-
+ 	if (fcntl(job->iofd, F_SETFL, O_NONBLOCK) < 0)
+ 		error("Unable to set nonblocking I/O on fd\n");
+ 
+@@ -68,7 +65,7 @@ void *io_thr(void *job_arg)
+ 
+ 		tv.tv_sec  = 0;
+ 		tv.tv_usec = 500;
+-		while ((m = select(maxfd+1, &rset, NULL, NULL, &tv)) < 0) {
++		while ((m = select(maxfd+1, &rset, NULL, NULL, NULL)) < 0) {
+ 			if (errno != EINTR)
+ 				fatal("Unable to handle I/O: %m", errno);
+ 		}	
+diff --git a/src/srun/job.h b/src/srun/job.h
+index 210513178b..ca242fb188 100644
+--- a/src/srun/job.h
++++ b/src/srun/job.h
+@@ -22,6 +22,7 @@ typedef enum {
+ typedef enum {
+ 	SRUN_HOST_INIT = 0,
+ 	SRUN_HOST_CONTACTED,
++	SRUN_HOST_UNREACHABLE,
+ 	SRUN_HOST_REPLIED,
+ 	SRUN_HOST_DONE
+ } host_state_t;
+diff --git a/src/srun/launch.c b/src/srun/launch.c
+index b69633265f..14ecede3ab 100644
+--- a/src/srun/launch.c
++++ b/src/srun/launch.c
+@@ -92,9 +92,10 @@ launch(void *arg)
+ 
+ 		debug2("launching on host %s", job->host[i]);
+                 print_launch_msg(&msg);
+-		if (slurm_send_only_node_msg(&req) < 0)
+-			error("Unable to send launch request: %s",
+-					slurm_strerror(errno));
++		if (slurm_send_only_node_msg(&req) < 0) {
++			error("%s: %m", job->host[i]);
++			job->host_state[i] = SRUN_HOST_UNREACHABLE;
++		}
+ 
+ 		xfree(msg.global_task_ids);
+ 	}
+diff --git a/src/srun/opt.c b/src/srun/opt.c
+index 906610b093..b7ef2e6c77 100644
+--- a/src/srun/opt.c
++++ b/src/srun/opt.c
+@@ -18,10 +18,15 @@
+ #include <pwd.h>		/* getpwuid   */
+ #include <ctype.h>		/* isdigit    */
+ #include <sys/param.h>		/* MAXPATHLEN */
++#include <sys/stat.h>
++#include <unistd.h>
++#include <sys/types.h>
+ 
+ #include <src/common/log.h>
+ #include <src/common/xmalloc.h>
+ #include <src/common/xstring.h>
++#include <src/common/list.h>
++
+ 
+ #include "opt.h"
+ #include "env.h"
+@@ -161,10 +166,10 @@ struct poptOption runTable[] = {
+ 	 "location of stderr redirection",
+ 	 "err"},
+         {"verbose", 'v', 0, 0, OPT_VERBOSE,
+-	 "verbose operation", },
+-	{"debug", 'd', 0, 0, OPT_DEBUG,
++	 "verbose operation (multiple -v's increase verbosity)", },
++	/*{"debug", 'd', 0, 0, OPT_DEBUG,
+ 	 "enable debug",
+-	 },
++	 },*/
+ 	POPT_TABLEEND
+ };
+ 
+@@ -248,6 +253,11 @@ static bool opt_verify(poptContext, bool, bool, bool);
+  */
+ static void opt_list(void);
+ 
++/* search PATH for command 
++ * returns full path
++ */
++static char * search_path(char *);
++
+ /*---[ end forward declarations of static functions ]---------------------*/
+ 
+ int initialize_and_process_args(int argc, char *argv[])
+@@ -579,6 +589,7 @@ static void opt_args(int ac, char **av)
+ 	bool nprocs_set, nnodes_set, cpus_set;
+ 	const char **rest;
+ 	const char *arg;
++	char *fullpath;
+ 	poptContext optctx;
+ 
+ 	opt.progname = xbasename(av[0]);
+@@ -733,6 +744,12 @@ static void opt_args(int ac, char **av)
+ 	for (i = 0; i < remote_argc; i++)
+ 		remote_argv[i] = strdup(rest[i]);
+ 
++	if ((fullpath = search_path(remote_argv[0])) != NULL) {
++		free(remote_argv[0]);
++		remote_argv[0] = fullpath;
++	} 
++
++	
+ 	if (!opt_verify(optctx, nnodes_set, cpus_set, nprocs_set)) {
+ 		poptPrintUsage(optctx, stderr, 0);
+ 		exit(1);
+@@ -752,6 +769,10 @@ opt_verify(poptContext optctx,
+ {
+ 	bool verified = true;
+ 
++	if (opt.no_alloc && !opt.nodelist) {
++		error("must specify a node list with -Z, --no-allocate.");
++		verified = false;
++	}
+ 
+ 	if (mode == MODE_ATTACH) {	/* attach to a running job */
+ 		if (nodes_set || cpus_set || procs_set) {
+@@ -771,7 +792,7 @@ opt_verify(poptContext optctx,
+ 
+ 		/* XXX what other args are incompatible with attach mode? */
+ 
+-	} else {
++	} else { /* mode != MODE_ATTACH */
+ 
+ 		if (mode == MODE_ALLOCATE) {
+ 
+@@ -831,6 +852,65 @@ opt_verify(poptContext optctx,
+ 	return verified;
+ }
+ 
++static List
++create_path_list(void)
++{
++	List l = list_create(&free);
++	char *path = strdup(getenv("PATH"));
++	char *c, *lc;
++
++	if (!path) {
++		error("Error in PATH environment variable");
++		list_destroy(l);
++		return NULL;
++	}
++
++	c = lc = path;
++
++	while (*c != '\0') {
++		if (*c == ':') {
++			/* nullify and push token onto list */
++			*c = '\0';
++			if (lc != NULL && strlen(lc) > 0)
++				list_append(l, strdup(lc));
++			lc = ++c;
++		} else
++			c++;
++	}
++
++	if (strlen(lc) > 0)
++		list_append(l, strdup(lc));
++
++	free(path);
++
++	return l;
++}
++
++static char *
++search_path(char *cmd)
++{
++	List l = create_path_list();
++	ListIterator i = list_iterator_create(l);
++	char *path, *fullpath;
++	struct stat stat_buf;
++
++	fullpath = xmalloc(1);
++
++	while ((path = list_next(i))) {
++		xstrcat(fullpath, path);
++		xstrcatchar(fullpath, '/');
++		xstrcat(fullpath, cmd);
++
++		if (   (stat(fullpath, &stat_buf) == 0)
++		    && (stat_buf.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
++			list_destroy(l);
++			return fullpath;
++		} else
++			xfree(fullpath);
++	}
++	return NULL;
++}
++
+ #ifdef __DEBUG
+ 
+ /* generate meaningful output message based on io type and "filename" */
+diff --git a/src/srun/opt.h b/src/srun/opt.h
+index 9edeb77726..fa3e1cb3ba 100644
+--- a/src/srun/opt.h
++++ b/src/srun/opt.h
+@@ -18,11 +18,7 @@
+ #include <getopt.h>
+ */
+ 
+-#ifndef HAVE_POPT_H
+-#  include <src/popt/popt.h>
+-#else 
+-#  include <popt.h>
+-#endif
++#include <popt.h>
+ 
+ #include <src/common/macros.h> /* true and false */
+ 
+diff --git a/src/srun/srun.c b/src/srun/srun.c
+index d12424b121..76037529e8 100644
+--- a/src/srun/srun.c
++++ b/src/srun/srun.c
+@@ -178,9 +178,16 @@ main(int ac, char **av)
+ 	if (!opt.no_alloc)
+ 		slurm_complete_job(job->jobid);
+ 
++	/* kill launch thread */
+ 	pthread_kill(job->lid, SIGTERM);
++
++	/* kill msg server thread */
+ 	pthread_kill(job->jtid, SIGTERM);
++
++	/* kill signal thread */
+ 	pthread_kill(job->sigid, SIGTERM);
++
++	/* flush stdio and kill io thread */
+ 	fflush(stderr);
+ 	fflush(stdout);
+ 	pthread_kill(job->ioid, SIGTERM);
+@@ -359,7 +366,7 @@ sig_thr(void *arg)
+ 	pthread_exit(0);
+ }
+ 
+-	void 
++void 
+ fwd_signal(job_t *job, int signo)
+ {
+ 	int i;
+@@ -377,6 +384,9 @@ fwd_signal(job_t *job, int signo)
+ 	msg.signal      = (uint32_t) signo;
+ 
+ 	for (i = 0; i < job->nhosts; i++) {
++		if (job->host_state[i] != SRUN_HOST_REPLIED)
++			continue;
++
+ 		slurm_set_addr_uint(&req.address, slurm_get_slurmd_port(),
+ 				ntohl(job->iaddr[i]));
+ 		debug("sending kill req to %s", job->host[i]);
+

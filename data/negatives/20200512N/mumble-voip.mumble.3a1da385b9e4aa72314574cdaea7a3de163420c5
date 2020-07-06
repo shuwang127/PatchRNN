@@ -1,0 +1,309 @@
+commit 3a1da385b9e4aa72314574cdaea7a3de163420c5
+Author: Tim Cooper <tim.cooper@layeh.com>
+Date:   Wed Jun 17 16:08:36 2015 -0300
+
+    grpc: add callback() method to single-streaming calls, reenable ContextActionService.Events
+
+diff --git a/scripts/protoc-gen-grpcwrapper.cpp b/scripts/protoc-gen-grpcwrapper.cpp
+index ce6a1e61..c266505b 100644
+--- a/scripts/protoc-gen-grpcwrapper.cpp
++++ b/scripts/protoc-gen-grpcwrapper.cpp
+@@ -110,6 +110,11 @@ struct $service$_$method$ : public RPCCall {
+ 		return new ::boost::function<void(bool)>(done_fn);
+ 	}
+ 
++	::boost::function<void(bool)> *callback(::boost::function<void($service$_$method$ *, bool)> cb) {
++		auto fn = ::boost::bind(&$service$_$method$::callbackAction, this, cb, _1);
++		return new ::boost::function<void(bool)>(fn);
++	}
++
+ 	void error(::grpc::Status &err) {
+ 		response.Finish(err, this->done());
+ 	}
+@@ -126,6 +131,13 @@ struct $service$_$method$ : public RPCCall {
+ 		auto fn_ptr = new ::boost::function<void(bool)>(fn);
+ 		service->Request$method$(&call->context, &call->request, &call->response, rpc->mCQ.get(), rpc->mCQ.get(), fn_ptr);
+ 	}
++
++private:
++
++	void callbackAction(::boost::function<void($service$_$method$ *, bool)> cb, bool ok) {
++		auto ie = new RPCExecEvent(::boost::bind(cb, this, ok), this);
++		QCoreApplication::instance()->postEvent(rpc, ie);
++	}
+ };
+ )";
+ 
+diff --git a/src/murmur/MurmurGRPCImpl.cpp b/src/murmur/MurmurGRPCImpl.cpp
+index 87487d9a..51084905 100644
+--- a/src/murmur/MurmurGRPCImpl.cpp
++++ b/src/murmur/MurmurGRPCImpl.cpp
+@@ -39,7 +39,6 @@
+ #include "../Message.h"
+ #include "../Group.h"
+ #include "MurmurGRPCImpl.h"
+-#include "Meta.h"
+ #include "ServerDB.h"
+ #include "ServerUser.h"
+ #include "Server.h"
+@@ -133,7 +132,7 @@ void MurmurRPCImpl::contextAction(const ::User *user, const QString &action, uns
+ 	ca.mutable_actor()->mutable_server()->set_id(s->iServerNum);
+ 	ca.mutable_actor()->set_session(user->uiSession);
+ 	ca.set_action(u8(action));
+-	// TODO(grpc): valid these values?
++	// TODO(grpc): validate these values?
+ 	ca.mutable_user()->mutable_server()->set_id(s->iServerNum);
+ 	ca.mutable_user()->set_session(session);
+ 	ca.mutable_channel()->mutable_server()->set_id(s->iServerNum);
+@@ -145,53 +144,11 @@ void MurmurRPCImpl::contextAction(const ::User *user, const QString &action, uns
+ 		auto listener = itr.value();
+ 		// TODO(grpc): remove listener upon failure or disconnect (will probably
+ 		// need a timer for that).
+-		listener->w->Write(ca, nullptr);
+-	}
+-}
+-
+ 
+-void MurmurRPCImpl::customEvent(QEvent *evt) {
+-	if (evt->type() == EXEC_QEVENT) {
+-		auto event = static_cast<RPCExecEvent *>(evt);
+-		try {
+-			event->execute();
+-		} catch (::grpc::Status &ex) {
+-			event->call->error(ex);
+-		}
++		listener->response.Write(ca, nullptr);
+ 	}
+ }
+ 
+-void MurmurRPCImpl::run() {
+-	MurmurRPC::Wrapper::ACLService_Init(this, &aACLService);
+-	MurmurRPC::Wrapper::AudioService_Init(this, &aAudioService);
+-	MurmurRPC::Wrapper::AuthenticatorService_Init(this, &aAuthenticatorService);
+-	MurmurRPC::Wrapper::BanService_Init(this, &aBanService);
+-	MurmurRPC::Wrapper::ChannelService_Init(this, &aChannelService);
+-	MurmurRPC::Wrapper::ConfigService_Init(this, &aConfigService);
+-	MurmurRPC::Wrapper::ContextActionService_Init(this, &aContextActionService);
+-	MurmurRPC::Wrapper::DatabaseService_Init(this, &aDatabaseService);
+-	MurmurRPC::Wrapper::LogService_Init(this, &aLogService);
+-	MurmurRPC::Wrapper::MetaService_Init(this, &aMetaService);
+-	MurmurRPC::Wrapper::ServerService_Init(this, &aServerService);
+-	MurmurRPC::Wrapper::TextMessageService_Init(this, &aTextMessageService);
+-	MurmurRPC::Wrapper::TreeService_Init(this, &aTreeService);
+-	MurmurRPC::Wrapper::UserService_Init(this, &aUserService);
+-
+-	void *tag;
+-	bool ok;
+-	while (true) {
+-		if (!mCQ->Next(&tag, &ok)) {
+-			break;
+-		}
+-		if (tag != nullptr) {
+-			auto op = static_cast<boost::function<void(bool)> *>(tag);
+-			(*op)(ok);
+-			delete op;
+-		}
+-	}
+-	// TODO(grpc): cleanup allocated memory? not super important, because murmur should be exiting now
+-}
+-
+ // TODO(grpc): ensure that all implementation methods are using the correct
+ // Must* kind (Must*, MustExist*, etc.)
+ 
+@@ -270,6 +227,48 @@ template <>
+ 	return MustChannel(server, msg.id());
+ }
+ 
++void MurmurRPCImpl::customEvent(QEvent *evt) {
++	if (evt->type() == EXEC_QEVENT) {
++		auto event = static_cast<RPCExecEvent *>(evt);
++		try {
++			event->execute();
++		} catch (::grpc::Status &ex) {
++			event->call->error(ex);
++		}
++	}
++}
++
++void MurmurRPCImpl::run() {
++	MurmurRPC::Wrapper::ACLService_Init(this, &aACLService);
++	MurmurRPC::Wrapper::AudioService_Init(this, &aAudioService);
++	MurmurRPC::Wrapper::AuthenticatorService_Init(this, &aAuthenticatorService);
++	MurmurRPC::Wrapper::BanService_Init(this, &aBanService);
++	MurmurRPC::Wrapper::ChannelService_Init(this, &aChannelService);
++	MurmurRPC::Wrapper::ConfigService_Init(this, &aConfigService);
++	MurmurRPC::Wrapper::ContextActionService_Init(this, &aContextActionService);
++	MurmurRPC::Wrapper::DatabaseService_Init(this, &aDatabaseService);
++	MurmurRPC::Wrapper::LogService_Init(this, &aLogService);
++	MurmurRPC::Wrapper::MetaService_Init(this, &aMetaService);
++	MurmurRPC::Wrapper::ServerService_Init(this, &aServerService);
++	MurmurRPC::Wrapper::TextMessageService_Init(this, &aTextMessageService);
++	MurmurRPC::Wrapper::TreeService_Init(this, &aTreeService);
++	MurmurRPC::Wrapper::UserService_Init(this, &aUserService);
++
++	void *tag;
++	bool ok;
++	while (true) {
++		if (!mCQ->Next(&tag, &ok)) {
++			break;
++		}
++		if (tag != nullptr) {
++			auto op = static_cast<boost::function<void(bool)> *>(tag);
++			(*op)(ok);
++			delete op;
++		}
++	}
++	// TODO(grpc): cleanup allocated memory? not super important, because murmur should be exiting now
++}
++
+ void ToRPC(const ::Server *srv, const ::Channel *c, ::MurmurRPC::Channel *rc) {
+ 	rc->mutable_server()->set_id(srv->iServerNum);
+ 
+@@ -543,17 +542,13 @@ void ContextActionService_Remove::impl(bool) {
+ }
+ 
+ void ContextActionService_Events::impl(bool) {
+-	throw ::grpc::Status(::grpc::StatusCode::UNIMPLEMENTED);
+-	/*
+ 	auto server = MustServer(request);
+ 
+ 	if (!request.has_action()) {
+ 		throw ::grpc::Status(::grpc::INVALID_ARGUMENT, "missing action");
+ 	}
+ 
+-	auto listener = new ::MurmurRPCImpl::ContextActionListener(response);
+-	service->qhContextActionListeners[server->iServerNum].insert(u8(request.action()), listener);
+-	*/
++	rpc->qhContextActionListeners[server->iServerNum].insert(u8(request.action()), this);
+ }
+ 
+ void TextMessageService_Send::impl(bool) {
+diff --git a/src/murmur/MurmurGRPCImpl.h b/src/murmur/MurmurGRPCImpl.h
+index 49b15e4d..e18b0f2a 100644
+--- a/src/murmur/MurmurGRPCImpl.h
++++ b/src/murmur/MurmurGRPCImpl.h
+@@ -35,6 +35,7 @@
+ #include "MurmurRPC.grpc.pb.h"
+ 
+ #include "Server.h"
++#include "Meta.h"
+ 
+ #include <QMultiHash>
+ 
+@@ -54,10 +55,16 @@ class RPCExecEvent : public ExecEvent {
+ 	Q_DISABLE_COPY(RPCExecEvent);
+ public:
+ 	RPCCall *call;
+-	RPCExecEvent(boost::function<void()> fn, RPCCall *call) : ExecEvent(fn), call(call) {
++	RPCExecEvent(::boost::function<void()> fn, RPCCall *call) : ExecEvent(fn), call(call) {
+ 	}
+ };
+ 
++namespace MurmurRPC {
++namespace Wrapper {
++struct ContextActionService_Events;
++}
++}
++
+ class MurmurRPCImpl : public QThread {
+ 		Q_OBJECT;
+ 		std::unique_ptr<grpc::Server> mServer;
+@@ -86,13 +93,8 @@ class MurmurRPCImpl : public QThread {
+ 		MurmurRPC::UserService::AsyncService aUserService;
+ 
+ 		// ContextActionService
+-		struct ContextActionListener {
+-			::grpc::ServerAsyncWriter<::MurmurRPC::ContextAction> *w;
+-			::boost::function<void()> *next;
+-			ContextActionListener(::grpc::ServerAsyncWriter<::MurmurRPC::ContextAction> *w, ::boost::function<void()> *next) : w(w), next(next) {
+-			}
+-		};
+-		QHash<int, QMultiHash<QString, ContextActionListener *> > qhContextActionListeners;
++		QHash<int, QMultiHash<QString, ::MurmurRPC::Wrapper::ContextActionService_Events *> > qhContextActionListeners;
++		void contextActionCb(::MurmurRPC::Wrapper::ContextActionService_Events *stream, bool ok);
+ 
+ 	public slots:
+ 		void started(Server *server);
+diff --git a/src/murmur/MurmurRPC.proto.Wrapper.cpp b/src/murmur/MurmurRPC.proto.Wrapper.cpp
+index eb1e7c2e..6294fcbb 100644
+--- a/src/murmur/MurmurRPC.proto.Wrapper.cpp
++++ b/src/murmur/MurmurRPC.proto.Wrapper.cpp
+@@ -266,6 +266,11 @@ struct ServerService_Events : public RPCCall {
+ 		return new ::boost::function<void(bool)>(done_fn);
+ 	}
+ 
++	::boost::function<void(bool)> *callback(::boost::function<void(ServerService_Events *, bool)> cb) {
++		auto fn = ::boost::bind(&ServerService_Events::callbackAction, this, cb, _1);
++		return new ::boost::function<void(bool)>(fn);
++	}
++
+ 	void error(::grpc::Status &err) {
+ 		response.Finish(err, this->done());
+ 	}
+@@ -282,6 +287,13 @@ struct ServerService_Events : public RPCCall {
+ 		auto fn_ptr = new ::boost::function<void(bool)>(fn);
+ 		service->RequestEvents(&call->context, &call->request, &call->response, rpc->mCQ.get(), rpc->mCQ.get(), fn_ptr);
+ 	}
++
++private:
++
++	void callbackAction(::boost::function<void(ServerService_Events *, bool)> cb, bool ok) {
++		auto ie = new RPCExecEvent(::boost::bind(cb, this, ok), this);
++		QCoreApplication::instance()->postEvent(rpc, ie);
++	}
+ };
+ void ServerService_Init(MurmurRPCImpl *impl, ::MurmurRPC::ServerService::AsyncService *service) {
+ 	ServerService_Create::create(impl, service);
+@@ -395,6 +407,11 @@ struct MetaService_Events : public RPCCall {
+ 		return new ::boost::function<void(bool)>(done_fn);
+ 	}
+ 
++	::boost::function<void(bool)> *callback(::boost::function<void(MetaService_Events *, bool)> cb) {
++		auto fn = ::boost::bind(&MetaService_Events::callbackAction, this, cb, _1);
++		return new ::boost::function<void(bool)>(fn);
++	}
++
+ 	void error(::grpc::Status &err) {
+ 		response.Finish(err, this->done());
+ 	}
+@@ -411,6 +428,13 @@ struct MetaService_Events : public RPCCall {
+ 		auto fn_ptr = new ::boost::function<void(bool)>(fn);
+ 		service->RequestEvents(&call->context, &call->request, &call->response, rpc->mCQ.get(), rpc->mCQ.get(), fn_ptr);
+ 	}
++
++private:
++
++	void callbackAction(::boost::function<void(MetaService_Events *, bool)> cb, bool ok) {
++		auto ie = new RPCExecEvent(::boost::bind(cb, this, ok), this);
++		QCoreApplication::instance()->postEvent(rpc, ie);
++	}
+ };
+ void MetaService_Init(MurmurRPCImpl *impl, ::MurmurRPC::MetaService::AsyncService *service) {
+ 	MetaService_GetUptime::create(impl, service);
+@@ -520,6 +544,11 @@ struct ContextActionService_Events : public RPCCall {
+ 		return new ::boost::function<void(bool)>(done_fn);
+ 	}
+ 
++	::boost::function<void(bool)> *callback(::boost::function<void(ContextActionService_Events *, bool)> cb) {
++		auto fn = ::boost::bind(&ContextActionService_Events::callbackAction, this, cb, _1);
++		return new ::boost::function<void(bool)>(fn);
++	}
++
+ 	void error(::grpc::Status &err) {
+ 		response.Finish(err, this->done());
+ 	}
+@@ -536,6 +565,13 @@ struct ContextActionService_Events : public RPCCall {
+ 		auto fn_ptr = new ::boost::function<void(bool)>(fn);
+ 		service->RequestEvents(&call->context, &call->request, &call->response, rpc->mCQ.get(), rpc->mCQ.get(), fn_ptr);
+ 	}
++
++private:
++
++	void callbackAction(::boost::function<void(ContextActionService_Events *, bool)> cb, bool ok) {
++		auto ie = new RPCExecEvent(::boost::bind(cb, this, ok), this);
++		QCoreApplication::instance()->postEvent(rpc, ie);
++	}
+ };
+ void ContextActionService_Init(MurmurRPCImpl *impl, ::MurmurRPC::ContextActionService::AsyncService *service) {
+ 	ContextActionService_Add::create(impl, service);
+

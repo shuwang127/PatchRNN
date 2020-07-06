@@ -1,0 +1,63 @@
+commit f36f3042eae238bdaefe7c79310afe573bfc3622
+Author: Chris Mason <chris.mason@oracle.com>
+Date:   Thu Jul 30 10:04:48 2009 -0400
+
+    Btrfs: be more polite in the async caching threads
+    
+    The semaphore used by the async caching threads can prevent a
+    transaction commit, which can make the FS appear to stall.  This
+    releases the semaphore more often when a transaction commit is
+    in progress.
+    
+    Signed-off-by: Chris Mason <chris.mason@oracle.com>
+
+diff --git a/fs/btrfs/extent-tree.c b/fs/btrfs/extent-tree.c
+index 2fe21fa74913..dc84daee6bc4 100644
+--- a/fs/btrfs/extent-tree.c
++++ b/fs/btrfs/extent-tree.c
+@@ -302,10 +302,11 @@ static int caching_kthread(void *data)
+ 			else if (ret)
+ 				break;
+ 
+-			if (need_resched()) {
++			if (need_resched() ||
++			    btrfs_transaction_in_commit(fs_info)) {
+ 				btrfs_release_path(fs_info->extent_root, path);
+ 				up_read(&fs_info->extent_commit_sem);
+-				cond_resched();
++				schedule_timeout(1);
+ 				goto again;
+ 			}
+ 
+diff --git a/fs/btrfs/transaction.c b/fs/btrfs/transaction.c
+index de48e4ec808c..cdbb5022da52 100644
+--- a/fs/btrfs/transaction.c
++++ b/fs/btrfs/transaction.c
+@@ -857,6 +857,16 @@ static void update_super_roots(struct btrfs_root *root)
+ 	super->root_level = root_item->level;
+ }
+ 
++int btrfs_transaction_in_commit(struct btrfs_fs_info *info)
++{
++	int ret = 0;
++	spin_lock(&info->new_trans_lock);
++	if (info->running_transaction)
++		ret = info->running_transaction->in_commit;
++	spin_unlock(&info->new_trans_lock);
++	return ret;
++}
++
+ int btrfs_commit_transaction(struct btrfs_trans_handle *trans,
+ 			     struct btrfs_root *root)
+ {
+diff --git a/fs/btrfs/transaction.h b/fs/btrfs/transaction.h
+index 961c3ee5a2e1..663c67404918 100644
+--- a/fs/btrfs/transaction.h
++++ b/fs/btrfs/transaction.h
+@@ -107,4 +107,5 @@ int btrfs_record_root_in_trans(struct btrfs_trans_handle *trans,
+ 				struct btrfs_root *root);
+ int btrfs_write_and_wait_marked_extents(struct btrfs_root *root,
+ 					struct extent_io_tree *dirty_pages);
++int btrfs_transaction_in_commit(struct btrfs_fs_info *info);
+ #endif
+

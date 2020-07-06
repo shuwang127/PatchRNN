@@ -1,0 +1,188 @@
+commit 8b315480f1df953751fda12c58ed891862e03edc
+Author: Gerald Combs <gerald@wireshark.org>
+Date:   Sun Jul 9 22:12:02 2006 +0000
+
+    In new_format_oid(), handle a zero-length OID.
+    
+    Fix a bug introduced recently in packet-rpc.c.
+    
+    Replace DISSECTOR_ASSERT() with THROW(ReportedBoundsError) in my recent
+    checkins, since fuzz-test.sh sets WIRESHARK_ABORT_ON_DISSECTOR_BUG.
+    
+    svn path=/trunk/; revision=18693
+
+diff --git a/asn1/snmp/packet-snmp-template.c b/asn1/snmp/packet-snmp-template.c
+index 992831a74b..452485e26a 100644
+--- a/asn1/snmp/packet-snmp-template.c
++++ b/asn1/snmp/packet-snmp-template.c
+@@ -449,6 +449,11 @@ new_format_oid(subid_t *oid, guint oid_length,
+ 	unsigned int i;
+ 	char *buf;
+ 
++        if (oid == NULL || oid_length < 1) {
++		*decoded = NULL;
++		return;
++	}
++
+ #ifdef HAVE_SOME_SNMP
+ 	guchar *oid_string;
+ 	size_t oid_string_len;
+diff --git a/epan/dissectors/packet-ber.c b/epan/dissectors/packet-ber.c
+index dc3b358561..9aafe82d17 100644
+--- a/epan/dissectors/packet-ber.c
++++ b/epan/dissectors/packet-ber.c
+@@ -539,7 +539,8 @@ get_ber_length(proto_tree *tree, tvbuff_t *tvb, int offset, guint32 *length, gbo
+ 				tmp_length += tmp_len+(offset-s_offset); /* length + tag and length */
+ 				offset += tmp_len;
+                                 /* Make sure we've moved forward in the packet */
+-                                DISSECTOR_ASSERT(offset > s_offset);
++				if (offset <= s_offset)
++					THROW(ReportedBoundsError);
+ 				}
+ 			tmp_length += 2;
+ 			tmp_ind = TRUE;
+@@ -1069,7 +1070,8 @@ printf("SEQUENCE dissect_ber_sequence(%s) entered\n",name);
+ 		offset = get_ber_length(tree, tvb, offset, &len, &ind_field);
+ 		eoffset = offset + len;
+                 /* Make sure we move forward */
+-		DISSECTOR_ASSERT(eoffset > hoffset);
++		if (eoffset <= hoffset)
++			THROW(ReportedBoundsError);
+ 
+ 		if(ind_field && (len == 2)){
+     			/* disgusting indefinite length zero length field, what are these people doing */
+@@ -2001,7 +2003,8 @@ printf("SQ OF dissect_ber_sq_of(%s) entered\n",name);
+ 			/* adjust end_offset if we find somthing that doesnt match */
+ 			offset += len;
+ 			cnt++;
+-			DISSECTOR_ASSERT(offset > s_offset);
++			if (offset <= s_offset)
++				THROW(ReportedBoundsError);
+ 		}
+ 	}
+ 	offset = hoffset;
+@@ -2044,7 +2047,8 @@ printf("SQ OF dissect_ber_sq_of(%s) entered\n",name);
+ 		offset = get_ber_length(tree, tvb, offset, &len, &ind_field);
+ 		eoffset = offset + len;
+                 /* Make sure we move forward */
+-		DISSECTOR_ASSERT(eoffset > hoffset);
++		if (eoffset <= hoffset)
++			THROW(ReportedBoundsError);
+ 
+ 		/* verify that this one is the one we want */
+ 		/* ahup if we are implicit then we return to the uper layer how much we have used */
+diff --git a/epan/dissectors/packet-mount.c b/epan/dissectors/packet-mount.c
+index e7318ae495..5866c63152 100644
+--- a/epan/dissectors/packet-mount.c
++++ b/epan/dissectors/packet-mount.c
+@@ -174,7 +174,8 @@ dissect_mount_dirpath_call(tvbuff_t *tvb, int offset, packet_info *pinfo,
+ 
+ 			host=ip_to_str(pinfo->dst.data);
+ 			len=tvb_get_ntohl(tvb, offset);
+-                        DISSECTOR_ASSERT(len < ITEM_LABEL_LENGTH);
++                        if (len >= ITEM_LABEL_LENGTH)
++                                THROW(ReportedBoundsError);
+ 
+ 			dir=tvb_get_ptr(tvb, offset+4, len);
+ 			if(dir){
+diff --git a/epan/dissectors/packet-mq.c b/epan/dissectors/packet-mq.c
+index 9529b4917c..d891207dc1 100644
+--- a/epan/dissectors/packet-mq.c
++++ b/epan/dissectors/packet-mq.c
+@@ -2207,7 +2207,8 @@ dissect_mq_pdu(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
+ 									iSizeHeader = (gint) tvb_get_guint32_endian(tvb, offset + 8, bLittleEndian);
+                   /* XXX - 32 is inferred from the code below.  What's the
+                    * correct minimum? */
+-                  DISSECTOR_ASSERT(iSizeHeader > 32);
++                  if (iSizeHeader <= 32)
++		  	THROW(ReportedBoundsError);
+ 
+ 								 	if (tvb_length_remaining(tvb, offset) >= iSizeHeader)
+ 								 	{
+diff --git a/epan/dissectors/packet-pktc.c b/epan/dissectors/packet-pktc.c
+index ba865e980b..2e43177f65 100644
+--- a/epan/dissectors/packet-pktc.c
++++ b/epan/dissectors/packet-pktc.c
+@@ -521,7 +521,8 @@ dissect_pktc_mtafqdn_krbsafeuserdata(packet_info *pinfo, tvbuff_t *tvb, proto_tr
+     case PKTC_MTAFQDN_REP:
+         /* MTA FQDN */
+         string_len = tvb_length_remaining(tvb, offset) - 4;
+-        DISSECTOR_ASSERT(string_len > 0);
++        if (string_len <= 0)
++                THROW(ReportedBoundsError);
+         proto_tree_add_item(tree, hf_pktc_mtafqdn_fqdn, tvb, offset, string_len, FALSE);
+         offset+=string_len;
+ 
+diff --git a/epan/dissectors/packet-rpc.c b/epan/dissectors/packet-rpc.c
+index dade181535..516386be2a 100644
+--- a/epan/dissectors/packet-rpc.c
++++ b/epan/dissectors/packet-rpc.c
+@@ -488,7 +488,9 @@ rpc_roundup(unsigned int a)
+         unsigned int ret;
+ 	ret = a + ((mod)? 4-mod : 0);
+         /* Check for overflow */
+-        DISSECTOR_ASSERT(ret >= a);
++        if (ret < a)
++		THROW(ReportedBoundsError);
++	return ret;
+ }
+ 
+ 
+diff --git a/epan/dissectors/packet-snmp.c b/epan/dissectors/packet-snmp.c
+index 16e700a415..edb2c6b1dc 100644
+--- a/epan/dissectors/packet-snmp.c
++++ b/epan/dissectors/packet-snmp.c
+@@ -574,6 +574,11 @@ new_format_oid(subid_t *oid, guint oid_length,
+ 	unsigned int i;
+ 	char *buf;
+ 
++        if (oid == NULL || oid_length < 1) {
++		*decoded = NULL;
++		return;
++	}
++
+ #ifdef HAVE_SOME_SNMP
+ 	guchar *oid_string;
+ 	size_t oid_string_len;
+@@ -2699,7 +2704,7 @@ static void dissect_SMUX_PDUs_PDU(tvbuff_t *tvb, packet_info *pinfo, proto_tree
+ 
+ 
+ /*--- End of included file: packet-snmp-fn.c ---*/
+-#line 1038 "packet-snmp-template.c"
++#line 1043 "packet-snmp-template.c"
+ 
+ guint
+ dissect_snmp_pdu(tvbuff_t *tvb, int offset, packet_info *pinfo,
+@@ -3391,7 +3396,7 @@ void proto_register_snmp(void) {
+         "RReqPDU/operation", HFILL }},
+ 
+ /*--- End of included file: packet-snmp-hfarr.c ---*/
+-#line 1393 "packet-snmp-template.c"
++#line 1398 "packet-snmp-template.c"
+   };
+ 
+   /* List of subtrees */
+@@ -3429,7 +3434,7 @@ void proto_register_snmp(void) {
+     &ett_snmp_RReqPDU,
+ 
+ /*--- End of included file: packet-snmp-ettarr.c ---*/
+-#line 1402 "packet-snmp-template.c"
++#line 1407 "packet-snmp-template.c"
+   };
+ 	module_t *snmp_module;
+ 
+diff --git a/epan/dissectors/packet-ssh.c b/epan/dissectors/packet-ssh.c
+index d75d2d28b5..6bf1e13390 100644
+--- a/epan/dissectors/packet-ssh.c
++++ b/epan/dissectors/packet-ssh.c
+@@ -334,7 +334,8 @@ dissect_ssh(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
+ 			}
+ 		}
+ 
+-                DISSECTOR_ASSERT(offset > last_offset);
++                if(offset <= last_offset)
++                        THROW(ReportedBoundsError);
+ 		if(need_desegmentation) return;
+ 	}
+ }
+

@@ -1,0 +1,75 @@
+commit fa871852ed0075b7564289cb07481ed343bb162f
+Author: batschul <none@none>
+Date:   Tue Feb 13 07:18:09 2007 -0800
+
+    6462361 Cannot make hardlinks to device nodes on lofs
+    Contributed by Richard Lowe <richlowe@richlowe.net>
+    
+    5105488 ufs_dirremove() should not panic in face of NULL name passed in
+    Contributed by John Sonnenschein <johnsonnenschein@gmail.com>
+
+diff --git a/usr/src/uts/common/fs/lofs/lofs_vnops.c b/usr/src/uts/common/fs/lofs/lofs_vnops.c
+index f90d227b6f..fe68686fbe 100644
+--- a/usr/src/uts/common/fs/lofs/lofs_vnops.c
++++ b/usr/src/uts/common/fs/lofs/lofs_vnops.c
+@@ -699,6 +699,8 @@ lo_remove(vnode_t *dvp, char *nm, struct cred *cr)
+ static int
+ lo_link(vnode_t *tdvp, vnode_t *vp, char *tnm, struct cred *cr)
+ {
++	vnode_t *realvp;
++
+ #ifdef LODEBUG
+ 	lo_dprint(4, "lo_link vp %p realvp %p\n", vp, realvp(vp));
+ #endif
+@@ -726,6 +728,17 @@ lo_link(vnode_t *tdvp, vnode_t *vp, char *tnm, struct cred *cr)
+ 	while (vn_matchops(vp, lo_vnodeops)) {
+ 		vp = realvp(vp);
+ 	}
++
++	/*
++	 * In the case where the source vnode is on another stacking
++	 * filesystem (such as specfs), the loop above will
++	 * terminate before finding the true underlying vnode.
++	 *
++	 * We use VOP_REALVP here to continue the search.
++	 */
++	if (VOP_REALVP(vp, &realvp) == 0)
++		vp = realvp;
++
+ 	while (vn_matchops(tdvp, lo_vnodeops)) {
+ 		tdvp = realvp(tdvp);
+ 	}
+diff --git a/usr/src/uts/common/fs/ufs/ufs_dir.c b/usr/src/uts/common/fs/ufs/ufs_dir.c
+index 274c95073d..ee70b4bec0 100644
+--- a/usr/src/uts/common/fs/ufs/ufs_dir.c
++++ b/usr/src/uts/common/fs/ufs/ufs_dir.c
+@@ -19,7 +19,7 @@
+  * CDDL HEADER END
+  */
+ /*
+- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
++ * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
+  */
+ 
+@@ -2445,8 +2445,17 @@ ufs_dirremove(
+ 	ushort_t extra;
+ 
+ 	namlen = (int)strlen(namep);
+-	if (namlen == 0)
+-		return (ufs_fault(ITOV(dp), "ufs_dirremove: namlen == 0"));
++	if (namlen == 0) {
++		struct fs	*fs = dp->i_fs;
++
++		cmn_err(CE_WARN, "%s: ufs_dirremove: attempted to remove"
++		    " nameless file in directory (directory inode %llu)",
++		    fs->fs_fsmnt, (u_longlong_t)dp->i_number);
++		ASSERT(namlen != 0);
++
++		return (ENOENT);
++	}
++
+ 	/*
+ 	 * return error when removing . and ..
+ 	 */
+

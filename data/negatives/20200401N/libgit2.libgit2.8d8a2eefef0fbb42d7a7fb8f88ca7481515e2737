@@ -1,0 +1,76 @@
+commit 8d8a2eefef0fbb42d7a7fb8f88ca7481515e2737
+Author: Pierre-Olivier Latour <pol@mac.com>
+Date:   Mon Jun 15 11:14:40 2015 -0700
+
+    Fixed GIT_DELTA_CONFLICTED not returned in some cases
+    
+    If an index entry for a file that is not in HEAD is in conflicted state,
+    when diffing HEAD with the index, the status field of the corresponding git_diff_delta was incorrectly reported as GIT_DELTA_ADDED instead of GIT_DELTA_CONFLICTED.
+    
+    This was due to handle_unmatched_new_item() initially setting the status
+    to GIT_DELTA_CONFLICTED but then overriding it later with GIT_DELTA_ADDED.
+
+diff --git a/src/diff.c b/src/diff.c
+index d7365ef77..e42ca63bb 100644
+--- a/src/diff.c
++++ b/src/diff.c
+@@ -1089,8 +1089,10 @@ static int handle_unmatched_new_item(
+ 		/* item contained in ignored directory, so skip over it */
+ 		return iterator_advance(&info->nitem, info->new_iter);
+ 
+-	else if (info->new_iter->type != GIT_ITERATOR_TYPE_WORKDIR)
+-		delta_type = GIT_DELTA_ADDED;
++	else if (info->new_iter->type != GIT_ITERATOR_TYPE_WORKDIR) {
++		if (delta_type != GIT_DELTA_CONFLICTED)
++			delta_type = GIT_DELTA_ADDED;
++	}
+ 
+ 	else if (nitem->mode == GIT_FILEMODE_COMMIT) {
+ 		/* ignore things that are not actual submodules */
+diff --git a/tests/diff/index.c b/tests/diff/index.c
+index 242fb0046..f702568bf 100644
+--- a/tests/diff/index.c
++++ b/tests/diff/index.c
+@@ -183,7 +183,7 @@ static void do_conflicted_diff(diff_expects *exp, unsigned long flags)
+ 	cl_git_pass(git_repository_index(&index, g_repo));
+ 
+ 	ancestor.path = ours.path = theirs.path = "staged_changes";
+-	ancestor.mode = ours.mode = theirs.mode = 0100644;
++	ancestor.mode = ours.mode = theirs.mode = GIT_FILEMODE_BLOB;
+ 
+ 	git_oid_fromstr(&ancestor.id, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+ 	git_oid_fromstr(&ours.id, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+@@ -239,3 +239,32 @@ void test_diff_index__reports_conflicts_when_reversed(void)
+ 	cl_assert_equal_i(2, exp.line_adds);
+ 	cl_assert_equal_i(5, exp.line_dels);
+ }
++
++void test_diff_index__not_in_head_conflicted(void)
++{
++	const char *a_commit = "26a125ee1bf"; /* the current HEAD */
++	git_index_entry theirs = {{0}};
++	git_index *index;
++	git_diff *diff;
++	const git_diff_delta *delta;
++
++	git_tree *a = resolve_commit_oid_to_tree(g_repo, a_commit);
++
++	cl_git_pass(git_repository_index(&index, g_repo));
++	cl_git_pass(git_index_read_tree(index, a));
++
++	theirs.path = "file_not_in_head";
++	theirs.mode = GIT_FILEMODE_BLOB;
++	git_oid_fromstr(&theirs.id, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
++	cl_git_pass(git_index_conflict_add(index, NULL, NULL, &theirs));
++
++	cl_git_pass(git_diff_tree_to_index(&diff, g_repo, a, index, NULL));
++
++	cl_assert_equal_i(git_diff_num_deltas(diff), 1);
++	delta = git_diff_get_delta(diff, 0);
++	cl_assert_equal_i(delta->status, GIT_DELTA_CONFLICTED);
++
++	git_diff_free(diff);
++	git_index_free(index);
++	git_tree_free(a);
++}
+

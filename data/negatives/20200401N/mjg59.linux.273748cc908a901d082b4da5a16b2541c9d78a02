@@ -1,0 +1,542 @@
+commit 273748cc908a901d082b4da5a16b2541c9d78a02
+Author: Roland Dreier <rolandd@cisco.com>
+Date:   Tue May 6 15:56:22 2008 -0700
+
+    RDMA/cxgb3: Fix severe limit on userspace memory registration size
+    
+    Currently, iw_cxgb3 is severely limited on the amount of userspace
+    memory that can be registered in in a single memory region, which
+    causes big problems for applications that expect to be able to
+    register 100s of MB.
+    
+    The problem is that the driver uses a single kmalloc()ed buffer to
+    hold the physical buffer list (PBL) for the entire memory region
+    during registration, which means that 8 bytes of contiguous memory are
+    required for each page of memory being registered.  For example, a 64
+    MB registration will require 128 KB of contiguous memory with 4 KB
+    pages, and it unlikely that such an allocation will succeed on a busy
+    system.
+    
+    This is purely a driver problem: the temporary page list buffer is not
+    needed by the hardware, so we can fix this by writing the PBL to the
+    hardware in page-sized chunks rather than all at once.  We do this by
+    splitting the memory registration operation up into several steps:
+    
+     - Allocate PBL space in adapter memory for the full registration
+     - Copy PBL to adapter memory in chunks
+     - Allocate STag and enable memory region
+    
+    This also allows several other cleanups to the __cxio_tpt_op()
+    interface and related parts of the driver.
+    
+    This change leaves the reregister memory region and memory window
+    operations broken, but they already didn't work due to other
+    longstanding bugs, so fixing them will be left to a later patch.
+    
+    Signed-off-by: Roland Dreier <rolandd@cisco.com>
+
+diff --git a/drivers/infiniband/hw/cxgb3/cxio_hal.c b/drivers/infiniband/hw/cxgb3/cxio_hal.c
+index 5fd8506a8657..ebf9d3043f80 100644
+--- a/drivers/infiniband/hw/cxgb3/cxio_hal.c
++++ b/drivers/infiniband/hw/cxgb3/cxio_hal.c
+@@ -588,7 +588,7 @@ static int cxio_hal_destroy_ctrl_qp(struct cxio_rdev *rdev_p)
+  * caller aquires the ctrl_qp lock before the call
+  */
+ static int cxio_hal_ctrl_qp_write_mem(struct cxio_rdev *rdev_p, u32 addr,
+-				      u32 len, void *data, int completion)
++				      u32 len, void *data)
+ {
+ 	u32 i, nr_wqe, copy_len;
+ 	u8 *copy_data;
+@@ -624,7 +624,7 @@ static int cxio_hal_ctrl_qp_write_mem(struct cxio_rdev *rdev_p, u32 addr,
+ 		flag = 0;
+ 		if (i == (nr_wqe - 1)) {
+ 			/* last WQE */
+-			flag = completion ? T3_COMPLETION_FLAG : 0;
++			flag = T3_COMPLETION_FLAG;
+ 			if (len % 32)
+ 				utx_len = len / 32 + 1;
+ 			else
+@@ -683,21 +683,20 @@ static int cxio_hal_ctrl_qp_write_mem(struct cxio_rdev *rdev_p, u32 addr,
+ 	return 0;
+ }
+ 
+-/* IN: stag key, pdid, perm, zbva, to, len, page_size, pbl, and pbl_size
+- * OUT: stag index, actual pbl_size, pbl_addr allocated.
++/* IN: stag key, pdid, perm, zbva, to, len, page_size, pbl_size and pbl_addr
++ * OUT: stag index
+  * TBD: shared memory region support
+  */
+ static int __cxio_tpt_op(struct cxio_rdev *rdev_p, u32 reset_tpt_entry,
+ 			 u32 *stag, u8 stag_state, u32 pdid,
+ 			 enum tpt_mem_type type, enum tpt_mem_perm perm,
+-			 u32 zbva, u64 to, u32 len, u8 page_size, __be64 *pbl,
+-			 u32 *pbl_size, u32 *pbl_addr)
++			 u32 zbva, u64 to, u32 len, u8 page_size,
++			 u32 pbl_size, u32 pbl_addr)
+ {
+ 	int err;
+ 	struct tpt_entry tpt;
+ 	u32 stag_idx;
+ 	u32 wptr;
+-	int rereg = (*stag != T3_STAG_UNSET);
+ 
+ 	stag_state = stag_state > 0;
+ 	stag_idx = (*stag) >> 8;
+@@ -711,30 +710,8 @@ static int __cxio_tpt_op(struct cxio_rdev *rdev_p, u32 reset_tpt_entry,
+ 	PDBG("%s stag_state 0x%0x type 0x%0x pdid 0x%0x, stag_idx 0x%x\n",
+ 	     __func__, stag_state, type, pdid, stag_idx);
+ 
+-	if (reset_tpt_entry)
+-		cxio_hal_pblpool_free(rdev_p, *pbl_addr, *pbl_size << 3);
+-	else if (!rereg) {
+-		*pbl_addr = cxio_hal_pblpool_alloc(rdev_p, *pbl_size << 3);
+-		if (!*pbl_addr) {
+-			return -ENOMEM;
+-		}
+-	}
+-
+ 	mutex_lock(&rdev_p->ctrl_qp.lock);
+ 
+-	/* write PBL first if any - update pbl only if pbl list exist */
+-	if (pbl) {
+-
+-		PDBG("%s *pdb_addr 0x%x, pbl_base 0x%x, pbl_size %d\n",
+-		     __func__, *pbl_addr, rdev_p->rnic_info.pbl_base,
+-		     *pbl_size);
+-		err = cxio_hal_ctrl_qp_write_mem(rdev_p,
+-				(*pbl_addr >> 5),
+-				(*pbl_size << 3), pbl, 0);
+-		if (err)
+-			goto ret;
+-	}
+-
+ 	/* write TPT entry */
+ 	if (reset_tpt_entry)
+ 		memset(&tpt, 0, sizeof(tpt));
+@@ -749,23 +726,23 @@ static int __cxio_tpt_op(struct cxio_rdev *rdev_p, u32 reset_tpt_entry,
+ 				V_TPT_ADDR_TYPE((zbva ? TPT_ZBTO : TPT_VATO)) |
+ 				V_TPT_PAGE_SIZE(page_size));
+ 		tpt.rsvd_pbl_addr = reset_tpt_entry ? 0 :
+-				    cpu_to_be32(V_TPT_PBL_ADDR(PBL_OFF(rdev_p, *pbl_addr)>>3));
++				    cpu_to_be32(V_TPT_PBL_ADDR(PBL_OFF(rdev_p, pbl_addr)>>3));
+ 		tpt.len = cpu_to_be32(len);
+ 		tpt.va_hi = cpu_to_be32((u32) (to >> 32));
+ 		tpt.va_low_or_fbo = cpu_to_be32((u32) (to & 0xFFFFFFFFULL));
+ 		tpt.rsvd_bind_cnt_or_pstag = 0;
+ 		tpt.rsvd_pbl_size = reset_tpt_entry ? 0 :
+-				  cpu_to_be32(V_TPT_PBL_SIZE((*pbl_size) >> 2));
++				  cpu_to_be32(V_TPT_PBL_SIZE(pbl_size >> 2));
+ 	}
+ 	err = cxio_hal_ctrl_qp_write_mem(rdev_p,
+ 				       stag_idx +
+ 				       (rdev_p->rnic_info.tpt_base >> 5),
+-				       sizeof(tpt), &tpt, 1);
++				       sizeof(tpt), &tpt);
+ 
+ 	/* release the stag index to free pool */
+ 	if (reset_tpt_entry)
+ 		cxio_hal_put_stag(rdev_p->rscp, stag_idx);
+-ret:
++
+ 	wptr = rdev_p->ctrl_qp.wptr;
+ 	mutex_unlock(&rdev_p->ctrl_qp.lock);
+ 	if (!err)
+@@ -776,44 +753,67 @@ ret:
+ 	return err;
+ }
+ 
++int cxio_write_pbl(struct cxio_rdev *rdev_p, __be64 *pbl,
++		   u32 pbl_addr, u32 pbl_size)
++{
++	u32 wptr;
++	int err;
++
++	PDBG("%s *pdb_addr 0x%x, pbl_base 0x%x, pbl_size %d\n",
++	     __func__, pbl_addr, rdev_p->rnic_info.pbl_base,
++	     pbl_size);
++
++	mutex_lock(&rdev_p->ctrl_qp.lock);
++	err = cxio_hal_ctrl_qp_write_mem(rdev_p, pbl_addr >> 5, pbl_size << 3,
++					 pbl);
++	wptr = rdev_p->ctrl_qp.wptr;
++	mutex_unlock(&rdev_p->ctrl_qp.lock);
++	if (err)
++		return err;
++
++	if (wait_event_interruptible(rdev_p->ctrl_qp.waitq,
++				     SEQ32_GE(rdev_p->ctrl_qp.rptr,
++					      wptr)))
++		return -ERESTARTSYS;
++
++	return 0;
++}
++
+ int cxio_register_phys_mem(struct cxio_rdev *rdev_p, u32 *stag, u32 pdid,
+ 			   enum tpt_mem_perm perm, u32 zbva, u64 to, u32 len,
+-			   u8 page_size, __be64 *pbl, u32 *pbl_size,
+-			   u32 *pbl_addr)
++			   u8 page_size, u32 pbl_size, u32 pbl_addr)
+ {
+ 	*stag = T3_STAG_UNSET;
+ 	return __cxio_tpt_op(rdev_p, 0, stag, 1, pdid, TPT_NON_SHARED_MR, perm,
+-			     zbva, to, len, page_size, pbl, pbl_size, pbl_addr);
++			     zbva, to, len, page_size, pbl_size, pbl_addr);
+ }
+ 
+ int cxio_reregister_phys_mem(struct cxio_rdev *rdev_p, u32 *stag, u32 pdid,
+ 			   enum tpt_mem_perm perm, u32 zbva, u64 to, u32 len,
+-			   u8 page_size, __be64 *pbl, u32 *pbl_size,
+-			   u32 *pbl_addr)
++			   u8 page_size, u32 pbl_size, u32 pbl_addr)
+ {
+ 	return __cxio_tpt_op(rdev_p, 0, stag, 1, pdid, TPT_NON_SHARED_MR, perm,
+-			     zbva, to, len, page_size, pbl, pbl_size, pbl_addr);
++			     zbva, to, len, page_size, pbl_size, pbl_addr);
+ }
+ 
+ int cxio_dereg_mem(struct cxio_rdev *rdev_p, u32 stag, u32 pbl_size,
+ 		   u32 pbl_addr)
+ {
+-	return __cxio_tpt_op(rdev_p, 1, &stag, 0, 0, 0, 0, 0, 0ULL, 0, 0, NULL,
+-			     &pbl_size, &pbl_addr);
++	return __cxio_tpt_op(rdev_p, 1, &stag, 0, 0, 0, 0, 0, 0ULL, 0, 0,
++			     pbl_size, pbl_addr);
+ }
+ 
+ int cxio_allocate_window(struct cxio_rdev *rdev_p, u32 * stag, u32 pdid)
+ {
+-	u32 pbl_size = 0;
+ 	*stag = T3_STAG_UNSET;
+ 	return __cxio_tpt_op(rdev_p, 0, stag, 0, pdid, TPT_MW, 0, 0, 0ULL, 0, 0,
+-			     NULL, &pbl_size, NULL);
++			     0, 0);
+ }
+ 
+ int cxio_deallocate_window(struct cxio_rdev *rdev_p, u32 stag)
+ {
+-	return __cxio_tpt_op(rdev_p, 1, &stag, 0, 0, 0, 0, 0, 0ULL, 0, 0, NULL,
+-			     NULL, NULL);
++	return __cxio_tpt_op(rdev_p, 1, &stag, 0, 0, 0, 0, 0, 0ULL, 0, 0,
++			     0, 0);
+ }
+ 
+ int cxio_rdma_init(struct cxio_rdev *rdev_p, struct t3_rdma_init_attr *attr)
+diff --git a/drivers/infiniband/hw/cxgb3/cxio_hal.h b/drivers/infiniband/hw/cxgb3/cxio_hal.h
+index 69ab08ebc680..6e128f6bab05 100644
+--- a/drivers/infiniband/hw/cxgb3/cxio_hal.h
++++ b/drivers/infiniband/hw/cxgb3/cxio_hal.h
+@@ -154,14 +154,14 @@ int cxio_create_qp(struct cxio_rdev *rdev, u32 kernel_domain, struct t3_wq *wq,
+ int cxio_destroy_qp(struct cxio_rdev *rdev, struct t3_wq *wq,
+ 		    struct cxio_ucontext *uctx);
+ int cxio_peek_cq(struct t3_wq *wr, struct t3_cq *cq, int opcode);
++int cxio_write_pbl(struct cxio_rdev *rdev_p, __be64 *pbl,
++		   u32 pbl_addr, u32 pbl_size);
+ int cxio_register_phys_mem(struct cxio_rdev *rdev, u32 * stag, u32 pdid,
+ 			   enum tpt_mem_perm perm, u32 zbva, u64 to, u32 len,
+-			   u8 page_size, __be64 *pbl, u32 *pbl_size,
+-			   u32 *pbl_addr);
++			   u8 page_size, u32 pbl_size, u32 pbl_addr);
+ int cxio_reregister_phys_mem(struct cxio_rdev *rdev, u32 * stag, u32 pdid,
+ 			   enum tpt_mem_perm perm, u32 zbva, u64 to, u32 len,
+-			   u8 page_size, __be64 *pbl, u32 *pbl_size,
+-			   u32 *pbl_addr);
++			   u8 page_size, u32 pbl_size, u32 pbl_addr);
+ int cxio_dereg_mem(struct cxio_rdev *rdev, u32 stag, u32 pbl_size,
+ 		   u32 pbl_addr);
+ int cxio_allocate_window(struct cxio_rdev *rdev, u32 * stag, u32 pdid);
+diff --git a/drivers/infiniband/hw/cxgb3/iwch_mem.c b/drivers/infiniband/hw/cxgb3/iwch_mem.c
+index 58c3d61bcd14..ec49a5cbdebb 100644
+--- a/drivers/infiniband/hw/cxgb3/iwch_mem.c
++++ b/drivers/infiniband/hw/cxgb3/iwch_mem.c
+@@ -35,17 +35,26 @@
+ #include <rdma/ib_verbs.h>
+ 
+ #include "cxio_hal.h"
++#include "cxio_resource.h"
+ #include "iwch.h"
+ #include "iwch_provider.h"
+ 
+-int iwch_register_mem(struct iwch_dev *rhp, struct iwch_pd *php,
+-					struct iwch_mr *mhp,
+-					int shift,
+-					__be64 *page_list)
++static void iwch_finish_mem_reg(struct iwch_mr *mhp, u32 stag)
+ {
+-	u32 stag;
+ 	u32 mmid;
+ 
++	mhp->attr.state = 1;
++	mhp->attr.stag = stag;
++	mmid = stag >> 8;
++	mhp->ibmr.rkey = mhp->ibmr.lkey = stag;
++	insert_handle(mhp->rhp, &mhp->rhp->mmidr, mhp, mmid);
++	PDBG("%s mmid 0x%x mhp %p\n", __func__, mmid, mhp);
++}
++
++int iwch_register_mem(struct iwch_dev *rhp, struct iwch_pd *php,
++		      struct iwch_mr *mhp, int shift)
++{
++	u32 stag;
+ 
+ 	if (cxio_register_phys_mem(&rhp->rdev,
+ 				   &stag, mhp->attr.pdid,
+@@ -53,28 +62,21 @@ int iwch_register_mem(struct iwch_dev *rhp, struct iwch_pd *php,
+ 				   mhp->attr.zbva,
+ 				   mhp->attr.va_fbo,
+ 				   mhp->attr.len,
+-				   shift-12,
+-				   page_list,
+-				   &mhp->attr.pbl_size, &mhp->attr.pbl_addr))
++				   shift - 12,
++				   mhp->attr.pbl_size, mhp->attr.pbl_addr))
+ 		return -ENOMEM;
+-	mhp->attr.state = 1;
+-	mhp->attr.stag = stag;
+-	mmid = stag >> 8;
+-	mhp->ibmr.rkey = mhp->ibmr.lkey = stag;
+-	insert_handle(rhp, &rhp->mmidr, mhp, mmid);
+-	PDBG("%s mmid 0x%x mhp %p\n", __func__, mmid, mhp);
++
++	iwch_finish_mem_reg(mhp, stag);
++
+ 	return 0;
+ }
+ 
+ int iwch_reregister_mem(struct iwch_dev *rhp, struct iwch_pd *php,
+ 					struct iwch_mr *mhp,
+ 					int shift,
+-					__be64 *page_list,
+ 					int npages)
+ {
+ 	u32 stag;
+-	u32 mmid;
+-
+ 
+ 	/* We could support this... */
+ 	if (npages > mhp->attr.pbl_size)
+@@ -87,19 +89,40 @@ int iwch_reregister_mem(struct iwch_dev *rhp, struct iwch_pd *php,
+ 				   mhp->attr.zbva,
+ 				   mhp->attr.va_fbo,
+ 				   mhp->attr.len,
+-				   shift-12,
+-				   page_list,
+-				   &mhp->attr.pbl_size, &mhp->attr.pbl_addr))
++				   shift - 12,
++				   mhp->attr.pbl_size, mhp->attr.pbl_addr))
+ 		return -ENOMEM;
+-	mhp->attr.state = 1;
+-	mhp->attr.stag = stag;
+-	mmid = stag >> 8;
+-	mhp->ibmr.rkey = mhp->ibmr.lkey = stag;
+-	insert_handle(rhp, &rhp->mmidr, mhp, mmid);
+-	PDBG("%s mmid 0x%x mhp %p\n", __func__, mmid, mhp);
++
++	iwch_finish_mem_reg(mhp, stag);
++
++	return 0;
++}
++
++int iwch_alloc_pbl(struct iwch_mr *mhp, int npages)
++{
++	mhp->attr.pbl_addr = cxio_hal_pblpool_alloc(&mhp->rhp->rdev,
++						    npages << 3);
++
++	if (!mhp->attr.pbl_addr)
++		return -ENOMEM;
++
++	mhp->attr.pbl_size = npages;
++
+ 	return 0;
+ }
+ 
++void iwch_free_pbl(struct iwch_mr *mhp)
++{
++	cxio_hal_pblpool_free(&mhp->rhp->rdev, mhp->attr.pbl_addr,
++			      mhp->attr.pbl_size << 3);
++}
++
++int iwch_write_pbl(struct iwch_mr *mhp, __be64 *pages, int npages, int offset)
++{
++	return cxio_write_pbl(&mhp->rhp->rdev, pages,
++			      mhp->attr.pbl_addr + (offset << 3), npages);
++}
++
+ int build_phys_page_list(struct ib_phys_buf *buffer_list,
+ 					int num_phys_buf,
+ 					u64 *iova_start,
+diff --git a/drivers/infiniband/hw/cxgb3/iwch_provider.c b/drivers/infiniband/hw/cxgb3/iwch_provider.c
+index d07d3a377b5f..8934178a23ee 100644
+--- a/drivers/infiniband/hw/cxgb3/iwch_provider.c
++++ b/drivers/infiniband/hw/cxgb3/iwch_provider.c
+@@ -442,6 +442,7 @@ static int iwch_dereg_mr(struct ib_mr *ib_mr)
+ 	mmid = mhp->attr.stag >> 8;
+ 	cxio_dereg_mem(&rhp->rdev, mhp->attr.stag, mhp->attr.pbl_size,
+ 		       mhp->attr.pbl_addr);
++	iwch_free_pbl(mhp);
+ 	remove_handle(rhp, &rhp->mmidr, mmid);
+ 	if (mhp->kva)
+ 		kfree((void *) (unsigned long) mhp->kva);
+@@ -475,6 +476,8 @@ static struct ib_mr *iwch_register_phys_mem(struct ib_pd *pd,
+ 	if (!mhp)
+ 		return ERR_PTR(-ENOMEM);
+ 
++	mhp->rhp = rhp;
++
+ 	/* First check that we have enough alignment */
+ 	if ((*iova_start & ~PAGE_MASK) != (buffer_list[0].addr & ~PAGE_MASK)) {
+ 		ret = -EINVAL;
+@@ -492,7 +495,17 @@ static struct ib_mr *iwch_register_phys_mem(struct ib_pd *pd,
+ 	if (ret)
+ 		goto err;
+ 
+-	mhp->rhp = rhp;
++	ret = iwch_alloc_pbl(mhp, npages);
++	if (ret) {
++		kfree(page_list);
++		goto err_pbl;
++	}
++
++	ret = iwch_write_pbl(mhp, page_list, npages, 0);
++	kfree(page_list);
++	if (ret)
++		goto err_pbl;
++
+ 	mhp->attr.pdid = php->pdid;
+ 	mhp->attr.zbva = 0;
+ 
+@@ -502,12 +515,15 @@ static struct ib_mr *iwch_register_phys_mem(struct ib_pd *pd,
+ 
+ 	mhp->attr.len = (u32) total_size;
+ 	mhp->attr.pbl_size = npages;
+-	ret = iwch_register_mem(rhp, php, mhp, shift, page_list);
+-	kfree(page_list);
+-	if (ret) {
+-		goto err;
+-	}
++	ret = iwch_register_mem(rhp, php, mhp, shift);
++	if (ret)
++		goto err_pbl;
++
+ 	return &mhp->ibmr;
++
++err_pbl:
++	iwch_free_pbl(mhp);
++
+ err:
+ 	kfree(mhp);
+ 	return ERR_PTR(ret);
+@@ -560,7 +576,7 @@ static int iwch_reregister_phys_mem(struct ib_mr *mr,
+ 			return ret;
+ 	}
+ 
+-	ret = iwch_reregister_mem(rhp, php, &mh, shift, page_list, npages);
++	ret = iwch_reregister_mem(rhp, php, &mh, shift, npages);
+ 	kfree(page_list);
+ 	if (ret) {
+ 		return ret;
+@@ -602,6 +618,8 @@ static struct ib_mr *iwch_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
+ 	if (!mhp)
+ 		return ERR_PTR(-ENOMEM);
+ 
++	mhp->rhp = rhp;
++
+ 	mhp->umem = ib_umem_get(pd->uobject->context, start, length, acc, 0);
+ 	if (IS_ERR(mhp->umem)) {
+ 		err = PTR_ERR(mhp->umem);
+@@ -615,10 +633,14 @@ static struct ib_mr *iwch_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
+ 	list_for_each_entry(chunk, &mhp->umem->chunk_list, list)
+ 		n += chunk->nents;
+ 
+-	pages = kmalloc(n * sizeof(u64), GFP_KERNEL);
++	err = iwch_alloc_pbl(mhp, n);
++	if (err)
++		goto err;
++
++	pages = (__be64 *) __get_free_page(GFP_KERNEL);
+ 	if (!pages) {
+ 		err = -ENOMEM;
+-		goto err;
++		goto err_pbl;
+ 	}
+ 
+ 	i = n = 0;
+@@ -630,25 +652,38 @@ static struct ib_mr *iwch_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
+ 				pages[i++] = cpu_to_be64(sg_dma_address(
+ 					&chunk->page_list[j]) +
+ 					mhp->umem->page_size * k);
++				if (i == PAGE_SIZE / sizeof *pages) {
++					err = iwch_write_pbl(mhp, pages, i, n);
++					if (err)
++						goto pbl_done;
++					n += i;
++					i = 0;
++				}
+ 			}
+ 		}
+ 
+-	mhp->rhp = rhp;
++	if (i)
++		err = iwch_write_pbl(mhp, pages, i, n);
++
++pbl_done:
++	free_page((unsigned long) pages);
++	if (err)
++		goto err_pbl;
++
+ 	mhp->attr.pdid = php->pdid;
+ 	mhp->attr.zbva = 0;
+ 	mhp->attr.perms = iwch_ib_to_tpt_access(acc);
+ 	mhp->attr.va_fbo = virt;
+ 	mhp->attr.page_size = shift - 12;
+ 	mhp->attr.len = (u32) length;
+-	mhp->attr.pbl_size = i;
+-	err = iwch_register_mem(rhp, php, mhp, shift, pages);
+-	kfree(pages);
++
++	err = iwch_register_mem(rhp, php, mhp, shift);
+ 	if (err)
+-		goto err;
++		goto err_pbl;
+ 
+ 	if (udata && !t3a_device(rhp)) {
+ 		uresp.pbl_addr = (mhp->attr.pbl_addr -
+-	                         rhp->rdev.rnic_info.pbl_base) >> 3;
++				 rhp->rdev.rnic_info.pbl_base) >> 3;
+ 		PDBG("%s user resp pbl_addr 0x%x\n", __func__,
+ 		     uresp.pbl_addr);
+ 
+@@ -661,6 +696,9 @@ static struct ib_mr *iwch_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
+ 
+ 	return &mhp->ibmr;
+ 
++err_pbl:
++	iwch_free_pbl(mhp);
++
+ err:
+ 	ib_umem_release(mhp->umem);
+ 	kfree(mhp);
+diff --git a/drivers/infiniband/hw/cxgb3/iwch_provider.h b/drivers/infiniband/hw/cxgb3/iwch_provider.h
+index db5100d27ca2..836163fc5429 100644
+--- a/drivers/infiniband/hw/cxgb3/iwch_provider.h
++++ b/drivers/infiniband/hw/cxgb3/iwch_provider.h
+@@ -340,14 +340,14 @@ int iwch_quiesce_qps(struct iwch_cq *chp);
+ int iwch_resume_qps(struct iwch_cq *chp);
+ void stop_read_rep_timer(struct iwch_qp *qhp);
+ int iwch_register_mem(struct iwch_dev *rhp, struct iwch_pd *php,
+-					struct iwch_mr *mhp,
+-					int shift,
+-					__be64 *page_list);
++		      struct iwch_mr *mhp, int shift);
+ int iwch_reregister_mem(struct iwch_dev *rhp, struct iwch_pd *php,
+ 					struct iwch_mr *mhp,
+ 					int shift,
+-					__be64 *page_list,
+ 					int npages);
++int iwch_alloc_pbl(struct iwch_mr *mhp, int npages);
++void iwch_free_pbl(struct iwch_mr *mhp);
++int iwch_write_pbl(struct iwch_mr *mhp, __be64 *pages, int npages, int offset);
+ int build_phys_page_list(struct ib_phys_buf *buffer_list,
+ 					int num_phys_buf,
+ 					u64 *iova_start,
+

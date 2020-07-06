@@ -1,0 +1,63 @@
+commit 2e8689a49983dd678d5010aa589ff38b71213e54
+Author: Sage Weil <sage@inktank.com>
+Date:   Mon Aug 20 17:04:58 2012 -0700
+
+    mon: fix monitor cluster contraction race
+    
+    If we contract to 1 monitor, we win_standalone_election() without bumping
+    the election epoch.  Racing paxos updates can then reach us without being
+    ignored and trigger an assert:
+    
+    mon/Paxos.cc: In function 'void Paxos::handle_accept(MMonPaxos*)' thread 7f85eae05700 time 2012-08-20 16:01:00.843937
+    mon/Paxos.cc: 468: FAILED assert(state == STATE_UPDATING)
+    
+    Fixes: #3003
+    Reported-by: John Wilkins <john.wilkins@inktank.com>
+    Signed-off-by: Sage Weil <sage@inktank.com>
+
+diff --git a/src/mon/Elector.h b/src/mon/Elector.h
+index 377cb97ac1..d81eb23976 100644
+--- a/src/mon/Elector.h
++++ b/src/mon/Elector.h
+@@ -145,7 +145,7 @@ class Elector {
+    *
+    * @param e Epoch to which we will update our epoch
+    */
+-  void bump_epoch(epoch_t e=0);
++  void bump_epoch(epoch_t e);
+ 
+   /**
+    * @defgroup Elector_h_callbacks Callbacks
+@@ -353,6 +353,15 @@ class Elector {
+    */
+   epoch_t get_epoch() { return epoch; }
+ 
++  /**
++   * advance_epoch
++   *
++   * increase election epoch by 1
++   */
++  void advance_epoch() {
++    bump_epoch(epoch + 1);
++  }
++
+   /**
+    * Handle received messages.
+    *
+diff --git a/src/mon/Monitor.cc b/src/mon/Monitor.cc
+index 902d6d508f..e92077bc8a 100644
+--- a/src/mon/Monitor.cc
++++ b/src/mon/Monitor.cc
+@@ -929,6 +929,11 @@ void Monitor::start_election()
+ void Monitor::win_standalone_election()
+ {
+   dout(1) << "win_standalone_election" << dendl;
++
++  // bump election epoch, in case the previous epoch included other
++  // monitors; we need to be able to make the distinction.
++  elector.advance_epoch();
++
+   rank = monmap->get_rank(name);
+   assert(rank == 0);
+   set<int> q;
+

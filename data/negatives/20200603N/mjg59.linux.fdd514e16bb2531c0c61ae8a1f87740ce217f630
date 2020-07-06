@@ -1,0 +1,79 @@
+commit fdd514e16bb2531c0c61ae8a1f87740ce217f630
+Author: Tejun Heo <tj@kernel.org>
+Date:   Thu Jun 9 20:43:59 2011 +0200
+
+    block: make disk_block_events() properly wait for work cancellation
+    
+    disk_block_events() should guarantee that the event work is not in
+    flight on return and once blocked it shouldn't issue further
+    cancellations.
+    
+    Because there was no synchronization between the first blocker doing
+    cancel_delayed_work_sync() and the following blockers, the following
+    blockers could finish before cancellation was complete, which broke
+    both guarantees - event work could be in flight and cancellation could
+    happen after return.
+    
+    This bug triggered WARN_ON_ONCE() in disk_clear_events() reported in
+    bug#34662.
+    
+      https://bugzilla.kernel.org/show_bug.cgi?id=34662
+    
+    Fix it by adding an outer mutex which protects both block count
+    manipulation and work cancellation.
+    
+    -v2: Use outer mutex instead of bit waitqueue per Linus.
+    
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Tested-by: Sitsofe Wheeler <sitsofe@yahoo.com>
+    Reported-by: Sitsofe Wheeler <sitsofe@yahoo.com>
+    Reported-by: Borislav Petkov <bp@alien8.de>
+    Reported-by: Meelis Roos <mroos@linux.ee>
+    Reported-by: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Jens Axboe <axboe@kernel.dk>
+    Cc: Kay Sievers <kay.sievers@vrfy.org>
+    Signed-off-by: Jens Axboe <jaxboe@fusionio.com>
+
+diff --git a/block/genhd.c b/block/genhd.c
+index ab0731d8976d..3608289c8ecd 100644
+--- a/block/genhd.c
++++ b/block/genhd.c
+@@ -1371,6 +1371,7 @@ struct disk_events {
+ 	struct gendisk		*disk;		/* the associated disk */
+ 	spinlock_t		lock;
+ 
++	struct mutex		block_mutex;	/* protects blocking */
+ 	int			block;		/* event blocking depth */
+ 	unsigned int		pending;	/* events already sent out */
+ 	unsigned int		clearing;	/* events being cleared */
+@@ -1438,12 +1439,20 @@ void disk_block_events(struct gendisk *disk)
+ 	if (!ev)
+ 		return;
+ 
++	/*
++	 * Outer mutex ensures that the first blocker completes canceling
++	 * the event work before further blockers are allowed to finish.
++	 */
++	mutex_lock(&ev->block_mutex);
++
+ 	spin_lock_irqsave(&ev->lock, flags);
+ 	cancel = !ev->block++;
+ 	spin_unlock_irqrestore(&ev->lock, flags);
+ 
+ 	if (cancel)
+ 		cancel_delayed_work_sync(&disk->ev->dwork);
++
++	mutex_unlock(&ev->block_mutex);
+ }
+ 
+ static void __disk_unblock_events(struct gendisk *disk, bool check_now)
+@@ -1751,6 +1760,7 @@ static void disk_add_events(struct gendisk *disk)
+ 	INIT_LIST_HEAD(&ev->node);
+ 	ev->disk = disk;
+ 	spin_lock_init(&ev->lock);
++	mutex_init(&ev->block_mutex);
+ 	ev->block = 1;
+ 	ev->poll_msecs = -1;
+ 	INIT_DELAYED_WORK(&ev->dwork, disk_events_workfn);
+

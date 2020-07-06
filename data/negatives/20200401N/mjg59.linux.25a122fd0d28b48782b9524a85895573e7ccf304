@@ -1,0 +1,52 @@
+commit 25a122fd0d28b48782b9524a85895573e7ccf304
+Author: Timo Teras <timo.teras@solidboot.com>
+Date:   Wed Oct 25 09:37:41 2006 +0300
+
+    MMC: Poll card status after rescanning cards
+    
+    Some broken cards seem to process CMD1 even in stand-by state. The result is
+    that the card replies with ILLEGAL_COMMAND error for the next command sent
+    after rescanning. Currently the next command is select card, which would
+    return the error. But CMD7 does actually succeed and retries of the command
+    will timeout. The workaround is to poll card status after CMD1 to clear the
+    pending error.
+    
+    Signed-off-by: Timo Teras <timo.teras@solidboot.com>
+    Signed-off-by: Pierre Ossman <drzeus@drzeus.cx>
+
+diff --git a/drivers/mmc/mmc.c b/drivers/mmc/mmc.c
+index ee8863c123e3..ec8168ac75b1 100644
+--- a/drivers/mmc/mmc.c
++++ b/drivers/mmc/mmc.c
+@@ -1178,14 +1178,29 @@ static void mmc_rescan(void *data)
+ {
+ 	struct mmc_host *host = data;
+ 	struct list_head *l, *n;
++	unsigned char power_mode;
+ 
+ 	mmc_claim_host(host);
+ 
+-	if (host->ios.power_mode == MMC_POWER_ON)
++	/*
++	 * Check for removed cards and newly inserted ones. We check for
++	 * removed cards first so we can intelligently re-select the VDD.
++	 */
++	power_mode = host->ios.power_mode;
++	if (power_mode == MMC_POWER_ON)
+ 		mmc_check_cards(host);
+ 
+ 	mmc_setup(host);
+ 
++	/*
++	 * Some broken cards process CMD1 even in stand-by state. There is
++	 * no reply, but an ILLEGAL_COMMAND error is cached and returned
++	 * after next command. We poll for card status here to clear any
++	 * possibly pending error.
++	 */
++	if (power_mode == MMC_POWER_ON)
++		mmc_check_cards(host);
++
+ 	if (!list_empty(&host->cards)) {
+ 		/*
+ 		 * (Re-)calculate the fastest clock rate which the
+

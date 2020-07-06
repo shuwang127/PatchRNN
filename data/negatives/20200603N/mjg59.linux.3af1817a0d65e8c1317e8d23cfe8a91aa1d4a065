@@ -1,0 +1,57 @@
+commit 3af1817a0d65e8c1317e8d23cfe8a91aa1d4a065
+Author: Lai Jiangshan <laijs@cn.fujitsu.com>
+Date:   Wed May 26 16:48:19 2010 +0800
+
+    KVM: MMU: calculate correct gfn for small host pages backing large guest pages
+    
+    In Documentation/kvm/mmu.txt:
+      gfn:
+        Either the guest page table containing the translations shadowed by this
+        page, or the base page frame for linear translations. See role.direct.
+    
+    But in function FNAME(fetch)(), sp->gfn is incorrect when one of following
+    situations occurred:
+    
+     1) guest is 32bit paging and the guest PDE maps a 4-MByte page
+        (backed by 4k host pages), FNAME(fetch)() miss handling the quadrant.
+    
+        And if guest use pse-36, "table_gfn = gpte_to_gfn(gw->ptes[level - delta]);"
+        is incorrect.
+    
+     2) guest is long mode paging and the guest PDPTE maps a 1-GByte page
+        (backed by 4k or 2M host pages).
+    
+    So we fix it to suit to the document and suit to the code which
+    requires sp->gfn correct when sp->role.direct=1.
+    
+    We use the goal mapping gfn(gw->gfn) to calculate the base page frame
+    for linear translations, it is simple and easy to be understood.
+    
+    Reported-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Reported-by: Gui Jianfeng <guijianfeng@cn.fujitsu.com>
+    Signed-off-by: Lai Jiangshan <laijs@cn.fujitsu.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/paging_tmpl.h b/arch/x86/kvm/paging_tmpl.h
+index 2ee7060a80a5..1f7f5dd8306f 100644
+--- a/arch/x86/kvm/paging_tmpl.h
++++ b/arch/x86/kvm/paging_tmpl.h
+@@ -339,10 +339,13 @@ static u64 *FNAME(fetch)(struct kvm_vcpu *vcpu, gva_t addr,
+ 			direct = 1;
+ 			if (!is_dirty_gpte(gw->ptes[level - delta]))
+ 				access &= ~ACC_WRITE_MASK;
+-			table_gfn = gpte_to_gfn(gw->ptes[level - delta]);
+-			/* advance table_gfn when emulating 1gb pages with 4k */
+-			if (delta == 0)
+-				table_gfn += PT_INDEX(addr, level);
++			/*
++			 * It is a large guest pages backed by small host pages,
++			 * So we set @direct(@shadow_page->role.direct)=1, and
++			 * set @table_gfn(@shadow_page->gfn)=the base page frame
++			 * for linear translations.
++			 */
++			table_gfn = gw->gfn & ~(KVM_PAGES_PER_HPAGE(level) - 1);
+ 			access &= gw->pte_access;
+ 		} else {
+ 			direct = 0;
+

@@ -1,0 +1,45 @@
+commit 3f514fe3b1d217c80edb1524976203bc535f9502
+Author: Nick Mathewson <nickm@torproject.org>
+Date:   Thu Apr 12 13:11:35 2018 -0400
+
+    Accept small hops backward in the monotonic timer.
+
+diff --git a/src/common/token_bucket.c b/src/common/token_bucket.c
+index abb050183..6af298214 100644
+--- a/src/common/token_bucket.c
++++ b/src/common/token_bucket.c
+@@ -120,6 +120,14 @@ token_bucket_refill(token_bucket_t *bucket,
+                     uint32_t now_ts)
+ {
+   const uint32_t elapsed_ticks = (now_ts - bucket->last_refilled_at_ts);
++  if (elapsed_ticks > UINT32_MAX-(300*1000)) {
++    /* Either about 48 days have passed since the last refill, or the
++     * monotonic clock has somehow moved backwards. (We're looking at you,
++     * Windows.).  We accept up to a 5 minute jump backwards as
++     * "unremarkable".
++     */
++    return 0;
++  }
+   const uint32_t elapsed_steps = elapsed_ticks / TICKS_PER_STEP;
+ 
+   if (!elapsed_steps) {
+diff --git a/src/test/test_bwmgt.c b/src/test/test_bwmgt.c
+index 7bcfcf7fe..2428b1505 100644
+--- a/src/test/test_bwmgt.c
++++ b/src/test/test_bwmgt.c
+@@ -178,8 +178,13 @@ test_bwmgt_token_buf_refill(void *arg)
+   tt_int_op(b.read_bucket, OP_GT, 8*KB-200);
+   tt_int_op(b.read_bucket, OP_LT, 8*KB+200);
+ 
+-  // a ridiculous amount of time passes
++  // We step a second backwards, and nothing happens.
+   tt_int_op(0, OP_EQ, token_bucket_refill(&b, START_TS + SEC*64));
++  tt_int_op(b.read_bucket, OP_GT, 8*KB-200);
++  tt_int_op(b.read_bucket, OP_LT, 8*KB+200);
++
++  // A ridiculous amount of time passes.
++  tt_int_op(0, OP_EQ, token_bucket_refill(&b, INT32_MAX));
+   tt_int_op(b.read_bucket, OP_EQ, b.burst);
+ 
+  done:
+

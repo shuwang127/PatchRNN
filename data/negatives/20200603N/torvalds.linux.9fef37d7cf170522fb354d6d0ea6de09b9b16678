@@ -1,0 +1,44 @@
+commit 9fef37d7cf170522fb354d6d0ea6de09b9b16678
+Author: Johan Hovold <johan@kernel.org>
+Date:   Thu Jan 12 14:56:09 2017 +0100
+
+    USB: serial: ark3116: fix register-accessor error handling
+    
+    The current implementation failed to detect short transfers, something
+    which could lead to bits of the uninitialised heap transfer buffer
+    leaking to user space.
+    
+    Fixes: 149fc791a452 ("USB: ark3116: Setup some basic infrastructure for
+    new ark3116 driver.")
+    Fixes: f4c1e8d597d1 ("USB: ark3116: Make existing functions 16450-aware
+    and add close and release functions.")
+    Cc: stable <stable@vger.kernel.org>
+    Reviewed-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Signed-off-by: Johan Hovold <johan@kernel.org>
+
+diff --git a/drivers/usb/serial/ark3116.c b/drivers/usb/serial/ark3116.c
+index 1532cde8a437..7812052dc700 100644
+--- a/drivers/usb/serial/ark3116.c
++++ b/drivers/usb/serial/ark3116.c
+@@ -99,10 +99,17 @@ static int ark3116_read_reg(struct usb_serial *serial,
+ 				 usb_rcvctrlpipe(serial->dev, 0),
+ 				 0xfe, 0xc0, 0, reg,
+ 				 buf, 1, ARK_TIMEOUT);
+-	if (result < 0)
++	if (result < 1) {
++		dev_err(&serial->interface->dev,
++				"failed to read register %u: %d\n",
++				reg, result);
++		if (result >= 0)
++			result = -EIO;
++
+ 		return result;
+-	else
+-		return buf[0];
++	}
++
++	return buf[0];
+ }
+ 
+ static inline int calc_divisor(int bps)
+

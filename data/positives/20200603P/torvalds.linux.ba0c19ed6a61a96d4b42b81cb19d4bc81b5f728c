@@ -1,0 +1,52 @@
+commit ba0c19ed6a61a96d4b42b81cb19d4bc81b5f728c
+Author: Stephen Smalley <sds@tycho.nsa.gov>
+Date:   Sun Jun 4 02:51:30 2006 -0700
+
+    [PATCH] selinux: fix sb_lock/sb_security_lock nesting
+    
+    From: Stephen Smalley <sds@tycho.nsa.gov>
+    
+    Fix unsafe nesting of sb_lock inside sb_security_lock in
+    selinux_complete_init.  Detected by the kernel locking validator.
+    
+    Signed-off-by: Stephen Smalley <sds@tycho.nsa.gov>
+    Acked-by: James Morris <jmorris@namei.org>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 21dad415b896..90b4cdc0c948 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -4422,6 +4422,7 @@ void selinux_complete_init(void)
+ 
+ 	/* Set up any superblocks initialized prior to the policy load. */
+ 	printk(KERN_INFO "SELinux:  Setting up existing superblocks.\n");
++	spin_lock(&sb_lock);
+ 	spin_lock(&sb_security_lock);
+ next_sb:
+ 	if (!list_empty(&superblock_security_head)) {
+@@ -4430,19 +4431,20 @@ void selinux_complete_init(void)
+ 				           struct superblock_security_struct,
+ 				           list);
+ 		struct super_block *sb = sbsec->sb;
+-		spin_lock(&sb_lock);
+ 		sb->s_count++;
+-		spin_unlock(&sb_lock);
+ 		spin_unlock(&sb_security_lock);
++		spin_unlock(&sb_lock);
+ 		down_read(&sb->s_umount);
+ 		if (sb->s_root)
+ 			superblock_doinit(sb, NULL);
+ 		drop_super(sb);
++		spin_lock(&sb_lock);
+ 		spin_lock(&sb_security_lock);
+ 		list_del_init(&sbsec->list);
+ 		goto next_sb;
+ 	}
+ 	spin_unlock(&sb_security_lock);
++	spin_unlock(&sb_lock);
+ }
+ 
+ /* SELinux requires early initialization in order to label
+

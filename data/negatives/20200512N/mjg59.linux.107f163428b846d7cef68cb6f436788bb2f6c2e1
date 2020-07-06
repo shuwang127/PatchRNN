@@ -1,0 +1,89 @@
+commit 107f163428b846d7cef68cb6f436788bb2f6c2e1
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Wed Dec 5 21:14:28 2007 -0800
+
+    [IPV4] ROUTE: Clean up proc files creation.
+    
+    The rt_cache, stats/rt_cache and rt_acct(optional) files
+    creation looks a bit messy. Clean this out and join them
+    to other proc-related functions under the proper ifdef.
+    
+    The struct net * argument in a new function will help net
+    namespaces patches look nicer.
+    
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv4/route.c b/net/ipv4/route.c
+index 9736f6895628..193788381a59 100644
+--- a/net/ipv4/route.c
++++ b/net/ipv4/route.c
+@@ -520,6 +520,44 @@ static int ip_rt_acct_read(char *buffer, char **start, off_t offset,
+ 	return length;
+ }
+ #endif
++
++static __init int ip_rt_proc_init(struct net *net)
++{
++	struct proc_dir_entry *pde;
++
++	pde = proc_net_fops_create(net, "rt_cache", S_IRUGO,
++			&rt_cache_seq_fops);
++	if (!pde)
++		goto err1;
++
++	pde = create_proc_entry("rt_cache", S_IRUGO, net->proc_net_stat);
++	if (!pde)
++		goto err2;
++
++	pde->proc_fops = &rt_cpu_seq_fops;
++
++#ifdef CONFIG_NET_CLS_ROUTE
++	pde = create_proc_read_entry("rt_acct", 0, net->proc_net,
++			ip_rt_acct_read, NULL);
++	if (!pde)
++		goto err3;
++#endif
++	return 0;
++
++#ifdef CONFIG_NET_CLS_ROUTE
++err3:
++	remove_proc_entry("rt_cache", net->proc_net_stat);
++#endif
++err2:
++	remove_proc_entry("rt_cache", net->proc_net);
++err1:
++	return -ENOMEM;
++}
++#else
++static inline int ip_rt_proc_init(struct net *net)
++{
++	return 0;
++}
+ #endif /* CONFIG_PROC_FS */
+ 
+ static __inline__ void rt_free(struct rtable *rt)
+@@ -3000,20 +3038,8 @@ int __init ip_rt_init(void)
+ 		ip_rt_secret_interval;
+ 	add_timer(&rt_secret_timer);
+ 
+-#ifdef CONFIG_PROC_FS
+-	{
+-	struct proc_dir_entry *rtstat_pde = NULL; /* keep gcc happy */
+-	if (!proc_net_fops_create(&init_net, "rt_cache", S_IRUGO, &rt_cache_seq_fops) ||
+-	    !(rtstat_pde = create_proc_entry("rt_cache", S_IRUGO,
+-					     init_net.proc_net_stat))) {
+-		return -ENOMEM;
+-	}
+-	rtstat_pde->proc_fops = &rt_cpu_seq_fops;
+-	}
+-#ifdef CONFIG_NET_CLS_ROUTE
+-	create_proc_read_entry("rt_acct", 0, init_net.proc_net, ip_rt_acct_read, NULL);
+-#endif
+-#endif
++	if (ip_rt_proc_init(&init_net))
++		printk(KERN_ERR "Unable to create route proc files\n");
+ #ifdef CONFIG_XFRM
+ 	xfrm_init();
+ 	xfrm4_init();
+

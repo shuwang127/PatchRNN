@@ -1,0 +1,42 @@
+commit ded652f7024bc2d7b6118b561a44187af30841b0
+Author: Takashi Iwai <tiwai@suse.de>
+Date:   Thu Mar 19 10:08:49 2009 +0100
+
+    ALSA: pcm - Fix delta calculation at boundary overlap
+    
+    When the hw_ptr_interrupt reaches the boundary, it must check whether
+    the hw_base was already lapped and corret the delta value appropriately.
+    
+    Also, rebasing the hw_ptr needs a correction because buffer_size isn't
+    always aligned to period_size.
+    
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+diff --git a/sound/core/pcm_lib.c b/sound/core/pcm_lib.c
+index 92ed6d819225..063c675177a9 100644
+--- a/sound/core/pcm_lib.c
++++ b/sound/core/pcm_lib.c
+@@ -221,8 +221,11 @@ static int snd_pcm_update_hw_ptr_interrupt(struct snd_pcm_substream *substream)
+ 	new_hw_ptr = hw_base + pos;
+ 	hw_ptr_interrupt = runtime->hw_ptr_interrupt + runtime->period_size;
+ 	delta = new_hw_ptr - hw_ptr_interrupt;
+-	if (hw_ptr_interrupt == runtime->boundary)
+-		hw_ptr_interrupt = 0;
++	if (hw_ptr_interrupt >= runtime->boundary) {
++		hw_ptr_interrupt %= runtime->boundary;
++		if (!hw_base) /* hw_base was already lapped; recalc delta */
++			delta = new_hw_ptr - hw_ptr_interrupt;
++	}
+ 	if (delta < 0) {
+ 		delta += runtime->buffer_size;
+ 		if (delta < 0) {
+@@ -233,6 +236,8 @@ static int snd_pcm_update_hw_ptr_interrupt(struct snd_pcm_substream *substream)
+ 				     (long)hw_ptr_interrupt);
+ 			/* rebase to interrupt position */
+ 			hw_base = new_hw_ptr = hw_ptr_interrupt;
++			/* align hw_base to buffer_size */
++			hw_base -= hw_base % runtime->buffer_size;
+ 			delta = 0;
+ 		} else {
+ 			hw_base += runtime->buffer_size;
+

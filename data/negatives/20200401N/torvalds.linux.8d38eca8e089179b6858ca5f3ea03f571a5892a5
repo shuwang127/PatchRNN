@@ -1,0 +1,60 @@
+commit 8d38eca8e089179b6858ca5f3ea03f571a5892a5
+Author: Gabor Juhos <juhosg@openwrt.org>
+Date:   Sat Aug 17 14:09:31 2013 +0200
+
+    rt2x00: rt2800lib: use step-by-step frequency offset adjustment on MMIO devices
+    
+    According to the DPO_RT5572_LinuxSTA_2.6.0.1_20120629
+    driver, the RFCSR17 register can't be programmed in
+    one step on devices which are using the frequency
+    offset adjustment code.
+    
+    Update the code to use step-by-step adjustment.
+    
+    Reference:
+      RT30xxWriteRFRegister function in common/rt_rf.c
+    
+    Signed-off-by: Gabor Juhos <juhosg@openwrt.org>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/rt2x00/rt2800lib.c b/drivers/net/wireless/rt2x00/rt2800lib.c
+index bebc56f5b849..623ad9d21ee5 100644
+--- a/drivers/net/wireless/rt2x00/rt2800lib.c
++++ b/drivers/net/wireless/rt2x00/rt2800lib.c
+@@ -2496,7 +2496,7 @@ static void rt2800_config_channel_rf3053(struct rt2x00_dev *rt2x00dev,
+ 
+ static void rt2800_adjust_freq_offset(struct rt2x00_dev *rt2x00dev)
+ {
+-	u8 freq_offset;
++	u8 freq_offset, prev_freq_offset;
+ 	u8 rfcsr, prev_rfcsr;
+ 
+ 	freq_offset = rt2x00_get_field8(rt2x00dev->freq_offset, RFCSR17_CODE);
+@@ -2509,11 +2509,24 @@ static void rt2800_adjust_freq_offset(struct rt2x00_dev *rt2x00dev)
+ 	if (rfcsr == prev_rfcsr)
+ 		return;
+ 
+-	if (rt2x00_is_usb(rt2x00dev))
++	if (rt2x00_is_usb(rt2x00dev)) {
+ 		rt2800_mcu_request(rt2x00dev, MCU_FREQ_OFFSET, 0xff,
+ 				   freq_offset, prev_rfcsr);
+-	else
++		return;
++	}
++
++	prev_freq_offset = rt2x00_get_field8(prev_rfcsr, RFCSR17_CODE);
++	while (prev_freq_offset != freq_offset) {
++		if (prev_freq_offset < freq_offset)
++			prev_freq_offset++;
++		else
++			prev_freq_offset--;
++
++		rt2x00_set_field8(&rfcsr, RFCSR17_CODE, prev_freq_offset);
+ 		rt2800_rfcsr_write(rt2x00dev, 17, rfcsr);
++
++		usleep_range(1000, 1500);
++	}
+ }
+ 
+ static void rt2800_config_channel_rf3290(struct rt2x00_dev *rt2x00dev,
+

@@ -1,0 +1,127 @@
+commit 935a9eef5770a4a298d1ccefab59e3863210fc68
+Author: Rainer Gerhards <rgerhards@adiscon.com>
+Date:   Tue Jul 14 16:57:49 2009 +0200
+
+    added tcp output rebinding option.
+    
+    added tcp output rebinding option.
+    
+    needs some more testing and doc
+
+diff --git a/tcpclt.c b/tcpclt.c
+index c53f00f7b..617aaef6c 100644
+--- a/tcpclt.c
++++ b/tcpclt.c
+@@ -297,6 +297,12 @@ Send(tcpclt_t *pThis, void *pData, char *msg, size_t len)
+ 
+ 	CHKiRet(TCPSendBldFrame(pThis, &msg, &len, &bMsgMustBeFreed));
+ 
++	if(pThis->iRebindInterval > 0  && ++pThis->iNumMsgs == pThis->iRebindInterval) {
++		/* we need to rebind, and use the retry logic for this*/
++		CHKiRet(pThis->prepRetryFunc(pData)); /* try to recover */
++		pThis->iNumMsgs = 0;
++	}
++
+ 	while(!bDone) { /* loop is broken when send succeeds or error occurs */
+ 		CHKiRet(pThis->initFunc(pData));
+ 		iRet = pThis->sendFunc(pData, msg, len);
+@@ -388,6 +394,13 @@ SetFraming(tcpclt_t *pThis, TCPFRAMINGMODE framing)
+ 	pThis->tcp_framing = framing;
+ 	RETiRet;
+ }
++static rsRetVal
++SetRebindInterval(tcpclt_t *pThis, int iRebindInterval)
++{
++	DEFiRet;
++	pThis->iRebindInterval = iRebindInterval;
++	RETiRet;
++}
+ 
+ 
+ /* Standard-Constructor
+@@ -445,6 +458,7 @@ CODESTARTobjQueryInterface(tcpclt)
+ 	pIf->SetSendFrame = SetSendFrame;
+ 	pIf->SetSendPrepRetry = SetSendPrepRetry;
+ 	pIf->SetFraming = SetFraming;
++	pIf->SetRebindInterval = SetRebindInterval;
+ 
+ finalize_it:
+ ENDobjQueryInterface(tcpclt)
+diff --git a/tcpclt.h b/tcpclt.h
+index 1d7040446..5a8eba75a 100644
+--- a/tcpclt.h
++++ b/tcpclt.h
+@@ -36,6 +36,8 @@ typedef struct tcpclt_s {
+ 	short bResendLastOnRecon; /* should the last message be resent on a successful reconnect? */
+ 	size_t lenPrevMsg;
+ 	/* session specific callbacks */
++	int iRebindInterval;	/* how often should the send socket be rebound? */
++	int iNumMsgs;		/* number of messages during current "rebind session" */
+ 	rsRetVal (*initFunc)(void*);
+ 	rsRetVal (*sendFunc)(void*, char*, size_t);
+ 	rsRetVal (*prepRetryFunc)(void*);
+@@ -55,8 +57,10 @@ BEGINinterface(tcpclt) /* name must also be changed in ENDinterface macro! */
+ 	rsRetVal (*SetSendFrame)(tcpclt_t*, rsRetVal (*)(void*, char*, size_t));
+ 	rsRetVal (*SetSendPrepRetry)(tcpclt_t*, rsRetVal (*)(void*));
+ 	rsRetVal (*SetFraming)(tcpclt_t*, TCPFRAMINGMODE framing);
++	/* v3, 2009-07-14*/
++	rsRetVal (*SetRebindInterval)(tcpclt_t*, int iRebindInterval);
+ ENDinterface(tcpclt)
+-#define tcpcltCURR_IF_VERSION 2 /* increment whenever you change the interface structure! */
++#define tcpcltCURR_IF_VERSION 3 /* increment whenever you change the interface structure! */
+ 
+ 
+ /* prototypes */
+diff --git a/tools/omfwd.c b/tools/omfwd.c
+index d207cce55..fe65f515c 100644
+--- a/tools/omfwd.c
++++ b/tools/omfwd.c
+@@ -90,6 +90,7 @@ typedef struct _instanceData {
+ 	char *port;
+ 	int protocol;
+ 	int iUDPRebindInterval;	/* rebind interval */
++	int iTCPRebindInterval;	/* rebind interval */
+ 	int nXmit;		/* number of transmissions since last (re-)bind */
+ #	define	FORW_UDP 0
+ #	define	FORW_TCP 1
+@@ -104,6 +105,7 @@ static short iStrmDrvrMode = 0; /* mode for stream driver, driver-dependent (0 m
+ static short bResendLastOnRecon = 0; /* should the last message be re-sent on a successful reconnect? */
+ static uchar *pszStrmDrvrAuthMode = NULL; /* authentication mode to use */
+ static int iUDPRebindInterval = 0;	/* support for automatic re-binding (load balancers!). 0 - no rebind */
++static int iTCPRebindInterval = 0;	/* support for automatic re-binding (load balancers!). 0 - no rebind */
+ 
+ static permittedPeers_t *pPermPeers = NULL;
+ 
+@@ -643,6 +645,7 @@ CODE_STD_STRING_REQUESTparseSelectorAct(1)
+ 
+ 	/* copy over config data as needed */
+ 	pData->iUDPRebindInterval = iUDPRebindInterval;
++	pData->iTCPRebindInterval = iTCPRebindInterval;
+ 
+ 	/* process template */
+ 	CHKiRet(cflineParseTemplateName(&p, *ppOMSR, 0, OMSR_NO_RQD_TPL_OPTS,
+@@ -657,6 +660,7 @@ CODE_STD_STRING_REQUESTparseSelectorAct(1)
+ 		CHKiRet(tcpclt.SetSendFrame(pData->pTCPClt, TCPSendFrame));
+ 		CHKiRet(tcpclt.SetSendPrepRetry(pData->pTCPClt, TCPSendPrepRetry));
+ 		CHKiRet(tcpclt.SetFraming(pData->pTCPClt, tcp_framing));
++		CHKiRet(tcpclt.SetRebindInterval(pData->pTCPClt, pData->iTCPRebindInterval));
+ 		pData->iStrmDrvrMode = iStrmDrvrMode;
+ 		if(pszStrmDrvr != NULL)
+ 			CHKmalloc(pData->pszStrmDrvr = (uchar*)strdup((char*)pszStrmDrvr));
+@@ -728,6 +732,7 @@ static rsRetVal resetConfigVariables(uchar __attribute__((unused)) *pp, void __a
+ 	iStrmDrvrMode = 0;
+ 	bResendLastOnRecon = 0;
+ 	iUDPRebindInterval = 0;
++	iTCPRebindInterval = 0;
+ 
+ 	return RS_RET_OK;
+ }
+@@ -742,6 +747,7 @@ CODEmodInit_QueryRegCFSLineHdlr
+ 	CHKiRet(objUse(net,LM_NET_FILENAME));
+ 
+ 	CHKiRet(regCfSysLineHdlr((uchar *)"actionforwarddefaulttemplate", 0, eCmdHdlrGetWord, NULL, &pszTplName, NULL));
++	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendtcprebindinterval", 0, eCmdHdlrInt, NULL, &iTCPRebindInterval, NULL));
+ 	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendudprebindinterval", 0, eCmdHdlrInt, NULL, &iUDPRebindInterval, NULL));
+ 	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendstreamdriver", 0, eCmdHdlrGetWord, NULL, &pszStrmDrvr, NULL));
+ 	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendstreamdrivermode", 0, eCmdHdlrInt, NULL, &iStrmDrvrMode, NULL));
+

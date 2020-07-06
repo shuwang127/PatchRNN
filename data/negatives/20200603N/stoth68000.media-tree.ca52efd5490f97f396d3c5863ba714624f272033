@@ -1,0 +1,59 @@
+commit ca52efd5490f97f396d3c5863ba714624f272033
+Author: françois romieu <romieu@fr.zoreil.com>
+Date:   Fri Jul 24 12:34:19 2009 +0000
+
+    r8169: WakeOnLan fix for the 8168
+    
+    More stuff for http://bugzilla.kernel.org/show_bug.cgi?id=9512
+    
+    Some 8168 are unable to WoL when receiving is not enabled (plain
+    old 8169 do not seem to care).
+    
+    It is not exactly pretty to leave the receiver enabled but we
+    should now enable DMA late enough for it to be safe. Some late
+    stage boot failure due to pxe and friends may benefit from the
+    delayed enabling of bus-mastering as well.
+    
+    Signed-off-by: Francois Romieu <romieu@fr.zoreil.com>
+    Tested-by: Jaromír Cápík <tavvva@volny.cz>
+    Cc: Edward Hsu <edward_hsu@realtek.com.tw>
+
+diff --git a/drivers/net/r8169.c b/drivers/net/r8169.c
+index 4b53b58d75fc..b82780d805f5 100644
+--- a/drivers/net/r8169.c
++++ b/drivers/net/r8169.c
+@@ -2060,8 +2060,6 @@ rtl8169_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 		}
+ 	}
+ 
+-	pci_set_master(pdev);
+-
+ 	/* ioremap MMIO region */
+ 	ioaddr = ioremap(pci_resource_start(pdev, region), R8169_REGS_SIZE);
+ 	if (!ioaddr) {
+@@ -2089,6 +2087,8 @@ rtl8169_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 
+ 	RTL_W16(IntrStatus, 0xffff);
+ 
++	pci_set_master(pdev);
++
+ 	/* Identify chip attached to board */
+ 	rtl8169_get_mac_version(tp, ioaddr);
+ 
+@@ -3874,6 +3874,15 @@ static void rtl_shutdown(struct pci_dev *pdev)
+ 	spin_unlock_irq(&tp->lock);
+ 
+ 	if (system_state == SYSTEM_POWER_OFF) {
++		/* WoL fails with some 8168 when the receiver is disabled. */
++		if (tp->features & RTL_FEATURE_WOL) {
++			pci_clear_master(pdev);
++
++			RTL_W8(ChipCmd, CmdRxEnb);
++			/* PCI commit */
++			RTL_R8(ChipCmd);
++		}
++
+ 		pci_wake_from_d3(pdev, true);
+ 		pci_set_power_state(pdev, PCI_D3hot);
+ 	}
+

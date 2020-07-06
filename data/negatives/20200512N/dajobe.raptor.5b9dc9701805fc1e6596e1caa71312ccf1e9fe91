@@ -1,0 +1,104 @@
+commit 5b9dc9701805fc1e6596e1caa71312ccf1e9fe91
+Author: Dave Beckett <dave@dajobe.org>
+Date:   Sun Feb 24 19:58:34 2013 -0800
+
+    Update Turtle URI writing to match Turtle 2013 encoding
+    
+    (raptor_turtle_writer_reference): Write URIs with Turtle 2013 escaped
+    characters; must escape #x00-#x20<>\"{}|^`
+
+diff --git a/src/raptor_internal.h b/src/raptor_internal.h
+index f9ed9748..97090c2f 100644
+--- a/src/raptor_internal.h
++++ b/src/raptor_internal.h
+@@ -1286,7 +1286,7 @@ void raptor_turtle_writer_base(raptor_turtle_writer* turtle_writer, raptor_uri*
+ RAPTOR_INTERNAL_API void raptor_turtle_writer_increase_indent(raptor_turtle_writer *turtle_writer);
+ RAPTOR_INTERNAL_API void raptor_turtle_writer_decrease_indent(raptor_turtle_writer *turtle_writer);
+ RAPTOR_INTERNAL_API void raptor_turtle_writer_newline(raptor_turtle_writer *turtle_writer);
+-RAPTOR_INTERNAL_API void raptor_turtle_writer_reference(raptor_turtle_writer* turtle_writer, raptor_uri* uri);
++RAPTOR_INTERNAL_API int raptor_turtle_writer_reference(raptor_turtle_writer* turtle_writer, raptor_uri* uri);
+ RAPTOR_INTERNAL_API int raptor_turtle_writer_literal(raptor_turtle_writer* turtle_writer, raptor_namespace_stack *nstack, const unsigned char *s, const unsigned char* lang, raptor_uri* datatype);
+ RAPTOR_INTERNAL_API void raptor_turtle_writer_qname(raptor_turtle_writer* turtle_writer, raptor_qname* qname);
+ RAPTOR_INTERNAL_API int raptor_turtle_writer_quoted_counted_string(raptor_turtle_writer* turtle_writer, const unsigned char *s, size_t length);
+diff --git a/src/raptor_serialize_turtle.c b/src/raptor_serialize_turtle.c
+index 249ebf10..f112066a 100644
+--- a/src/raptor_serialize_turtle.c
++++ b/src/raptor_serialize_turtle.c
+@@ -3,7 +3,7 @@
+  * raptor_serialize_turtle.c - Turtle serializer
+  *
+  * Copyright (C) 2006,2008 Dave Robillard
+- * Copyright (C) 2004-2010 David Beckett http://www.dajobe.org/
++ * Copyright (C) 2004-2013 David Beckett http://www.dajobe.org/
+  * Copyright (C) 2004-2005 University of Bristol, UK http://www.bristol.ac.uk/
+  * Copyright (C) 2005 Steve Shepard steveshep@gmail.com
+  * 
+diff --git a/src/raptor_turtle_writer.c b/src/raptor_turtle_writer.c
+index 2572090d..293fdd59 100644
+--- a/src/raptor_turtle_writer.c
++++ b/src/raptor_turtle_writer.c
+@@ -319,24 +319,57 @@ raptor_turtle_writer_base(raptor_turtle_writer* turtle_writer,
+  * @turtle_writer: Turtle writer object
+  * @uri: URI to write
+  *
+- * Write a URI to the Turtle writer.
++ * Write a Turtle-encoded URI to the Turtle writer.
+  *
++ * Return value: non-0 on failure
+  **/
+-void
++int
+ raptor_turtle_writer_reference(raptor_turtle_writer* turtle_writer, 
+                                raptor_uri* uri)
+ {
+   unsigned char* uri_str;
+-  size_t length;
++  size_t len;
+   
+-  uri_str = raptor_uri_to_relative_counted_uri_string(turtle_writer->base_uri, uri, &length);
++  uri_str = raptor_uri_to_relative_counted_uri_string(turtle_writer->base_uri, uri, &len);
+ 
+   raptor_iostream_write_byte('<', turtle_writer->iostr);
+-  if(uri_str)
+-    raptor_string_ntriples_write(uri_str, length, '>', turtle_writer->iostr);
++  if(uri_str) {
++    unsigned char* string = uri_str;
++    unsigned char c;
++
++    for(; (c=*string); string++, len--) {
++      int unichar_len;
++
++      /* Must escape #x00-#x20<>\"{}|^` */
++      if(c <= 0x20 ||
++         c == '<' || c == '>' || c == '\\' || c == '"' || 
++         c == '{' || c == '}' || c == '|' || c == '^' || c == '`') {
++        raptor_iostream_counted_string_write("\\u", 2, turtle_writer->iostr);
++        raptor_iostream_hexadecimal_write(c, 4, turtle_writer->iostr);
++        continue;
++      } else if(c < 0x80) {
++        raptor_iostream_write_byte(c, turtle_writer->iostr);
++        continue;
++      }
++
++      /* It is unicode */
++      unichar_len = raptor_unicode_utf8_string_get_char(string, len, NULL);
++      if(unichar_len < 0 || RAPTOR_GOOD_CAST(size_t, unichar_len) > len) {
++        /* UTF-8 encoding had an error or ended in the middle of a string */
++        RAPTOR_FREE(char*, uri_str);
++        return 1;
++      }
++      
++      raptor_iostream_counted_string_write(string, unichar_len,
++                                           turtle_writer->iostr);
++      unichar_len--; /* since loop does len-- */
++      string += unichar_len; len -= unichar_len;
++    }
++  }
+   raptor_iostream_write_byte('>', turtle_writer->iostr);
+ 
+   RAPTOR_FREE(char*, uri_str);
++  return 0;
+ }
+ 
+ 
+

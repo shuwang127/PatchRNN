@@ -1,0 +1,108 @@
+commit 950c07d421c04e5aae99973479f4f13131fb45e1
+Author: Michal Schmidt <mschmidt@redhat.com>
+Date:   Tue Feb 24 19:45:17 2015 +0100
+
+    journal: make skipping of exhausted journal files effective again
+    
+    Commit 668c965af "journal: skipping of exhausted journal files is bad if
+    direction changed" fixed a correctness issue, but it also significantly
+    limited the cases where the optimization that skips exhausted journal
+    files could apply.
+    As a result, some journalctl queries are much slower in v219 than in v218.
+    (e.g. queries where a "--since" cutoff should have quickly eliminated
+    older journal files from consideration, but didn't.)
+    
+    If already in the initial iteration find_location_with_matches() finds
+    no entry, the journal file's location is not updated. This is fine,
+    except that:
+     - We must update at least f->last_direction. The optimization relies on
+       it. Let's separate that from journal_file_save_location() and update
+       it immediately after the direction checks.
+     - The optimization was conditional on "f->current_offset > 0", but it
+       would always be 0 in this scenario. This check is unnecessary for the
+       optimization.
+
+diff --git a/src/journal/journal-file.c b/src/journal/journal-file.c
+index 9b4967fb3..9c9a5483b 100644
+--- a/src/journal/journal-file.c
++++ b/src/journal/journal-file.c
+@@ -2013,8 +2013,7 @@ void journal_file_reset_location(JournalFile *f) {
+         f->current_xor_hash = 0;
+ }
+ 
+-void journal_file_save_location(JournalFile *f, direction_t direction, Object *o, uint64_t offset) {
+-        f->last_direction = direction;
++void journal_file_save_location(JournalFile *f, Object *o, uint64_t offset) {
+         f->location_type = LOCATION_SEEK;
+         f->current_offset = offset;
+         f->current_seqnum = le64toh(o->entry.seqnum);
+diff --git a/src/journal/journal-file.h b/src/journal/journal-file.h
+index 2526e14d6..403c8f760 100644
+--- a/src/journal/journal-file.h
++++ b/src/journal/journal-file.h
+@@ -199,7 +199,7 @@ int journal_file_find_field_object(JournalFile *f, const void *field, uint64_t s
+ int journal_file_find_field_object_with_hash(JournalFile *f, const void *field, uint64_t size, uint64_t hash, Object **ret, uint64_t *offset);
+ 
+ void journal_file_reset_location(JournalFile *f);
+-void journal_file_save_location(JournalFile *f, direction_t direction, Object *o, uint64_t offset);
++void journal_file_save_location(JournalFile *f, Object *o, uint64_t offset);
+ int journal_file_compare_locations(JournalFile *af, JournalFile *bf);
+ int journal_file_next_entry(JournalFile *f, uint64_t p, direction_t direction, Object **ret, uint64_t *offset);
+ 
+diff --git a/src/journal/sd-journal.c b/src/journal/sd-journal.c
+index 94891cdf3..9b57e5945 100644
+--- a/src/journal/sd-journal.c
++++ b/src/journal/sd-journal.c
+@@ -723,13 +723,17 @@ static int next_beyond_location(sd_journal *j, JournalFile *f, direction_t direc
+         assert(j);
+         assert(f);
+ 
+-        if (f->last_direction == direction && f->current_offset > 0) {
+-                /* If we hit EOF before, recheck if any new entries arrived. */
+-                n_entries = le64toh(f->header->n_entries);
+-                if (f->location_type == LOCATION_TAIL && n_entries == f->last_n_entries)
+-                        return 0;
+-                f->last_n_entries = n_entries;
++        n_entries = le64toh(f->header->n_entries);
++
++        /* If we hit EOF before, we don't need to look into this file again
++         * unless direction changed or new entries appeared. */
++        if (f->last_direction == direction && f->location_type == LOCATION_TAIL &&
++            n_entries == f->last_n_entries)
++                return 0;
+ 
++        f->last_n_entries = n_entries;
++
++        if (f->last_direction == direction && f->current_offset > 0) {
+                 /* LOCATION_SEEK here means we did the work in a previous
+                  * iteration and the current location already points to a
+                  * candidate entry. */
+@@ -738,14 +742,16 @@ static int next_beyond_location(sd_journal *j, JournalFile *f, direction_t direc
+                         if (r <= 0)
+                                 return r;
+ 
+-                        journal_file_save_location(f, direction, c, cp);
++                        journal_file_save_location(f, c, cp);
+                 }
+         } else {
++                f->last_direction = direction;
++
+                 r = find_location_with_matches(j, f, direction, &c, &cp);
+                 if (r <= 0)
+                         return r;
+ 
+-                journal_file_save_location(f, direction, c, cp);
++                journal_file_save_location(f, c, cp);
+         }
+ 
+         /* OK, we found the spot, now let's advance until an entry
+@@ -773,7 +779,7 @@ static int next_beyond_location(sd_journal *j, JournalFile *f, direction_t direc
+                 if (r <= 0)
+                         return r;
+ 
+-                journal_file_save_location(f, direction, c, cp);
++                journal_file_save_location(f, c, cp);
+         }
+ }
+ 
+

@@ -1,0 +1,58 @@
+commit 8b9b0f3af73233595b6b1103ffb30242508a5e47
+Author: Junio C Hamano <junkio@cox.net>
+Date:   Wed Feb 8 21:49:47 2006 -0800
+
+    "Assume unchanged" git: do not set CE_VALID with --refresh
+    
+    When working with automatic assume-unchanged mode using
+    core.ignorestat, setting CE_VALID after --refresh makes things
+    more cumbersome to use.  Consider this scenario:
+    
+     (1) the working tree is on a filesystem with slow lstat(2).
+         The user sets core.ignorestat = true.
+    
+     (2) "git checkout" to switch to a different branch (or initial
+         checkout) updates all paths and the index starts out with
+         "all clean".
+    
+     (3) The user knows she wants to edit certain paths.  She uses
+         update-index --no-assume-unchanged (we could call it --edit;
+         the name is inmaterial) to mark these paths and starts
+         editing.
+    
+     (4) After editing half of the paths marked to be edited, she
+         runs "git status".  This runs "update-index --refresh" to
+         reduce the false hits from diff-files.
+    
+     (5) Now the other half of the paths, since she has not changed
+         them, are found to match the index, and CE_VALID is set on
+         them again.
+    
+    For this reason, this commit makes update-index --refresh not to
+    set CE_VALID even after the path without CE_VALID are verified
+    to be up to date.  The user still can run --really-refresh to
+    force lstat() to match the index entries to the reality.
+    
+    Signed-off-by: Junio C Hamano <junkio@cox.net>
+
+diff --git a/update-index.c b/update-index.c
+index 767fd4972..bb730509b 100644
+--- a/update-index.c
++++ b/update-index.c
+@@ -172,6 +172,15 @@ static struct cache_entry *refresh_entry(struct cache_entry *ce, int really)
+ 	memcpy(updated, ce, size);
+ 	fill_stat_cache_info(updated, &st);
+ 
++	/* In this case, if really is not set, we should leave
++	 * CE_VALID bit alone.  Otherwise, paths marked with
++	 * --no-assume-unchanged (i.e. things to be edited) will
++	 * reacquire CE_VALID bit automatically, which is not
++	 * really what we want.
++	 */
++	if (!really && assume_unchanged && !(ce->ce_flags & htons(CE_VALID)))
++		updated->ce_flags &= ~htons(CE_VALID);
++
+ 	return updated;
+ }
+ 
+

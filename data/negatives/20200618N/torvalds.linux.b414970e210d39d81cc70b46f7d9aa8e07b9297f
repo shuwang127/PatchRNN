@@ -1,0 +1,75 @@
+commit b414970e210d39d81cc70b46f7d9aa8e07b9297f
+Author: Ido Schimmel <idosch@mellanox.com>
+Date:   Fri Mar 10 08:53:34 2017 +0100
+
+    mlxsw: spectrum: Sanitize bridge's upper devices
+    
+    We're going to allow bridges stacked on top of port netdevs to be
+    enslaved to a VRF, but for now, only VLAN uppers of the VLAN-aware
+    bridge are supported.
+    
+    Sanitize any other bridge upper. This is consistent with the way we
+    sanitize port netdevs' uppers.
+    
+    Signed-off-by: Ido Schimmel <idosch@mellanox.com>
+    Signed-off-by: Jiri Pirko <jiri@mellanox.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/mellanox/mlxsw/spectrum.c b/drivers/net/ethernet/mellanox/mlxsw/spectrum.c
+index ae18067198dd..c27c8f83f7ac 100644
+--- a/drivers/net/ethernet/mellanox/mlxsw/spectrum.c
++++ b/drivers/net/ethernet/mellanox/mlxsw/spectrum.c
+@@ -4565,33 +4565,40 @@ static int mlxsw_sp_netdevice_bridge_event(struct net_device *br_dev,
+ 	struct netdev_notifier_changeupper_info *info;
+ 	struct net_device *upper_dev;
+ 	struct mlxsw_sp *mlxsw_sp;
+-	int err;
++	int err = 0;
+ 
+ 	mlxsw_sp = mlxsw_sp_lower_get(br_dev);
+ 	if (!mlxsw_sp)
+ 		return 0;
+-	if (br_dev != mlxsw_sp->master_bridge.dev)
+-		return 0;
+ 
+ 	info = ptr;
+ 
+ 	switch (event) {
+-	case NETDEV_CHANGEUPPER:
++	case NETDEV_PRECHANGEUPPER:
+ 		upper_dev = info->upper_dev;
+ 		if (!is_vlan_dev(upper_dev))
+-			break;
+-		if (info->linking) {
+-			err = mlxsw_sp_master_bridge_vlan_link(mlxsw_sp,
+-							       upper_dev);
+-			if (err)
+-				return err;
++			return -EINVAL;
++		if (is_vlan_dev(upper_dev) &&
++		    br_dev != mlxsw_sp->master_bridge.dev)
++			return -EINVAL;
++		break;
++	case NETDEV_CHANGEUPPER:
++		upper_dev = info->upper_dev;
++		if (is_vlan_dev(upper_dev)) {
++			if (info->linking)
++				err = mlxsw_sp_master_bridge_vlan_link(mlxsw_sp,
++								       upper_dev);
++			else
++				mlxsw_sp_master_bridge_vlan_unlink(mlxsw_sp,
++								   upper_dev);
+ 		} else {
+-			mlxsw_sp_master_bridge_vlan_unlink(mlxsw_sp, upper_dev);
++			err = -EINVAL;
++			WARN_ON(1);
+ 		}
+ 		break;
+ 	}
+ 
+-	return 0;
++	return err;
+ }
+ 
+ static u16 mlxsw_sp_avail_vfid_get(const struct mlxsw_sp *mlxsw_sp)
+

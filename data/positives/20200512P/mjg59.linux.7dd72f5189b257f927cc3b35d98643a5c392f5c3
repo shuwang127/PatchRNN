@@ -1,0 +1,51 @@
+commit 7dd72f5189b257f927cc3b35d98643a5c392f5c3
+Author: Jesper Juhl <jj@chaosbits.net>
+Date:   Sun Jan 8 22:44:19 2012 +0100
+
+    drivers/scsi/aacraid/commctrl.c: fix mem leak in aac_send_raw_srb()
+    
+    We leak in drivers/scsi/aacraid/commctrl.c::aac_send_raw_srb() :
+    
+    We allocate memory:
+    
+            ...
+            struct user_sgmap* usg;
+            usg = kmalloc(actual_fibsize - sizeof(struct aac_srb)
+              + sizeof(struct sgmap), GFP_KERNEL);
+    
+    and then neglect to free it:
+    
+            ...
+            for (i = 0; i < usg->count; i++) {
+                    u64 addr;
+                    void* p;
+                    if (usg->sg[i].count >
+                        ((dev->adapter_info.options &
+                         AAC_OPT_NEW_COMM) ?
+                          (dev->scsi_host_ptr->max_sectors << 9) :
+                          65536)) {
+                            rcode = -EINVAL;
+                            goto cleanup;
+            ... this 'goto' makes 'usg' go out of scope and leak the memory we
+                allocated.
+    
+    Other exits properly kfree(usg), it's just here it is neglected.
+    
+    Signed-off-by: Jesper Juhl <jj@chaosbits.net>
+    Cc: James Bottomley <James.Bottomley@HansenPartnership.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/scsi/aacraid/commctrl.c b/drivers/scsi/aacraid/commctrl.c
+index 8a0b33033177..0bd38da4ada0 100644
+--- a/drivers/scsi/aacraid/commctrl.c
++++ b/drivers/scsi/aacraid/commctrl.c
+@@ -650,6 +650,7 @@ static int aac_send_raw_srb(struct aac_dev* dev, void __user * arg)
+ 				     AAC_OPT_NEW_COMM) ?
+ 				      (dev->scsi_host_ptr->max_sectors << 9) :
+ 				      65536)) {
++					kfree(usg);
+ 					rcode = -EINVAL;
+ 					goto cleanup;
+ 				}
+

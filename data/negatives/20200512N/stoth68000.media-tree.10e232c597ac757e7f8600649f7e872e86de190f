@@ -1,0 +1,79 @@
+commit 10e232c597ac757e7f8600649f7e872e86de190f
+Author: Ming Lei <ming.lei@canonical.com>
+Date:   Fri Jun 28 09:38:12 2013 +0800
+
+    USB: check sg buffer size in usb_submit_urb
+    
+    USB spec stats that short packet can only appear at the end
+    of transfer. Because lost of HC(EHCI/UHCI/OHCI/...) can't
+    build a full packet from discontinuous buffers, we introduce
+    the limit in usb_submit_urb() to avoid such kind of bad sg buffers
+    coming from driver.
+    
+    The limit might be a bit strict:
+            - platform has iommu to do sg list mapping
+            - some host controllers may support to build full packet from
+            discontinuous buffers.
+    
+    But considered that most of HCs don't support that, and driver
+    need work well or keep consistent on different HCs and ARCHs, we
+    have to introduce the limit.
+    
+    Currently, only usbtest is reported to pass such sg buffers to HC,
+    and other users(mass storage, usbfs) don't have the problem.
+    
+    We don't check it on USB wireless device, because:
+            - wireless devices can't be attached to common USB
+              bus(EHCI/UHCI/OHCI/...)
+            - the max packet size of endpoint may be odd, and often can't
+            devide 4KB which is a typical usage in usb mass storage application
+    
+    Reported-by: Konstantin Filatov <kfilatov@parallels.com>
+    Reported-by: Denis V. Lunev <den@openvz.org>
+    Cc: Felipe Balbi <balbi@ti.com>
+    Acked-by: Alan Stern <stern@rowland.harvard.edu>
+    Signed-off-by: Ming Lei <ming.lei@canonical.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/usb/core/urb.c b/drivers/usb/core/urb.c
+index 16927fa88fbd..e75115a04a2e 100644
+--- a/drivers/usb/core/urb.c
++++ b/drivers/usb/core/urb.c
+@@ -7,6 +7,7 @@
+ #include <linux/usb.h>
+ #include <linux/wait.h>
+ #include <linux/usb/hcd.h>
++#include <linux/scatterlist.h>
+ 
+ #define to_urb(d) container_of(d, struct urb, kref)
+ 
+@@ -413,6 +414,13 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
+ 			urb->iso_frame_desc[n].status = -EXDEV;
+ 			urb->iso_frame_desc[n].actual_length = 0;
+ 		}
++	} else if (dev->speed != USB_SPEED_WIRELESS && urb->num_sgs) {
++		struct scatterlist *sg;
++		int i;
++
++		for_each_sg(urb->sg, sg, urb->num_sgs - 1, i)
++			if (sg->length % max)
++				return -EINVAL;
+ 	}
+ 
+ 	/* the I/O buffer must be mapped/unmapped, except when length=0 */
+diff --git a/include/linux/usb.h b/include/linux/usb.h
+index a232b7ece1f6..e99b2a114af4 100644
+--- a/include/linux/usb.h
++++ b/include/linux/usb.h
+@@ -1258,7 +1258,9 @@ typedef void (*usb_complete_t)(struct urb *);
+  *	the device driver is saying that it provided this DMA address,
+  *	which the host controller driver should use in preference to the
+  *	transfer_buffer.
+- * @sg: scatter gather buffer list
++ * @sg: scatter gather buffer list, the buffer size of each element in
++ * 	the list (except the last) must be divisible by the endpoint's
++ * 	max packet size
+  * @num_mapped_sgs: (internal) number of mapped sg entries
+  * @num_sgs: number of entries in the sg list
+  * @transfer_buffer_length: How big is transfer_buffer.  The transfer may
+

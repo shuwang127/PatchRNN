@@ -1,0 +1,90 @@
+commit 4ebc1c61d6185604c97fd0b0355ab668052044ab
+Author: Tejun Heo <tj@kernel.org>
+Date:   Tue Aug 18 14:54:57 2015 -0700
+
+    cfq-iosched: simplify control flow in cfq_get_queue()
+    
+    cfq_get_queue()'s control flow looks like the following.
+    
+            async_cfqq = NULL;
+            cfqq = NULL;
+    
+            if (!is_sync) {
+                    ...
+                    async_cfqq = ...;
+                    cfqq = *async_cfqq;
+            }
+    
+            if (!cfqq)
+                    cfqq = ...;
+    
+            if (!is_sync && !(*async_cfqq))
+                    ...;
+    
+    The only thing the local variable init, the second if, and the
+    async_cfqq test in the third if achieves is to skip cfqq creation and
+    installation if *async_cfqq was already non-NULL.  This is needlessly
+    complicated with different tests examining the same condition.
+    Simplify it to the following.
+    
+            if (!is_sync) {
+                    ...
+                    async_cfqq = ...;
+                    cfqq = *async_cfqq;
+                    if (cfqq)
+                            goto out;
+            }
+    
+            cfqq = ...;
+    
+            if (!is_sync)
+                    ...;
+     out:
+    
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Acked-by: Jeff Moyer <jmoyer@redhat.com>
+    Cc: Vivek Goyal <vgoyal@redhat.com>
+    Cc: Arianna Avanzini <avanzini.arianna@gmail.com>
+    Signed-off-by: Jens Axboe <axboe@fb.com>
+
+diff --git a/block/cfq-iosched.c b/block/cfq-iosched.c
+index c62bb2e650b8..e91093d0c0eb 100644
+--- a/block/cfq-iosched.c
++++ b/block/cfq-iosched.c
+@@ -3731,8 +3731,8 @@ cfq_get_queue(struct cfq_data *cfqd, bool is_sync, struct cfq_io_cq *cic,
+ {
+ 	int ioprio_class = IOPRIO_PRIO_CLASS(cic->ioprio);
+ 	int ioprio = IOPRIO_PRIO_DATA(cic->ioprio);
+-	struct cfq_queue **async_cfqq = NULL;
+-	struct cfq_queue *cfqq = NULL;
++	struct cfq_queue **async_cfqq;
++	struct cfq_queue *cfqq;
+ 
+ 	if (!is_sync) {
+ 		if (!ioprio_valid(cic->ioprio)) {
+@@ -3742,19 +3742,20 @@ cfq_get_queue(struct cfq_data *cfqd, bool is_sync, struct cfq_io_cq *cic,
+ 		}
+ 		async_cfqq = cfq_async_queue_prio(cfqd, ioprio_class, ioprio);
+ 		cfqq = *async_cfqq;
++		if (cfqq)
++			goto out;
+ 	}
+ 
+-	if (!cfqq)
+-		cfqq = cfq_find_alloc_queue(cfqd, is_sync, cic, bio, gfp_mask);
++	cfqq = cfq_find_alloc_queue(cfqd, is_sync, cic, bio, gfp_mask);
+ 
+ 	/*
+ 	 * pin the queue now that it's allocated, scheduler exit will prune it
+ 	 */
+-	if (!is_sync && !(*async_cfqq)) {
++	if (!is_sync) {
+ 		cfqq->ref++;
+ 		*async_cfqq = cfqq;
+ 	}
+-
++out:
+ 	cfqq->ref++;
+ 	return cfqq;
+ }
+

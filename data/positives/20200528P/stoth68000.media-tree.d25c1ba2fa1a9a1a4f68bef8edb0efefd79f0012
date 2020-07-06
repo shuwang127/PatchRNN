@@ -1,0 +1,48 @@
+commit d25c1ba2fa1a9a1a4f68bef8edb0efefd79f0012
+Author: Loic Prylli <loic@myri.com>
+Date:   Fri Jul 6 02:39:52 2007 -0700
+
+    MTRR: Fix race causing set_mtrr to go into infinite loop
+    
+    Processors synchronization in set_mtrr requires the .gate field to be set
+    after .count field is properly initialized.  Without an explicit barrier,
+    the compiler was reordering those memory stores.  That was sometimes
+    causing a processor (in ipi_handler) to see the .gate change and decrement
+    .count before the latter is set by set_mtrr() (which then hangs in a
+    infinite loop with irqs disabled).
+    
+    Signed-off-by: Loic Prylli <loic@myri.com>
+    Cc: Andi Kleen <ak@suse.de>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/arch/i386/kernel/cpu/mtrr/main.c b/arch/i386/kernel/cpu/mtrr/main.c
+index 55b005152a11..75dc6d5214bc 100644
+--- a/arch/i386/kernel/cpu/mtrr/main.c
++++ b/arch/i386/kernel/cpu/mtrr/main.c
+@@ -229,6 +229,8 @@ static void set_mtrr(unsigned int reg, unsigned long base,
+ 	data.smp_size = size;
+ 	data.smp_type = type;
+ 	atomic_set(&data.count, num_booting_cpus() - 1);
++	/* make sure data.count is visible before unleashing other CPUs */
++	smp_wmb();
+ 	atomic_set(&data.gate,0);
+ 
+ 	/*  Start the ball rolling on other CPUs  */
+@@ -242,6 +244,7 @@ static void set_mtrr(unsigned int reg, unsigned long base,
+ 
+ 	/* ok, reset count and toggle gate */
+ 	atomic_set(&data.count, num_booting_cpus() - 1);
++	smp_wmb();
+ 	atomic_set(&data.gate,1);
+ 
+ 	/* do our MTRR business */
+@@ -260,6 +263,7 @@ static void set_mtrr(unsigned int reg, unsigned long base,
+ 		cpu_relax();
+ 
+ 	atomic_set(&data.count, num_booting_cpus() - 1);
++	smp_wmb();
+ 	atomic_set(&data.gate,0);
+ 
+ 	/*
+

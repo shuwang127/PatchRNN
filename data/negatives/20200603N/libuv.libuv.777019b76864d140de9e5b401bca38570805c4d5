@@ -1,0 +1,106 @@
+commit 777019b76864d140de9e5b401bca38570805c4d5
+Author: Ben Noordhuis <info@bnoordhuis.nl>
+Date:   Fri Oct 18 16:23:57 2013 +0200
+
+    unix: make uv_tty_reset_mode() async signal-safe
+    
+    Make it possible to call uv_tty_reset_mode() from inside a signal
+    handler.  The primary motivation is to make it possible to restore
+    the TTY from inside a SIGINT or SIGTERM signal handler.
+    
+    Fixes #954.
+
+diff --git a/include/uv.h b/include/uv.h
+index 379c538a..16f847c2 100644
+--- a/include/uv.h
++++ b/include/uv.h
+@@ -1074,8 +1074,11 @@ UV_EXTERN int uv_tty_set_mode(uv_tty_t*, int mode);
+ /*
+  * To be called when the program exits. Resets TTY settings to default
+  * values for the next process to take over.
++ *
++ * This function is async signal-safe on UNIX platforms but can fail with error
++ * code UV_EBUSY if you call it when execution is inside uv_tty_set_mode().
+  */
+-UV_EXTERN void uv_tty_reset_mode(void);
++UV_EXTERN int uv_tty_reset_mode(void);
+ 
+ /*
+  * Gets the current Window size. On success zero is returned.
+diff --git a/src/unix/tty.c b/src/unix/tty.c
+index 2fe57476..ca9459dd 100644
+--- a/src/unix/tty.c
++++ b/src/unix/tty.c
+@@ -21,6 +21,7 @@
+ 
+ #include "uv.h"
+ #include "internal.h"
++#include "spinlock.h"
+ 
+ #include <assert.h>
+ #include <unistd.h>
+@@ -28,9 +29,9 @@
+ #include <errno.h>
+ #include <sys/ioctl.h>
+ 
+-
+ static int orig_termios_fd = -1;
+ static struct termios orig_termios;
++static uv_spinlock_t termios_spinlock = UV_SPINLOCK_INITIALIZER;
+ 
+ 
+ int uv_tty_init(uv_loop_t* loop, uv_tty_t* tty, int fd, int readable) {
+@@ -69,10 +70,12 @@ int uv_tty_set_mode(uv_tty_t* tty, int mode) {
+       return -errno;
+ 
+     /* This is used for uv_tty_reset_mode() */
++    uv_spinlock_lock(&termios_spinlock);
+     if (orig_termios_fd == -1) {
+       orig_termios = tty->orig_termios;
+       orig_termios_fd = fd;
+     }
++    uv_spinlock_unlock(&termios_spinlock);
+ 
+     raw = tty->orig_termios;
+     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+@@ -161,8 +164,21 @@ uv_handle_type uv_guess_handle(uv_file file) {
+ }
+ 
+ 
+-void uv_tty_reset_mode(void) {
+-  if (orig_termios_fd >= 0) {
+-    tcsetattr(orig_termios_fd, TCSANOW, &orig_termios);
+-  }
++/* This function is async signal-safe, meaning that it's safe to call from
++ * inside a signal handler _unless_ execution was inside uv_tty_set_mode()'s
++ * critical section when the signal was raised.
++ */
++int uv_tty_reset_mode(void) {
++  int err;
++
++  if (!uv_spinlock_trylock(&termios_spinlock))
++    return -EBUSY;  /* In uv_tty_set_mode(). */
++
++  err = 0;
++  if (orig_termios_fd != -1)
++    if (tcsetattr(orig_termios_fd, TCSANOW, &orig_termios))
++      err = -errno;
++
++  uv_spinlock_unlock(&termios_spinlock);
++  return err;
+ }
+diff --git a/src/win/tty.c b/src/win/tty.c
+index d380cd0b..4f9cfa56 100644
+--- a/src/win/tty.c
++++ b/src/win/tty.c
+@@ -1866,7 +1866,7 @@ void uv_process_tty_connect_req(uv_loop_t* loop, uv_tty_t* handle,
+ }
+ 
+ 
+-void uv_tty_reset_mode(void) {
++int uv_tty_reset_mode(void) {
+   /* Not necessary to do anything. */
+-  ;
++  return 0;
+ }
+

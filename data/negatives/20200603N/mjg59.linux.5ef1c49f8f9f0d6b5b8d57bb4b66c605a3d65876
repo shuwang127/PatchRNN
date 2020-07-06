@@ -1,0 +1,40 @@
+commit 5ef1c49f8f9f0d6b5b8d57bb4b66c605a3d65876
+Author: Zach Brown <zach.brown@oracle.com>
+Date:   Sun Nov 13 16:07:35 2005 -0800
+
+    [PATCH] aio: don't ref kioctx after decref in put_ioctx
+    
+    put_ioctx's refcount debugging was doing an atomic_read after dropping its
+    reference when it wasn't the last ref, leaving a tiny race for another freeing
+    thread to sneak into.  This shifts the debugging before the ops, uses BUG_ON,
+    and reformats the defines a little.  Sadly, moving to inlines increased the
+    code size but this change decreases the code size by a whole 9 bytes :)
+    
+    Signed-off-by: Zach Brown <zach.brown@oracle.com>
+    Cc: Benjamin LaHaise <bcrl@kvack.org>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/include/linux/aio.h b/include/linux/aio.h
+index 9e0ae8711276..49fd37629ee4 100644
+--- a/include/linux/aio.h
++++ b/include/linux/aio.h
+@@ -210,8 +210,15 @@ struct kioctx *lookup_ioctx(unsigned long ctx_id);
+ int FASTCALL(io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
+ 				  struct iocb *iocb));
+ 
+-#define get_ioctx(kioctx)	do { if (unlikely(atomic_read(&(kioctx)->users) <= 0)) BUG(); atomic_inc(&(kioctx)->users); } while (0)
+-#define put_ioctx(kioctx)	do { if (unlikely(atomic_dec_and_test(&(kioctx)->users))) __put_ioctx(kioctx); else if (unlikely(atomic_read(&(kioctx)->users) < 0)) BUG(); } while (0)
++#define get_ioctx(kioctx) do {						\
++	BUG_ON(unlikely(atomic_read(&(kioctx)->users) <= 0));		\
++	atomic_inc(&(kioctx)->users);					\
++} while (0)
++#define put_ioctx(kioctx) do {						\
++	BUG_ON(unlikely(atomic_read(&(kioctx)->users) <= 0));		\
++	if (unlikely(atomic_dec_and_test(&(kioctx)->users))) 		\
++		__put_ioctx(kioctx);					\
++} while (0)
+ 
+ #define in_aio() !is_sync_wait(current->io_wait)
+ /* may be used for debugging */
+

@@ -1,0 +1,117 @@
+commit 5a71978e4b6ee6a01bc6aab926a3571055123029
+Author: Gavin Shan <shangw@linux.vnet.ibm.com>
+Date:   Thu Jun 20 13:21:01 2013 +0800
+
+    powerpc/eeh: Trace time on first error for PE
+    
+    We're not expecting that one specific PE got frozen for over 5
+    times in last hour. Otherwise, the PE will be removed from the
+    system upon newly coming EEH errors. The patch introduces time
+    stamp to trace the first error on specific PE in last hour and
+    function to update that accordingly. Besides, the time stamp
+    is recovered during PE hotplug path as we did for frozen count.
+    
+    Signed-off-by: Gavin Shan <shangw@linux.vnet.ibm.com>
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+
+diff --git a/arch/powerpc/include/asm/eeh.h b/arch/powerpc/include/asm/eeh.h
+index beec7883d93e..e1109fd87ff4 100644
+--- a/arch/powerpc/include/asm/eeh.h
++++ b/arch/powerpc/include/asm/eeh.h
+@@ -24,6 +24,7 @@
+ #include <linux/init.h>
+ #include <linux/list.h>
+ #include <linux/string.h>
++#include <linux/time.h>
+ 
+ struct pci_dev;
+ struct pci_bus;
+@@ -62,6 +63,7 @@ struct eeh_pe {
+ 	struct pci_bus *bus;		/* Top PCI bus for bus PE	*/
+ 	int check_count;		/* Times of ignored error	*/
+ 	int freeze_count;		/* Times of froze up		*/
++	struct timeval tstamp;		/* Time on first-time freeze	*/
+ 	int false_positives;		/* Times of reported #ff's	*/
+ 	struct eeh_pe *parent;		/* Parent PE			*/
+ 	struct list_head child_list;	/* Link PE to the child list	*/
+@@ -190,6 +192,7 @@ struct eeh_pe *eeh_phb_pe_get(struct pci_controller *phb);
+ struct eeh_pe *eeh_pe_get(struct eeh_dev *edev);
+ int eeh_add_to_parent_pe(struct eeh_dev *edev);
+ int eeh_rmv_from_parent_pe(struct eeh_dev *edev, int purge_pe);
++void eeh_pe_update_time_stamp(struct eeh_pe *pe);
+ void *eeh_pe_dev_traverse(struct eeh_pe *root,
+ 		eeh_traverse_func fn, void *flag);
+ void eeh_pe_restore_bars(struct eeh_pe *pe);
+diff --git a/arch/powerpc/kernel/eeh_driver.c b/arch/powerpc/kernel/eeh_driver.c
+index fb927af9a9ef..678bc6cddf82 100644
+--- a/arch/powerpc/kernel/eeh_driver.c
++++ b/arch/powerpc/kernel/eeh_driver.c
+@@ -349,10 +349,12 @@ static void *eeh_report_failure(void *data, void *userdata)
+  */
+ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus)
+ {
++	struct timeval tstamp;
+ 	int cnt, rc;
+ 
+ 	/* pcibios will clear the counter; save the value */
+ 	cnt = pe->freeze_count;
++	tstamp = pe->tstamp;
+ 
+ 	/*
+ 	 * We don't remove the corresponding PE instances because
+@@ -385,6 +387,8 @@ static int eeh_reset_device(struct eeh_pe *pe, struct pci_bus *bus)
+ 		ssleep(5);
+ 		pcibios_add_pci_devices(bus);
+ 	}
++
++	pe->tstamp = tstamp;
+ 	pe->freeze_count = cnt;
+ 
+ 	return 0;
+@@ -425,6 +429,7 @@ void eeh_handle_event(struct eeh_pe *pe)
+ 		return;
+ 	}
+ 
++	eeh_pe_update_time_stamp(pe);
+ 	pe->freeze_count++;
+ 	if (pe->freeze_count > EEH_MAX_ALLOWED_FREEZES)
+ 		goto excess_failures;
+diff --git a/arch/powerpc/kernel/eeh_pe.c b/arch/powerpc/kernel/eeh_pe.c
+index c96366758acf..ae75722c0583 100644
+--- a/arch/powerpc/kernel/eeh_pe.c
++++ b/arch/powerpc/kernel/eeh_pe.c
+@@ -481,6 +481,33 @@ int eeh_rmv_from_parent_pe(struct eeh_dev *edev, int purge_pe)
+ 	return 0;
+ }
+ 
++/**
++ * eeh_pe_update_time_stamp - Update PE's frozen time stamp
++ * @pe: EEH PE
++ *
++ * We have time stamp for each PE to trace its time of getting
++ * frozen in last hour. The function should be called to update
++ * the time stamp on first error of the specific PE. On the other
++ * handle, we needn't account for errors happened in last hour.
++ */
++void eeh_pe_update_time_stamp(struct eeh_pe *pe)
++{
++	struct timeval tstamp;
++
++	if (!pe) return;
++
++	if (pe->freeze_count <= 0) {
++		pe->freeze_count = 0;
++		do_gettimeofday(&pe->tstamp);
++	} else {
++		do_gettimeofday(&tstamp);
++		if (tstamp.tv_sec - pe->tstamp.tv_sec > 3600) {
++			pe->tstamp = tstamp;
++			pe->freeze_count = 0;
++		}
++	}
++}
++
+ /**
+  * __eeh_pe_state_mark - Mark the state for the PE
+  * @data: EEH PE
+

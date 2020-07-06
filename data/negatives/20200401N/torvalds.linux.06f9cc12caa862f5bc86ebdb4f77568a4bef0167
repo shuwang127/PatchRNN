@@ -1,0 +1,70 @@
+commit 06f9cc12caa862f5bc86ebdb4f77568a4bef0167
+Author: J. Bruce Fields <bfields@redhat.com>
+Date:   Wed Apr 2 14:59:08 2014 -0400
+
+    nfsd4: don't create unnecessary mask acl
+    
+    Any setattr of the ACL attribute, even if it sets just the basic 3-ACE
+    ACL exactly as it was returned from a file with only mode bits, creates
+    a mask entry, and it is only the mask, not group, entry that is changed
+    by subsequent modifications of the mode bits.
+    
+    So, for example, it's surprising that GROUP@ is left without read or
+    write permissions after a chmod 0666:
+    
+      touch test
+      chmod 0600 test
+      nfs4_getfacl test
+            A::OWNER@:rwatTcCy
+            A::GROUP@:tcy
+            A::EVERYONE@:tcy
+      nfs4_getfacl test | nfs4_setfacl -S - test #
+      chmod 0666 test
+      nfs4_getfacl test
+            A::OWNER@:rwatTcCy
+            A::GROUP@:tcy
+            D::GROUP@:rwa
+            A::EVERYONE@:rwatcy
+    
+    So, let's stop creating the unnecessary mask ACL.
+    
+    A mask will still be created on non-trivial ACLs (ACLs with actual named
+    user and group ACEs), so the odd posix-acl behavior of chmod modifying
+    only the mask will still be left in that case; but that's consistent
+    with local behavior.
+    
+    Reported-by: Soumya Koduri <skoduri@redhat.com>
+    Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+
+diff --git a/fs/nfsd/nfs4acl.c b/fs/nfsd/nfs4acl.c
+index d190e33d0ec2..6f3f392d48af 100644
+--- a/fs/nfsd/nfs4acl.c
++++ b/fs/nfsd/nfs4acl.c
+@@ -542,7 +542,10 @@ posix_state_to_acl(struct posix_acl_state *state, unsigned int flags)
+ 	 * up setting a 3-element effective posix ACL with all
+ 	 * permissions zero.
+ 	 */
+-	nace = 4 + state->users->n + state->groups->n;
++	if (!state->users->n && !state->groups->n)
++		nace = 3;
++	else /* Note we also include a MASK ACE in this case: */
++		nace = 4 + state->users->n + state->groups->n;
+ 	pacl = posix_acl_alloc(nace, GFP_KERNEL);
+ 	if (!pacl)
+ 		return ERR_PTR(-ENOMEM);
+@@ -586,9 +589,11 @@ posix_state_to_acl(struct posix_acl_state *state, unsigned int flags)
+ 		add_to_mask(state, &state->groups->aces[i].perms);
+ 	}
+ 
+-	pace++;
+-	pace->e_tag = ACL_MASK;
+-	low_mode_from_nfs4(state->mask.allow, &pace->e_perm, flags);
++	if (!state->users->n && !state->groups->n) {
++		pace++;
++		pace->e_tag = ACL_MASK;
++		low_mode_from_nfs4(state->mask.allow, &pace->e_perm, flags);
++	}
+ 
+ 	pace++;
+ 	pace->e_tag = ACL_OTHER;
+

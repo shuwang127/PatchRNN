@@ -1,0 +1,104 @@
+commit 49c370b74df11832239408f68119bd0a0a19a6e8
+Author: Colin Petrie <cpetrie@ripe.net>
+Date:   Wed May 11 11:56:58 2016 +0200
+
+    bgpd: fix MRT table dumps for locally-originated routes
+    
+    I've been working on a small patch to correct an issue in the BGP MRT
+    table dump code. It's a quick'n'easy fix initially, and I'd appreciate
+    any feedback on making it better :)
+    
+    Issue:
+    
+    When the BGP table dump code runs, it generates the peer_index_table.
+    This walks the list of peers, and dumps out their IP, ASN, address
+    family, etc. It also sets the peer index number in the peer struct.
+    
+    Then the code walks the RIB, and for each prefix, writes out RIB
+    entries, that refer to the peer index number.
+    
+    However, when it finds prefixes that are locally originated, the
+    associated peer is the 'self' peer, which wasn't in the list of peers,
+    never gets an index number assigned, but because it is calloc'd, the
+    index number is set to 0.
+    
+    End result: locally-originated routes are associated with whichever peer
+    happens to be first in the list of remote peers in the index table :)
+    
+    Example (from one of our route collectors) - these are two of our
+    originated prefixes (bgpdump output):
+    TABLE_DUMP2|1457568002|B|12.0.1.63|7018|84.205.80.0/24||IGP|193.0.4.28|0|0||NAG|64512
+    10.255.255.255|
+    TABLE_DUMP2|1457568006|B|12.0.1.63|7018|2001:7fb:ff00::/48||IGP|::|0|0||NAG||
+    
+    The prefixes are announced by us (note it has an empty AS PATH (the
+    field after the prefix)) but also looks like it was received from AS7018
+    (12.0.1.63). In fact, the AS7018 peer just happens to be the first peer
+    in the index table.
+    
+    Fix:
+    
+    The simplest fix (which is also the method adopted by both OpenBGPd and
+    the BIRD mrtdump branch) is to create an empty placeholder 'peer' at the
+    start of the peer index table, for all the routes which are locally
+    originated to refer to.
+    
+    I've attached a patch for this.
+    Here's a resulting bgpdump output after the patch:
+    TABLE_DUMP2|1458828539|B|0.0.0.0|0|93.175.150.0/24||IGP|0.0.0.0|0|0||NAG||
+    Now it is more obvious that the prefix is locally originated.
+    
+    There are more complicated potential ways of fixing it
+    1) skip the local routes when dumping the RIB. This leads to questions
+    about what an MRT table dump *should* contain :)
+    2) include the 'self' peer in the list of peers used to generate the
+    index table.
+    etc etc.
+    
+    But I'm quite happy with my 'create a fake peer, and associate local
+    routes with it' method :)
+    
+    Your thoughts and feedback are welcome!
+    
+    Regards,
+    
+    Colin Petrie
+    Systems Engineer
+    RIPE NCC RIS Project
+    Tested-by: NetDEF CI System <cisystem@netdef.org>
+
+diff --git a/bgpd/bgp_dump.c b/bgpd/bgp_dump.c
+index 1fa0e658..da0c2ac3 100644
+--- a/bgpd/bgp_dump.c
++++ b/bgpd/bgp_dump.c
+@@ -226,7 +226,7 @@ bgp_dump_routes_index_table(struct bgp *bgp)
+ {
+   struct peer *peer;
+   struct listnode *node;
+-  uint16_t peerno = 0;
++  uint16_t peerno = 1;
+   struct stream *obuf;
+ 
+   obuf = bgp_dump_obuf;
+@@ -250,8 +250,18 @@ bgp_dump_routes_index_table(struct bgp *bgp)
+       stream_putw(obuf, 0);
+     }
+ 
+-  /* Peer count */
+-  stream_putw (obuf, listcount(bgp->peer));
++  /* Peer count ( plus one extra internal peer ) */
++  stream_putw (obuf, listcount(bgp->peer) + 1);
++
++  /* Populate fake peer at index 0, for locally originated routes */
++  /* Peer type (IPv4) */
++  stream_putc (obuf, TABLE_DUMP_V2_PEER_INDEX_TABLE_AS4+TABLE_DUMP_V2_PEER_INDEX_TABLE_IP);
++  /* Peer BGP ID (0.0.0.0) */
++  stream_putl (obuf, 0);
++  /* Peer IP address (0.0.0.0) */
++  stream_putl (obuf, 0);
++  /* Peer ASN (0) */
++  stream_putl (obuf, 0);
+ 
+   /* Walk down all peers */
+   for(ALL_LIST_ELEMENTS_RO (bgp->peer, node, peer))
+

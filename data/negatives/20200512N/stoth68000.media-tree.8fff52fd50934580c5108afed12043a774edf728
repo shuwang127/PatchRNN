@@ -1,0 +1,141 @@
+commit 8fff52fd50934580c5108afed12043a774edf728
+Author: Viresh Kumar <viresh.kumar@linaro.org>
+Date:   Fri Apr 3 09:04:04 2015 +0530
+
+    clockevents: Introduce CLOCK_EVT_STATE_ONESHOT_STOPPED state
+    
+    When no timers/hrtimers are pending, the expiry time is set to a
+    special value: 'KTIME_MAX'. This normally happens with
+    NO_HZ_{IDLE|FULL} in both LOWRES/HIGHRES modes.
+    
+    When 'expiry == KTIME_MAX', we either cancel the 'tick-sched' hrtimer
+    (NOHZ_MODE_HIGHRES) or skip reprogramming clockevent device
+    (NOHZ_MODE_LOWRES).  But, the clockevent device is already
+    reprogrammed from the tick-handler for next tick.
+    
+    As the clock event device is programmed in ONESHOT mode it will at
+    least fire one more time (unnecessarily). Timers on few
+    implementations (like arm_arch_timer, etc.) only support PERIODIC mode
+    and their drivers emulate ONESHOT over that. Which means that on these
+    platforms we will get spurious interrupts periodically (at last
+    programmed interval rate, normally tick rate).
+    
+    In order to avoid spurious interrupts, the clockevent device should be
+    stopped or its interrupts should be masked.
+    
+    A simple (yet hacky) solution to get this fixed could be: update
+    hrtimer_force_reprogram() to always reprogram clockevent device and
+    update clockevent drivers to STOP generating events (or delay it to
+    max time) when 'expires' is set to KTIME_MAX. But the drawback here is
+    that every clockevent driver has to be hacked for this particular case
+    and its very easy for new ones to miss this.
+    
+    However, Thomas suggested to add an optional state ONESHOT_STOPPED to
+    solve this problem: lkml.org/lkml/2014/5/9/508.
+    
+    This patch adds support for ONESHOT_STOPPED state in clockevents
+    core. It will only be available to drivers that implement the
+    state-specific callbacks instead of the legacy ->set_mode() callback.
+    
+    Signed-off-by: Viresh Kumar <viresh.kumar@linaro.org>
+    Reviewed-by: Preeti U. Murthy <preeti@linux.vnet.ibm.com>
+    Cc: linaro-kernel@lists.linaro.org
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Kevin Hilman <khilman@linaro.org>
+    Cc: Daniel Lezcano <daniel.lezcano@linaro.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Link: http://lkml.kernel.org/r/b8b383a03ac07b13312c16850b5106b82e4245b5.1428031396.git.viresh.kumar@linaro.org
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/include/linux/clockchips.h b/include/linux/clockchips.h
+index 96c280b2c263..271fa4c8eb29 100644
+--- a/include/linux/clockchips.h
++++ b/include/linux/clockchips.h
+@@ -37,12 +37,15 @@ enum clock_event_mode {
+  *		reached from DETACHED or SHUTDOWN.
+  * ONESHOT:	Device is programmed to generate event only once. Can be reached
+  *		from DETACHED or SHUTDOWN.
++ * ONESHOT_STOPPED: Device was programmed in ONESHOT mode and is temporarily
++ *		    stopped.
+  */
+ enum clock_event_state {
+ 	CLOCK_EVT_STATE_DETACHED,
+ 	CLOCK_EVT_STATE_SHUTDOWN,
+ 	CLOCK_EVT_STATE_PERIODIC,
+ 	CLOCK_EVT_STATE_ONESHOT,
++	CLOCK_EVT_STATE_ONESHOT_STOPPED,
+ };
+ 
+ /*
+@@ -90,6 +93,7 @@ enum clock_event_state {
+  * @set_mode:		legacy set mode function, only for modes <= CLOCK_EVT_MODE_RESUME.
+  * @set_state_periodic:	switch state to periodic, if !set_mode
+  * @set_state_oneshot:	switch state to oneshot, if !set_mode
++ * @set_state_oneshot_stopped: switch state to oneshot_stopped, if !set_mode
+  * @set_state_shutdown:	switch state to shutdown, if !set_mode
+  * @tick_resume:	resume clkevt device, if !set_mode
+  * @broadcast:		function to broadcast events
+@@ -121,11 +125,12 @@ struct clock_event_device {
+ 	 * State transition callback(s): Only one of the two groups should be
+ 	 * defined:
+ 	 * - set_mode(), only for modes <= CLOCK_EVT_MODE_RESUME.
+-	 * - set_state_{shutdown|periodic|oneshot}(), tick_resume().
++	 * - set_state_{shutdown|periodic|oneshot|oneshot_stopped}(), tick_resume().
+ 	 */
+ 	void			(*set_mode)(enum clock_event_mode mode, struct clock_event_device *);
+ 	int			(*set_state_periodic)(struct clock_event_device *);
+ 	int			(*set_state_oneshot)(struct clock_event_device *);
++	int			(*set_state_oneshot_stopped)(struct clock_event_device *);
+ 	int			(*set_state_shutdown)(struct clock_event_device *);
+ 	int			(*tick_resume)(struct clock_event_device *);
+ 
+diff --git a/kernel/time/clockevents.c b/kernel/time/clockevents.c
+index 637a09461c1d..dc6afb485027 100644
+--- a/kernel/time/clockevents.c
++++ b/kernel/time/clockevents.c
+@@ -134,6 +134,17 @@ static int __clockevents_set_state(struct clock_event_device *dev,
+ 			return -ENOSYS;
+ 		return dev->set_state_oneshot(dev);
+ 
++	case CLOCK_EVT_STATE_ONESHOT_STOPPED:
++		/* Core internal bug */
++		if (WARN_ONCE(dev->state != CLOCK_EVT_STATE_ONESHOT,
++			      "Current state: %d\n", dev->state))
++			return -EINVAL;
++
++		if (dev->set_state_oneshot_stopped)
++			return dev->set_state_oneshot_stopped(dev);
++		else
++			return -ENOSYS;
++
+ 	default:
+ 		return -ENOSYS;
+ 	}
+@@ -445,7 +456,8 @@ static int clockevents_sanity_check(struct clock_event_device *dev)
+ 	if (dev->set_mode) {
+ 		/* We shouldn't be supporting new modes now */
+ 		WARN_ON(dev->set_state_periodic || dev->set_state_oneshot ||
+-			dev->set_state_shutdown || dev->tick_resume);
++			dev->set_state_shutdown || dev->tick_resume ||
++			dev->set_state_oneshot_stopped);
+ 
+ 		BUG_ON(dev->mode != CLOCK_EVT_MODE_UNUSED);
+ 		return 0;
+diff --git a/kernel/time/timer_list.c b/kernel/time/timer_list.c
+index 18b074b215b0..1327004429be 100644
+--- a/kernel/time/timer_list.c
++++ b/kernel/time/timer_list.c
+@@ -258,6 +258,12 @@ print_tickdevice(struct seq_file *m, struct tick_device *td, int cpu)
+ 			SEQ_printf(m, "\n");
+ 		}
+ 
++		if (dev->set_state_oneshot_stopped) {
++			SEQ_printf(m, " oneshot stopped: ");
++			print_name_offset(m, dev->set_state_oneshot_stopped);
++			SEQ_printf(m, "\n");
++		}
++
+ 		if (dev->tick_resume) {
+ 			SEQ_printf(m, " resume:   ");
+ 			print_name_offset(m, dev->tick_resume);
+

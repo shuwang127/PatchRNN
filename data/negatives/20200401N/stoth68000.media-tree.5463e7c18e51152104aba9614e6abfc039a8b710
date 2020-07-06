@@ -1,0 +1,67 @@
+commit 5463e7c18e51152104aba9614e6abfc039a8b710
+Author: Jaegeuk Kim <jaegeuk@kernel.org>
+Date:   Tue Apr 21 10:40:54 2015 -0700
+
+    Revert "f2fs: enhance multi-threads performance"
+    
+    This reports performance regression by Yuanhan Liu.
+    The basic idea was to reduce one-point mutex, but it turns out this causes
+    another contention like context swithes.
+    
+    https://lkml.org/lkml/2015/4/21/11
+    
+    Until finishing the analysis on this issue, I'd like to revert this for a while.
+    
+    This reverts commit 78373b7319abdf15050af5b1632c4c8b8b398f33.
+
+diff --git a/fs/f2fs/data.c b/fs/f2fs/data.c
+index b91b0e10678e..1e1aae669fa8 100644
+--- a/fs/f2fs/data.c
++++ b/fs/f2fs/data.c
+@@ -1513,6 +1513,7 @@ static int f2fs_write_data_pages(struct address_space *mapping,
+ {
+ 	struct inode *inode = mapping->host;
+ 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
++	bool locked = false;
+ 	int ret;
+ 	long diff;
+ 
+@@ -1533,7 +1534,13 @@ static int f2fs_write_data_pages(struct address_space *mapping,
+ 
+ 	diff = nr_pages_to_write(sbi, DATA, wbc);
+ 
++	if (!S_ISDIR(inode->i_mode)) {
++		mutex_lock(&sbi->writepages);
++		locked = true;
++	}
+ 	ret = write_cache_pages(mapping, wbc, __f2fs_writepage, mapping);
++	if (locked)
++		mutex_unlock(&sbi->writepages);
+ 
+ 	f2fs_submit_merged_bio(sbi, DATA, WRITE);
+ 
+diff --git a/fs/f2fs/f2fs.h b/fs/f2fs/f2fs.h
+index d8921cf2ba9a..8de34ab6d5b1 100644
+--- a/fs/f2fs/f2fs.h
++++ b/fs/f2fs/f2fs.h
+@@ -625,6 +625,7 @@ struct f2fs_sb_info {
+ 	struct mutex cp_mutex;			/* checkpoint procedure lock */
+ 	struct rw_semaphore cp_rwsem;		/* blocking FS operations */
+ 	struct rw_semaphore node_write;		/* locking node writes */
++	struct mutex writepages;		/* mutex for writepages() */
+ 	wait_queue_head_t cp_wait;
+ 
+ 	struct inode_management im[MAX_INO_ENTRY];      /* manage inode cache */
+diff --git a/fs/f2fs/super.c b/fs/f2fs/super.c
+index 160b88346b24..b2dd1b01f076 100644
+--- a/fs/f2fs/super.c
++++ b/fs/f2fs/super.c
+@@ -1035,6 +1035,7 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
+ 	sbi->raw_super = raw_super;
+ 	sbi->raw_super_buf = raw_super_buf;
+ 	mutex_init(&sbi->gc_mutex);
++	mutex_init(&sbi->writepages);
+ 	mutex_init(&sbi->cp_mutex);
+ 	init_rwsem(&sbi->node_write);
+ 	clear_sbi_flag(sbi, SBI_POR_DOING);
+

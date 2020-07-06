@@ -1,0 +1,63 @@
+commit ea4525b6008fb29553306ec6719f8e6930ac9499
+Author: Namhyung Kim <namhyung@gmail.com>
+Date:   Tue Oct 26 14:22:01 2010 -0700
+
+    rmap: annotate lock context change on page_[un]lock_anon_vma()
+    
+    The page_lock_anon_vma() conditionally grabs RCU and anon_vma lock but
+    page_unlock_anon_vma() releases them unconditionally.  This leads sparse
+    to complain about context imbalance.  Annotate them.
+    
+    Signed-off-by: Namhyung Kim <namhyung@gmail.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/linux/rmap.h b/include/linux/rmap.h
+index 5c98df68a953..07ea89c16761 100644
+--- a/include/linux/rmap.h
++++ b/include/linux/rmap.h
+@@ -230,7 +230,20 @@ int try_to_munlock(struct page *);
+ /*
+  * Called by memory-failure.c to kill processes.
+  */
+-struct anon_vma *page_lock_anon_vma(struct page *page);
++struct anon_vma *__page_lock_anon_vma(struct page *page);
++
++static inline struct anon_vma *page_lock_anon_vma(struct page *page)
++{
++	struct anon_vma *anon_vma;
++
++	__cond_lock(RCU, anon_vma = __page_lock_anon_vma(page));
++
++	/* (void) is needed to make gcc happy */
++	(void) __cond_lock(&anon_vma->root->lock, anon_vma);
++
++	return anon_vma;
++}
++
+ void page_unlock_anon_vma(struct anon_vma *anon_vma);
+ int page_mapped_in_vma(struct page *page, struct vm_area_struct *vma);
+ 
+diff --git a/mm/rmap.c b/mm/rmap.c
+index f5ad996a4a8f..0995a8f68866 100644
+--- a/mm/rmap.c
++++ b/mm/rmap.c
+@@ -314,7 +314,7 @@ void __init anon_vma_init(void)
+  * Getting a lock on a stable anon_vma from a page off the LRU is
+  * tricky: page_lock_anon_vma rely on RCU to guard against the races.
+  */
+-struct anon_vma *page_lock_anon_vma(struct page *page)
++struct anon_vma *__page_lock_anon_vma(struct page *page)
+ {
+ 	struct anon_vma *anon_vma, *root_anon_vma;
+ 	unsigned long anon_mapping;
+@@ -348,6 +348,8 @@ out:
+ }
+ 
+ void page_unlock_anon_vma(struct anon_vma *anon_vma)
++	__releases(&anon_vma->root->lock)
++	__releases(RCU)
+ {
+ 	anon_vma_unlock(anon_vma);
+ 	rcu_read_unlock();
+

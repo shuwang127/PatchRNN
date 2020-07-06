@@ -1,0 +1,47 @@
+commit 45633fb370fdd16608756d587245459bf8983a26
+Author: Jean Delvare <khali@linux-fr.org>
+Date:   Wed Dec 19 22:17:00 2012 +0100
+
+    hwmon: (w83627ehf) Get rid of smatch warnings
+    
+    The smatch static code analyzer complains:
+    
+    drivers/hwmon/w83627ehf.c:911 w83627ehf_update_device() error: buffer overflow 'W83627EHF_REG_TEMP_OFFSET' 3 <= 8
+    drivers/hwmon/w83627ehf.c:909 w83627ehf_update_device() error: buffer overflow 'data->temp_offset' 3 <= 8
+    drivers/hwmon/w83627ehf.c:2672 w83627ehf_resume() error: buffer overflow 'W83627EHF_REG_TEMP_OFFSET' 3 <= 8
+    drivers/hwmon/w83627ehf.c:2673 w83627ehf_resume() error: buffer overflow 'data->temp_offset' 3 <= 8
+    
+    A deeper analysis of the code shows that these are false positives, as
+    only the lower 3 bits of data->have_temp_offset can be set so the
+    write is never attempted with i >= 3. However this shows that the code
+    isn't very robust and future changes could easily introduce a buffer
+    overflow. So let's add a safety check to prevent that and make smatch
+    happy.
+    
+    Signed-off-by: Jean Delvare <khali@linux-fr.org>
+    Cc: Peter Huewe <PeterHuewe@gmx.de>
+    Reviewed-by: Guenter Roeck <linux@roeck-us.net>
+
+diff --git a/drivers/hwmon/w83627ehf.c b/drivers/hwmon/w83627ehf.c
+index 7fbd0ba0f26f..0e8ffd6059a0 100644
+--- a/drivers/hwmon/w83627ehf.c
++++ b/drivers/hwmon/w83627ehf.c
+@@ -905,6 +905,8 @@ static struct w83627ehf_data *w83627ehf_update_device(struct device *dev)
+ 				data->temp_max_hyst[i]
+ 				  = w83627ehf_read_temp(data,
+ 						data->reg_temp_hyst[i]);
++			if (i > 2)
++				continue;
+ 			if (data->have_temp_offset & (1 << i))
+ 				data->temp_offset[i]
+ 				  = w83627ehf_read_value(data,
+@@ -2670,6 +2672,8 @@ static int w83627ehf_resume(struct device *dev)
+ 		if (data->reg_temp_hyst[i])
+ 			w83627ehf_write_temp(data, data->reg_temp_hyst[i],
+ 					     data->temp_max_hyst[i]);
++		if (i > 2)
++			continue;
+ 		if (data->have_temp_offset & (1 << i))
+ 			w83627ehf_write_value(data,
+ 					      W83627EHF_REG_TEMP_OFFSET[i],
+

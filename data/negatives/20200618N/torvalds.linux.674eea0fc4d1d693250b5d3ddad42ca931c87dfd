@@ -1,0 +1,121 @@
+commit 674eea0fc4d1d693250b5d3ddad42ca931c87dfd
+Author: Avi Kivity <avi@qumranet.com>
+Date:   Mon Feb 11 18:37:23 2008 +0200
+
+    KVM: Make the supported cpuid list a host property rather than a vm property
+    
+    One of the use cases for the supported cpuid list is to create a "greatest
+    common denominator" of cpu capabilities in a server farm.  As such, it is
+    useful to be able to get the list without creating a virtual machine first.
+    
+    Since the code does not depend on the vm in any way, all that is needed is
+    to move it to the device ioctl handler.  The capability identifier is also
+    changed so that binaries made against -rc1 will fail gracefully.
+    
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index ec60409299a3..a7069ec2267c 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -46,6 +46,9 @@
+ #define VM_STAT(x) offsetof(struct kvm, stat.x), KVM_STAT_VM
+ #define VCPU_STAT(x) offsetof(struct kvm_vcpu, stat.x), KVM_STAT_VCPU
+ 
++static int kvm_dev_ioctl_get_supported_cpuid(struct kvm_cpuid2 *cpuid,
++				    struct kvm_cpuid_entry2 __user *entries);
++
+ struct kvm_x86_ops *kvm_x86_ops;
+ 
+ struct kvm_stats_debugfs_item debugfs_entries[] = {
+@@ -727,6 +730,24 @@ long kvm_arch_dev_ioctl(struct file *filp,
+ 		r = 0;
+ 		break;
+ 	}
++	case KVM_GET_SUPPORTED_CPUID: {
++		struct kvm_cpuid2 __user *cpuid_arg = argp;
++		struct kvm_cpuid2 cpuid;
++
++		r = -EFAULT;
++		if (copy_from_user(&cpuid, cpuid_arg, sizeof cpuid))
++			goto out;
++		r = kvm_dev_ioctl_get_supported_cpuid(&cpuid,
++			cpuid_arg->entries);
++		if (r)
++			goto out;
++
++		r = -EFAULT;
++		if (copy_to_user(cpuid_arg, &cpuid, sizeof cpuid))
++			goto out;
++		r = 0;
++		break;
++	}
+ 	default:
+ 		r = -EINVAL;
+ 	}
+@@ -974,8 +995,7 @@ static void do_cpuid_ent(struct kvm_cpuid_entry2 *entry, u32 function,
+ 	put_cpu();
+ }
+ 
+-static int kvm_vm_ioctl_get_supported_cpuid(struct kvm *kvm,
+-				    struct kvm_cpuid2 *cpuid,
++static int kvm_dev_ioctl_get_supported_cpuid(struct kvm_cpuid2 *cpuid,
+ 				    struct kvm_cpuid_entry2 __user *entries)
+ {
+ 	struct kvm_cpuid_entry2 *cpuid_entries;
+@@ -1487,24 +1507,6 @@ long kvm_arch_vm_ioctl(struct file *filp,
+ 		r = 0;
+ 		break;
+ 	}
+-	case KVM_GET_SUPPORTED_CPUID: {
+-		struct kvm_cpuid2 __user *cpuid_arg = argp;
+-		struct kvm_cpuid2 cpuid;
+-
+-		r = -EFAULT;
+-		if (copy_from_user(&cpuid, cpuid_arg, sizeof cpuid))
+-			goto out;
+-		r = kvm_vm_ioctl_get_supported_cpuid(kvm, &cpuid,
+-			cpuid_arg->entries);
+-		if (r)
+-			goto out;
+-
+-		r = -EFAULT;
+-		if (copy_to_user(cpuid_arg, &cpuid, sizeof cpuid))
+-			goto out;
+-		r = 0;
+-		break;
+-	}
+ 	default:
+ 		;
+ 	}
+diff --git a/include/linux/kvm.h b/include/linux/kvm.h
+index 4de4fd2d8607..c1ec04fd000d 100644
+--- a/include/linux/kvm.h
++++ b/include/linux/kvm.h
+@@ -221,6 +221,7 @@ struct kvm_vapic_addr {
+  * Get size for mmap(vcpu_fd)
+  */
+ #define KVM_GET_VCPU_MMAP_SIZE    _IO(KVMIO,   0x04) /* in bytes */
++#define KVM_GET_SUPPORTED_CPUID   _IOWR(KVMIO, 0x05, struct kvm_cpuid2)
+ 
+ /*
+  * Extension capability list.
+@@ -230,8 +231,8 @@ struct kvm_vapic_addr {
+ #define KVM_CAP_MMU_SHADOW_CACHE_CONTROL 2
+ #define KVM_CAP_USER_MEMORY 3
+ #define KVM_CAP_SET_TSS_ADDR 4
+-#define KVM_CAP_EXT_CPUID 5
+ #define KVM_CAP_VAPIC 6
++#define KVM_CAP_EXT_CPUID 7
+ 
+ /*
+  * ioctls for VM fds
+@@ -249,7 +250,6 @@ struct kvm_vapic_addr {
+ #define KVM_CREATE_VCPU           _IO(KVMIO,  0x41)
+ #define KVM_GET_DIRTY_LOG         _IOW(KVMIO, 0x42, struct kvm_dirty_log)
+ #define KVM_SET_MEMORY_ALIAS      _IOW(KVMIO, 0x43, struct kvm_memory_alias)
+-#define KVM_GET_SUPPORTED_CPUID   _IOWR(KVMIO, 0x48, struct kvm_cpuid2)
+ /* Device model IOC */
+ #define KVM_CREATE_IRQCHIP	  _IO(KVMIO,  0x60)
+ #define KVM_IRQ_LINE		  _IOW(KVMIO, 0x61, struct kvm_irq_level)
+

@@ -1,0 +1,74 @@
+commit 037689d8969c493d39153fd920ad81e161b0d55c
+Author: Kevin Wolf <kwolf@redhat.com>
+Date:   Tue Mar 26 17:49:59 2013 +0100
+
+    qcow2: Decouple cluster allocation from cluster reuse code
+    
+    This moves some code that prepares the allocation of new clusters to
+    where the actual allocation happens. This is the minimum required to be
+    able to move it to a separate function in the next patch.
+    
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+    Signed-off-by: Stefan Hajnoczi <stefanha@redhat.com>
+
+diff --git a/block/qcow2-cluster.c b/block/qcow2-cluster.c
+index 202adb4807..9550927c4d 100644
+--- a/block/qcow2-cluster.c
++++ b/block/qcow2-cluster.c
+@@ -946,10 +946,7 @@ again:
+ 
+     cluster_offset = be64_to_cpu(l2_table[l2_index]);
+ 
+-    /*
+-     * Check how many clusters are already allocated and don't need COW, and how
+-     * many need a new allocation.
+-     */
++    /* Check how many clusters are already allocated and don't need COW */
+     if (qcow2_get_cluster_type(cluster_offset) == QCOW2_CLUSTER_NORMAL
+         && (cluster_offset & QCOW_OFLAG_COPIED))
+     {
+@@ -965,17 +962,6 @@ again:
+         cluster_offset = 0;
+     }
+ 
+-    if (nb_clusters > 0) {
+-        /* For the moment, overwrite compressed clusters one by one */
+-        uint64_t entry = be64_to_cpu(l2_table[l2_index + keep_clusters]);
+-        if (entry & QCOW_OFLAG_COMPRESSED) {
+-            nb_clusters = 1;
+-        } else {
+-            nb_clusters = count_cow_clusters(s, nb_clusters, l2_table,
+-                                             l2_index + keep_clusters);
+-        }
+-    }
+-
+     cluster_offset &= L2E_OFFSET_MASK;
+ 
+     /*
+@@ -996,6 +982,25 @@ again:
+         uint64_t alloc_cluster_offset;
+         uint64_t keep_bytes = keep_clusters * s->cluster_size;
+ 
++        ret = get_cluster_table(bs, offset, &l2_table, &l2_index);
++        if (ret < 0) {
++            return ret;
++        }
++
++        /* For the moment, overwrite compressed clusters one by one */
++        uint64_t entry = be64_to_cpu(l2_table[l2_index + keep_clusters]);
++        if (entry & QCOW_OFLAG_COMPRESSED) {
++            nb_clusters = 1;
++        } else {
++            nb_clusters = count_cow_clusters(s, nb_clusters, l2_table,
++                                             l2_index + keep_clusters);
++        }
++
++        ret = qcow2_cache_put(bs, s->l2_table_cache, (void**) &l2_table);
++        if (ret < 0) {
++            return ret;
++        }
++
+         /* Calculate start and size of allocation */
+         alloc_offset = offset + keep_bytes;
+ 
+

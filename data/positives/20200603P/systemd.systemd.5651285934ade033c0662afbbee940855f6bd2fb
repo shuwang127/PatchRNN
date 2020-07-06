@@ -1,0 +1,100 @@
+commit 5651285934ade033c0662afbbee940855f6bd2fb
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Sat Dec 26 12:43:28 2015 +0100
+
+    shared: fix handling of suffix "." in dns_name_compare_func()
+    
+    All our other domain name handling functions make no destinction between
+    domain names that end in a dot plus a NUL, or those just ending in a
+    NUL. Make sure dns_name_compare_func() and dns_label_unescape_suffix()
+    do the same.
+
+diff --git a/src/shared/dns-domain.c b/src/shared/dns-domain.c
+index 159944858..0273b9e3c 100644
+--- a/src/shared/dns-domain.c
++++ b/src/shared/dns-domain.c
+@@ -154,20 +154,24 @@ int dns_label_unescape_suffix(const char *name, const char **label_terminal, cha
+                 return 0;
+         }
+ 
+-        assert(**label_terminal == '.' || **label_terminal == 0);
++        terminal = *label_terminal;
++        assert(*terminal == '.' || *terminal == 0);
+ 
+-        /* skip current terminal character */
+-        terminal = *label_terminal - 1;
++        /* Skip current terminal character (and accept domain names ending it ".") */
++        if (*terminal == 0)
++                terminal--;
++        if (terminal >= name && *terminal == '.')
++                terminal--;
+ 
+-        /* point name to the last label, and terminal to the preceding terminal symbol (or make it a NULL pointer) */
++        /* Point name to the last label, and terminal to the preceding terminal symbol (or make it a NULL pointer) */
+         for (;;) {
+                 if (terminal < name) {
+-                        /* reached the first label, so indicate that there are no more */
++                        /* Reached the first label, so indicate that there are no more */
+                         terminal = NULL;
+                         break;
+                 }
+ 
+-                /* find the start of the last label */
++                /* Find the start of the last label */
+                 if (*terminal == '.') {
+                         const char *y;
+                         unsigned slashes = 0;
+@@ -176,7 +180,7 @@ int dns_label_unescape_suffix(const char *name, const char **label_terminal, cha
+                                 slashes ++;
+ 
+                         if (slashes % 2 == 0) {
+-                                /* the '.' was not escaped */
++                                /* The '.' was not escaped */
+                                 name = terminal + 1;
+                                 break;
+                         } else {
+diff --git a/src/test/test-dns-domain.c b/src/test/test-dns-domain.c
+index 78c5631ff..1b0cb153f 100644
+--- a/src/test/test-dns-domain.c
++++ b/src/test/test-dns-domain.c
+@@ -140,9 +140,9 @@ static void test_dns_label_unescape_suffix(void) {
+         test_dns_label_unescape_suffix_one("hallo\\", "hallo", "hallo", 20, -EINVAL, -EINVAL);
+         test_dns_label_unescape_suffix_one("hallo\\032 ", "hallo  ", "", 20, 7, 0);
+         test_dns_label_unescape_suffix_one(".", "", "", 20, 0, 0);
+-        test_dns_label_unescape_suffix_one("..", "", "", 20, 0, 0);
++        test_dns_label_unescape_suffix_one("..", "", "", 20, 0, -EINVAL);
+         test_dns_label_unescape_suffix_one(".foobar", "foobar", "", 20, 6, -EINVAL);
+-        test_dns_label_unescape_suffix_one("foobar.", "", "foobar", 20, 0, 6);
++        test_dns_label_unescape_suffix_one("foobar.", "foobar", "", 20, 6, 0);
+         test_dns_label_unescape_suffix_one("foo\\\\bar", "foo\\bar", "", 20, 7, 0);
+         test_dns_label_unescape_suffix_one("foo.bar", "bar", "foo", 20, 3, 3);
+         test_dns_label_unescape_suffix_one("foo..bar", "bar", "", 20, 3, -EINVAL);
+@@ -546,6 +546,19 @@ static void test_dns_name_equal_skip(void) {
+         test_dns_name_equal_skip_one("", 2, "foo", 0);
+ }
+ 
++static void test_dns_name_compare_func(void) {
++        assert_se(dns_name_compare_func("", "") == 0);
++        assert_se(dns_name_compare_func("", ".") == 0);
++        assert_se(dns_name_compare_func(".", "") == 0);
++        assert_se(dns_name_compare_func("foo", "foo.") == 0);
++        assert_se(dns_name_compare_func("foo.", "foo") == 0);
++        assert_se(dns_name_compare_func("foo", "foo") == 0);
++        assert_se(dns_name_compare_func("foo.", "foo.") == 0);
++        assert_se(dns_name_compare_func("heise.de", "HEISE.DE.") == 0);
++
++        assert_se(dns_name_compare_func("de.", "heise.de") != 0);
++}
++
+ int main(int argc, char *argv[]) {
+ 
+         test_dns_label_unescape();
+@@ -569,6 +582,7 @@ int main(int argc, char *argv[]) {
+         test_dns_name_suffix();
+         test_dns_name_count_labels();
+         test_dns_name_equal_skip();
++        test_dns_name_compare_func();
+ 
+         return 0;
+ }
+

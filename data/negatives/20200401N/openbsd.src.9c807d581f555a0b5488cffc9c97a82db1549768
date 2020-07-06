@@ -1,0 +1,90 @@
+commit 9c807d581f555a0b5488cffc9c97a82db1549768
+Author: guenther <guenther@openbsd.org>
+Date:   Tue Jun 2 12:09:26 2009 +0000
+
+    If a bogus channel is encountered, return an error instead of trying
+    to use the -1 flag value as an array index.
+    Found by Parfait.
+    
+    ok reyk@ oga@
+
+diff --git a/sys/dev/ic/ar5211.c b/sys/dev/ic/ar5211.c
+index 5d55e3a63c0..ffeb024e000 100644
+--- a/sys/dev/ic/ar5211.c
++++ b/sys/dev/ic/ar5211.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ar5211.c,v 1.42 2009/02/06 17:06:45 grange Exp $	*/
++/*	$OpenBSD: ar5211.c,v 1.43 2009/06/02 12:09:26 guenther Exp $	*/
+ 
+ /*
+  * Copyright (c) 2004, 2005, 2006, 2007 Reyk Floeter <reyk@openbsd.org>
+@@ -29,7 +29,7 @@ HAL_BOOL	 ar5k_ar5211_nic_reset(struct ath_hal *, u_int32_t);
+ HAL_BOOL	 ar5k_ar5211_nic_wakeup(struct ath_hal *, u_int16_t);
+ u_int16_t	 ar5k_ar5211_radio_revision(struct ath_hal *, HAL_CHIP);
+ void		 ar5k_ar5211_fill(struct ath_hal *);
+-void		 ar5k_ar5211_rfregs(struct ath_hal *, HAL_CHANNEL *, u_int,
++HAL_BOOL	 ar5k_ar5211_rfregs(struct ath_hal *, HAL_CHANNEL *, u_int,
+     u_int);
+ 
+ /*
+@@ -480,7 +480,8 @@ ar5k_ar5211_reset(struct ath_hal *hal, HAL_OPMODE op_mode, HAL_CHANNEL *channel,
+ 	/*
+ 	 * Write initial RF registers
+ 	 */
+-	ar5k_ar5211_rfregs(hal, channel, freq, ee_mode);
++	if (ar5k_ar5211_rfregs(hal, channel, freq, ee_mode) == AH_FALSE)
++		return (AH_FALSE);
+ 
+ 	/*
+ 	 * Write initial mode settings
+@@ -2556,7 +2557,7 @@ ar5k_ar5211_eeprom_write(struct ath_hal *hal, u_int32_t offset, u_int16_t data)
+  * RF register settings
+  */
+ 
+-void
++HAL_BOOL
+ ar5k_ar5211_rfregs(struct ath_hal *hal, HAL_CHANNEL *channel, u_int freq,
+     u_int ee_mode)
+ {
+@@ -2587,6 +2588,10 @@ ar5k_ar5211_rfregs(struct ath_hal *hal, HAL_CHANNEL *channel, u_int freq,
+ 			    (channel->c_channel > 4000 ? 0 : -1)));
+ 	}
+ 
++	/* bogus channel: bad beacon? */
++	if (obdb < 0)
++		return (AH_FALSE);
++
+ 	ob = ee->ee_ob[ee_mode][obdb];
+ 	db = ee->ee_db[ee_mode][obdb];
+ 	x_gain = ee->ee_x_gain[ee_mode];
+@@ -2613,6 +2618,8 @@ ar5k_ar5211_rfregs(struct ath_hal *hal, HAL_CHANNEL *channel, u_int freq,
+ 	}
+ 
+ 	hal->ah_rf_gain = HAL_RFGAIN_INACTIVE;
++
++	return (AH_TRUE);
+ }
+ 
+ HAL_BOOL
+diff --git a/sys/dev/ic/ar5xxx.c b/sys/dev/ic/ar5xxx.c
+index edaac74af4c..e1e75da938c 100644
+--- a/sys/dev/ic/ar5xxx.c
++++ b/sys/dev/ic/ar5xxx.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ar5xxx.c,v 1.52 2008/07/30 07:43:01 reyk Exp $	*/
++/*	$OpenBSD: ar5xxx.c,v 1.53 2009/06/02 12:09:26 guenther Exp $	*/
+ 
+ /*
+  * Copyright (c) 2004, 2005, 2006, 2007 Reyk Floeter <reyk@openbsd.org>
+@@ -1681,6 +1681,10 @@ ar5k_ar5112_rfregs(struct ath_hal *hal, HAL_CHANNEL *channel, u_int mode)
+ 			(channel->c_channel >= 5260 ? 1 :
+ 			    (channel->c_channel > 4000 ? 0 : -1)));
+ 
++		/* bogus channel: bad beacon? */
++		if (obdb < 0)
++			return (AH_FALSE);
++
+ 		if (!ar5k_rfregs_op(rf, hal->ah_offset[6],
+ 			ee->ee_ob[ee_mode][obdb], 3, 279, 0, AH_TRUE))
+ 			return (AH_FALSE);
+

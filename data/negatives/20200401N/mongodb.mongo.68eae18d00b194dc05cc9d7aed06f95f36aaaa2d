@@ -1,0 +1,74 @@
+commit 68eae18d00b194dc05cc9d7aed06f95f36aaaa2d
+Author: Eliot Horowitz <eliot@10gen.com>
+Date:   Fri Feb 5 12:02:01 2010 -0500
+
+    slight _id query plan optimization
+
+diff --git a/db/query.cpp b/db/query.cpp
+index 4538fa973e..8e970b0380 100644
+--- a/db/query.cpp
++++ b/db/query.cpp
+@@ -884,7 +884,7 @@ namespace mongo {
+             
+             bool idHackWorked = false;
+ 
+-            if ( strcmp( query.firstElement().fieldName() , "_id" ) == 0 && query.nFields() == 1 && query.firstElement().isSimpleType() ){
++            if ( isSimpleIdQuery( query ) ){
+                 nscanned = 1;
+ 
+                 bool nsFound = false;
+diff --git a/db/queryoptimizer.cpp b/db/queryoptimizer.cpp
+index 214d99977a..ff147d9336 100644
+--- a/db/queryoptimizer.cpp
++++ b/db/queryoptimizer.cpp
+@@ -213,6 +213,7 @@ namespace mongo {
+     
+     QueryPlanSet::QueryPlanSet( const char *_ns, const BSONObj &query, const BSONObj &order, const BSONElement *hint, bool honorRecordedPlan, const BSONObj &min, const BSONObj &max ) :
+     ns(_ns),
++    query_( query.getOwned() ),
+     fbs_( _ns, query ),
+     mayRecordPlan_( true ),
+     usingPrerecordedPlan_( false ),
+@@ -297,6 +298,16 @@ namespace mongo {
+             plans_.push_back( PlanPtr( new QueryPlan( d, d->idxNo(*idx), fbs_, order_, min_, max_ ) ) );
+             return;
+         }
++
++        if ( isSimpleIdQuery( query_ ) ){
++            int idx = d->findIdIndex();
++            if ( idx >= 0 ){
++                usingPrerecordedPlan_ = true;
++                mayRecordPlan_ = false;
++                plans_.push_back( PlanPtr( new QueryPlan( d , idx , fbs_ , order_ ) ) );
++                return;
++            }
++        }
+         
+         if ( honorRecordedPlan_ ) {
+             boostlock lk(NamespaceDetailsTransient::_qcMutex);
+diff --git a/db/queryoptimizer.h b/db/queryoptimizer.h
+index 8014be8718..742daa12dd 100644
+--- a/db/queryoptimizer.h
++++ b/db/queryoptimizer.h
+@@ -144,6 +144,7 @@ namespace mongo {
+             static void nextOp( QueryOp &op );
+         };
+         const char *ns;
++        BSONObj query_;
+         FieldRangeSet fbs_;
+         PlanSet plans_;
+         bool mayRecordPlan_;
+@@ -158,5 +159,12 @@ namespace mongo {
+ 
+     // NOTE min, max, and keyPattern will be updated to be consistent with the selected index.
+     IndexDetails *indexDetailsForRange( const char *ns, string &errmsg, BSONObj &min, BSONObj &max, BSONObj &keyPattern );
++
++    inline bool isSimpleIdQuery( const BSONObj& query ){
++        return 
++            strcmp( query.firstElement().fieldName() , "_id" ) == 0 && 
++            query.nFields() == 1 && 
++            query.firstElement().isSimpleType();
++    }
+         
+ } // namespace mongo
+

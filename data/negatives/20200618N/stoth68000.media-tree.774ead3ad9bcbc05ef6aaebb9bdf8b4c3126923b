@@ -1,0 +1,85 @@
+commit 774ead3ad9bcbc05ef6aaebb9bdf8b4c3126923b
+Author: Avi Kivity <avi@qumranet.com>
+Date:   Wed Dec 26 13:57:04 2007 +0200
+
+    KVM: Disable vapic support on Intel machines with FlexPriority
+    
+    FlexPriority accelerates the tpr without any patching.
+    
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index 3d4b71a94440..33f77b044c52 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -1653,6 +1653,11 @@ static void svm_check_processor_compat(void *rtn)
+ 	*(int *)rtn = 0;
+ }
+ 
++static bool svm_cpu_has_accelerated_tpr(void)
++{
++	return false;
++}
++
+ static struct kvm_x86_ops svm_x86_ops = {
+ 	.cpu_has_kvm_support = has_svm,
+ 	.disabled_by_bios = is_disabled,
+@@ -1661,6 +1666,7 @@ static struct kvm_x86_ops svm_x86_ops = {
+ 	.check_processor_compatibility = svm_check_processor_compat,
+ 	.hardware_enable = svm_hardware_enable,
+ 	.hardware_disable = svm_hardware_disable,
++	.cpu_has_accelerated_tpr = svm_cpu_has_accelerated_tpr,
+ 
+ 	.vcpu_create = svm_create_vcpu,
+ 	.vcpu_free = svm_free_vcpu,
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index fc494aff5d8b..d1167fc303d6 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -192,7 +192,7 @@ static inline int cpu_has_secondary_exec_ctrls(void)
+ 		CPU_BASED_ACTIVATE_SECONDARY_CONTROLS);
+ }
+ 
+-static inline int cpu_has_vmx_virtualize_apic_accesses(void)
++static inline bool cpu_has_vmx_virtualize_apic_accesses(void)
+ {
+ 	return (vmcs_config.cpu_based_2nd_exec_ctrl &
+ 		SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES);
+@@ -2565,6 +2565,7 @@ static struct kvm_x86_ops vmx_x86_ops = {
+ 	.check_processor_compatibility = vmx_check_processor_compat,
+ 	.hardware_enable = hardware_enable,
+ 	.hardware_disable = hardware_disable,
++	.cpu_has_accelerated_tpr = cpu_has_vmx_virtualize_apic_accesses,
+ 
+ 	.vcpu_create = vmx_create_vcpu,
+ 	.vcpu_free = vmx_free_vcpu,
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index e7eac27adb7f..1f48ec871035 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -684,9 +684,11 @@ int kvm_dev_ioctl_check_extension(long ext)
+ 	case KVM_CAP_USER_MEMORY:
+ 	case KVM_CAP_SET_TSS_ADDR:
+ 	case KVM_CAP_EXT_CPUID:
+-	case KVM_CAP_VAPIC:
+ 		r = 1;
+ 		break;
++	case KVM_CAP_VAPIC:
++		r = !kvm_x86_ops->cpu_has_accelerated_tpr();
++		break;
+ 	default:
+ 		r = 0;
+ 		break;
+diff --git a/include/asm-x86/kvm_host.h b/include/asm-x86/kvm_host.h
+index 6e649af08d19..44b89259f6c4 100644
+--- a/include/asm-x86/kvm_host.h
++++ b/include/asm-x86/kvm_host.h
+@@ -329,6 +329,7 @@ struct kvm_x86_ops {
+ 	void (*check_processor_compatibility)(void *rtn);
+ 	int (*hardware_setup)(void);               /* __init */
+ 	void (*hardware_unsetup)(void);            /* __exit */
++	bool (*cpu_has_accelerated_tpr)(void);
+ 
+ 	/* Create, but do not attach this VCPU */
+ 	struct kvm_vcpu *(*vcpu_create)(struct kvm *kvm, unsigned id);
+

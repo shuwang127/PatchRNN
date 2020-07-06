@@ -1,0 +1,65 @@
+commit 1af7f05628fab81fdf4412d757676412ba5db660
+Author: olof@lixom.net <olof@lixom.net>
+Date:   Sat May 12 14:57:46 2007 -0500
+
+    pasemi_mac: Fix local-mac-address parsing
+    
+    Turns out we have an old version of firmware that stores the mac address
+    in 'mac-address' as a string instead of a byte array. All versions that
+    use local-mac-address should have it as byte array, so no need to do
+    string parsing for that case.
+    
+    Signed-off-by: Olof Johansson <olof@lixom.net>
+    Signed-off-by: Jeff Garzik <jeff@garzik.org>
+
+diff --git a/drivers/net/pasemi_mac.c b/drivers/net/pasemi_mac.c
+index 933d56476894..8d38425e46c3 100644
+--- a/drivers/net/pasemi_mac.c
++++ b/drivers/net/pasemi_mac.c
+@@ -85,6 +85,7 @@ static int pasemi_get_mac_addr(struct pasemi_mac *mac)
+ {
+ 	struct pci_dev *pdev = mac->pdev;
+ 	struct device_node *dn = pci_device_to_OF_node(pdev);
++	int len;
+ 	const u8 *maddr;
+ 	u8 addr[6];
+ 
+@@ -94,9 +95,17 @@ static int pasemi_get_mac_addr(struct pasemi_mac *mac)
+ 		return -ENOENT;
+ 	}
+ 
+-	maddr = of_get_property(dn, "local-mac-address", NULL);
++	maddr = of_get_property(dn, "local-mac-address", &len);
++
++	if (maddr && len == 6) {
++		memcpy(mac->mac_addr, maddr, 6);
++		return 0;
++	}
++
++	/* Some old versions of firmware mistakenly uses mac-address
++	 * (and as a string) instead of a byte array in local-mac-address.
++	 */
+ 
+-	/* Fall back to mac-address for older firmware */
+ 	if (maddr == NULL)
+ 		maddr = of_get_property(dn, "mac-address", NULL);
+ 
+@@ -106,6 +115,7 @@ static int pasemi_get_mac_addr(struct pasemi_mac *mac)
+ 		return -ENOENT;
+ 	}
+ 
++
+ 	if (sscanf(maddr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &addr[0],
+ 		   &addr[1], &addr[2], &addr[3], &addr[4], &addr[5]) != 6) {
+ 		dev_warn(&pdev->dev,
+@@ -113,7 +123,8 @@ static int pasemi_get_mac_addr(struct pasemi_mac *mac)
+ 		return -EINVAL;
+ 	}
+ 
+-	memcpy(mac->mac_addr, addr, sizeof(addr));
++	memcpy(mac->mac_addr, addr, 6);
++
+ 	return 0;
+ }
+ 
+

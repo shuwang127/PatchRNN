@@ -1,0 +1,40 @@
+commit eb9d4b44e785dbb340b38d4d2d3aa68a2f4d75e3
+Author: Niklas Therning <niklas@therning.org>
+Date:   Thu Aug 4 16:07:11 2016 +0200
+
+    Set SGen's REDZONE_SIZE=0 on Win64 since the ABI defines no red zone and the
+    ABI states that "All memory beyond the current address of RSP is considered
+    volatile".
+    
+    On Windows the stack grows dynamically as the thread needs more stack space.
+    Windows places a guard page before the page at the top of stack and when this
+    guard page is accessed by the thread Windows will add a new page to the stack
+    and resume the thread.
+    
+    Before this fix SGen on Win64 subtracted 128 from the stack pointer of a
+    suspended thread and started the stack scan from this address. In the case
+    when the stack pointer would be less than 128 from the start of the memory
+    page SGen would attempt to read from the previous page. If this happens to be
+    the guard page a STATUS_GUARD_PAGE_VIOLATION exception is raised and the
+    process crashes. The sgen-weakref-stress.exe triggered this bug on almost
+    every invocation.
+
+diff --git a/mono/sgen/sgen-archdep.h b/mono/sgen/sgen-archdep.h
+index da6aaf01823..d0314e8ccfd 100644
+--- a/mono/sgen/sgen-archdep.h
++++ b/mono/sgen/sgen-archdep.h
+@@ -26,7 +26,13 @@
+ 
+ #elif defined(TARGET_AMD64)
+ 
++#ifdef HOST_WIN32
++/* The Windows x64 ABI defines no "red zone". The ABI states:
++   "All memory beyond the current address of RSP is considered volatile" */
++#define REDZONE_SIZE	0
++#else
+ #define REDZONE_SIZE	128
++#endif
+ 
+ #elif defined(TARGET_POWERPC)
+ 
+

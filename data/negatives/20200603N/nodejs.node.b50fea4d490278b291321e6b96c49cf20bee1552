@@ -1,0 +1,49 @@
+commit b50fea4d490278b291321e6b96c49cf20bee1552
+Author: Saúl Ibarra Corretgé <saghul@gmail.com>
+Date:   Tue Jan 27 13:40:40 2015 +0100
+
+    watchdog: fix timeout for early polling return
+    
+    Switch from running the loop with UV_RUN_ONCE to UV_RUN_DEFAULT, because
+    it's possible that the poll returns earlier than expected and thus the
+    timer is not run on a single interation.
+    
+    The loop is not stopped either from the timer callback or from the async
+    handle's.
+    
+    PR-URL: https://github.com/iojs/io.js/pull/622
+    Reviewed-By: Ben Noordhuis <info@bnoordhuis.nl>
+    Reviewed-By: Rod Vagg <rod@vagg.org>
+
+diff --git a/src/node_watchdog.cc b/src/node_watchdog.cc
+index 5789a5e471..2811ab06ed 100644
+--- a/src/node_watchdog.cc
++++ b/src/node_watchdog.cc
+@@ -65,8 +65,9 @@ void Watchdog::Destroy() {
+ void Watchdog::Run(void* arg) {
+   Watchdog* wd = static_cast<Watchdog*>(arg);
+ 
+-  // UV_RUN_ONCE so async_ or timer_ wakeup exits uv_run() call.
+-  uv_run(wd->loop_, UV_RUN_ONCE);
++  // UV_RUN_DEFAULT the loop will be stopped either by the async or the
++  // timer handle.
++  uv_run(wd->loop_, UV_RUN_DEFAULT);
+ 
+   // Loop ref count reaches zero when both handles are closed.
+   // Close the timer handle on this side and let Destroy() close async_
+@@ -75,11 +76,14 @@ void Watchdog::Run(void* arg) {
+ 
+ 
+ void Watchdog::Async(uv_async_t* async) {
++  Watchdog* w = ContainerOf(&Watchdog::async_, async);
++  uv_stop(w->loop_);
+ }
+ 
+ 
+ void Watchdog::Timer(uv_timer_t* timer) {
+   Watchdog* w = ContainerOf(&Watchdog::timer_, timer);
++  uv_stop(w->loop_);
+   V8::TerminateExecution(w->env()->isolate());
+ }
+ 
+

@@ -1,0 +1,50 @@
+commit fa4c505edafa6f8d213db50b4059b5b33a669183
+Author: Marc Alff <marc.alff@oracle.com>
+Date:   Fri Sep 17 13:03:09 2010 -0600
+
+    Bug#50557 checksum table crashes server when used in performance_schema
+    
+    CHECKSUM TABLE for performance schema tables could cause uninitialized
+    memory reads.
+    
+    The root cause is a design flaw in the implementation of
+    mysql_checksum_table(), which do not honor null fields.
+    
+    However, fixing this bug in CHECKSUM TABLE is risky, as it can cause the
+    checksum value to change.
+    
+    This fix implements a work around, to systematically reset fields values
+    even for null fields, so that the field memory representation is always
+    initialized with a known value.
+
+diff --git a/storage/perfschema/pfs_engine_table.cc b/storage/perfschema/pfs_engine_table.cc
+index df00811959c..3b1959c98d2 100644
+--- a/storage/perfschema/pfs_engine_table.cc
++++ b/storage/perfschema/pfs_engine_table.cc
+@@ -223,6 +223,8 @@ int PFS_engine_table::read_row(TABLE *table,
+                                Field **fields)
+ {
+   my_bitmap_map *org_bitmap;
++  Field *f;
++  Field **fields_reset;
+ 
+   /*
+     Make sure the table structure is as expected before mapping
+@@ -240,6 +242,16 @@ int PFS_engine_table::read_row(TABLE *table,
+ 
+   /* We internally write to Fields to support the read interface */
+   org_bitmap= dbug_tmp_use_all_columns(table, table->write_set);
++
++  /*
++    Some callers of the storage engine interface do not honor the
++    f->is_null() flag, and will attempt to read the data itself.
++    A known offender is mysql_checksum_table().
++    For robustness, reset every field.
++  */
++  for (fields_reset= fields; (f= *fields_reset) ; fields_reset++)
++    f->reset();
++
+   int result= read_row_values(table, buf, fields, read_all);
+   dbug_tmp_restore_column_map(table->write_set, org_bitmap);
+ 
+

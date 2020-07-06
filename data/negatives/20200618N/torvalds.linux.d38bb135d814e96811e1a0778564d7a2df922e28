@@ -1,0 +1,147 @@
+commit d38bb135d814e96811e1a0778564d7a2df922e28
+Author: Mike Travis <travis@sgi.com>
+Date:   Fri Apr 29 16:54:13 2016 -0500
+
+    x86/platform/UV: Move scir info to the per cpu info struct
+    
+    Change the references to the SCIR fields to the new per cpu info structs.
+    
+    Tested-by: John Estabrook <estabrook@sgi.com>
+    Tested-by: Gary Kroening <gfk@sgi.com>
+    Tested-by: Nathan Zimmer <nzimmer@sgi.com>
+    Signed-off-by: Mike Travis <travis@sgi.com>
+    Reviewed-by: Dimitri Sivanich <sivanich@sgi.com>
+    Cc: Andrew Banman <abanman@sgi.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Andy Lutomirski <luto@amacapital.net>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Brian Gerst <brgerst@gmail.com>
+    Cc: Denys Vlasenko <dvlasenk@redhat.com>
+    Cc: H. Peter Anvin <hpa@zytor.com>
+    Cc: Len Brown <len.brown@intel.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Russ Anderson <rja@sgi.com>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Link: http://lkml.kernel.org/r/20160429215404.452538234@asylum.americas.sgi.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/include/asm/uv/uv_hub.h b/arch/x86/include/asm/uv/uv_hub.h
+index 2ff0eb8058ae..b8c5a6198ca1 100644
+--- a/arch/x86/include/asm/uv/uv_hub.h
++++ b/arch/x86/include/asm/uv/uv_hub.h
+@@ -127,6 +127,7 @@
+  */
+ #define UV_MAX_NASID_VALUE	(UV_MAX_NUMALINK_BLADES * 2)
+ 
++/* System Controller Interface Reg info */
+ struct uv_scir_s {
+ 	struct timer_list timer;
+ 	unsigned long	offset;
+@@ -161,7 +162,6 @@ struct uv_hub_info_s {
+ 	unsigned char		blade_processor_id;
+ 	unsigned char		m_val;
+ 	unsigned char		n_val;
+-	struct uv_scir_s	scir;
+ };
+ 
+ DECLARE_PER_CPU(struct uv_hub_info_s, __uv_hub_info);
+@@ -179,6 +179,9 @@ DECLARE_PER_CPU(struct uv_cpu_info_s, __uv_cpu_info);
+ #define uv_cpu_info		this_cpu_ptr(&__uv_cpu_info)
+ #define uv_cpu_info_per(cpu)	(&per_cpu(__uv_cpu_info, cpu))
+ 
++#define	uv_scir_info		(&uv_cpu_info->scir)
++#define	uv_cpu_scir_info(cpu)	(&uv_cpu_info_per(cpu)->scir)
++
+ /*
+  * HUB revision ranges for each UV HUB architecture.
+  * This is a software convention - NOT the hardware revision numbers in
+@@ -686,9 +689,9 @@ DECLARE_PER_CPU(struct uv_cpu_nmi_s, uv_cpu_nmi);
+ /* Update SCIR state */
+ static inline void uv_set_scir_bits(unsigned char value)
+ {
+-	if (uv_hub_info->scir.state != value) {
+-		uv_hub_info->scir.state = value;
+-		uv_write_local_mmr8(uv_hub_info->scir.offset, value);
++	if (uv_scir_info->state != value) {
++		uv_scir_info->state = value;
++		uv_write_local_mmr8(uv_scir_info->offset, value);
+ 	}
+ }
+ 
+@@ -699,10 +702,10 @@ static inline unsigned long uv_scir_offset(int apicid)
+ 
+ static inline void uv_set_cpu_scir_bits(int cpu, unsigned char value)
+ {
+-	if (uv_cpu_hub_info(cpu)->scir.state != value) {
++	if (uv_cpu_scir_info(cpu)->state != value) {
+ 		uv_write_global_mmr8(uv_cpu_to_pnode(cpu),
+-				uv_cpu_hub_info(cpu)->scir.offset, value);
+-		uv_cpu_hub_info(cpu)->scir.state = value;
++				uv_cpu_scir_info(cpu)->offset, value);
++		uv_cpu_scir_info(cpu)->state = value;
+ 	}
+ }
+ 
+diff --git a/arch/x86/kernel/apic/x2apic_uv_x.c b/arch/x86/kernel/apic/x2apic_uv_x.c
+index 067aa5122f42..c8acda9f1622 100644
+--- a/arch/x86/kernel/apic/x2apic_uv_x.c
++++ b/arch/x86/kernel/apic/x2apic_uv_x.c
+@@ -756,8 +756,8 @@ static __init void uv_rtc_init(void)
+  */
+ static void uv_heartbeat(unsigned long ignored)
+ {
+-	struct timer_list *timer = &uv_hub_info->scir.timer;
+-	unsigned char bits = uv_hub_info->scir.state;
++	struct timer_list *timer = &uv_scir_info->timer;
++	unsigned char bits = uv_scir_info->state;
+ 
+ 	/* flip heartbeat bit */
+ 	bits ^= SCIR_CPU_HEARTBEAT;
+@@ -777,14 +777,14 @@ static void uv_heartbeat(unsigned long ignored)
+ 
+ static void uv_heartbeat_enable(int cpu)
+ {
+-	while (!uv_cpu_hub_info(cpu)->scir.enabled) {
+-		struct timer_list *timer = &uv_cpu_hub_info(cpu)->scir.timer;
++	while (!uv_cpu_scir_info(cpu)->enabled) {
++		struct timer_list *timer = &uv_cpu_scir_info(cpu)->timer;
+ 
+ 		uv_set_cpu_scir_bits(cpu, SCIR_CPU_HEARTBEAT|SCIR_CPU_ACTIVITY);
+ 		setup_timer(timer, uv_heartbeat, cpu);
+ 		timer->expires = jiffies + SCIR_CPU_HB_INTERVAL;
+ 		add_timer_on(timer, cpu);
+-		uv_cpu_hub_info(cpu)->scir.enabled = 1;
++		uv_cpu_scir_info(cpu)->enabled = 1;
+ 
+ 		/* also ensure that boot cpu is enabled */
+ 		cpu = 0;
+@@ -794,9 +794,9 @@ static void uv_heartbeat_enable(int cpu)
+ #ifdef CONFIG_HOTPLUG_CPU
+ static void uv_heartbeat_disable(int cpu)
+ {
+-	if (uv_cpu_hub_info(cpu)->scir.enabled) {
+-		uv_cpu_hub_info(cpu)->scir.enabled = 0;
+-		del_timer(&uv_cpu_hub_info(cpu)->scir.timer);
++	if (uv_cpu_scir_info(cpu)->enabled) {
++		uv_cpu_scir_info(cpu)->enabled = 0;
++		del_timer(&uv_cpu_scir_info(cpu)->timer);
+ 	}
+ 	uv_set_cpu_scir_bits(cpu, 0xff);
+ }
+@@ -1055,13 +1055,13 @@ void __init uv_system_init(void)
+ 
+ 		uv_cpu_hub_info(cpu)->numa_blade_id = blade;
+ 		uv_cpu_hub_info(cpu)->pnode = pnode;
+-		uv_cpu_hub_info(cpu)->scir.offset = uv_scir_offset(apicid);
+ 		uv_cpu_hub_info(cpu)->blade_processor_id = lcpu;
+ 		uv_node_to_blade[nodeid] = blade;
+ 		uv_cpu_to_blade[cpu] = blade;
+ 
+ 		/* Initialize per cpu info list */
+ 		uv_cpu_info_per(cpu)->p_uv_hub_info = uv_cpu_hub_info(cpu);
++		uv_cpu_info_per(cpu)->scir.offset = uv_scir_offset(apicid);
+ 	}
+ 
+ 	/* Add blade/pnode info for nodes without cpus */
+

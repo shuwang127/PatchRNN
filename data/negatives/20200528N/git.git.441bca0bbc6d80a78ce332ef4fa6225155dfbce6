@@ -1,0 +1,78 @@
+commit 441bca0bbc6d80a78ce332ef4fa6225155dfbce6
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Thu Aug 28 16:19:08 2008 -0700
+
+    Fix '--dirstat' with cross-directory renaming
+    
+    The dirstat code depends on the fact that we always generate diffs with
+    the names sorted, since it then just does a single-pass walk-over of the
+    sorted list of names and how many changes there were. The sorting means
+    that all files are nicely grouped by directory.
+    
+    That all works fine.
+    
+    Except when we have rename detection, and suddenly the nicely sorted list
+    of pathnames isn't all that sorted at all. And now the single-pass dirstat
+    walk gets all confused, and you can get results like this:
+    
+      [torvalds@nehalem linux]$ git diff --dirstat=2 -M v2.6.27-rc4..v2.6.27-rc5
+         3.0% arch/powerpc/configs/
+         6.8% arch/arm/configs/
+         2.7% arch/powerpc/configs/
+         4.2% arch/arm/configs/
+         5.6% arch/powerpc/configs/
+         8.4% arch/arm/configs/
+         5.5% arch/powerpc/configs/
+        23.3% arch/arm/configs/
+         8.6% arch/powerpc/configs/
+         4.0% arch/
+         4.4% drivers/usb/musb/
+         4.0% drivers/watchdog/
+         7.6% drivers/
+         3.5% fs/
+    
+    The trivial fix is to add a sorting pass, fixing it to:
+    
+      [torvalds@nehalem linux]$ git diff --dirstat=2 -M v2.6.27-rc4..v2.6.27-rc5
+        43.0% arch/arm/configs/
+        25.5% arch/powerpc/configs/
+         5.3% arch/
+         4.4% drivers/usb/musb/
+         4.0% drivers/watchdog/
+         7.6% drivers/
+         3.5% fs/
+    
+    Spot the difference. In case anybody wonders: it's because of a ton of
+    renames from {include/asm-blackfin => arch/blackfin/include/asm} that just
+    totally messed up the file ordering in between arch/arm and arch/powerpc.
+    
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+    Signed-off-by: Junio C Hamano <gitster@pobox.com>
+
+diff --git a/diff.c b/diff.c
+index f70e6b491..7b4300a74 100644
+--- a/diff.c
++++ b/diff.c
+@@ -1054,6 +1054,13 @@ static long gather_dirstat(FILE *file, struct dirstat_dir *dir, unsigned long ch
+ 	return this_dir;
+ }
+ 
++static int dirstat_compare(const void *_a, const void *_b)
++{
++	const struct dirstat_file *a = _a;
++	const struct dirstat_file *b = _b;
++	return strcmp(a->name, b->name);
++}
++
+ static void show_dirstat(struct diff_options *options)
+ {
+ 	int i;
+@@ -1113,6 +1120,7 @@ static void show_dirstat(struct diff_options *options)
+ 		return;
+ 
+ 	/* Show all directories with more than x% of the changes */
++	qsort(dir.files, dir.nr, sizeof(dir.files[0]), dirstat_compare);
+ 	gather_dirstat(options->file, &dir, changed, "", 0);
+ }
+ 
+

@@ -1,0 +1,109 @@
+commit 400f26b542e86995662a0cc5483656b7b1f42af6
+Author: Simo Sorce <simo@redhat.com>
+Date:   Fri May 25 18:09:53 2012 -0400
+
+    SUNRPC: conditionally return endtime from import_sec_context
+    
+    We expose this parameter for a future caller.
+    It will be used to extract the endtime from the gss-proxy upcall mechanism,
+    in order to set the rsc cache expiration time.
+    
+    Signed-off-by: Simo Sorce <simo@redhat.com>
+    Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+
+diff --git a/include/linux/sunrpc/gss_api.h b/include/linux/sunrpc/gss_api.h
+index a19e2547ae6a..04d03bb2de5d 100644
+--- a/include/linux/sunrpc/gss_api.h
++++ b/include/linux/sunrpc/gss_api.h
+@@ -37,6 +37,7 @@ int gss_import_sec_context(
+ 		size_t			bufsize,
+ 		struct gss_api_mech	*mech,
+ 		struct gss_ctx		**ctx_id,
++		time_t			*endtime,
+ 		gfp_t			gfp_mask);
+ u32 gss_get_mic(
+ 		struct gss_ctx		*ctx_id,
+@@ -92,6 +93,7 @@ struct gss_api_ops {
+ 			const void		*input_token,
+ 			size_t			bufsize,
+ 			struct gss_ctx		*ctx_id,
++			time_t			*endtime,
+ 			gfp_t			gfp_mask);
+ 	u32 (*gss_get_mic)(
+ 			struct gss_ctx		*ctx_id,
+diff --git a/net/sunrpc/auth_gss/auth_gss.c b/net/sunrpc/auth_gss/auth_gss.c
+index 5257d2982ba5..23563e783ec2 100644
+--- a/net/sunrpc/auth_gss/auth_gss.c
++++ b/net/sunrpc/auth_gss/auth_gss.c
+@@ -238,7 +238,7 @@ gss_fill_context(const void *p, const void *end, struct gss_cl_ctx *ctx, struct
+ 		p = ERR_PTR(-EFAULT);
+ 		goto err;
+ 	}
+-	ret = gss_import_sec_context(p, seclen, gm, &ctx->gc_gss_ctx, GFP_NOFS);
++	ret = gss_import_sec_context(p, seclen, gm, &ctx->gc_gss_ctx, NULL, GFP_NOFS);
+ 	if (ret < 0) {
+ 		p = ERR_PTR(ret);
+ 		goto err;
+diff --git a/net/sunrpc/auth_gss/gss_krb5_mech.c b/net/sunrpc/auth_gss/gss_krb5_mech.c
+index d3611f11a8df..3bc4a23938ea 100644
+--- a/net/sunrpc/auth_gss/gss_krb5_mech.c
++++ b/net/sunrpc/auth_gss/gss_krb5_mech.c
+@@ -679,6 +679,7 @@ gss_import_v2_context(const void *p, const void *end, struct krb5_ctx *ctx,
+ static int
+ gss_import_sec_context_kerberos(const void *p, size_t len,
+ 				struct gss_ctx *ctx_id,
++				time_t *endtime,
+ 				gfp_t gfp_mask)
+ {
+ 	const void *end = (const void *)((const char *)p + len);
+@@ -694,9 +695,11 @@ gss_import_sec_context_kerberos(const void *p, size_t len,
+ 	else
+ 		ret = gss_import_v2_context(p, end, ctx, gfp_mask);
+ 
+-	if (ret == 0)
++	if (ret == 0) {
+ 		ctx_id->internal_ctx_id = ctx;
+-	else
++		if (endtime)
++			*endtime = ctx->endtime;
++	} else
+ 		kfree(ctx);
+ 
+ 	dprintk("RPC:       %s: returning %d\n", __func__, ret);
+diff --git a/net/sunrpc/auth_gss/gss_mech_switch.c b/net/sunrpc/auth_gss/gss_mech_switch.c
+index f0f4eee63a35..43fd5bbf92c6 100644
+--- a/net/sunrpc/auth_gss/gss_mech_switch.c
++++ b/net/sunrpc/auth_gss/gss_mech_switch.c
+@@ -325,14 +325,15 @@ int
+ gss_import_sec_context(const void *input_token, size_t bufsize,
+ 		       struct gss_api_mech	*mech,
+ 		       struct gss_ctx		**ctx_id,
++		       time_t			*endtime,
+ 		       gfp_t gfp_mask)
+ {
+ 	if (!(*ctx_id = kzalloc(sizeof(**ctx_id), gfp_mask)))
+ 		return -ENOMEM;
+ 	(*ctx_id)->mech_type = gss_mech_get(mech);
+ 
+-	return mech->gm_ops
+-		->gss_import_sec_context(input_token, bufsize, *ctx_id, gfp_mask);
++	return mech->gm_ops->gss_import_sec_context(input_token, bufsize,
++						*ctx_id, endtime, gfp_mask);
+ }
+ 
+ /* gss_get_mic: compute a mic over message and return mic_token. */
+diff --git a/net/sunrpc/auth_gss/svcauth_gss.c b/net/sunrpc/auth_gss/svcauth_gss.c
+index 5ead60550895..20eedecc35f8 100644
+--- a/net/sunrpc/auth_gss/svcauth_gss.c
++++ b/net/sunrpc/auth_gss/svcauth_gss.c
+@@ -497,7 +497,8 @@ static int rsc_parse(struct cache_detail *cd,
+ 		len = qword_get(&mesg, buf, mlen);
+ 		if (len < 0)
+ 			goto out;
+-		status = gss_import_sec_context(buf, len, gm, &rsci.mechctx, GFP_KERNEL);
++		status = gss_import_sec_context(buf, len, gm, &rsci.mechctx,
++						NULL, GFP_KERNEL);
+ 		if (status)
+ 			goto out;
+ 
+

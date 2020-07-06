@@ -1,0 +1,155 @@
+commit 38fd4c2e664a38e17663d2d469c5e0f1ecec3269
+Author: Rostislav Pehlivanov <atomnuker@gmail.com>
+Date:   Thu Jul 2 19:13:05 2015 +0100
+
+    aaccoder: add a new perceptual noise substitution implementation
+    
+    This commit finalizes the PNS implementation previously added to the encoder
+    by moving it to a seperate function search_for_pns() and thus making it
+    coder-generic. This new implementation makes use of the spread field of
+    the psy bands and the lambda quality feedback paremeter. The spread of the
+    spectrum in a band prevents PNS from being used excessively and thus preserve
+    more phase information in high frequencies.  The lambda parameter allows
+    the number of PNS-marked bands to vary based on the lambda parameter and the
+    amount of bits available, making better choices on which bands are to be marked
+    as noise. Comparisons with the previous PNS implementation can be found
+    here: https://trac.ffmpeg.org/attachment/wiki/Encode/AAC/
+    
+    This is V2 of the patch, the changes from the previous version being that this
+    version uses the new band->spread metric from aacpsy and normalizes the
+    energy using the group size. These changes were suggested by Claudio Freire
+    on the mailing list. Another change is the use of lambda to alter the
+    frequency threshold. This change makes the actual threshold frequencies
+    vary between +-2Khz of what's specified, depending on frame encoding performance.
+    
+    Reviewed-by: Claudio Freire <klaussfreire@gmail.com>
+    Signed-off-by: Michael Niedermayer <michaelni@gmx.at>
+
+diff --git a/libavcodec/aaccoder.c b/libavcodec/aaccoder.c
+index 8695a885c1..95782fc49e 100644
+--- a/libavcodec/aaccoder.c
++++ b/libavcodec/aaccoder.c
+@@ -41,7 +41,16 @@
+ #include "aactab.h"
+ 
+ /** Frequency in Hz for lower limit of noise substitution **/
+-#define NOISE_LOW_LIMIT 4000
++#define NOISE_LOW_LIMIT 4500
++
++/* Energy spread threshold value below which no PNS is used, this corresponds to
++ * typically around 17Khz, after which PNS usage decays ending at 19Khz */
++#define NOISE_SPREAD_THRESHOLD 0.5f
++
++/* This constant gets divided by lambda to return ~1.65 which when multiplied
++ * by the band->threshold and compared to band->energy is the boundary between
++ * excessive PNS and little PNS usage. */
++#define NOISE_LAMBDA_NUMERATOR 252.1f
+ 
+ /** Total number of usable codebooks **/
+ #define CB_TOT 12
+@@ -1132,6 +1141,43 @@ static void search_for_quantizers_fast(AVCodecContext *avctx, AACEncContext *s,
+                 sce->sf_idx[(w+w2)*16+g] = sce->sf_idx[w*16+g];
+ }
+ 
++static void search_for_pns(AACEncContext *s, AVCodecContext *avctx, SingleChannelElement *sce,
++                           const float lambda)
++{
++    int start = 0, w, w2, g;
++    const float freq_mult = avctx->sample_rate/(1024.0f/sce->ics.num_windows)/2.0f;
++    const float spread_threshold = NOISE_SPREAD_THRESHOLD*(lambda/120.f);
++    const float thr_mult = NOISE_LAMBDA_NUMERATOR/lambda;
++
++    /* Coders !twoloop don't reset the band_types */
++    for (w = 0; w < 128; w++)
++        if (sce->band_type[w] == NOISE_BT)
++            sce->band_type[w] = 0;
++
++    for (w = 0; w < sce->ics.num_windows; w += sce->ics.group_len[w]) {
++        start = 0;
++        for (g = 0;  g < sce->ics.num_swb; g++) {
++            if (start*freq_mult > NOISE_LOW_LIMIT*(lambda/170.0f)) {
++                float energy = 0.0f, threshold = 0.0f, spread = 0.0f;
++                for (w2 = 0; w2 < sce->ics.group_len[w]; w2++) {
++                    FFPsyBand *band = &s->psy.ch[s->cur_channel+0].psy_bands[(w+w2)*16+g];
++                    energy += band->energy;
++                    threshold += band->threshold;
++                    spread += band->spread;
++                }
++                if (spread > spread_threshold*sce->ics.group_len[w] &&
++                    ((sce->zeroes[w*16+g] && energy >= threshold) ||
++                    energy < threshold*thr_mult*sce->ics.group_len[w])) {
++                    sce->band_type[w*16+g] = NOISE_BT;
++                    sce->pns_ener[w*16+g] = energy / sce->ics.group_len[w];
++                    sce->zeroes[w*16+g] = 0;
++                }
++            }
++            start += sce->ics.swb_sizes[g];
++        }
++    }
++}
++
+ static void search_for_ms(AACEncContext *s, ChannelElement *cpe,
+                           const float lambda)
+ {
+@@ -1200,6 +1246,7 @@ AACCoefficientsEncoder ff_aac_coders[AAC_CODER_NB] = {
+         encode_window_bands_info,
+         quantize_and_encode_band,
+         set_special_band_scalefactors,
++        search_for_pns,
+         search_for_ms,
+     },
+     [AAC_CODER_ANMR] = {
+@@ -1207,6 +1254,7 @@ AACCoefficientsEncoder ff_aac_coders[AAC_CODER_NB] = {
+         encode_window_bands_info,
+         quantize_and_encode_band,
+         set_special_band_scalefactors,
++        search_for_pns,
+         search_for_ms,
+     },
+     [AAC_CODER_TWOLOOP] = {
+@@ -1214,6 +1262,7 @@ AACCoefficientsEncoder ff_aac_coders[AAC_CODER_NB] = {
+         codebook_trellis_rate,
+         quantize_and_encode_band,
+         set_special_band_scalefactors,
++        search_for_pns,
+         search_for_ms,
+     },
+     [AAC_CODER_FAST] = {
+@@ -1221,6 +1270,7 @@ AACCoefficientsEncoder ff_aac_coders[AAC_CODER_NB] = {
+         encode_window_bands_info,
+         quantize_and_encode_band,
+         set_special_band_scalefactors,
++        search_for_pns,
+         search_for_ms,
+     },
+ };
+diff --git a/libavcodec/aacenc.c b/libavcodec/aacenc.c
+index 3854066fc1..f7325d49c1 100644
+--- a/libavcodec/aacenc.c
++++ b/libavcodec/aacenc.c
+@@ -641,6 +641,12 @@ static int aac_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
+                     }
+                 }
+             }
++            if (s->options.pns && s->coder->search_for_pns) {
++                for (ch = 0; ch < chans; ch++) {
++                    s->cur_channel = start_ch + ch;
++                    s->coder->search_for_pns(s, avctx, &cpe->ch[ch], s->lambda);
++                }
++            }
+             s->cur_channel = start_ch;
+             if (s->options.stereo_mode && cpe->common_window) {
+                 if (s->options.stereo_mode > 0) {
+diff --git a/libavcodec/aacenc.h b/libavcodec/aacenc.h
+index cc1b06afac..8ba58174a4 100644
+--- a/libavcodec/aacenc.h
++++ b/libavcodec/aacenc.h
+@@ -55,6 +55,7 @@ typedef struct AACCoefficientsEncoder {
+     void (*quantize_and_encode_band)(struct AACEncContext *s, PutBitContext *pb, const float *in, int size,
+                                      int scale_idx, int cb, const float lambda);
+     void (*set_special_band_scalefactors)(struct AACEncContext *s, SingleChannelElement *sce);
++    void (*search_for_pns)(struct AACEncContext *s, AVCodecContext *avctx, SingleChannelElement *sce, const float lambda);
+     void (*search_for_ms)(struct AACEncContext *s, ChannelElement *cpe, const float lambda);
+ } AACCoefficientsEncoder;
+ 
+

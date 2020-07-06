@@ -1,0 +1,311 @@
+commit f0ed4418d46db587eca981065ef5014332678606
+Author: Martin Brandenburg <martin@omnibond.com>
+Date:   Fri Nov 13 14:26:09 2015 -0500
+
+    Orangefs: Remove upcall trailers which are not used.
+    
+    Also removes remnants of iox (readx/writex) which previously used
+    trailers, but no longer exist.
+    
+    Signed-off-by: Martin Brandenburg <martin@omnibond.com>
+    Signed-off-by: Mike Marshall <hubcap@omnibond.com>
+
+diff --git a/fs/orangefs/devpvfs2-req.c b/fs/orangefs/devpvfs2-req.c
+index dbf52ab1e569..34e2240f1d29 100644
+--- a/fs/orangefs/devpvfs2-req.c
++++ b/fs/orangefs/devpvfs2-req.c
+@@ -139,20 +139,6 @@ static ssize_t pvfs2_devreq_read(struct file *file,
+ 				cur_op = op;
+ 				spin_lock(&cur_op->lock);
+ 				list_del(&cur_op->list);
+-				cur_op->op_linger_tmp--;
+-				/*
+-				 * if there is a trailer, re-add it to
+-				 * the request list.
+-				 */
+-				if (cur_op->op_linger == 2 &&
+-				    cur_op->op_linger_tmp == 1) {
+-					if (cur_op->upcall.trailer_size <= 0 ||
+-					    cur_op->upcall.trailer_buf == NULL)
+-						gossip_err("BUG:trailer_size is %ld and trailer buf is %p\n", (long)cur_op->upcall.trailer_size, cur_op->upcall.trailer_buf);
+-					/* re-add it to the head of the list */
+-					list_add(&cur_op->list,
+-						 &pvfs2_request_list);
+-				}
+ 				spin_unlock(&cur_op->lock);
+ 				break;
+ 			}
+@@ -167,11 +153,8 @@ static ssize_t pvfs2_devreq_read(struct file *file,
+ 			     "client-core: reading op tag %llu %s\n",
+ 			     llu(cur_op->tag), get_opname_string(cur_op));
+ 		if (op_state_in_progress(cur_op) || op_state_serviced(cur_op)) {
+-			if (cur_op->op_linger == 1)
+-				gossip_err("WARNING: Current op already queued...skipping\n");
+-		} else if (cur_op->op_linger == 1 ||
+-			   (cur_op->op_linger == 2 &&
+-			    cur_op->op_linger_tmp == 0)) {
++			gossip_err("WARNING: Current op already queued...skipping\n");
++		} else  {
+ 			/*
+ 			 * atomically move the operation to the
+ 			 * htable_ops_in_progress
+@@ -182,71 +165,40 @@ static ssize_t pvfs2_devreq_read(struct file *file,
+ 
+ 		spin_unlock(&cur_op->lock);
+ 
+-		/* 2 cases
+-		 * a) OPs with no trailers
+-		 * b) OPs with trailers, Stage 1
+-		 * Either way push the upcall out
+-		 */
+-		if (cur_op->op_linger == 1 ||
+-		   (cur_op->op_linger == 2 && cur_op->op_linger_tmp == 1)) {
+-			len = MAX_ALIGNED_DEV_REQ_UPSIZE;
+-			if ((size_t) len <= count) {
+-			    ret = copy_to_user(buf,
+-					       &proto_ver,
+-					       sizeof(__s32));
++		/* Push the upcall out */
++		len = MAX_ALIGNED_DEV_REQ_UPSIZE;
++		if ((size_t) len <= count) {
++		    ret = copy_to_user(buf,
++				       &proto_ver,
++			       sizeof(__s32));
++		    if (ret == 0) {
++			ret = copy_to_user(buf + sizeof(__s32),
++					   &magic,
++					   sizeof(__s32));
++			if (ret == 0) {
++			    ret = copy_to_user(buf+2 * sizeof(__s32),
++					       &cur_op->tag,
++					       sizeof(__u64));
+ 			    if (ret == 0) {
+-				ret = copy_to_user(buf + sizeof(__s32),
+-						   &magic,
+-						   sizeof(__s32));
+-				if (ret == 0) {
+-				    ret = copy_to_user(buf+2 * sizeof(__s32),
+-						       &cur_op->tag,
+-						       sizeof(__u64));
+-				    if (ret == 0) {
+-					ret = copy_to_user(
+-						buf +
+-						  2 *
+-						  sizeof(__s32) +
+-						  sizeof(__u64),
+-						&cur_op->upcall,
+-						sizeof(struct pvfs2_upcall_s));
+-				    }
+-				}
+-			    }
+-
+-			    if (ret) {
+-				gossip_err("Failed to copy data to user space\n");
+-				len = -EFAULT;
++				ret = copy_to_user(
++					buf +
++					  2 *
++					  sizeof(__s32) +
++					  sizeof(__u64),
++					&cur_op->upcall,
++					sizeof(struct pvfs2_upcall_s));
+ 			    }
+-			} else {
+-				gossip_err
+-				    ("Failed to copy data to user space\n");
+-				len = -EIO;
+-			}
+-		}
+-		/* Stage 2: Push the trailer out */
+-		else if (cur_op->op_linger == 2 && cur_op->op_linger_tmp == 0) {
+-			len = cur_op->upcall.trailer_size;
+-			if ((size_t) len <= count) {
+-				ret = copy_to_user(buf,
+-						   cur_op->upcall.trailer_buf,
+-						   len);
+-				if (ret) {
+-					gossip_err("Failed to copy trailer to user space\n");
+-					len = -EFAULT;
+-				}
+-			} else {
+-				gossip_err("Read buffer for trailer is too small (%ld as opposed to %ld)\n",
+-					(long)count,
+-					(long)len);
+-				len = -EIO;
+ 			}
++		    }
++
++		    if (ret) {
++			gossip_err("Failed to copy data to user space\n");
++			len = -EFAULT;
++		    }
+ 		} else {
+-			gossip_err("cur_op: %p (op_linger %d), (op_linger_tmp %d), erroneous request list?\n",
+-				cur_op,
+-				cur_op->op_linger,
+-				cur_op->op_linger_tmp);
+-			len = 0;
++			gossip_err
++			    ("Failed to copy data to user space\n");
++			len = -EIO;
+ 		}
+ 	} else if (file->f_flags & O_NONBLOCK) {
+ 		/*
+@@ -413,9 +365,8 @@ static ssize_t pvfs2_devreq_writev(struct file *file,
+ 		 * application reading/writing this device to return until
+ 		 * the buffers are done being used.
+ 		 */
+-		if ((op->upcall.type == PVFS2_VFS_OP_FILE_IO &&
+-		     op->upcall.req.io.async_vfs_io == PVFS_VFS_SYNC_IO) ||
+-		     op->upcall.type == PVFS2_VFS_OP_FILE_IOX) {
++		if (op->upcall.type == PVFS2_VFS_OP_FILE_IO &&
++		    op->upcall.req.io.async_vfs_io == PVFS_VFS_SYNC_IO) {
+ 			int timed_out = 0;
+ 			DECLARE_WAITQUEUE(wait_entry, current);
+ 
+diff --git a/fs/orangefs/downcall.h b/fs/orangefs/downcall.h
+index f8bea46e7c6a..e372f446f6ba 100644
+--- a/fs/orangefs/downcall.h
++++ b/fs/orangefs/downcall.h
+@@ -19,10 +19,6 @@ struct pvfs2_io_response {
+ 	__s64 amt_complete;
+ };
+ 
+-struct pvfs2_iox_response {
+-	__s64 amt_complete;
+-};
+-
+ struct pvfs2_lookup_response {
+ 	struct pvfs2_object_kref refn;
+ };
+@@ -111,7 +107,6 @@ struct pvfs2_downcall_s {
+ 
+ 	union {
+ 		struct pvfs2_io_response io;
+-		struct pvfs2_iox_response iox;
+ 		struct pvfs2_lookup_response lookup;
+ 		struct pvfs2_create_response create;
+ 		struct pvfs2_symlink_response sym;
+diff --git a/fs/orangefs/pvfs2-cache.c b/fs/orangefs/pvfs2-cache.c
+index 15251884ba4a..f982616a4349 100644
+--- a/fs/orangefs/pvfs2-cache.c
++++ b/fs/orangefs/pvfs2-cache.c
+@@ -103,13 +103,11 @@ char *get_opname_string(struct pvfs2_kernel_op_s *new_op)
+ 			return "OP_FSYNC";
+ 		else if (type == PVFS2_VFS_OP_FSKEY)
+ 			return "OP_FSKEY";
+-		else if (type == PVFS2_VFS_OP_FILE_IOX)
+-			return "OP_FILE_IOX";
+ 	}
+ 	return "OP_UNKNOWN?";
+ }
+ 
+-static struct pvfs2_kernel_op_s *op_alloc_common(__s32 op_linger, __s32 type)
++struct pvfs2_kernel_op_s *op_alloc(__s32 type)
+ {
+ 	struct pvfs2_kernel_op_s *new_op = NULL;
+ 
+@@ -145,24 +143,12 @@ static struct pvfs2_kernel_op_s *op_alloc_common(__s32 op_linger, __s32 type)
+ 
+ 		new_op->upcall.gid = from_kgid(current_user_ns(),
+ 					       current_fsgid());
+-
+-		new_op->op_linger = new_op->op_linger_tmp = op_linger;
+ 	} else {
+ 		gossip_err("op_alloc: kmem_cache_alloc failed!\n");
+ 	}
+ 	return new_op;
+ }
+ 
+-struct pvfs2_kernel_op_s *op_alloc(__s32 type)
+-{
+-	return op_alloc_common(1, type);
+-}
+-
+-struct pvfs2_kernel_op_s *op_alloc_trailer(__s32 type)
+-{
+-	return op_alloc_common(2, type);
+-}
+-
+ void op_release(struct pvfs2_kernel_op_s *pvfs2_op)
+ {
+ 	if (pvfs2_op) {
+diff --git a/fs/orangefs/pvfs2-dev-proto.h b/fs/orangefs/pvfs2-dev-proto.h
+index 68b1bc6e57b4..71ab56df4ad7 100644
+--- a/fs/orangefs/pvfs2-dev-proto.h
++++ b/fs/orangefs/pvfs2-dev-proto.h
+@@ -41,7 +41,6 @@
+ #define PVFS2_VFS_OP_FSYNC             0xFF00EE01
+ #define PVFS2_VFS_OP_FSKEY             0xFF00EE02
+ #define PVFS2_VFS_OP_READDIRPLUS       0xFF00EE03
+-#define PVFS2_VFS_OP_FILE_IOX          0xFF00EE04
+ 
+ /*
+  * Misc constants. Please retain them as multiples of 8!
+diff --git a/fs/orangefs/pvfs2-kernel.h b/fs/orangefs/pvfs2-kernel.h
+index 8b7d57118f9e..ac90b6365fd3 100644
+--- a/fs/orangefs/pvfs2-kernel.h
++++ b/fs/orangefs/pvfs2-kernel.h
+@@ -279,19 +279,6 @@ struct pvfs2_kernel_op_s {
+ 	int io_completed;
+ 	wait_queue_head_t io_completion_waitq;
+ 
+-	/*
+-	 * upcalls requiring variable length trailers require that this struct
+-	 * be in the request list even after client-core does a read() on the
+-	 * device to dequeue the upcall.
+-	 * if op_linger field goes to 0, we dequeue this op off the list.
+-	 * else we let it stay. What gets passed to the read() is
+-	 * a) if op_linger field is = 1, pvfs2_kernel_op_s itself
+-	 * b) else if = 0, we pass ->upcall.trailer_buf
+-	 * We expect to have only a single upcall trailer buffer,
+-	 * so we expect callers with trailers
+-	 * to set this field to 2 and others to set it to 1.
+-	 */
+-	__s32 op_linger, op_linger_tmp;
+ 	/* VFS aio fields */
+ 
+ 	/* used by the async I/O code to stash the pvfs2_kiocb_s structure */
+@@ -507,7 +494,6 @@ static inline int match_handle(struct pvfs2_khandle resp_handle,
+ int op_cache_initialize(void);
+ int op_cache_finalize(void);
+ struct pvfs2_kernel_op_s *op_alloc(__s32 type);
+-struct pvfs2_kernel_op_s *op_alloc_trailer(__s32 type);
+ char *get_opname_string(struct pvfs2_kernel_op_s *new_op);
+ void op_release(struct pvfs2_kernel_op_s *op);
+ 
+diff --git a/fs/orangefs/upcall.h b/fs/orangefs/upcall.h
+index 1e07f626aac6..0805778a8185 100644
+--- a/fs/orangefs/upcall.h
++++ b/fs/orangefs/upcall.h
+@@ -23,14 +23,6 @@ struct pvfs2_io_request_s {
+ 	__s32 readahead_size;
+ };
+ 
+-struct pvfs2_iox_request_s {
+-	__s32 buf_index;
+-	__s32 count;
+-	struct pvfs2_object_kref refn;
+-	enum PVFS_io_type io_type;
+-	__s32 __pad1;
+-};
+-
+ struct pvfs2_lookup_request_s {
+ 	__s32 sym_follow;
+ 	__s32 __pad1;
+@@ -218,13 +210,12 @@ struct pvfs2_upcall_s {
+ 	__u32 gid;
+ 	int pid;
+ 	int tgid;
+-	/* currently trailer is used only by readx/writex (iox) */
++	/* Trailers unused but must be retained for protocol compatibility. */
+ 	__s64 trailer_size;
+ 	char *trailer_buf;
+ 
+ 	union {
+ 		struct pvfs2_io_request_s io;
+-		struct pvfs2_iox_request_s iox;
+ 		struct pvfs2_lookup_request_s lookup;
+ 		struct pvfs2_create_request_s create;
+ 		struct pvfs2_symlink_request_s sym;
+

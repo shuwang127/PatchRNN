@@ -1,0 +1,79 @@
+commit b091cd928dfa81e8c28b9707899201358b4e50b5
+Author: Adam Jackson <ajax@redhat.com>
+Date:   Tue Sep 18 10:58:49 2012 -0400
+
+    drm/i915/dp: Fetch downstream port info if needed during DPCD fetch
+    
+    v2: Fix parenthesis mismatch, spotted by Jani Nikula
+    
+    Tested-by: Takashi Iwai <tiwai@suse.de>
+    Signed-off-by: Adam Jackson <ajax@redhat.com>
+    Reviewed-by: Jani Nikula <jani.nikula@intel.com>
+    [danvet: Fixup merge conflict and MAX_DOWNSTREAM #define as spotted by
+    Jani.]
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/i915/intel_dp.c b/drivers/gpu/drm/i915/intel_dp.c
+index 1474f84fdbd0..42bdca47c5d6 100644
+--- a/drivers/gpu/drm/i915/intel_dp.c
++++ b/drivers/gpu/drm/i915/intel_dp.c
+@@ -37,6 +37,7 @@
+ #include "i915_drm.h"
+ #include "i915_drv.h"
+ 
++#define DP_RECEIVER_CAP_SIZE	0xf
+ #define DP_LINK_STATUS_SIZE	6
+ #define DP_LINK_CHECK_TIMEOUT	(10 * 1000)
+ 
+@@ -1964,12 +1965,25 @@ static bool
+ intel_dp_get_dpcd(struct intel_dp *intel_dp)
+ {
+ 	if (intel_dp_aux_native_read_retry(intel_dp, 0x000, intel_dp->dpcd,
+-					   sizeof(intel_dp->dpcd)) &&
+-	    (intel_dp->dpcd[DP_DPCD_REV] != 0)) {
+-		return true;
+-	}
++					   sizeof(intel_dp->dpcd)) == 0)
++		return false; /* aux transfer failed */
+ 
+-	return false;
++	if (intel_dp->dpcd[DP_DPCD_REV] == 0)
++		return false; /* DPCD not present */
++
++	if (!(intel_dp->dpcd[DP_DOWNSTREAMPORT_PRESENT] &
++	      DP_DWN_STRM_PORT_PRESENT))
++		return true; /* native DP sink */
++
++	if (intel_dp->dpcd[DP_DPCD_REV] == 0x10)
++		return true; /* no per-port downstream info */
++
++	if (intel_dp_aux_native_read_retry(intel_dp, DP_DOWNSTREAM_PORT_0,
++					   intel_dp->downstream_ports,
++					   DP_MAX_DOWNSTREAM_PORTS) == 0)
++		return false; /* downstream port status fetch failed */
++
++	return true;
+ }
+ 
+ static void
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index 351fd7179cd7..79f8ed66574e 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -332,6 +332,7 @@ struct intel_hdmi {
+ };
+ 
+ #define DP_RECEIVER_CAP_SIZE		0xf
++#define DP_MAX_DOWNSTREAM_PORTS		0x10
+ #define DP_LINK_CONFIGURATION_SIZE	9
+ 
+ struct intel_dp {
+@@ -346,6 +347,7 @@ struct intel_dp {
+ 	uint8_t link_bw;
+ 	uint8_t lane_count;
+ 	uint8_t dpcd[DP_RECEIVER_CAP_SIZE];
++	uint8_t downstream_ports[DP_MAX_DOWNSTREAM_PORTS];
+ 	struct i2c_adapter adapter;
+ 	struct i2c_algo_dp_aux_data algo;
+ 	bool is_pch_edp;
+

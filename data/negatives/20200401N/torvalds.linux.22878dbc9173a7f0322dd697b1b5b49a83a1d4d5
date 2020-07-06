@@ -1,0 +1,65 @@
+commit 22878dbc9173a7f0322dd697b1b5b49a83a1d4d5
+Author: Matan Barak <matanb@mellanox.com>
+Date:   Sun Sep 1 18:39:52 2013 +0300
+
+    IB/core: Better checking of userspace values for receive flow steering
+    
+      - Don't allow unsupported comp_mask values, user should check
+        ibv_query_device to know which features are supported.
+      - Add a check in ib_uverbs_create_flow() to verify the size passed
+        from the user space.
+    
+    Signed-off-by: Matan Barak <matanb@mellanox.com>
+    Signed-off-by: Roland Dreier <roland@purestorage.com>
+
+diff --git a/drivers/infiniband/core/uverbs_cmd.c b/drivers/infiniband/core/uverbs_cmd.c
+index 6e98df929e29..9112410da11d 100644
+--- a/drivers/infiniband/core/uverbs_cmd.c
++++ b/drivers/infiniband/core/uverbs_cmd.c
+@@ -2652,17 +2652,31 @@ ssize_t ib_uverbs_create_flow(struct ib_uverbs_file *file,
+ 	if (copy_from_user(&cmd, buf, sizeof(cmd)))
+ 		return -EFAULT;
+ 
++	if (cmd.comp_mask)
++		return -EINVAL;
++
+ 	if ((cmd.flow_attr.type == IB_FLOW_ATTR_SNIFFER &&
+ 	     !capable(CAP_NET_ADMIN)) || !capable(CAP_NET_RAW))
+ 		return -EPERM;
+ 
++	if (cmd.flow_attr.num_of_specs < 0 ||
++	    cmd.flow_attr.num_of_specs > IB_FLOW_SPEC_SUPPORT_LAYERS)
++		return -EINVAL;
++
++	kern_attr_size = cmd.flow_attr.size - sizeof(cmd) -
++			 sizeof(struct ib_uverbs_cmd_hdr_ex);
++
++	if (cmd.flow_attr.size < 0 || cmd.flow_attr.size > in_len ||
++	    kern_attr_size < 0 || kern_attr_size >
++	    (cmd.flow_attr.num_of_specs * sizeof(struct ib_kern_spec)))
++		return -EINVAL;
++
+ 	if (cmd.flow_attr.num_of_specs) {
+ 		kern_flow_attr = kmalloc(cmd.flow_attr.size, GFP_KERNEL);
+ 		if (!kern_flow_attr)
+ 			return -ENOMEM;
+ 
+ 		memcpy(kern_flow_attr, &cmd.flow_attr, sizeof(*kern_flow_attr));
+-		kern_attr_size = cmd.flow_attr.size - sizeof(cmd) - sizeof(struct ib_uverbs_cmd_hdr_ex);
+ 		if (copy_from_user(kern_flow_attr + 1, buf + sizeof(cmd),
+ 				   kern_attr_size)) {
+ 			err = -EFAULT;
+diff --git a/include/rdma/ib_verbs.h b/include/rdma/ib_verbs.h
+index 274205d4df97..bd151eac1e61 100644
+--- a/include/rdma/ib_verbs.h
++++ b/include/rdma/ib_verbs.h
+@@ -1098,6 +1098,8 @@ enum ib_flow_spec_type {
+ 	IB_FLOW_SPEC_UDP	= 0x41
+ };
+ 
++#define IB_FLOW_SPEC_SUPPORT_LAYERS 4
++
+ /* Flow steering rule priority is set according to it's domain.
+  * Lower domain value means higher priority.
+  */
+

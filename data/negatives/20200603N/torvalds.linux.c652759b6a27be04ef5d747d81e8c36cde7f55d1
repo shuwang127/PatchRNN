@@ -1,0 +1,91 @@
+commit c652759b6a27be04ef5d747d81e8c36cde7f55d1
+Author: Julia Lawall <julia@diku.dk>
+Date:   Wed Feb 16 13:05:54 2011 +1100
+
+    hwrng: omap - Convert release_resource to release_region/release_mem_region
+    
+    Request_region should be used with release_region, not release_resource.
+    
+    The local variable mem, storing the result of request_mem_region, is
+    dropped and instead the pointer res is stored in the drvdata field of the
+    platform device.  This information is retrieved in omap_rng_remove to
+    release the region.  The drvdata field is not used elsewhere.
+    
+    The semantic match that finds this problem is as follows:
+    (http://coccinelle.lip6.fr/)
+    
+    // <smpl>
+    @@
+    expression x,E;
+    @@
+    (
+    *x = request_region(...)
+    |
+    *x = request_mem_region(...)
+    )
+    ... when != release_region(x)
+        when != x = E
+    * release_resource(x);
+    // </smpl>
+    
+    Signed-off-by: Julia Lawall <julia@diku.dk>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/char/hw_random/omap-rng.c b/drivers/char/hw_random/omap-rng.c
+index 06aad0831c73..2cc755a64302 100644
+--- a/drivers/char/hw_random/omap-rng.c
++++ b/drivers/char/hw_random/omap-rng.c
+@@ -91,7 +91,7 @@ static struct hwrng omap_rng_ops = {
+ 
+ static int __devinit omap_rng_probe(struct platform_device *pdev)
+ {
+-	struct resource *res, *mem;
++	struct resource *res;
+ 	int ret;
+ 
+ 	/*
+@@ -116,14 +116,12 @@ static int __devinit omap_rng_probe(struct platform_device *pdev)
+ 	if (!res)
+ 		return -ENOENT;
+ 
+-	mem = request_mem_region(res->start, resource_size(res),
+-				 pdev->name);
+-	if (mem == NULL) {
++	if (!request_mem_region(res->start, resource_size(res), pdev->name)) {
+ 		ret = -EBUSY;
+ 		goto err_region;
+ 	}
+ 
+-	dev_set_drvdata(&pdev->dev, mem);
++	dev_set_drvdata(&pdev->dev, res);
+ 	rng_base = ioremap(res->start, resource_size(res));
+ 	if (!rng_base) {
+ 		ret = -ENOMEM;
+@@ -146,7 +144,7 @@ static int __devinit omap_rng_probe(struct platform_device *pdev)
+ 	iounmap(rng_base);
+ 	rng_base = NULL;
+ err_ioremap:
+-	release_resource(mem);
++	release_mem_region(res->start, resource_size(res));
+ err_region:
+ 	if (cpu_is_omap24xx()) {
+ 		clk_disable(rng_ick);
+@@ -157,7 +155,7 @@ static int __devinit omap_rng_probe(struct platform_device *pdev)
+ 
+ static int __exit omap_rng_remove(struct platform_device *pdev)
+ {
+-	struct resource *mem = dev_get_drvdata(&pdev->dev);
++	struct resource *res = dev_get_drvdata(&pdev->dev);
+ 
+ 	hwrng_unregister(&omap_rng_ops);
+ 
+@@ -170,7 +168,7 @@ static int __exit omap_rng_remove(struct platform_device *pdev)
+ 		clk_put(rng_ick);
+ 	}
+ 
+-	release_resource(mem);
++	release_mem_region(res->start, resource_size(res));
+ 	rng_base = NULL;
+ 
+ 	return 0;
+

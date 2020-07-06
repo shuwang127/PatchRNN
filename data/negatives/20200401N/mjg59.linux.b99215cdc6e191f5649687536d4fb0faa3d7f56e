@@ -1,0 +1,76 @@
+commit b99215cdc6e191f5649687536d4fb0faa3d7f56e
+Author: David S. Miller <davem@davemloft.net>
+Date:   Sun May 13 15:45:13 2012 -0400
+
+    bonding: Fix LACPDU rx_dropped commit.
+    
+    I applied the wrong version of Jiri's bonding fix in commit
+    13a8e0c8cdb43982372bd6c65fb26839c8fd8ce9 ("bonding: don't increase
+    rx_dropped after processing LACPDUs")
+    
+    I applied v3, which introduces warnings I asked him to fix,
+    instead of v4 which properly takes care of those issues.
+    
+    This inter-diffs such that the warnings are now gone.
+    
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/bonding/bond_alb.c b/drivers/net/bonding/bond_alb.c
+index 9abfde479316..2e1f8066f1a8 100644
+--- a/drivers/net/bonding/bond_alb.c
++++ b/drivers/net/bonding/bond_alb.c
+@@ -342,26 +342,26 @@ static void rlb_update_entry_from_arp(struct bonding *bond, struct arp_pkt *arp)
+ 	_unlock_rx_hashtbl_bh(bond);
+ }
+ 
+-static void rlb_arp_recv(struct sk_buff *skb, struct bonding *bond,
++static int rlb_arp_recv(struct sk_buff *skb, struct bonding *bond,
+ 			 struct slave *slave)
+ {
+ 	struct arp_pkt *arp;
+ 
+ 	if (skb->protocol != cpu_to_be16(ETH_P_ARP))
+-		return;
++		goto out;
+ 
+ 	arp = (struct arp_pkt *) skb->data;
+ 	if (!arp) {
+ 		pr_debug("Packet has no ARP data\n");
+-		return;
++		goto out;
+ 	}
+ 
+ 	if (!pskb_may_pull(skb, arp_hdr_len(bond->dev)))
+-		return;
++		goto out;
+ 
+ 	if (skb->len < sizeof(struct arp_pkt)) {
+ 		pr_debug("Packet is too small to be an ARP\n");
+-		return;
++		goto out;
+ 	}
+ 
+ 	if (arp->op_code == htons(ARPOP_REPLY)) {
+@@ -369,6 +369,8 @@ static void rlb_arp_recv(struct sk_buff *skb, struct bonding *bond,
+ 		rlb_update_entry_from_arp(bond, arp);
+ 		pr_debug("Server received an ARP Reply from client\n");
+ 	}
++out:
++	return RX_HANDLER_ANOTHER;
+ }
+ 
+ /* Caller must hold bond lock for read */
+diff --git a/drivers/net/bonding/bonding.h b/drivers/net/bonding/bonding.h
+index 9f2bae6616d3..4581aa5ccaba 100644
+--- a/drivers/net/bonding/bonding.h
++++ b/drivers/net/bonding/bonding.h
+@@ -218,7 +218,7 @@ struct bonding {
+ 	struct   slave *primary_slave;
+ 	bool     force_primary;
+ 	s32      slave_cnt; /* never change this value outside the attach/detach wrappers */
+-	void     (*recv_probe)(struct sk_buff *, struct bonding *,
++	int     (*recv_probe)(struct sk_buff *, struct bonding *,
+ 			       struct slave *);
+ 	rwlock_t lock;
+ 	rwlock_t curr_slave_lock;
+

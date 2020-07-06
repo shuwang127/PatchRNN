@@ -1,0 +1,39 @@
+commit c948bb5c2cc4d63f9d76fc02baf5a8331e3cd27f
+Author: Sowmini Varadhan <sowmini.varadhan@oracle.com>
+Date:   Wed May 18 10:06:24 2016 -0700
+
+    RDS: TCP: Avoid rds connection churn from rogue SYNs
+    
+    When a rogue SYN is received after the connection arbitration
+    algorithm has converged, the incoming SYN should not needlessly
+    quiesce the transmit path, and it should not result in needless
+    TCP connection resets due to re-execution of the connection
+    arbitration logic.
+    
+    Signed-off-by: Sowmini Varadhan <sowmini.varadhan@oracle.com>
+    Acked-by: Santosh Shilimkar <santosh.shilimkar@oracle.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/rds/tcp_listen.c b/net/rds/tcp_listen.c
+index 094a8cae0ef1..4bf4befe5066 100644
+--- a/net/rds/tcp_listen.c
++++ b/net/rds/tcp_listen.c
+@@ -132,11 +132,13 @@ int rds_tcp_accept_one(struct socket *sock)
+ 		 * so we must quiesce any send threads before resetting
+ 		 * c_transport_data.
+ 		 */
+-		wait_event(conn->c_waitq,
+-			   !test_bit(RDS_IN_XMIT, &conn->c_flags));
+-		if (ntohl(inet->inet_saddr) < ntohl(inet->inet_daddr)) {
++		if (ntohl(inet->inet_saddr) < ntohl(inet->inet_daddr) ||
++		    !conn->c_outgoing) {
+ 			goto rst_nsk;
+-		} else if (rs_tcp->t_sock) {
++		} else {
++			atomic_set(&conn->c_state, RDS_CONN_CONNECTING);
++			wait_event(conn->c_waitq,
++				   !test_bit(RDS_IN_XMIT, &conn->c_flags));
+ 			rds_tcp_restore_callbacks(rs_tcp->t_sock, rs_tcp);
+ 			conn->c_outgoing = 0;
+ 		}
+

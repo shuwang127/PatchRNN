@@ -1,0 +1,666 @@
+commit 29e948debe603d7dd33a171a0101352e6b133a7a
+Author: Vicent Martí <tanoku@gmail.com>
+Date:   Thu May 10 10:38:10 2012 +0200
+
+    global: Change parameter ordering in API
+    
+    Consistency is good.
+
+diff --git a/include/git2/attr.h b/include/git2/attr.h
+index 6a05496dc..28ca3bc1c 100644
+--- a/include/git2/attr.h
++++ b/include/git2/attr.h
+@@ -65,7 +65,7 @@ GIT_BEGIN_DECL
+ #define GIT_ATTR_UNSPECIFIED(attr)	(!(attr) || (attr) == git_attr__unset)
+ 
+ /**
+- * GIT_ATTR_SET_TO_VALUE checks if an attribute is set to a value (as
++ * GIT_ATTR_HAS_VALUE checks if an attribute is set to a value (as
+  * opposied to TRUE, FALSE or UNSPECIFIED).  This would be the case if
+  * for a file with something like:
+  *
+@@ -74,7 +74,7 @@ GIT_BEGIN_DECL
+  * Given this, looking up "eol" for `onefile.txt` will give back the
+  * string "lf" and `GIT_ATTR_SET_TO_VALUE(attr)` will return true.
+  */
+-#define GIT_ATTR_SET_TO_VALUE(attr) \
++#define GIT_ATTR_HAS_VALUE(attr) \
+ 	((attr) && (attr) != git_attr__unset && \
+ 	 (attr) != git_attr__true && (attr) != git_attr__false)
+ 
+@@ -111,6 +111,10 @@ GIT_EXTERN(const char *) git_attr__unset;
+ /**
+  * Look up the value of one git attribute for path.
+  *
++ * @param value_out Output of the value of the attribute.  Use the GIT_ATTR_...
++ *             macros to test for TRUE, FALSE, UNSPECIFIED, etc. or just
++ *             use the string value for attributes set to a value.  You
++ *             should NOT modify or free this value.
+  * @param repo The repository containing the path.
+  * @param flags A combination of GIT_ATTR_CHECK... flags.
+  * @param path The path to check for attributes.  Relative paths are
+@@ -118,17 +122,13 @@ GIT_EXTERN(const char *) git_attr__unset;
+  *             not have to exist, but if it does not, then it will be
+  *             treated as a plain file (not a directory).
+  * @param name The name of the attribute to look up.
+- * @param value Output of the value of the attribute.  Use the GIT_ATTR_...
+- *             macros to test for TRUE, FALSE, UNSPECIFIED, etc. or just
+- *             use the string value for attributes set to a value.  You
+- *             should NOT modify or free this value.
+  */
+ GIT_EXTERN(int) git_attr_get(
++	const char **value_out,
+     git_repository *repo,
+ 	uint32_t flags,
+ 	const char *path,
+-	const char *name,
+-	const char **value);
++	const char *name);
+ 
+ /**
+  * Look up a list of git attributes for path.
+@@ -141,11 +141,16 @@ GIT_EXTERN(int) git_attr_get(
+  *
+  *     const char *attrs[] = { "crlf", "diff", "foo" };
+  *     const char **values[3];
+- *     git_attr_get_many(repo, 0, "my/fun/file.c", 3, attrs, values);
++ *     git_attr_get_many(values, repo, 0, "my/fun/file.c", 3, attrs);
+  *
+  * Then you could loop through the 3 values to get the settings for
+  * the three attributes you asked about.
+  *
++ * @param values An array of num_attr entries that will have string
++ *             pointers written into it for the values of the attributes.
++ *             You should not modify or free the values that are written
++ *             into this array (although of course, you should free the
++ *             array itself if you allocated it).
+  * @param repo The repository containing the path.
+  * @param flags A combination of GIT_ATTR_CHECK... flags.
+  * @param path The path inside the repo to check attributes.  This
+@@ -153,19 +158,14 @@ GIT_EXTERN(int) git_attr_get(
+  *             it will be treated as a plain file (i.e. not a directory).
+  * @param num_attr The number of attributes being looked up
+  * @param names An array of num_attr strings containing attribute names.
+- * @param values An array of num_attr entries that will have string
+- *             pointers written into it for the values of the attributes.
+- *             You should not modify or free the values that are written
+- *             into this array (although of course, you should free the
+- *             array itself if you allocated it).
+  */
+ GIT_EXTERN(int) git_attr_get_many(
++	const char **values_out,
+ 	git_repository *repo,
+ 	uint32_t flags,
+ 	const char *path,
+ 	size_t num_attr,
+-	const char **names,
+-	const char **values);
++	const char **names);
+ 
+ /**
+  * Loop over all the git attributes for a path.
+diff --git a/include/git2/config.h b/include/git2/config.h
+index acc45b018..983d7fc9a 100644
+--- a/include/git2/config.h
++++ b/include/git2/config.h
+@@ -65,7 +65,7 @@ typedef struct {
+  * @return GIT_SUCCESS if a global configuration file has been
+  *	found. Its path will be stored in `buffer`.
+  */
+-GIT_EXTERN(int) git_config_find_global(char *global_config_path);
++GIT_EXTERN(int) git_config_find_global(char *global_config_path, size_t length);
+ 
+ /**
+  * Locate the path to the system configuration file
+@@ -77,7 +77,7 @@ GIT_EXTERN(int) git_config_find_global(char *global_config_path);
+  * @return GIT_SUCCESS if a system configuration file has been
+  *	found. Its path will be stored in `buffer`.
+  */
+-GIT_EXTERN(int) git_config_find_system(char *system_config_path);
++GIT_EXTERN(int) git_config_find_system(char *system_config_path, size_t length);
+ 
+ /**
+  * Open the global configuration file
+@@ -177,22 +177,22 @@ GIT_EXTERN(void) git_config_free(git_config *cfg);
+ /**
+  * Get the value of an integer config variable.
+  *
++ * @param out pointer to the variable where the value should be stored
+  * @param cfg where to look for the variable
+  * @param name the variable's name
+- * @param out pointer to the variable where the value should be stored
+  * @return GIT_SUCCESS or an error code
+  */
+-GIT_EXTERN(int) git_config_get_int32(git_config *cfg, const char *name, int32_t *out);
++GIT_EXTERN(int) git_config_get_int32(int32_t *out, git_config *cfg, const char *name);
+ 
+ /**
+  * Get the value of a long integer config variable.
+  *
++ * @param out pointer to the variable where the value should be stored
+  * @param cfg where to look for the variable
+  * @param name the variable's name
+- * @param out pointer to the variable where the value should be stored
+  * @return GIT_SUCCESS or an error code
+  */
+-GIT_EXTERN(int) git_config_get_int64(git_config *cfg, const char *name, int64_t *out);
++GIT_EXTERN(int) git_config_get_int64(int64_t *out, git_config *cfg, const char *name);
+ 
+ /**
+  * Get the value of a boolean config variable.
+@@ -200,12 +200,12 @@ GIT_EXTERN(int) git_config_get_int64(git_config *cfg, const char *name, int64_t
+  * This function uses the usual C convention of 0 being false and
+  * anything else true.
+  *
++ * @param out pointer to the variable where the value should be stored
+  * @param cfg where to look for the variable
+  * @param name the variable's name
+- * @param out pointer to the variable where the value should be stored
+  * @return GIT_SUCCESS or an error code
+  */
+-GIT_EXTERN(int) git_config_get_bool(git_config *cfg, const char *name, int *out);
++GIT_EXTERN(int) git_config_get_bool(int *out, git_config *cfg, const char *name);
+ 
+ /**
+  * Get the value of a string config variable.
+@@ -213,12 +213,12 @@ GIT_EXTERN(int) git_config_get_bool(git_config *cfg, const char *name, int *out)
+  * The string is owned by the variable and should not be freed by the
+  * user.
+  *
++ * @param out pointer to the variable's value
+  * @param cfg where to look for the variable
+  * @param name the variable's name
+- * @param out pointer to the variable's value
+  * @return GIT_SUCCESS or an error code
+  */
+-GIT_EXTERN(int) git_config_get_string(git_config *cfg, const char *name, const char **out);
++GIT_EXTERN(int) git_config_get_string(const char **out, git_config *cfg, const char *name);
+ 
+ /**
+  * Get each value of a multivar.
+@@ -342,14 +342,14 @@ GIT_EXTERN(int) git_config_foreach(
+  * If not a single match can be made to store in `out`, an error code will be
+  * returned.
+  *
++ * @param out place to store the result of the mapping
+  * @param cfg config file to get the variables from
+  * @param name name of the config variable to lookup
+  * @param maps array of `git_cvar_map` objects specifying the possible mappings
+  * @param map_n number of mapping objects in `maps`
+- * @param out place to store the result of the mapping
+  * @return GIT_SUCCESS on success, error code otherwise
+  */
+-GIT_EXTERN(int) git_config_get_mapped(git_config *cfg, const char *name, git_cvar_map *maps, size_t map_n, int *out);
++GIT_EXTERN(int) git_config_get_mapped(int *out, git_config *cfg, const char *name, git_cvar_map *maps, size_t map_n);
+ 
+ /** @} */
+ GIT_END_DECL
+diff --git a/src/attr.c b/src/attr.c
+index 1aa965de3..093f64d5c 100644
+--- a/src/attr.c
++++ b/src/attr.c
+@@ -13,11 +13,11 @@ static int collect_attr_files(
+ 
+ 
+ int git_attr_get(
++	const char **value,
+     git_repository *repo,
+ 	uint32_t flags,
+ 	const char *pathname,
+-	const char *name,
+-	const char **value)
++	const char *name)
+ {
+ 	int error;
+ 	git_attr_path path;
+@@ -64,12 +64,12 @@ typedef struct {
+ } attr_get_many_info;
+ 
+ int git_attr_get_many(
++	const char **values,
+     git_repository *repo,
+ 	uint32_t flags,
+ 	const char *pathname,
+     size_t num_attr,
+-	const char **names,
+-	const char **values)
++	const char **names)
+ {
+ 	int error;
+ 	git_attr_path path;
+@@ -576,11 +576,11 @@ int git_attr_cache__init(git_repository *repo)
+ 	if (git_repository_config__weakptr(&cfg, repo) < 0)
+ 		return -1;
+ 
+-	ret = git_config_get_string(cfg, GIT_ATTR_CONFIG, &cache->cfg_attr_file);
++	ret = git_config_get_string(&cache->cfg_attr_file, cfg, GIT_ATTR_CONFIG);
+ 	if (ret < 0 && ret != GIT_ENOTFOUND)
+ 		return ret;
+ 
+-	ret = git_config_get_string(cfg, GIT_IGNORE_CONFIG, &cache->cfg_excl_file);
++	ret = git_config_get_string(&cache->cfg_excl_file, cfg, GIT_IGNORE_CONFIG);
+ 	if (ret < 0 && ret != GIT_ENOTFOUND)
+ 		return ret;
+ 
+diff --git a/src/config.c b/src/config.c
+index 0ab0cd424..618202c34 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -199,30 +199,6 @@ int git_config_set_string(git_config *cfg, const char *name, const char *value)
+ 	return file->set(file, name, value);
+ }
+ 
+-int git_config_parse_bool(int *out, const char *value)
+-{
+-	/* A missing value means true */
+-	if (value == NULL) {
+-		*out = 1;
+-		return 0;
+-	}
+-
+-	if (!strcasecmp(value, "true") ||
+-		!strcasecmp(value, "yes") ||
+-		!strcasecmp(value, "on")) {
+-		*out = 1;
+-		return 0;
+-	}
+-	if (!strcasecmp(value, "false") ||
+-		!strcasecmp(value, "no") ||
+-		!strcasecmp(value, "off")) {
+-		*out = 0;
+-		return 0;
+-	}
+-
+-	return -1;
+-}
+-
+ static int parse_int64(int64_t *out, const char *value)
+ {
+ 	const char *num_end;
+@@ -297,7 +273,7 @@ int git_config_lookup_map_value(
+ 		case GIT_CVAR_TRUE: {
+ 			int bool_val;
+ 
+-			if (git_config_parse_bool(&bool_val, value) == 0 && 
++			if (git__parse_bool(&bool_val, value) == 0 &&
+ 				bool_val == (int)m->cvar_type) {
+ 				*out = m->map_value;
+ 				return 0;
+@@ -322,12 +298,17 @@ int git_config_lookup_map_value(
+ 	return GIT_ENOTFOUND;
+ }
+ 
+-int git_config_get_mapped(git_config *cfg, const char *name, git_cvar_map *maps, size_t map_n, int *out)
++int git_config_get_mapped(
++	int *out,
++	git_config *cfg,
++	const char *name,
++	git_cvar_map *maps,
++	size_t map_n)
+ {
+ 	const char *value;
+ 	int ret;
+ 
+-	ret = git_config_get_string(cfg, name, &value);
++	ret = git_config_get_string(&value, cfg, name);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -339,12 +320,12 @@ int git_config_get_mapped(git_config *cfg, const char *name, git_cvar_map *maps,
+ 	return -1;
+ }
+ 
+-int git_config_get_int64(git_config *cfg, const char *name, int64_t *out)
++int git_config_get_int64(int64_t *out, git_config *cfg, const char *name)
+ {
+ 	const char *value;
+ 	int ret;
+ 
+-	ret = git_config_get_string(cfg, name, &value);
++	ret = git_config_get_string(&value, cfg, name);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -356,12 +337,12 @@ int git_config_get_int64(git_config *cfg, const char *name, int64_t *out)
+ 	return 0;
+ }
+ 
+-int git_config_get_int32(git_config *cfg, const char *name, int32_t *out)
++int git_config_get_int32(int32_t *out, git_config *cfg, const char *name)
+ {
+ 	const char *value;
+ 	int ret;
+ 
+-	ret = git_config_get_string(cfg, name, &value);
++	ret = git_config_get_string(&value, cfg, name);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -373,16 +354,16 @@ int git_config_get_int32(git_config *cfg, const char *name, int32_t *out)
+ 	return 0;
+ }
+ 
+-int git_config_get_bool(git_config *cfg, const char *name, int *out)
++int git_config_get_bool(int *out, git_config *cfg, const char *name)
+ {
+ 	const char *value;
+ 	int ret;
+ 
+-	ret = git_config_get_string(cfg, name, &value);
++	ret = git_config_get_string(&value, cfg, name);
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	if (git_config_parse_bool(out, value) == 0)
++	if (git__parse_bool(out, value) == 0)
+ 		return 0;
+ 
+ 	if (parse_int32(out, value) == 0) {
+@@ -394,7 +375,7 @@ int git_config_get_bool(git_config *cfg, const char *name, int *out)
+ 	return -1;
+ }
+ 
+-int git_config_get_string(git_config *cfg, const char *name, const char **out)
++int git_config_get_string(const char **out, git_config *cfg, const char *name)
+ {
+ 	file_internal *internal;
+ 	unsigned int i;
+@@ -462,7 +443,7 @@ int git_config_find_global_r(git_buf *path)
+ 	return git_futils_find_global_file(path, GIT_CONFIG_FILENAME);
+ }
+ 
+-int git_config_find_global(char *global_config_path)
++int git_config_find_global(char *global_config_path, size_t length)
+ {
+ 	git_buf path  = GIT_BUF_INIT;
+ 	int     ret = git_config_find_global_r(&path);
+@@ -472,14 +453,14 @@ int git_config_find_global(char *global_config_path)
+ 		return ret;
+ 	}
+ 
+-	if (path.size > GIT_PATH_MAX) {
++	if (path.size >= length) {
+ 		git_buf_free(&path);
+ 		giterr_set(GITERR_NOMEMORY,
+ 			"Path is to long to fit on the given buffer");
+ 		return -1;
+ 	}
+ 
+-	git_buf_copy_cstr(global_config_path, GIT_PATH_MAX, &path);
++	git_buf_copy_cstr(global_config_path, length, &path);
+ 	git_buf_free(&path);
+ 	return 0;
+ }
+@@ -489,7 +470,7 @@ int git_config_find_system_r(git_buf *path)
+ 	return git_futils_find_system_file(path, GIT_CONFIG_FILENAME_SYSTEM);
+ }
+ 
+-int git_config_find_system(char *system_config_path)
++int git_config_find_system(char *system_config_path, size_t length)
+ {
+ 	git_buf path  = GIT_BUF_INIT;
+ 	int     ret = git_config_find_system_r(&path);
+@@ -499,14 +480,14 @@ int git_config_find_system(char *system_config_path)
+ 		return ret;
+ 	}
+ 
+-	if (path.size > GIT_PATH_MAX) {
++	if (path.size >= length) {
+ 		git_buf_free(&path);
+ 		giterr_set(GITERR_NOMEMORY,
+ 			"Path is to long to fit on the given buffer");
+ 		return -1;
+ 	}
+ 
+-	git_buf_copy_cstr(system_config_path, GIT_PATH_MAX, &path);
++	git_buf_copy_cstr(system_config_path, length, &path);
+ 	git_buf_free(&path);
+ 	return 0;
+ }
+@@ -514,11 +495,14 @@ int git_config_find_system(char *system_config_path)
+ int git_config_open_global(git_config **out)
+ {
+ 	int error;
+-	char global_path[GIT_PATH_MAX];
++	git_buf path = GIT_BUF_INIT;
+ 
+-	if ((error = git_config_find_global(global_path)) < 0)
++	if ((error = git_config_find_global_r(&path)) < 0)
+ 		return error;
+ 
+-	return git_config_open_ondisk(out, global_path);
++	error = git_config_open_ondisk(out, git_buf_cstr(&path));
++	git_buf_free(&path);
++
++	return error;
+ }
+ 
+diff --git a/src/config_cache.c b/src/config_cache.c
+index 3679a9646..057f21439 100644
+--- a/src/config_cache.c
++++ b/src/config_cache.c
+@@ -69,8 +69,8 @@ int git_repository__cvar(int *out, git_repository *repo, git_cvar_cached cvar)
+ 		if (error < GIT_SUCCESS)
+ 			return error;
+ 
+-		error = git_config_get_mapped(
+-			config, data->cvar_name, data->maps, data->map_count, out);
++		error = git_config_get_mapped(out,
++			config, data->cvar_name, data->maps, data->map_count);
+ 
+ 		if (error == GIT_ENOTFOUND)
+ 			*out = data->default_value;
+diff --git a/src/crlf.c b/src/crlf.c
+index 5d09a1f40..0ee1eef35 100644
+--- a/src/crlf.c
++++ b/src/crlf.c
+@@ -82,8 +82,8 @@ static int crlf_load_attributes(struct crlf_attrs *ca, git_repository *repo, con
+ 	const char *attr_vals[NUM_CONV_ATTRS];
+ 	int error;
+ 
+-	error = git_attr_get_many(
+-		repo, 0, path, NUM_CONV_ATTRS, attr_names, attr_vals);
++	error = git_attr_get_many(attr_vals,
++		repo, 0, path, NUM_CONV_ATTRS, attr_names);
+ 
+ 	if (error == GIT_ENOTFOUND) {
+ 		ca->crlf_action = GIT_CRLF_GUESS;
+@@ -100,7 +100,7 @@ static int crlf_load_attributes(struct crlf_attrs *ca, git_repository *repo, con
+ 		return 0;
+ 	}
+ 
+-	return error;
++	return -1;
+ }
+ 
+ static int drop_crlf(git_buf *dest, const git_buf *source)
+diff --git a/src/diff.c b/src/diff.c
+index d5c0c8ba5..0b2f8fb50 100644
+--- a/src/diff.c
++++ b/src/diff.c
+@@ -270,8 +270,10 @@ static int diff_delta__cmp(const void *a, const void *b)
+ static int config_bool(git_config *cfg, const char *name, int defvalue)
+ {
+ 	int val = defvalue;
+-	if (git_config_get_bool(cfg, name, &val) < 0)
++
++	if (git_config_get_bool(&val, cfg, name) < 0)
+ 		giterr_clear();
++
+ 	return val;
+ }
+ 
+diff --git a/src/diff_output.c b/src/diff_output.c
+index 4ad736e26..ba7ef8245 100644
+--- a/src/diff_output.c
++++ b/src/diff_output.c
+@@ -103,7 +103,7 @@ static int diff_output_cb(void *priv, mmbuffer_t *bufs, int len)
+ static int update_file_is_binary_by_attr(git_repository *repo, git_diff_file *file)
+ {
+ 	const char *value;
+-	if (git_attr_get(repo, 0, file->path, "diff", &value) < 0)
++	if (git_attr_get(&value, repo, 0, file->path, "diff") < 0)
+ 		return -1;
+ 
+ 	if (GIT_ATTR_FALSE(value))
+diff --git a/src/notes.c b/src/notes.c
+index a86a75b01..84ad94087 100644
+--- a/src/notes.c
++++ b/src/notes.c
+@@ -274,7 +274,7 @@ static int note_get_default_ref(const char **out, git_repository *repo)
+ 	if (git_repository_config__weakptr(&cfg, repo) < 0)
+ 		return -1;
+ 
+-	ret = git_config_get_string(cfg, "core.notesRef", out);
++	ret = git_config_get_string(out, cfg, "core.notesRef");
+ 	if (ret == GIT_ENOTFOUND) {
+ 		*out = GIT_NOTES_DEFAULT_REF;
+ 		return 0;
+diff --git a/src/remote.c b/src/remote.c
+index a5cfc822e..dc0ff6a03 100644
+--- a/src/remote.c
++++ b/src/remote.c
+@@ -48,7 +48,7 @@ static int parse_remote_refspec(git_config *cfg, git_refspec *refspec, const cha
+ 	int error;
+ 	const char *val;
+ 
+-	if ((error = git_config_get_string(cfg, var, &val)) < 0)
++	if ((error = git_config_get_string(&val, cfg, var)) < 0)
+ 		return error;
+ 
+ 	return refspec_parse(refspec, val);
+@@ -121,7 +121,7 @@ int git_remote_load(git_remote **out, git_repository *repo, const char *name)
+ 		goto cleanup;
+ 	}
+ 
+-	if ((error = git_config_get_string(config, git_buf_cstr(&buf), &val)) < 0)
++	if ((error = git_config_get_string(&val, config, git_buf_cstr(&buf))) < 0)
+ 		goto cleanup;
+ 
+ 	remote->repo = repo;
+diff --git a/src/repository.c b/src/repository.c
+index c5eed531b..6ce3a560f 100644
+--- a/src/repository.c
++++ b/src/repository.c
+@@ -25,8 +25,7 @@
+ 
+ #define GIT_BRANCH_MASTER "master"
+ 
+-#define GIT_CONFIG_CORE_REPOSITORYFORMATVERSION "core.repositoryformatversion"
+-#define GIT_REPOSITORYFORMATVERSION 0
++#define GIT_REPO_VERSION 0
+ 
+ static void drop_odb(git_repository *repo)
+ {
+@@ -125,7 +124,7 @@ static int load_config_data(git_repository *repo)
+ 	if (git_repository_config__weakptr(&config, repo) < 0)
+ 		return -1;
+ 
+-	if (git_config_get_bool(config, "core.bare", &is_bare) < 0)
++	if (git_config_get_bool(&is_bare, config, "core.bare") < 0)
+ 		return -1; /* FIXME: We assume that a missing core.bare
+ 					  variable is an error. Is this right? */
+ 
+@@ -146,7 +145,7 @@ static int load_workdir(git_repository *repo, git_buf *parent_path)
+ 	if (git_repository_config__weakptr(&config, repo) < 0)
+ 		return -1;
+ 
+-	error = git_config_get_string(config, "core.worktree", &worktree);
++	error = git_config_get_string(&worktree, config, "core.worktree");
+ 	if (!error && worktree != NULL)
+ 		repo->workdir = git__strdup(worktree);
+ 	else if (error != GIT_ENOTFOUND)
+@@ -607,13 +606,13 @@ static int check_repositoryformatversion(git_repository *repo)
+ 	if (git_repository_config__weakptr(&config, repo) < 0)
+ 		return -1;
+ 
+-	if (git_config_get_int32(config, GIT_CONFIG_CORE_REPOSITORYFORMATVERSION, &version) < 0)
++	if (git_config_get_int32(&version, config, "core.repositoryformatversion") < 0)
+ 		return -1;
+ 
+-	if (GIT_REPOSITORYFORMATVERSION < version) {
++	if (GIT_REPO_VERSION < version) {
+ 		giterr_set(GITERR_REPOSITORY,
+ 			"Unsupported repository version %d. Only versions up to %d are supported.",
+-			version, GIT_REPOSITORYFORMATVERSION);
++			version, GIT_REPO_VERSION);
+ 		return -1;
+ 	}
+ 
+@@ -676,7 +675,7 @@ static int repo_init_config(const char *git_dir, int is_bare)
+ 	}
+ 
+ 	SET_REPO_CONFIG(bool, "core.bare", is_bare);
+-	SET_REPO_CONFIG(int32, GIT_CONFIG_CORE_REPOSITORYFORMATVERSION, GIT_REPOSITORYFORMATVERSION);
++	SET_REPO_CONFIG(int32, "core.repositoryformatversion", GIT_REPO_VERSION);
+ 	/* TODO: what other defaults? */
+ 
+ 	git_buf_free(&cfg_path);
+diff --git a/src/submodule.c b/src/submodule.c
+index 1b5b59f45..3c07e657d 100644
+--- a/src/submodule.c
++++ b/src/submodule.c
+@@ -218,8 +218,11 @@ static int submodule_from_config(
+ 		sm->update = (git_submodule_update_t)val;
+ 	}
+ 	else if (strcmp(property, "fetchRecurseSubmodules") == 0) {
+-		if (git_config_parse_bool(&sm->fetch_recurse, value) < 0)
++		if (git__parse_bool(&sm->fetch_recurse, value) < 0) {
++			giterr_set(GITERR_INVALID,
++				"Invalid value for submodule 'fetchRecurseSubmodules' property: '%s'", value);
+ 			goto fail;
++		}
+ 	}
+ 	else if (strcmp(property, "ignore") == 0) {
+ 		int val;
+diff --git a/src/util.c b/src/util.c
+index 9fd5f286c..ce770203a 100644
+--- a/src/util.c
++++ b/src/util.c
+@@ -411,3 +411,27 @@ int git__strcmp_cb(const void *a, const void *b)
+ 
+ 	return strcmp(stra, strb);
+ }
++
++int git__parse_bool(int *out, const char *value)
++{
++	/* A missing value means true */
++	if (value == NULL) {
++		*out = 1;
++		return 0;
++	}
++
++	if (!strcasecmp(value, "true") ||
++		!strcasecmp(value, "yes") ||
++		!strcasecmp(value, "on")) {
++		*out = 1;
++		return 0;
++	}
++	if (!strcasecmp(value, "false") ||
++		!strcasecmp(value, "no") ||
++		!strcasecmp(value, "off")) {
++		*out = 0;
++		return 0;
++	}
++
++	return -1;
++}
+diff --git a/src/util.h b/src/util.h
+index cb5e83ce9..c6851ac7e 100644
+--- a/src/util.h
++++ b/src/util.h
+@@ -214,4 +214,13 @@ GIT_INLINE(bool) git__iswildcard(int c)
+ 	return (c == '*' || c == '?' || c == '[');
+ }
+ 
++/*
++ * Parse a string value as a boolean, just like Core Git
++ * does.
++ *
++ * Valid values for true are: 'true', 'yes', 'on'
++ * Valid values for false are: 'false', 'no', 'off'
++ */
++extern int git__parse_bool(int *out, const char *value);
++
+ #endif /* INCLUDE_util_h__ */
+

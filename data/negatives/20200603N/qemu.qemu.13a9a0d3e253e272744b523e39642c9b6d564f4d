@@ -1,0 +1,270 @@
+commit 13a9a0d3e253e272744b523e39642c9b6d564f4d
+Author: Gerd Hoffmann <kraxel@redhat.com>
+Date:   Thu Dec 16 17:03:44 2010 +0100
+
+    usb: move complete callback to port ops
+
+diff --git a/hw/usb-hub.c b/hw/usb-hub.c
+index 3dd31ba31f..e0588f891d 100644
+--- a/hw/usb-hub.c
++++ b/hw/usb-hub.c
+@@ -256,6 +256,19 @@ static void usb_hub_wakeup(USBDevice *dev)
+     }
+ }
+ 
++static void usb_hub_complete(USBDevice *dev, USBPacket *packet)
++{
++    USBHubState *s = dev->port->opaque;
++
++    /*
++     * Just pass it along upstream for now.
++     *
++     * If we ever inplement usb 2.0 split transactions this will
++     * become a little more complicated ...
++     */
++    usb_packet_complete(&s->dev, packet);
++}
++
+ static void usb_hub_handle_attach(USBDevice *dev)
+ {
+     USBHubState *s = DO_UPCAST(USBHubState, dev, dev);
+@@ -524,6 +537,7 @@ static USBPortOps usb_hub_port_ops = {
+     .attach = usb_hub_attach,
+     .detach = usb_hub_detach,
+     .wakeup = usb_hub_wakeup,
++    .complete = usb_hub_complete,
+ };
+ 
+ static int usb_hub_initfn(USBDevice *dev)
+diff --git a/hw/usb-msd.c b/hw/usb-msd.c
+index 947fd3f83c..93f4b78f3c 100644
+--- a/hw/usb-msd.c
++++ b/hw/usb-msd.c
+@@ -241,7 +241,7 @@ static void usb_msd_command_complete(SCSIBus *bus, int reason, uint32_t tag,
+                     s->mode = USB_MSDM_CSW;
+             }
+             s->packet = NULL;
+-            usb_packet_complete(p);
++            usb_packet_complete(&s->dev, p);
+         } else if (s->data_len == 0) {
+             s->mode = USB_MSDM_CSW;
+         }
+@@ -257,7 +257,7 @@ static void usb_msd_command_complete(SCSIBus *bus, int reason, uint32_t tag,
+                usb_packet_complete returns.  */
+             DPRINTF("Packet complete %p\n", p);
+             s->packet = NULL;
+-            usb_packet_complete(p);
++            usb_packet_complete(&s->dev, p);
+         }
+     }
+ }
+diff --git a/hw/usb-musb.c b/hw/usb-musb.c
+index 30148e718d..b30caeb4e8 100644
+--- a/hw/usb-musb.c
++++ b/hw/usb-musb.c
+@@ -261,10 +261,12 @@
+ 
+ static void musb_attach(USBPort *port);
+ static void musb_detach(USBPort *port);
++static void musb_schedule_cb(USBDevice *dev, USBPacket *p);
+ 
+ static USBPortOps musb_port_ops = {
+     .attach = musb_attach,
+     .detach = musb_detach,
++    .complete = musb_schedule_cb,
+ };
+ 
+ typedef struct MUSBPacket MUSBPacket;
+@@ -511,9 +513,11 @@ static inline void musb_cb_tick1(void *opaque)
+ 
+ #define musb_cb_tick	(dir ? musb_cb_tick1 : musb_cb_tick0)
+ 
+-static inline void musb_schedule_cb(USBPacket *packey, void *opaque, int dir)
++static inline void musb_schedule_cb(USBDevice *dev, USBPacket *packey)
+ {
+-    MUSBEndPoint *ep = (MUSBEndPoint *) opaque;
++    MUSBPacket *p = container_of(packey, MUSBPacket, p);
++    MUSBEndPoint *ep = p->ep;
++    int dir = p->dir;
+     int timeout = 0;
+ 
+     if (ep->status[dir] == USB_RET_NAK)
+@@ -521,25 +525,15 @@ static inline void musb_schedule_cb(USBPacket *packey, void *opaque, int dir)
+     else if (ep->interrupt[dir])
+         timeout = 8;
+     else
+-        return musb_cb_tick(opaque);
++        return musb_cb_tick(ep);
+ 
+     if (!ep->intv_timer[dir])
+-        ep->intv_timer[dir] = qemu_new_timer_ns(vm_clock, musb_cb_tick, opaque);
++        ep->intv_timer[dir] = qemu_new_timer_ns(vm_clock, musb_cb_tick, ep);
+ 
+     qemu_mod_timer(ep->intv_timer[dir], qemu_get_clock_ns(vm_clock) +
+                    muldiv64(timeout, get_ticks_per_sec(), 8000));
+ }
+ 
+-static void musb_schedule0_cb(USBPacket *packey, void *opaque)
+-{
+-    return musb_schedule_cb(packey, opaque, 0);
+-}
+-
+-static void musb_schedule1_cb(USBPacket *packey, void *opaque)
+-{
+-    return musb_schedule_cb(packey, opaque, 1);
+-}
+-
+ static int musb_timeout(int ttype, int speed, int val)
+ {
+ #if 1
+@@ -596,7 +590,6 @@ static inline void musb_packet(MUSBState *s, MUSBEndPoint *ep,
+                     ep->type[idx] >> 6, ep->interval[idx]);
+     ep->interrupt[dir] = ttype == USB_ENDPOINT_XFER_INT;
+     ep->delayed_cb[dir] = cb;
+-    cb = dir ? musb_schedule1_cb : musb_schedule0_cb;
+ 
+     ep->packey[dir].p.pid = pid;
+     /* A wild guess on the FADDR semantics... */
+@@ -604,8 +597,6 @@ static inline void musb_packet(MUSBState *s, MUSBEndPoint *ep,
+     ep->packey[dir].p.devep = ep->type[idx] & 0xf;
+     ep->packey[dir].p.data = (void *) ep->buf[idx];
+     ep->packey[dir].p.len = len;
+-    ep->packey[dir].p.complete_cb = cb;
+-    ep->packey[dir].p.complete_opaque = ep;
+     ep->packey[dir].ep = ep;
+     ep->packey[dir].dir = dir;
+ 
+@@ -620,7 +611,7 @@ static inline void musb_packet(MUSBState *s, MUSBEndPoint *ep,
+     }
+ 
+     ep->status[dir] = ret;
+-    usb_packet_complete(&ep->packey[dir].p);
++    usb_packet_complete(s->port.dev, &ep->packey[dir].p);
+ }
+ 
+ static void musb_tx_packet_complete(USBPacket *packey, void *opaque)
+diff --git a/hw/usb-ohci.c b/hw/usb-ohci.c
+index 7678cdba11..8090c17c63 100644
+--- a/hw/usb-ohci.c
++++ b/hw/usb-ohci.c
+@@ -575,7 +575,7 @@ static void ohci_copy_iso_td(OHCIState *ohci,
+ 
+ static void ohci_process_lists(OHCIState *ohci, int completion);
+ 
+-static void ohci_async_complete_packet(USBPacket *packet, void *opaque)
++static void ohci_async_complete_packet(USBDevice *dev, USBPacket *packet)
+ {
+     OHCIState *ohci = container_of(packet, OHCIState, usb_packet);
+ #ifdef DEBUG_PACKET
+@@ -748,8 +748,6 @@ static int ohci_service_iso_td(OHCIState *ohci, struct ohci_ed *ed,
+             ohci->usb_packet.devep = OHCI_BM(ed->flags, ED_EN);
+             ohci->usb_packet.data = ohci->usb_buf;
+             ohci->usb_packet.len = len;
+-            ohci->usb_packet.complete_cb = ohci_async_complete_packet;
+-            ohci->usb_packet.complete_opaque = ohci;
+             ret = dev->info->handle_packet(dev, &ohci->usb_packet);
+             if (ret != USB_RET_NODEV)
+                 break;
+@@ -946,8 +944,6 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
+             ohci->usb_packet.devep = OHCI_BM(ed->flags, ED_EN);
+             ohci->usb_packet.data = ohci->usb_buf;
+             ohci->usb_packet.len = len;
+-            ohci->usb_packet.complete_cb = ohci_async_complete_packet;
+-            ohci->usb_packet.complete_opaque = ohci;
+             ret = dev->info->handle_packet(dev, &ohci->usb_packet);
+             if (ret != USB_RET_NODEV)
+                 break;
+@@ -1665,6 +1661,7 @@ static CPUWriteMemoryFunc * const ohci_writefn[3]={
+ static USBPortOps ohci_port_ops = {
+     .attach = ohci_attach,
+     .detach = ohci_detach,
++    .complete = ohci_async_complete_packet,
+ };
+ 
+ static void usb_ohci_init(OHCIState *ohci, DeviceState *dev,
+diff --git a/hw/usb-uhci.c b/hw/usb-uhci.c
+index 2b63b3f9e0..a65e0b3af6 100644
+--- a/hw/usb-uhci.c
++++ b/hw/usb-uhci.c
+@@ -642,7 +642,7 @@ static int uhci_broadcast_packet(UHCIState *s, USBPacket *p)
+     return ret;
+ }
+ 
+-static void uhci_async_complete(USBPacket * packet, void *opaque);
++static void uhci_async_complete(USBDevice *dev, USBPacket *packet);
+ static void uhci_process_frame(UHCIState *s);
+ 
+ /* return -1 if fatal error (frame must be stopped)
+@@ -795,8 +795,6 @@ static int uhci_handle_td(UHCIState *s, uint32_t addr, UHCI_TD *td, uint32_t *in
+     async->packet.devep   = (td->token >> 15) & 0xf;
+     async->packet.data    = async->buffer;
+     async->packet.len     = max_len;
+-    async->packet.complete_cb     = uhci_async_complete;
+-    async->packet.complete_opaque = s;
+ 
+     switch(pid) {
+     case USB_TOKEN_OUT:
+@@ -832,7 +830,7 @@ done:
+     return len;
+ }
+ 
+-static void uhci_async_complete(USBPacket *packet, void *opaque)
++static void uhci_async_complete(USBDevice *dev, USBPacket *packet)
+ {
+     UHCIAsync *async = container_of(packet, UHCIAsync, packet);
+     UHCIState *s = async->uhci;
+@@ -1083,6 +1081,7 @@ static USBPortOps uhci_port_ops = {
+     .attach = uhci_attach,
+     .detach = uhci_detach,
+     .wakeup = uhci_wakeup,
++    .complete = uhci_async_complete,
+ };
+ 
+ static int usb_uhci_common_initfn(UHCIState *s)
+diff --git a/hw/usb.h b/hw/usb.h
+index 22bb3385ba..7e46141fed 100644
+--- a/hw/usb.h
++++ b/hw/usb.h
+@@ -235,6 +235,7 @@ typedef struct USBPortOps {
+     void (*attach)(USBPort *port);
+     void (*detach)(USBPort *port);
+     void (*wakeup)(USBDevice *dev);
++    void (*complete)(USBDevice *dev, USBPacket *p);
+ } USBPortOps;
+ 
+ /* USB port on which a device can be connected */
+@@ -259,8 +260,6 @@ struct USBPacket {
+     uint8_t *data;
+     int len;
+     /* Internal use by the USB layer.  */
+-    USBCallback *complete_cb;
+-    void *complete_opaque;
+     USBCallback *cancel_cb;
+     void *cancel_opaque;
+ };
+@@ -278,9 +277,9 @@ static inline void usb_defer_packet(USBPacket *p, USBCallback *cancel,
+ /* Notify the controller that an async packet is complete.  This should only
+    be called for packets previously deferred with usb_defer_packet, and
+    should never be called from within handle_packet.  */
+-static inline void usb_packet_complete(USBPacket *p)
++static inline void usb_packet_complete(USBDevice *dev, USBPacket *p)
+ {
+-    p->complete_cb(p, p->complete_opaque);
++    dev->port->ops->complete(dev, p);
+ }
+ 
+ /* Cancel an active packet.  The packed must have been deferred with
+diff --git a/usb-linux.c b/usb-linux.c
+index 730eac2ca6..36a01ea0de 100644
+--- a/usb-linux.c
++++ b/usb-linux.c
+@@ -348,7 +348,7 @@ static void async_complete(void *opaque)
+                 break;
+             }
+ 
+-            usb_packet_complete(p);
++            usb_packet_complete(&s->dev, p);
+         }
+ 
+         async_free(aurb);
+

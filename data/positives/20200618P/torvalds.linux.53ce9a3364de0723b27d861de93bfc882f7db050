@@ -1,0 +1,54 @@
+commit 53ce9a3364de0723b27d861de93bfc882f7db050
+Author: Niels de Vos <ndevos@redhat.com>
+Date:   Wed Jul 17 14:53:53 2013 +0200
+
+    fuse: readdirplus: fix dentry leak
+    
+    In case d_lookup() returns a dentry with d_inode == NULL, the dentry is not
+    returned with dput(). This results in triggering a BUG() in
+    shrink_dcache_for_umount_subtree():
+    
+      BUG: Dentry ...{i=0,n=...} still in use (1) [unmount of fuse fuse]
+    
+    [SzM: need to d_drop() as well]
+    
+    Reported-by: Justin Clift <jclift@redhat.com>
+    Signed-off-by: Niels de Vos <ndevos@redhat.com>
+    Signed-off-by: Miklos Szeredi <mszeredi@suse.cz>
+    Tested-by: Brian Foster <bfoster@redhat.com>
+    Tested-by: Niels de Vos <ndevos@redhat.com>
+    CC: stable@vger.kernel.org
+
+diff --git a/fs/fuse/dir.c b/fs/fuse/dir.c
+index 0eda52738ec4..2ae5308174e2 100644
+--- a/fs/fuse/dir.c
++++ b/fs/fuse/dir.c
+@@ -1227,9 +1227,15 @@ static int fuse_direntplus_link(struct file *file,
+ 
+ 	name.hash = full_name_hash(name.name, name.len);
+ 	dentry = d_lookup(parent, &name);
+-	if (dentry && dentry->d_inode) {
++	if (dentry) {
+ 		inode = dentry->d_inode;
+-		if (get_node_id(inode) == o->nodeid) {
++		if (!inode) {
++			d_drop(dentry);
++		} else if (get_node_id(inode) != o->nodeid) {
++			err = d_invalidate(dentry);
++			if (err)
++				goto out;
++		} else {
+ 			struct fuse_inode *fi;
+ 			fi = get_fuse_inode(inode);
+ 			spin_lock(&fc->lock);
+@@ -1242,9 +1248,6 @@ static int fuse_direntplus_link(struct file *file,
+ 			 */
+ 			goto found;
+ 		}
+-		err = d_invalidate(dentry);
+-		if (err)
+-			goto out;
+ 		dput(dentry);
+ 		dentry = NULL;
+ 	}
+

@@ -1,0 +1,47 @@
+commit a1e7e16ed36b9b059c5ee94e372287418e2dc7bc
+Author: Filipe Manana <fdmanana@suse.com>
+Date:   Thu Dec 4 15:31:01 2014 +0000
+
+    Btrfs: ensure deletion from pinned_chunks list is protected
+    
+    The call to remove_extent_mapping() actually deletes the extent map
+    from the list it's included in - fs_info->pinned_chunks - and that
+    list is protected by the chunk mutex. Therefore make that call
+    while holding the chunk mutex and remove the redundant list delete
+    call because it's a noop.
+    
+    This fixes an overlook of the patch titled
+    "Btrfs: fix race between fs trimming and block group remove/allocation"
+    following the same obvervation from the patch titled
+    "Btrfs: fix unprotected deletion from pending_chunks list".
+    
+    Signed-off-by: Filipe Manana <fdmanana@suse.com>
+    Signed-off-by: Chris Mason <clm@fb.com>
+
+diff --git a/fs/btrfs/free-space-cache.c b/fs/btrfs/free-space-cache.c
+index 030847bf7cec..edf32c5bbef1 100644
+--- a/fs/btrfs/free-space-cache.c
++++ b/fs/btrfs/free-space-cache.c
+@@ -3185,16 +3185,18 @@ int btrfs_trim_block_group(struct btrfs_block_group_cache *block_group,
+ 
+ 		spin_unlock(&block_group->lock);
+ 
++		lock_chunks(block_group->fs_info->chunk_root);
+ 		em_tree = &block_group->fs_info->mapping_tree.map_tree;
+ 		write_lock(&em_tree->lock);
+ 		em = lookup_extent_mapping(em_tree, block_group->key.objectid,
+ 					   1);
+ 		BUG_ON(!em); /* logic error, can't happen */
++		/*
++		 * remove_extent_mapping() will delete us from the pinned_chunks
++		 * list, which is protected by the chunk mutex.
++		 */
+ 		remove_extent_mapping(em_tree, em);
+ 		write_unlock(&em_tree->lock);
+-
+-		lock_chunks(block_group->fs_info->chunk_root);
+-		list_del_init(&em->list);
+ 		unlock_chunks(block_group->fs_info->chunk_root);
+ 
+ 		/* once for us and once for the tree */
+

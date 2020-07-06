@@ -1,0 +1,61 @@
+commit b901bb89324ae65573c5f5c0a126cb864096b77c
+Author: Matthew Auld <matthew.auld@intel.com>
+Date:   Fri Oct 6 23:18:15 2017 +0100
+
+    drm/i915/gemfs: enable THP
+    
+    Enable transparent-huge-pages through gemfs by mounting with
+    huge=within_size.
+    
+    v2: sprinkle within_size comment
+    
+    Signed-off-by: Matthew Auld <matthew.auld@intel.com>
+    Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+    Cc: Chris Wilson <chris@chris-wilson.co.uk>
+    Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20171006145041.21673-4-matthew.auld@intel.com
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20171006221833.32439-3-chris@chris-wilson.co.uk
+
+diff --git a/drivers/gpu/drm/i915/i915_gemfs.c b/drivers/gpu/drm/i915/i915_gemfs.c
+index 168d0bd98f60..e2993857df37 100644
+--- a/drivers/gpu/drm/i915/i915_gemfs.c
++++ b/drivers/gpu/drm/i915/i915_gemfs.c
+@@ -24,6 +24,7 @@
+ 
+ #include <linux/fs.h>
+ #include <linux/mount.h>
++#include <linux/pagemap.h>
+ 
+ #include "i915_drv.h"
+ #include "i915_gemfs.h"
+@@ -41,6 +42,27 @@ int i915_gemfs_init(struct drm_i915_private *i915)
+ 	if (IS_ERR(gemfs))
+ 		return PTR_ERR(gemfs);
+ 
++	/*
++	 * Enable huge-pages for objects that are at least HPAGE_PMD_SIZE, most
++	 * likely 2M. Note that within_size may overallocate huge-pages, if say
++	 * we allocate an object of size 2M + 4K, we may get 2M + 2M, but under
++	 * memory pressure shmem should split any huge-pages which can be
++	 * shrunk.
++	 */
++
++	if (has_transparent_hugepage()) {
++		struct super_block *sb = gemfs->mnt_sb;
++		char options[] = "huge=within_size";
++		int flags = 0;
++		int err;
++
++		err = sb->s_op->remount_fs(sb, &flags, options);
++		if (err) {
++			kern_unmount(gemfs);
++			return err;
++		}
++	}
++
+ 	i915->mm.gemfs = gemfs;
+ 
+ 	return 0;
+

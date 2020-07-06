@@ -1,0 +1,81 @@
+commit 3c29b2f8512d4d2d702a2a2f985106a312818ddc
+Author: Eugene Ostroukhov <eostroukhov@chromium.org>
+Date:   Mon Dec 12 10:51:18 2016 -0800
+
+    inspector: fix Coverity defects
+    
+    One defect remains - Coverity believes that a session object is never
+    freed while in reality its lifespan is tied to a libuv socket.
+    
+    PR-URL: https://github.com/nodejs/node/pull/10240
+    Reviewed-By: Ben Noordhuis <info@bnoordhuis.nl>
+    Reviewed-By: Anna Henningsen <anna@addaleax.net>
+    Reviewed-By: Colin Ihrig <cjihrig@gmail.com>
+    Reviewed-By: Ali Ijaz Sheikh <ofrobots@google.com>
+
+diff --git a/src/inspector_socket_server.cc b/src/inspector_socket_server.cc
+index e05a0c577d..4bd35ae8be 100644
+--- a/src/inspector_socket_server.cc
++++ b/src/inspector_socket_server.cc
+@@ -210,6 +210,7 @@ InspectorSocketServer::InspectorSocketServer(SocketServerDelegate* delegate,
+                                              int port) : loop_(nullptr),
+                                                          delegate_(delegate),
+                                                          port_(port),
++                                                         server_(uv_tcp_t()),
+                                                          closer_(nullptr),
+                                                          next_session_id_(0) { }
+ 
+@@ -400,6 +401,7 @@ void InspectorSocketServer::SocketConnectedCallback(uv_stream_t* server,
+                                                     int status) {
+   if (status == 0) {
+     InspectorSocketServer* socket_server = InspectorSocketServer::From(server);
++    // Memory is freed when the socket closes.
+     SocketSession* session =
+         new SocketSession(socket_server, socket_server->next_session_id_++);
+     if (inspector_accept(server, session->Socket(), HandshakeCallback) != 0) {
+diff --git a/test/cctest/test_inspector_socket.cc b/test/cctest/test_inspector_socket.cc
+index ada3df3d43..b61fbd2cd6 100644
+--- a/test/cctest/test_inspector_socket.cc
++++ b/test/cctest/test_inspector_socket.cc
+@@ -370,13 +370,13 @@ class InspectorSocketTest : public ::testing::Test {
+     uv_tcp_init(&loop, &client_socket);
+     uv_ip4_addr("127.0.0.1", PORT, &addr);
+     uv_tcp_bind(&server, reinterpret_cast<const struct sockaddr*>(&addr), 0);
+-    int err = uv_listen(reinterpret_cast<uv_stream_t*>(&server),
+-                        1, on_new_connection);
+-    GTEST_ASSERT_EQ(0, err);
++    GTEST_ASSERT_EQ(0, uv_listen(reinterpret_cast<uv_stream_t*>(&server),
++                                 1, on_new_connection));
+     uv_connect_t connect;
+     connect.data = nullptr;
+-    uv_tcp_connect(&connect, &client_socket,
+-                   reinterpret_cast<const sockaddr*>(&addr), on_connection);
++    GTEST_ASSERT_EQ(0, uv_tcp_connect(&connect, &client_socket,
++                                      reinterpret_cast<const sockaddr*>(&addr),
++                                      on_connection));
+     uv_tcp_nodelay(&client_socket, 1);  // The buffering messes up the test
+     SPIN_WHILE(!connect.data || !connected);
+     really_close(reinterpret_cast<uv_handle_t*>(&server));
+diff --git a/test/cctest/test_inspector_socket_server.cc b/test/cctest/test_inspector_socket_server.cc
+index d253df5dd9..2bbc381139 100644
+--- a/test/cctest/test_inspector_socket_server.cc
++++ b/test/cctest/test_inspector_socket_server.cc
+@@ -86,7 +86,8 @@ class TestInspectorServerDelegate : public SocketServerDelegate {
+  public:
+   TestInspectorServerDelegate() : connected(0), disconnected(0),
+                                   targets_({ MAIN_TARGET_ID,
+-                                             UNCONNECTABLE_TARGET_ID }) {}
++                                             UNCONNECTABLE_TARGET_ID }),
++                                  session_id_(0) {}
+ 
+   void Connect(InspectorSocketServer* server) {
+     server_ = server;
+@@ -152,6 +153,7 @@ class SocketWrapper {
+   explicit SocketWrapper(uv_loop_t* loop) : closed_(false),
+                                             eof_(false),
+                                             loop_(loop),
++                                            socket_(uv_tcp_t()),
+                                             connected_(false),
+                                             sending_(false) { }
+ 
+

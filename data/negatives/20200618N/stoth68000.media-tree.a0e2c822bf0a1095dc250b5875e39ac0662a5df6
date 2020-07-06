@@ -1,0 +1,55 @@
+commit a0e2c822bf0a1095dc250b5875e39ac0662a5df6
+Author: Mugunthan V N <mugunthanvnm@ti.com>
+Date:   Wed Sep 10 16:38:09 2014 +0530
+
+    drivers: net: cpsw: dual_emac: fix reducing of rx descriptor during ifdown
+    
+    In Dual EMAC, when both interface are up and while doing ifdown with heavy
+    traffic then skbs already processed by DMA from that slave emac has to be
+    requeued as still the other interface is up and running.
+    
+    Signed-off-by: Mugunthan V N <mugunthanvnm@ti.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/ti/cpsw.c b/drivers/net/ethernet/ti/cpsw.c
+index 999fb72688d2..411232f07c3f 100644
+--- a/drivers/net/ethernet/ti/cpsw.c
++++ b/drivers/net/ethernet/ti/cpsw.c
+@@ -699,6 +699,28 @@ static void cpsw_rx_handler(void *token, int len, int status)
+ 	cpsw_dual_emac_src_port_detect(status, priv, ndev, skb);
+ 
+ 	if (unlikely(status < 0) || unlikely(!netif_running(ndev))) {
++		bool ndev_status = false;
++		struct cpsw_slave *slave = priv->slaves;
++		int n;
++
++		if (priv->data.dual_emac) {
++			/* In dual emac mode check for all interfaces */
++			for (n = priv->data.slaves; n; n--, slave++)
++				if (netif_running(slave->ndev))
++					ndev_status = true;
++		}
++
++		if (ndev_status && (status >= 0)) {
++			/* The packet received is for the interface which
++			 * is already down and the other interface is up
++			 * and running, intead of freeing which results
++			 * in reducing of the number of rx descriptor in
++			 * DMA engine, requeue skb back to cpdma.
++			 */
++			new_skb = skb;
++			goto requeue;
++		}
++
+ 		/* the interface is going down, skbs are purged */
+ 		dev_kfree_skb_any(skb);
+ 		return;
+@@ -717,6 +739,7 @@ static void cpsw_rx_handler(void *token, int len, int status)
+ 		new_skb = skb;
+ 	}
+ 
++requeue:
+ 	ret = cpdma_chan_submit(priv->rxch, new_skb, new_skb->data,
+ 			skb_tailroom(new_skb), 0);
+ 	if (WARN_ON(ret < 0))
+

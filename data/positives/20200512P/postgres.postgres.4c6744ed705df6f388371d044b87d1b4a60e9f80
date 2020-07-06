@@ -1,0 +1,62 @@
+commit 4c6744ed705df6f388371d044b87d1b4a60e9f80
+Author: Peter Eisentraut <peter_e@gmx.net>
+Date:   Tue Dec 5 14:14:55 2017 -0500
+
+    PL/Python: Fix potential NULL pointer dereference
+    
+    After d0aa965c0a0ac2ff7906ae1b1dad50a7952efa56, one error path in
+    PLy_spi_execute_fetch_result() could result in the variable "result"
+    being dereferenced after being set to NULL.  Rearrange the code a bit to
+    fix that.
+    
+    Also add another SPI_freetuptable() call so that that is cleared in all
+    error paths.
+    
+    discovered by John Naylor <jcnaylor@gmail.com> via scan-build
+    
+    ideas and review by Tom Lane
+
+diff --git a/src/pl/plpython/plpy_spi.c b/src/pl/plpython/plpy_spi.c
+index ade27f3924..0c623a9458 100644
+--- a/src/pl/plpython/plpy_spi.c
++++ b/src/pl/plpython/plpy_spi.c
+@@ -361,7 +361,10 @@ PLy_spi_execute_fetch_result(SPITupleTable *tuptable, uint64 rows, int status)
+ 
+ 	result = (PLyResultObject *) PLy_result_new();
+ 	if (!result)
++	{
++		SPI_freetuptable(tuptable);
+ 		return NULL;
++	}
+ 	Py_DECREF(result->status);
+ 	result->status = PyInt_FromLong(status);
+ 
+@@ -411,12 +414,7 @@ PLy_spi_execute_fetch_result(SPITupleTable *tuptable, uint64 rows, int status)
+ 
+ 				Py_DECREF(result->rows);
+ 				result->rows = PyList_New(rows);
+-				if (!result->rows)
+-				{
+-					Py_DECREF(result);
+-					result = NULL;
+-				}
+-				else
++				if (result->rows)
+ 				{
+ 					PLy_input_setup_tuple(&ininfo, tuptable->tupdesc,
+ 										  exec_ctx->curr_proc);
+@@ -455,6 +453,13 @@ PLy_spi_execute_fetch_result(SPITupleTable *tuptable, uint64 rows, int status)
+ 
+ 		MemoryContextDelete(cxt);
+ 		SPI_freetuptable(tuptable);
++
++		/* in case PyList_New() failed above */
++		if (!result->rows)
++		{
++			Py_DECREF(result);
++			result = NULL;
++		}
+ 	}
+ 
+ 	return (PyObject *) result;
+

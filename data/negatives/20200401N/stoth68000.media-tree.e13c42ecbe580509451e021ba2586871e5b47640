@@ -1,0 +1,68 @@
+commit e13c42ecbe580509451e021ba2586871e5b47640
+Author: Vineet Gupta <vgupta@synopsys.com>
+Date:   Mon Aug 3 15:37:24 2015 +0530
+
+    ARCv2: Fix the peripheral address space detection
+    
+    With HS 2.1 release, the peripheral space register no longer contains
+    the uncached space specifics, causing the kernel to panic early on.
+    So read the newer NON VOLATILE AUX register to get that info.
+    
+    Signed-off-by: Vineet Gupta <vgupta@synopsys.com>
+
+diff --git a/arch/arc/include/asm/arcregs.h b/arch/arc/include/asm/arcregs.h
+index 070f58827a5c..c8f57b8449dc 100644
+--- a/arch/arc/include/asm/arcregs.h
++++ b/arch/arc/include/asm/arcregs.h
+@@ -89,11 +89,10 @@
+ #define ECR_C_BIT_DTLB_LD_MISS		8
+ #define ECR_C_BIT_DTLB_ST_MISS		9
+ 
+-
+ /* Auxiliary registers */
+ #define AUX_IDENTITY		4
+ #define AUX_INTR_VEC_BASE	0x25
+-
++#define AUX_NON_VOL		0x5e
+ 
+ /*
+  * Floating Pt Registers
+@@ -240,9 +239,9 @@ struct bcr_extn_xymem {
+ 
+ struct bcr_perip {
+ #ifdef CONFIG_CPU_BIG_ENDIAN
+-	unsigned int start:8, pad2:8, sz:8, pad:8;
++	unsigned int start:8, pad2:8, sz:8, ver:8;
+ #else
+-	unsigned int pad:8, sz:8, pad2:8, start:8;
++	unsigned int ver:8, sz:8, pad2:8, start:8;
+ #endif
+ };
+ 
+diff --git a/arch/arc/kernel/setup.c b/arch/arc/kernel/setup.c
+index 18cc01591c96..f2f771bd3ede 100644
+--- a/arch/arc/kernel/setup.c
++++ b/arch/arc/kernel/setup.c
+@@ -47,6 +47,7 @@ static void read_arc_build_cfg_regs(void)
+ 	struct bcr_perip uncached_space;
+ 	struct bcr_generic bcr;
+ 	struct cpuinfo_arc *cpu = &cpuinfo_arc700[smp_processor_id()];
++	unsigned long perip_space;
+ 	FIX_PTR(cpu);
+ 
+ 	READ_BCR(AUX_IDENTITY, cpu->core);
+@@ -56,7 +57,12 @@ static void read_arc_build_cfg_regs(void)
+ 	cpu->vec_base = read_aux_reg(AUX_INTR_VEC_BASE);
+ 
+ 	READ_BCR(ARC_REG_D_UNCACH_BCR, uncached_space);
+-	BUG_ON((uncached_space.start << 24) != ARC_UNCACHED_ADDR_SPACE);
++        if (uncached_space.ver < 3)
++		perip_space = uncached_space.start << 24;
++	else
++		perip_space = read_aux_reg(AUX_NON_VOL) & 0xF0000000;
++
++	BUG_ON(perip_space != ARC_UNCACHED_ADDR_SPACE);
+ 
+ 	READ_BCR(ARC_REG_MUL_BCR, cpu->extn_mpy);
+ 
+

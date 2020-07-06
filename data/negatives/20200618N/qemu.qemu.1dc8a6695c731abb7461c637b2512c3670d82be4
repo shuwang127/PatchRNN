@@ -1,0 +1,38 @@
+commit 1dc8a6695c731abb7461c637b2512c3670d82be4
+Author: Marc-André Lureau <marcandre.lureau@redhat.com>
+Date:   Tue Aug 16 12:33:32 2016 +0400
+
+    char: fix waiting for TLS and telnet connection
+    
+    Since commit d7a04fd7d5008, tcp_chr_wait_connected() was introduced,
+    so vhost-user could wait until a backend started successfully. In
+    vhost-user case, the chr socket must be plain unix, and the chr+vhost
+    setup happens synchronously during qemu startup.
+    
+    However, with TLS and telnet socket, initial socket setup happens
+    asynchronously, and s->connected is not set after the socket is
+    accepted. In order for tcp_chr_wait_connected() to not keep accepting
+    new connections and proceed with the last accepted socket, it can
+    check for s->ioc instead.
+    
+    Signed-off-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+    Reviewed-by: Daniel P. Berrange <berrange@redhat.com>
+    Message-id: 20160816083332.15088-1-marcandre.lureau@redhat.com
+    Signed-off-by: Peter Maydell <peter.maydell@linaro.org>
+
+diff --git a/qemu-char.c b/qemu-char.c
+index 8a0ab05a7b..5f82ebb774 100644
+--- a/qemu-char.c
++++ b/qemu-char.c
+@@ -3176,7 +3176,9 @@ static int tcp_chr_wait_connected(CharDriverState *chr, Error **errp)
+     TCPCharDriver *s = chr->opaque;
+     QIOChannelSocket *sioc;
+ 
+-    while (!s->connected) {
++    /* It can't wait on s->connected, since it is set asynchronously
++     * in TLS and telnet cases, only wait for an accepted socket */
++    while (!s->ioc) {
+         if (s->is_listen) {
+             fprintf(stderr, "QEMU waiting for connection on: %s\n",
+                     chr->filename);
+

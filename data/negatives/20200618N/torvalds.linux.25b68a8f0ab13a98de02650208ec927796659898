@@ -1,0 +1,50 @@
+commit 25b68a8f0ab13a98de02650208ec927796659898
+Author: Stephen Smalley <sds@tycho.nsa.gov>
+Date:   Fri Feb 17 10:13:59 2017 -0500
+
+    timerfd: Only check CAP_WAKE_ALARM when it is needed
+    
+    timerfd_create() and do_timerfd_settime() evaluate capable(CAP_WAKE_ALARM)
+    unconditionally although CAP_WAKE_ALARM is only required for
+    CLOCK_REALTIME_ALARM and CLOCK_BOOTTIME_ALARM.
+    
+    This can cause extraneous audit messages when using a LSM such as SELinux,
+    incorrectly causes PF_SUPERPRIV to be set even when no privilege was
+    exercised, and is inefficient.
+    
+    Flip the order of the tests in both functions so that we only call
+    capable() if the capability is truly required for the operation.
+    
+    Signed-off-by: Stephen Smalley <sds@tycho.nsa.gov>
+    Cc: linux-security-module@vger.kernel.org
+    Cc: selinux@tycho.nsa.gov
+    Link: http://lkml.kernel.org/r/1487344439-22293-1-git-send-email-sds@tycho.nsa.gov
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/fs/timerfd.c b/fs/timerfd.c
+index 384fa759a563..c543cdb5f8ed 100644
+--- a/fs/timerfd.c
++++ b/fs/timerfd.c
+@@ -400,9 +400,9 @@ SYSCALL_DEFINE2(timerfd_create, int, clockid, int, flags)
+ 	     clockid != CLOCK_BOOTTIME_ALARM))
+ 		return -EINVAL;
+ 
+-	if (!capable(CAP_WAKE_ALARM) &&
+-	    (clockid == CLOCK_REALTIME_ALARM ||
+-	     clockid == CLOCK_BOOTTIME_ALARM))
++	if ((clockid == CLOCK_REALTIME_ALARM ||
++	     clockid == CLOCK_BOOTTIME_ALARM) &&
++	    !capable(CAP_WAKE_ALARM))
+ 		return -EPERM;
+ 
+ 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+@@ -449,7 +449,7 @@ static int do_timerfd_settime(int ufd, int flags,
+ 		return ret;
+ 	ctx = f.file->private_data;
+ 
+-	if (!capable(CAP_WAKE_ALARM) && isalarm(ctx)) {
++	if (isalarm(ctx) && !capable(CAP_WAKE_ALARM)) {
+ 		fdput(f);
+ 		return -EPERM;
+ 	}
+

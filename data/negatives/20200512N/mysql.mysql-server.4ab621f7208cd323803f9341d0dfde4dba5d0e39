@@ -1,0 +1,67 @@
+commit 4ab621f7208cd323803f9341d0dfde4dba5d0e39
+Author: Sunny Bains <Sunny.Bains@Oracle.Com>
+Date:   Wed Jan 11 10:13:58 2012 +0530
+
+    Fix the case where the page is flushed and we need to restart the flush.
+
+diff --git a/storage/innobase/buf/buf0flu.cc b/storage/innobase/buf/buf0flu.cc
+index 8b747780b26..a389f163de0 100644
+--- a/storage/innobase/buf/buf0flu.cc
++++ b/storage/innobase/buf/buf0flu.cc
+@@ -1463,6 +1463,7 @@ buf_do_flush_list_batch(
+ 	buf_page_t*	bpage = 0;
+ 	ulint		count = 0;
+ 	ulint		scanned = 0;
++	ibool		restart = true;
+ 
+ 	ut_ad(buf_pool_mutex_own(buf_pool));
+ 
+@@ -1488,18 +1489,20 @@ buf_do_flush_list_batch(
+ 		if (space == ULINT_UNDEFINED) {
+ 			bpage = UT_LIST_GET_LAST(buf_pool->flush_list);
+ 		} else {
+-			if (!bpage) {
++			if (restart) {
+ 				bpage = UT_LIST_GET_LAST(buf_pool->flush_list);
+ 			}
+ 
+ 			while (bpage != 0
+ 			       && space != buf_page_get_space(bpage)) {
+ 
+-			       bpage = UT_LIST_GET_PREV(list, bpage);
++				ut_ad(bpage->in_flush_list);
++				bpage = UT_LIST_GET_PREV(list, bpage);
+ 			}
+ 		}
+ 
+ 		if (bpage) {
++			ut_ad(bpage->in_flush_list);
+ 			ut_a(bpage->oldest_modification > 0);
+ 		}
+ 
+@@ -1509,7 +1512,6 @@ buf_do_flush_list_batch(
+ 			buf_flush_list_mutex_exit(buf_pool);
+ 			break;
+ 		}
+-
+ #if 1
+ 		fprintf(stderr, "space: %lu pg: %lu\n",
+ 			space, buf_page_get_page_no(bpage));
+@@ -1521,6 +1523,8 @@ buf_do_flush_list_batch(
+ 
+ 		buf_flush_list_mutex_exit(buf_pool);
+ 
++		restart = false;
++
+ 		/* The list may change during the flushing and we cannot
+ 		safely preserve within this function a pointer to a
+ 		block in the list! */
+@@ -1546,6 +1550,7 @@ buf_do_flush_list_batch(
+ 			we start all over again. */
+ 			if (bpage->oldest_modification == 0) {
+ 				buf_flush_list_mutex_exit(buf_pool);
++				restart = true;
+ 				break;
+ 			}
+ 
+

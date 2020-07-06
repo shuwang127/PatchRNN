@@ -1,0 +1,63 @@
+commit 74b6136edd3415fd08bedcd8b3ad2e7215aed285
+Author: Paul Pedersen <paul@10gen.com>
+Date:   Mon Feb 22 14:51:12 2016 -0800
+
+    SERVER-15688 Added check for TEXT + tailable to canonical query validation
+
+diff --git a/src/mongo/db/query/canonical_query.cpp b/src/mongo/db/query/canonical_query.cpp
+index fa90a487b5..c65eecd070 100644
+--- a/src/mongo/db/query/canonical_query.cpp
++++ b/src/mongo/db/query/canonical_query.cpp
+@@ -555,6 +555,11 @@ Status CanonicalQuery::isValid(MatchExpression* root, const LiteParsedQuery& par
+         return Status(ErrorCodes::BadValue, "text and snapshot not allowed in same query");
+     }
+ 
++    // TEXT and tailable are incompatible.
++    if (numText > 0 && parsed.isTailable()) {
++        return Status(ErrorCodes::BadValue, "text and tailable cursor not allowed in same query");
++    }
++
+     // $natural sort order must agree with hint.
+     if (sortNaturalElt) {
+         if (!hintObj.isEmpty() && !hintNaturalElt) {
+diff --git a/src/mongo/db/query/canonical_query_test.cpp b/src/mongo/db/query/canonical_query_test.cpp
+index d56c1814eb..11bdf8140a 100644
+--- a/src/mongo/db/query/canonical_query_test.cpp
++++ b/src/mongo/db/query/canonical_query_test.cpp
+@@ -28,6 +28,7 @@
+ 
+ #include "mongo/db/query/canonical_query.h"
+ 
++#include "mongo/client/dbclientinterface.h"
+ #include "mongo/db/json.h"
+ #include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+ #include "mongo/db/matcher/extensions_callback_noop.h"
+@@ -164,6 +165,27 @@ TEST(CanonicalQueryTest, IsValidText) {
+         *lpq));
+ }
+ 
++TEST(CanonicalQueryTest, IsValidTextTailable) {
++    // Passes in default values for LiteParsedQuery.
++    // Filter inside LiteParsedQuery is not used.
++    int options = QueryOption_CursorTailable;
++    unique_ptr<LiteParsedQuery> lpq(assertGet(LiteParsedQuery::makeAsOpQuery(nss,
++                                                                             0,
++                                                                             0,
++                                                                             options,
++                                                                             BSONObj(),
++                                                                             BSONObj(),
++                                                                             BSONObj(),
++                                                                             BSONObj(),
++                                                                             BSONObj(),
++                                                                             BSONObj(),
++                                                                             false,
++                                                                             false)));
++
++    // Invalid: TEXT and tailable.
++    ASSERT_NOT_OK(isValid("{$text: {$search: 's'}}", *lpq));
++}
++
+ TEST(CanonicalQueryTest, IsValidGeo) {
+     // Passes in default values for LiteParsedQuery.
+     // Filter inside LiteParsedQuery is not used.
+

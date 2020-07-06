@@ -1,0 +1,110 @@
+commit 49559854c9ea6d6950631d558d33faff49fa74f3
+Author: Mitch Williams <mitch.a.williams@intel.com>
+Date:   Wed Sep 27 12:53:37 2006 -0700
+
+    e1000: add multicast stats counters
+    
+    Add 4 multicast and broadcast hardware counters (rx/tx), and eliminate
+    as many non-hardware counters as possible.
+    
+    Signed-off-by: Mitch Williams <mitch.a.williams@intel.com>
+    Signed-off-by: Auke Kok <auke-jan.h.kok@intel.com>
+
+diff --git a/drivers/net/e1000/e1000_ethtool.c b/drivers/net/e1000/e1000_ethtool.c
+index 858c14d3ee91..9791b8a1a096 100644
+--- a/drivers/net/e1000/e1000_ethtool.c
++++ b/drivers/net/e1000/e1000_ethtool.c
+@@ -56,26 +56,30 @@ struct e1000_stats {
+ #define E1000_STAT(m) sizeof(((struct e1000_adapter *)0)->m), \
+ 		      offsetof(struct e1000_adapter, m)
+ static const struct e1000_stats e1000_gstrings_stats[] = {
+-	{ "rx_packets", E1000_STAT(net_stats.rx_packets) },
+-	{ "tx_packets", E1000_STAT(net_stats.tx_packets) },
+-	{ "rx_bytes", E1000_STAT(net_stats.rx_bytes) },
+-	{ "tx_bytes", E1000_STAT(net_stats.tx_bytes) },
+-	{ "rx_errors", E1000_STAT(net_stats.rx_errors) },
+-	{ "tx_errors", E1000_STAT(net_stats.tx_errors) },
++	{ "rx_packets", E1000_STAT(stats.gprc) },
++	{ "tx_packets", E1000_STAT(stats.gptc) },
++	{ "rx_bytes", E1000_STAT(stats.gorcl) },
++	{ "tx_bytes", E1000_STAT(stats.gotcl) },
++	{ "rx_broadcast", E1000_STAT(stats.bprc) },
++	{ "tx_broadcast", E1000_STAT(stats.bptc) },
++	{ "rx_multicast", E1000_STAT(stats.mprc) },
++	{ "tx_multicast", E1000_STAT(stats.mptc) },
++	{ "rx_errors", E1000_STAT(stats.rxerrc) },
++	{ "tx_errors", E1000_STAT(stats.txerrc) },
+ 	{ "tx_dropped", E1000_STAT(net_stats.tx_dropped) },
+-	{ "multicast", E1000_STAT(net_stats.multicast) },
+-	{ "collisions", E1000_STAT(net_stats.collisions) },
+-	{ "rx_length_errors", E1000_STAT(net_stats.rx_length_errors) },
++	{ "multicast", E1000_STAT(stats.mprc) },
++	{ "collisions", E1000_STAT(stats.colc) },
++	{ "rx_length_errors", E1000_STAT(stats.rlerrc) },
+ 	{ "rx_over_errors", E1000_STAT(net_stats.rx_over_errors) },
+-	{ "rx_crc_errors", E1000_STAT(net_stats.rx_crc_errors) },
++	{ "rx_crc_errors", E1000_STAT(stats.crcerrs) },
+ 	{ "rx_frame_errors", E1000_STAT(net_stats.rx_frame_errors) },
+ 	{ "rx_no_buffer_count", E1000_STAT(stats.rnbc) },
+-	{ "rx_missed_errors", E1000_STAT(net_stats.rx_missed_errors) },
+-	{ "tx_aborted_errors", E1000_STAT(net_stats.tx_aborted_errors) },
+-	{ "tx_carrier_errors", E1000_STAT(net_stats.tx_carrier_errors) },
++	{ "rx_missed_errors", E1000_STAT(stats.mpc) },
++	{ "tx_aborted_errors", E1000_STAT(stats.ecol) },
++	{ "tx_carrier_errors", E1000_STAT(stats.tncrs) },
+ 	{ "tx_fifo_errors", E1000_STAT(net_stats.tx_fifo_errors) },
+ 	{ "tx_heartbeat_errors", E1000_STAT(net_stats.tx_heartbeat_errors) },
+-	{ "tx_window_errors", E1000_STAT(net_stats.tx_window_errors) },
++	{ "tx_window_errors", E1000_STAT(stats.latecol) },
+ 	{ "tx_abort_late_coll", E1000_STAT(stats.latecol) },
+ 	{ "tx_deferred_ok", E1000_STAT(stats.dc) },
+ 	{ "tx_single_coll_ok", E1000_STAT(stats.scc) },
+diff --git a/drivers/net/e1000/e1000_hw.h b/drivers/net/e1000/e1000_hw.h
+index 47f34f213ac5..113344eb0e92 100644
+--- a/drivers/net/e1000/e1000_hw.h
++++ b/drivers/net/e1000/e1000_hw.h
+@@ -1298,6 +1298,7 @@ struct e1000_hw_stats {
+     uint64_t algnerrc;
+     uint64_t symerrs;
+     uint64_t rxerrc;
++    uint64_t txerrc;
+     uint64_t mpc;
+     uint64_t scc;
+     uint64_t ecol;
+@@ -1330,8 +1331,9 @@ struct e1000_hw_stats {
+     uint64_t gotch;
+     uint64_t rnbc;
+     uint64_t ruc;
+-    uint64_t rfc;
+     uint64_t roc;
++    uint64_t rlerrc;
++    uint64_t rfc;
+     uint64_t rjc;
+     uint64_t mgprc;
+     uint64_t mgpdc;
+diff --git a/drivers/net/e1000/e1000_main.c b/drivers/net/e1000/e1000_main.c
+index 447b7c8a77b1..5296a82c22b8 100644
+--- a/drivers/net/e1000/e1000_main.c
++++ b/drivers/net/e1000/e1000_main.c
+@@ -3338,16 +3338,15 @@ e1000_update_stats(struct e1000_adapter *adapter)
+ 		adapter->stats.crcerrs + adapter->stats.algnerrc +
+ 		adapter->stats.ruc + adapter->stats.roc +
+ 		adapter->stats.cexterr;
+-	adapter->net_stats.rx_length_errors = adapter->stats.ruc +
+-	                                      adapter->stats.roc;
++	adapter->stats.rlerrc = adapter->stats.ruc + adapter->stats.roc;
++	adapter->net_stats.rx_length_errors = adapter->stats.rlerrc;
+ 	adapter->net_stats.rx_crc_errors = adapter->stats.crcerrs;
+ 	adapter->net_stats.rx_frame_errors = adapter->stats.algnerrc;
+ 	adapter->net_stats.rx_missed_errors = adapter->stats.mpc;
+ 
+ 	/* Tx Errors */
+-
+-	adapter->net_stats.tx_errors = adapter->stats.ecol +
+-	                               adapter->stats.latecol;
++	adapter->stats.txerrc = adapter->stats.ecol + adapter->stats.latecol;
++	adapter->net_stats.tx_errors = adapter->stats.txerrc;
+ 	adapter->net_stats.tx_aborted_errors = adapter->stats.ecol;
+ 	adapter->net_stats.tx_window_errors = adapter->stats.latecol;
+ 	adapter->net_stats.tx_carrier_errors = adapter->stats.tncrs;
+

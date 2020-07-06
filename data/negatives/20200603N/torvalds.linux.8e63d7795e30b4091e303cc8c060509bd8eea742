@@ -1,0 +1,52 @@
+commit 8e63d7795e30b4091e303cc8c060509bd8eea742
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Tue May 25 20:43:30 2010 +0200
+
+    timers: Fix slack calculation really
+    
+    commit f00e047ef (timers: Fix slack calculation for expired timers)
+    fixed the issue of slack on expired timers only partially. Linus
+    noticed that jiffies is volatile so it is reloaded twice, which
+    generates bad code.
+    
+    But its worse. This can defeat the time_after() check if jiffies are
+    incremented between time_after() and the slack calculation.
+    
+    Fix it by reading jiffies into a local variable, which prevents the
+    compiler from loading it twice. While at it make the > -1 check into
+    >= 0 which is easier to read.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Arjan van de Ven <arjan@linux.intel.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/kernel/timer.c b/kernel/timer.c
+index be394af5bc22..d8decb8d46b0 100644
+--- a/kernel/timer.c
++++ b/kernel/timer.c
+@@ -747,16 +747,19 @@ EXPORT_SYMBOL(mod_timer_pending);
+ static inline
+ unsigned long apply_slack(struct timer_list *timer, unsigned long expires)
+ {
+-	unsigned long expires_limit, mask;
++	unsigned long expires_limit, mask, now;
+ 	int bit;
+ 
+ 	expires_limit = expires;
+ 
+-	if (timer->slack > -1)
++	if (timer->slack >= 0) {
+ 		expires_limit = expires + timer->slack;
+-	else if (time_after(expires, jiffies)) /* auto slack: use 0.4% */
+-		expires_limit = expires + (expires - jiffies)/256;
+-
++	} else {
++		now = jiffies;
++		/* No slack, if already expired else auto slack 0.4% */
++		if (time_after(expires, now))
++			expires_limit = expires + (expires - now)/256;
++	}
+ 	mask = expires ^ expires_limit;
+ 	if (mask == 0)
+ 		return expires;
+

@@ -1,0 +1,84 @@
+commit 5c0034beb9933bca2a8b7d83d11dface1ea3b7fa
+Author: Timo Sirainen <tss@iki.fi>
+Date:   Thu Nov 2 19:49:27 2006 +0200
+
+    If cache file contains broken field type or decision type mark the cache
+    corrupted instead of assert-crashing later.
+    
+    --HG--
+    branch : HEAD
+
+diff --git a/src/lib-index/mail-cache-fields.c b/src/lib-index/mail-cache-fields.c
+index 9303cad24..af3fdbaa2 100644
+--- a/src/lib-index/mail-cache-fields.c
++++ b/src/lib-index/mail-cache-fields.c
+@@ -21,12 +21,27 @@ static bool field_has_fixed_size(enum mail_cache_field_type type)
+ 	case MAIL_CACHE_FIELD_STRING:
+ 	case MAIL_CACHE_FIELD_HEADER:
+ 		return FALSE;
++
++	case MAIL_CACHE_FIELD_COUNT:
++		break;
+ 	}
+ 
+ 	i_unreached();
+ 	return FALSE;
+ }
+ 
++static bool field_decision_is_valid(enum mail_cache_decision_type type)
++{
++	switch (type & ~MAIL_CACHE_DECISION_FORCED) {
++	case MAIL_CACHE_DECISION_NO:
++	case MAIL_CACHE_DECISION_TEMP:
++	case MAIL_CACHE_DECISION_YES:
++		return TRUE;
++	default:
++		return FALSE;
++	}
++}
++
+ static int field_type_verify(struct mail_cache *cache, unsigned int idx,
+ 			     enum mail_cache_field_type type, unsigned int size)
+ {
+@@ -58,6 +73,8 @@ void mail_cache_register_fields(struct mail_cache *cache,
+ 	for (i = 0; i < fields_count; i++) {
+ 		if (hash_lookup_full(cache->field_name_hash, fields[i].name,
+ 				     &orig_key, &orig_value)) {
++			i_assert(fields[i].type < MAIL_CACHE_FIELD_COUNT);
++
+ 			fields[i].idx =
+ 				POINTER_CAST_TO(orig_value, unsigned int);
+ 			(void)field_type_verify(cache, fields[i].idx,
+@@ -263,6 +280,16 @@ int mail_cache_header_fields_read(struct mail_cache *cache)
+ 			return -1;
+ 		}
+ 
++		if (types[i] > MAIL_CACHE_FIELD_COUNT) {
++			mail_cache_set_corrupted(cache, "field type corrupted");
++			return -1;
++		}
++		if (!field_decision_is_valid(decisions[i])) {
++			mail_cache_set_corrupted(cache,
++				"field decision type corrupted");
++			return -1;
++		}
++
+ 		if (hash_lookup_full(cache->field_name_hash, names,
+ 				     &orig_key, &orig_value)) {
+ 			/* already exists, see if decision can be updated */
+diff --git a/src/lib-index/mail-cache.h b/src/lib-index/mail-cache.h
+index 297762b44..e68a05c23 100644
+--- a/src/lib-index/mail-cache.h
++++ b/src/lib-index/mail-cache.h
+@@ -26,7 +26,9 @@ enum mail_cache_field_type {
+ 	MAIL_CACHE_FIELD_VARIABLE_SIZE,
+ 	MAIL_CACHE_FIELD_STRING,
+ 	MAIL_CACHE_FIELD_BITMASK,
+-	MAIL_CACHE_FIELD_HEADER
++	MAIL_CACHE_FIELD_HEADER,
++
++	MAIL_CACHE_FIELD_COUNT
+ };
+ 
+ struct mail_cache_field {
+

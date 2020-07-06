@@ -1,0 +1,76 @@
+commit 7a867d149f0c0cb9184a38f83704d37439a17f3e
+Author: Vaibhav Hiremath <vaibhav.hiremath@linaro.org>
+Date:   Tue May 24 18:32:04 2016 +0530
+
+    greybus: arche-platform: Enable SVC clock during FW_FLASHING state
+    
+    The issue is, as part of kernel-only build we started seeing
+    failures in SVC FW flashing. It was reproducible easily in kernel-only
+    build, but never observed on Android build.
+    
+    During debugging, there were couple of observations,
+    
+    1. If SVC clock enabled and disables (which is REFCLK_MAIN), then SVC FW
+       flashing works.
+    2. If we do not switch SVC to HSE (external clock source) it works.
+       Recently, SVC code has been updated to switch HSE clock, so removing
+       it (remove/skip rcc_switch_ara_pll() fn) would use internal clock only.
+    
+    As per STM32 spec, for flashing through USART we do not need
+    to enable HSE, but the above observation contradicts with it.
+    
+    There is still something missing in terms of understanding of how STM32
+    device functions as far as Flashing is concerned. There is something
+    hidden in HW, which probably still need to identify.
+    
+    So as a interim solution we will enable clock for FW_FLASHING state,
+    which seems to be fixing the issue here.
+    
+    Testing Done: Tested on EVT1.5 with arche6.0 and kernel-only build.
+    
+    Signed-off-by: Vaibhav Hiremath <vaibhav.hiremath@linaro.org>
+    Tested-by: Michael Scott <michael.scott@linaro.org>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@google.com>
+
+diff --git a/drivers/staging/greybus/arche-platform.c b/drivers/staging/greybus/arche-platform.c
+index 58b370774399..f47ea4670d25 100644
+--- a/drivers/staging/greybus/arche-platform.c
++++ b/drivers/staging/greybus/arche-platform.c
+@@ -337,6 +337,8 @@ static int arche_platform_coldboot_seq(struct arche_platform_drvdata *arche_pdat
+  */
+ static int arche_platform_fw_flashing_seq(struct arche_platform_drvdata *arche_pdata)
+ {
++	int ret;
++
+ 	if (arche_pdata->state == ARCHE_PLATFORM_STATE_FW_FLASHING)
+ 		return 0;
+ 
+@@ -348,6 +350,14 @@ static int arche_platform_fw_flashing_seq(struct arche_platform_drvdata *arche_p
+ 	gpio_set_value(arche_pdata->svc_sysboot_gpio, 1);
+ 
+ 	usleep_range(100, 200);
++
++	ret = clk_prepare_enable(arche_pdata->svc_ref_clk);
++	if (ret) {
++		dev_err(arche_pdata->dev, "failed to enable svc_ref_clk: %d\n",
++				ret);
++		return ret;
++	}
++
+ 	svc_reset_onoff(arche_pdata->svc_reset_gpio,
+ 			!arche_pdata->is_reset_act_hi);
+ 
+@@ -374,10 +384,10 @@ static void arche_platform_poweroff_seq(struct arche_platform_drvdata *arche_pda
+ 		arche_platform_set_wake_detect_state(arche_pdata,
+ 						     WD_STATE_IDLE);
+ 		spin_unlock_irqrestore(&arche_pdata->wake_lock, flags);
+-
+-		clk_disable_unprepare(arche_pdata->svc_ref_clk);
+ 	}
+ 
++	clk_disable_unprepare(arche_pdata->svc_ref_clk);
++
+ 	/* As part of exit, put APB back in reset state */
+ 	svc_reset_onoff(arche_pdata->svc_reset_gpio,
+ 			arche_pdata->is_reset_act_hi);
+

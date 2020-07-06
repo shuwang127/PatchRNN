@@ -1,0 +1,82 @@
+commit 92ed48e5230e8f5906dda0cc31715b3b7e3fe303
+Author: Benoit PAPILLAULT <benoit.papillault@free.fr>
+Date:   Mon Aug 17 18:56:10 2009 +0200
+
+    rt2x00: Add support for retry rates
+    
+    rt2800pci can handle different retry rates,
+    it will always step 1 rate down after a failed
+    transmission so creating the retry rate list
+    for mac80211 is quite simple.
+    
+    Signed-off-by: Benoit PAPILLAULT <benoit.papillault@free.fr>
+    Signed-off-by: Ivo van Doorn <IvDoorn@gmail.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/rt2x00/rt2x00dev.c b/drivers/net/wireless/rt2x00/rt2x00dev.c
+index b6676c6722fc..9ab70e435b5d 100644
+--- a/drivers/net/wireless/rt2x00/rt2x00dev.c
++++ b/drivers/net/wireless/rt2x00/rt2x00dev.c
+@@ -220,7 +220,8 @@ void rt2x00lib_txdone(struct queue_entry *entry,
+ 	struct skb_frame_desc *skbdesc = get_skb_frame_desc(entry->skb);
+ 	enum data_queue_qid qid = skb_get_queue_mapping(entry->skb);
+ 	unsigned int header_length = ieee80211_get_hdrlen_from_skb(entry->skb);
+-	u8 rate_idx, rate_flags;
++	u8 rate_idx, rate_flags, retry_rates;
++	unsigned int i;
+ 
+ 	/*
+ 	 * Unmap the skb.
+@@ -259,16 +260,27 @@ void rt2x00lib_txdone(struct queue_entry *entry,
+ 
+ 	rate_idx = skbdesc->tx_rate_idx;
+ 	rate_flags = skbdesc->tx_rate_flags;
++	retry_rates = test_bit(TXDONE_FALLBACK, &txdesc->flags) ?
++	    (txdesc->retry + 1) : 1;
+ 
+ 	/*
+ 	 * Initialize TX status
+ 	 */
+ 	memset(&tx_info->status, 0, sizeof(tx_info->status));
+ 	tx_info->status.ack_signal = 0;
+-	tx_info->status.rates[0].idx = rate_idx;
+-	tx_info->status.rates[0].flags = rate_flags;
+-	tx_info->status.rates[0].count = txdesc->retry + 1;
+-	tx_info->status.rates[1].idx = -1; /* terminate */
++
++	/*
++	 * Frame was send with retries, hardware tried
++	 * different rates to send out the frame, at each
++	 * retry it lowered the rate 1 step.
++	 */
++	for (i = 0; i < retry_rates && i < IEEE80211_TX_MAX_RATES; i++) {
++		tx_info->status.rates[i].idx = rate_idx - i;
++		tx_info->status.rates[i].flags = rate_flags;
++		tx_info->status.rates[i].count = 1;
++	}
++	if (i < (IEEE80211_TX_MAX_RATES -1))
++		tx_info->status.rates[i].idx = -1; /* terminate */
+ 
+ 	if (!(tx_info->flags & IEEE80211_TX_CTL_NO_ACK)) {
+ 		if (test_bit(TXDONE_SUCCESS, &txdesc->flags) ||
+diff --git a/drivers/net/wireless/rt2x00/rt2x00queue.h b/drivers/net/wireless/rt2x00/rt2x00queue.h
+index 47d175a13790..a5591fb2b191 100644
+--- a/drivers/net/wireless/rt2x00/rt2x00queue.h
++++ b/drivers/net/wireless/rt2x00/rt2x00queue.h
+@@ -214,6 +214,7 @@ struct rxdone_entry_desc {
+  *
+  * @TXDONE_UNKNOWN: Hardware could not determine success of transmission.
+  * @TXDONE_SUCCESS: Frame was successfully send
++ * @TXDONE_FALLBACK: Frame was successfully send using a fallback rate.
+  * @TXDONE_FAILURE: Frame was not successfully send
+  * @TXDONE_EXCESSIVE_RETRY: In addition to &TXDONE_FAILURE, the
+  *	frame transmission failed due to excessive retries.
+@@ -221,6 +222,7 @@ struct rxdone_entry_desc {
+ enum txdone_entry_desc_flags {
+ 	TXDONE_UNKNOWN,
+ 	TXDONE_SUCCESS,
++	TXDONE_FALLBACK,
+ 	TXDONE_FAILURE,
+ 	TXDONE_EXCESSIVE_RETRY,
+ };
+

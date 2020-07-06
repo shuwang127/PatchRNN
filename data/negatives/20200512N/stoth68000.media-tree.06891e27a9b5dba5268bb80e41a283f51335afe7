@@ -1,0 +1,71 @@
+commit 06891e27a9b5dba5268bb80e41a283f51335afe7
+Author: Jesse Barnes <jbarnes@virtuousgeek.org>
+Date:   Mon Sep 14 10:58:48 2009 -0700
+
+    drm/i915: fix suspend/resume breakage in lid notifier
+    
+    We now unconditionally restore the mode at lid open time since some
+    platforms turn off the panel, pipes or other display elements when the
+    lid is closed.  There's a problem with doing this at resume time
+    however.
+    
+    At resume time, we'll get a lid event, but restoring the mode at that
+    time may not be safe (e.g. if we get the lid event before global state
+    has been restored), so check the suspended state and make sure our
+    restore is locked against other mode updates.
+    
+    Tested-by: Ben Gamari <bgamari.foss@gmail.com>
+    Signed-off-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 435082e40736..1f9e4503b072 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -89,6 +89,8 @@ static int i915_suspend(struct drm_device *dev, pm_message_t state)
+ 		pci_set_power_state(dev->pdev, PCI_D3hot);
+ 	}
+ 
++	dev_priv->suspended = 1;
++
+ 	return 0;
+ }
+ 
+@@ -124,6 +126,8 @@ static int i915_resume(struct drm_device *dev)
+ 		drm_helper_resume_force_mode(dev);
+ 	}
+ 
++	dev_priv->suspended = 0;
++
+ 	return ret;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index bcc1be281de6..d814b6957936 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -253,6 +253,7 @@ typedef struct drm_i915_private {
+ 	struct workqueue_struct *wq;
+ 
+ 	/* Register state */
++	bool suspended;
+ 	u8 saveLBB;
+ 	u32 saveDSPACNTR;
+ 	u32 saveDSPBCNTR;
+diff --git a/drivers/gpu/drm/i915/intel_lvds.c b/drivers/gpu/drm/i915/intel_lvds.c
+index 4c55596649f9..c1cc5566e20b 100644
+--- a/drivers/gpu/drm/i915/intel_lvds.c
++++ b/drivers/gpu/drm/i915/intel_lvds.c
+@@ -651,8 +651,11 @@ static int intel_lid_notify(struct notifier_block *nb, unsigned long val,
+ 		container_of(nb, struct drm_i915_private, lid_notifier);
+ 	struct drm_device *dev = dev_priv->dev;
+ 
+-	if (acpi_lid_open())
++	if (acpi_lid_open() && !dev_priv->suspended) {
++		mutex_lock(&dev->mode_config.mutex);
+ 		drm_helper_resume_force_mode(dev);
++		mutex_unlock(&dev->mode_config.mutex);
++	}
+ 
+ 	drm_sysfs_hotplug_event(dev_priv->dev);
+ 
+

@@ -1,0 +1,561 @@
+commit 5ec420289418b09eacc8d45163978b2b197dbd64
+Author: castaglia <castaglia>
+Date:   Fri Apr 22 02:49:17 2011 +0000
+
+    Add a new API for generating events whenever messages are logged.  These
+    events cover TransferLog, SystemLog, syslog, TraceLog, and per-module
+    logging.
+    
+    Listeners for these events can be registered by modules which want to
+    send the log messages remotely, process/digest/aggregrate them, etc.  (And
+    yes, I do already have a mod_log_forensic module which uses these events,
+    which I may decide is worth bundling with proftpd.)
+
+diff --git a/include/log.h b/include/log.h
+index 01b265067..7f6435f63 100644
+--- a/include/log.h
++++ b/include/log.h
+@@ -2,7 +2,7 @@
+  * ProFTPD - FTP server daemon
+  * Copyright (c) 1997, 1998 Public Flood Software
+  * Copyright (c) 1999, 2000 MacGyver aka Habeeb J. Dihu <macgyver@tos.net>
+- * Copyright (c) 2001-2009 The ProFTPD Project team
++ * Copyright (c) 2001-2011 The ProFTPD Project team
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -27,7 +27,7 @@
+ /* Logging, either to syslog or stderr, as well as debug logging
+  * and debug levels.
+  *
+- * $Id: log.h,v 1.32 2009-11-04 20:19:05 castaglia Exp $
++ * $Id: log.h,v 1.33 2011-04-22 02:49:16 castaglia Exp $
+  */
+ 
+ #ifndef PR_LOG_H
+@@ -167,4 +167,44 @@ void init_log(void);
+ 
+ int pr_log_str2sysloglevel(const char *);
+ 
++/* Define a struct, and some constants, for logging events and any listeners
++ * for those events.
++ */
++typedef struct log_event {
++
++  /* Type of log event/message; the values are defined below */
++  unsigned int log_type;
++
++  /* Log fd associated with this log for this event */
++  int log_fd;
++
++  /* Log level of this message; the semantics of the log level depend on
++   * on the log type.
++   */
++  int log_level;
++
++  /* The message being logged. */
++  const char *log_msg;
++  size_t log_msglen;
++
++} pr_log_event_t;
++
++#define PR_LOG_TYPE_UNSPEC	0
++#define PR_LOG_TYPE_XFERLOG	1
++#define PR_LOG_TYPE_SYSLOG	2
++#define PR_LOG_TYPE_SYSTEMLOG	3
++#define PR_LOG_TYPE_EXTLOG	4
++#define PR_LOG_TYPE_TRACELOG	5
++
++/* Helper function to generate the necessary log event, passing along the
++ * log event context data.
++ */
++int pr_log_event_generate(unsigned int log_type, int log_fd, int log_level,
++  const char *log_msg, size_t log_msglen);
++
++/* Returns TRUE if there are listeners for the specified log type, FALSE
++ * otherwise.
++ */
++int pr_log_event_listening(unsigned int log_type);
++
+ #endif /* PR_LOG_H */
+diff --git a/modules/mod_log.c b/modules/mod_log.c
+index f7134c825..4136457da 100644
+--- a/modules/mod_log.c
++++ b/modules/mod_log.c
+@@ -25,7 +25,7 @@
+  */
+ 
+ /* Flexible logging module for proftpd
+- * $Id: mod_log.c,v 1.118 2011-04-12 00:54:40 castaglia Exp $
++ * $Id: mod_log.c,v 1.119 2011-04-22 02:49:17 castaglia Exp $
+  */
+ 
+ #include "conf.h"
+@@ -1226,6 +1226,7 @@ static void do_log(cmd_rec *cmd, logfile_t *lf) {
+   char logbuf[EXTENDED_LOG_BUFFER_SIZE] = {'\0'};
+   logformat_t *fmt = NULL;
+   char *s, *bp;
++  size_t logbuflen;
+ 
+   fmt = lf->lf_format;
+   f = fmt->lf_format;
+@@ -1257,13 +1258,19 @@ static void do_log(cmd_rec *cmd, logfile_t *lf) {
+   *bp++ = '\n';
+   *bp = '\0';
+ 
++  logbuflen = strlen(logbuf);
++
+   if (lf->lf_fd != EXTENDED_LOG_SYSLOG) {
+-    if (write(lf->lf_fd, logbuf, strlen(logbuf)) < 0) {
++    pr_log_event_generate(PR_LOG_TYPE_EXTLOG, lf->lf_fd, -1, logbuf, logbuflen);
++
++    if (write(lf->lf_fd, logbuf, logbuflen) < 0) {
+       pr_log_pri(PR_LOG_ERR, "error: cannot write ExtendedLog to fd %d: %s",
+         lf->lf_fd, strerror(errno));
+     }
+ 
+   } else {
++    pr_log_event_generate(PR_LOG_TYPE_EXTLOG, syslog_sockfd,
++      lf->lf_syslog_level, logbuf, logbuflen);
+     pr_syslog(syslog_sockfd, lf->lf_syslog_level, "%s", logbuf);
+   }
+ }
+diff --git a/src/ftpdctl.c b/src/ftpdctl.c
+index 8c2cafa62..7c6a469e3 100644
+--- a/src/ftpdctl.c
++++ b/src/ftpdctl.c
+@@ -23,7 +23,7 @@
+  */
+ 
+ /* ProFTPD Controls command-line client
+- * $Id: ftpdctl.c,v 1.16 2011-01-12 06:54:49 castaglia Exp $
++ * $Id: ftpdctl.c,v 1.17 2011-04-22 02:49:17 castaglia Exp $
+  */
+ 
+ #include "conf.h"
+@@ -58,6 +58,15 @@ uid_t pr_auth_name2uid(pool *p, const char *name) {
+   return (uid_t) -1;
+ }
+ 
++void pr_event_generate(const char *event, const void *event_data) {
++  (void) event;
++  (void) event_data;
++}
++
++int pr_event_listening(const char *event) {
++  return -1;
++}
++
+ int pr_fs_get_usable_fd(int fd) {
+   return -1;
+ }
+diff --git a/src/log.c b/src/log.c
+index 31e87db0d..799ae7779 100644
+--- a/src/log.c
++++ b/src/log.c
+@@ -25,7 +25,7 @@
+  */
+ 
+ /* ProFTPD logging support.
+- * $Id: log.c,v 1.106 2011-03-19 18:44:31 castaglia Exp $
++ * $Id: log.c,v 1.107 2011-04-22 02:49:17 castaglia Exp $
+  */
+ 
+ #include "conf.h"
+@@ -312,6 +312,9 @@ int pr_log_vwritefile(int logfd, const char *ident, const char *fmt,
+   }
+ 
+   buflen = strlen(buf);
++
++  pr_log_event_generate(PR_LOG_TYPE_UNSPEC, logfd, -1, buf, buflen);
++
+   while (write(logfd, buf, buflen) < 0) {
+     if (errno == EINTR) {
+       pr_signals_handle();
+@@ -394,7 +397,7 @@ void log_discard(void) {
+   syslog_discard = TRUE;
+ }
+ 
+-static void log_write(int priority, int f, char *s) {
++static void log_write(int priority, int f, char *s, int discard) {
+   unsigned int *max_priority = NULL;
+   char serverinfo[PR_TUNABLE_BUFFER_SIZE] = {'\0'};
+ 
+@@ -417,29 +420,61 @@ static void log_write(int priority, int f, char *s) {
+     }
+   }
+ 
+-  if (logstderr ||
+-      !main_server) {
+-    fprintf(stderr, "%s - %s\n", serverinfo, s);
++  if (!discard &&
++      (logstderr || !main_server)) {
++    char buf[LOGBUFFER_SIZE] = {'\0'};
++    size_t buflen;
++
++    if (*serverinfo) {
++      snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf),
++               "%s proftpd[%u] %s: %s\n", systemlog_host,
++               (unsigned int) (session.pid ? session.pid : getpid()),
++               serverinfo, s);
++    } else {
++      snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf),
++               "%s proftpd[%u]: %s\n", systemlog_host,
++               (unsigned int) (session.pid ? session.pid : getpid()), s);
++    }
++
++    buf[sizeof(buf) - 1] = '\0';
++    buflen = strlen(buf);
++
++    pr_log_event_generate(PR_LOG_TYPE_SYSTEMLOG, STDERR_FILENO, priority,
++      buf, buflen);
++
++    fprintf(stderr, "%s", buf);
+     return;
+   }
+ 
+-  if (syslog_discard)
+-    return;
++  if (syslog_discard) {
++    /* Only return now if we don't have any log listeners. */
++    if (pr_log_event_listening(PR_LOG_TYPE_SYSLOG) == FALSE &&
++        pr_log_event_listening(PR_LOG_TYPE_SYSTEMLOG) == FALSE) {
++      return;
++    }
++  }
+ 
+   max_priority = get_param_ptr(main_server->conf, "SyslogLevel", FALSE);
+   if (max_priority != NULL &&
+       priority > *max_priority) {
+-    return;
++
++    /* Only return now if we don't have any log listeners. */
++    if (pr_log_event_listening(PR_LOG_TYPE_SYSLOG) == FALSE &&
++        pr_log_event_listening(PR_LOG_TYPE_SYSTEMLOG) == FALSE) {
++      return;
++    }
+   }
+ 
+   if (systemlog_fd != -1) {
+     char buf[LOGBUFFER_SIZE] = {'\0'};
++    size_t buflen;
+     time_t tt = time(NULL);
+     struct tm *t;
+ 
+     t = pr_localtime(NULL, &tt);
+-    if (!t)
++    if (t == NULL) {
+       return;
++    }
+ 
+     strftime(buf, sizeof(buf), "%b %d %H:%M:%S ", t);
+     buf[sizeof(buf) - 1] = '\0';
+@@ -456,7 +491,28 @@ static void log_write(int priority, int f, char *s) {
+     }
+ 
+     buf[sizeof(buf) - 1] = '\0';
+-    while (write(systemlog_fd, buf, strlen(buf)) < 0) {
++    buflen = strlen(buf);
++
++    pr_log_event_generate(PR_LOG_TYPE_SYSTEMLOG, systemlog_fd, priority,
++      buf, buflen);
++
++    /* Now we need to enforce the discard, syslog_discard and SyslogLevel
++     * filtering.
++     */
++    if (discard) {
++      return;
++    }
++
++    if (syslog_discard) {
++      return;
++    }
++
++    if (max_priority != NULL &&
++        priority > *max_priority) {
++      return;
++    }
++
++    while (write(systemlog_fd, buf, buflen) < 0) {
+       if (errno == EINTR) {
+         pr_signals_handle();
+         continue;
+@@ -468,6 +524,9 @@ static void log_write(int priority, int f, char *s) {
+     return;
+   }
+ 
++  pr_log_event_generate(PR_LOG_TYPE_SYSLOG, syslog_sockfd, priority, s,
++    strlen(s));
++
+   if (set_facility != -1)
+     f = set_facility;
+ 
+@@ -503,7 +562,7 @@ void pr_log_pri(int priority, const char *fmt, ...) {
+   /* Always make sure the buffer is NUL-terminated. */
+   buf[sizeof(buf) - 1] = '\0';
+ 
+-  log_write(priority, facility, buf);
++  log_write(priority, facility, buf, FALSE);
+ }
+ 
+ /* Like pr_log_pri(), but sends the log entry in the LOG_AUTHPRIV
+@@ -520,7 +579,7 @@ void pr_log_auth(int priority, const char *fmt, ...) {
+   /* Always make sure the buffer is NUL-terminated. */
+   buf[sizeof(buf) - 1] = '\0';
+ 
+-  log_write(priority, LOG_AUTHPRIV, buf);
++  log_write(priority, LOG_AUTHPRIV, buf, FALSE);
+ }
+ 
+ /* Disable logging to stderr, should be done right before forking
+@@ -578,9 +637,16 @@ int pr_log_str2sysloglevel(const char *name) {
+ void pr_log_debug(int level, const char *fmt, ...) {
+   char buf[LOGBUFFER_SIZE] = {'\0'};
+   va_list msg;
++  int discard = FALSE;
+ 
+-  if (debug_level < level)
+-    return;
++  if (debug_level < level) {
++    discard = TRUE;
++
++    if (pr_log_event_listening(PR_LOG_TYPE_SYSLOG) == FALSE &&
++        pr_log_event_listening(PR_LOG_TYPE_SYSTEMLOG) == FALSE) {
++      return;
++    }
++  }
+ 
+   if (fmt == NULL)
+     return;
+@@ -593,7 +659,89 @@ void pr_log_debug(int level, const char *fmt, ...) {
+   /* Always make sure the buffer is NUL-terminated. */
+   buf[sizeof(buf) - 1] = '\0';
+ 
+-  log_write(PR_LOG_DEBUG, facility, buf);
++  log_write(PR_LOG_DEBUG, facility, buf, discard);
++}
++
++static const char *get_log_event_name(unsigned int log_type) {
++  const char *event_name = NULL;
++
++  switch (log_type) {
++    case PR_LOG_TYPE_UNSPEC:
++      event_name = "core.log.unspec";
++      break;
++
++    case PR_LOG_TYPE_XFERLOG:
++      event_name = "core.log.xferlog";
++      break;
++
++    case PR_LOG_TYPE_SYSLOG:
++      event_name = "core.log.syslog"; 
++      break;
++
++    case PR_LOG_TYPE_SYSTEMLOG:
++      event_name = "core.log.systemlog"; 
++      break;
++
++    case PR_LOG_TYPE_EXTLOG:
++      event_name = "core.log.extendedlog"; 
++      break;
++
++    case PR_LOG_TYPE_TRACELOG:
++      event_name = "core.log.tracelog"; 
++      break;
++
++    default:
++      errno = EINVAL;
++      return NULL;
++  }
++
++  return event_name;
++}
++
++int pr_log_event_generate(unsigned int log_type, int log_fd, int log_level,
++    const char *log_msg, size_t log_msglen) {
++  const char *event_name;
++  pr_log_event_t le;
++
++  if (log_msg == NULL ||
++      log_msglen == 0) {
++    errno = EINVAL;
++    return -1;
++  }
++
++  if (pr_log_event_listening(log_type) == FALSE) {
++    errno = ENOENT;
++    return -1;
++  }
++
++  event_name = get_log_event_name(log_type);
++
++  memset(&le, 0, sizeof(le));
++  le.log_type = log_type;
++  le.log_fd = log_fd;
++  le.log_level = log_level;
++  le.log_msg = log_msg;
++  le.log_msglen = log_msglen;
++
++  pr_event_generate(event_name, &le);
++  return 0;
++}
++
++int pr_log_event_listening(unsigned int log_type) {
++  const char *event_name;
++  int res;
++
++  event_name = get_log_event_name(log_type);
++  if (event_name == NULL) {
++    return FALSE;
++  }
++
++  res = pr_event_listening(event_name);
++  if (res <= 0) {
++    return FALSE;
++  }
++
++  return TRUE;
+ }
+ 
+ void init_log(void) {
+diff --git a/src/main.c b/src/main.c
+index 0cdaa837a..e570f2fcb 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -25,7 +25,7 @@
+  */
+ 
+ /* House initialization and main program loop
+- * $Id: main.c,v 1.428 2011-04-21 16:27:08 castaglia Exp $
++ * $Id: main.c,v 1.429 2011-04-22 02:49:17 castaglia Exp $
+  */
+ 
+ #include "conf.h"
+@@ -1862,7 +1862,7 @@ static void handle_stacktrace_signal(int signo, siginfo_t *info, void *ptr) {
+ 
+   pr_log_pri(PR_LOG_ERR, "-----END STACK TRACE-----");
+ 
+-  exit(0);
++  finish_terminate();
+ }
+ #endif /* PR_DEVEL_STACK_TRACE */
+ 
+diff --git a/src/trace.c b/src/trace.c
+index 23886455a..eb26fe745 100644
+--- a/src/trace.c
++++ b/src/trace.c
+@@ -23,7 +23,7 @@
+  */
+ 
+ /* Trace functions
+- * $Id: trace.c,v 1.32 2011-03-25 04:11:45 castaglia Exp $
++ * $Id: trace.c,v 1.33 2011-04-22 02:49:17 castaglia Exp $
+  */
+ 
+ 
+@@ -91,7 +91,8 @@ static void trace_restart_ev(const void *event_data, void *user_data) {
+   return;
+ }
+ 
+-static int trace_write(const char *channel, int level, const char *msg) {
++static int trace_write(const char *channel, int level, const char *msg,
++    int discard) {
+   char buf[PR_TUNABLE_BUFFER_SIZE];
+   size_t buflen;
+   struct tm *tm;
+@@ -171,7 +172,20 @@ static int trace_write(const char *channel, int level, const char *msg) {
+     buf[sizeof(buf)-2] = '\n';
+   }
+ 
+-  return write(trace_logfd, buf, strlen(buf));
++  buflen = strlen(buf);
++
++  pr_log_event_generate(PR_LOG_TYPE_TRACELOG, trace_logfd, level, buf, buflen);
++
++  if (discard) {
++    /* This log message would not have been written to disk, so just discard
++     * it.  The discard value is TRUE when there's a log listener for
++     * TraceLog logging events, and the Trace log level configuration would
++     * otherwise have filtered out this log message.
++     */
++    return 0;
++  }
++
++  return write(trace_logfd, buf, buflen);
+ }
+ 
+ pr_table_t *pr_trace_get_table(void) {
+@@ -439,6 +453,7 @@ int pr_trace_vmsg(const char *channel, int level, const char *fmt,
+   char buf[PR_TUNABLE_BUFFER_SIZE] = {'\0'};
+   size_t buflen;
+   struct trace_levels *levels;
++  int discard = FALSE;
+ 
+   /* Writing a trace message at level zero is NOT helpful; this makes it
+    * impossible to quell messages to that trace channel by setting the level
+@@ -459,15 +474,29 @@ int pr_trace_vmsg(const char *channel, int level, const char *fmt,
+   }
+ 
+   levels = trace_get_levels(channel);
+-  if (levels == NULL)
+-    return -1;
++  if (levels == NULL) {
++    discard = TRUE;
+ 
+-  if (level < levels->min_level) {
+-    return 0;
++    if (pr_log_event_listening(PR_LOG_TYPE_TRACELOG) == FALSE) {
++      return -1;
++    }
+   }
+ 
+-  if (level > levels->max_level) {
+-    return 0;
++  if (discard == FALSE &&
++      level < levels->min_level) {
++    discard = TRUE;
++
++    if (pr_log_event_listening(PR_LOG_TYPE_TRACELOG) == FALSE) {
++      return 0;
++    }
++  }
++
++  if (discard == FALSE &&
++      level > levels->max_level) {
++
++    if (pr_log_event_listening(PR_LOG_TYPE_TRACELOG) == FALSE) {
++      return 0;
++    }
+   }
+ 
+   vsnprintf(buf, sizeof(buf), fmt, msg);
+@@ -484,7 +513,7 @@ int pr_trace_vmsg(const char *channel, int level, const char *fmt,
+     buflen = strlen(buf);
+   }
+ 
+-  return trace_write(channel, level, buf);
++  return trace_write(channel, level, buf, discard);
+ }
+ 
+ #else
+diff --git a/src/xferlog.c b/src/xferlog.c
+index 8f4946030..3099c03ac 100644
+--- a/src/xferlog.c
++++ b/src/xferlog.c
+@@ -23,7 +23,7 @@
+  */
+ 
+ /* ProFTPD xferlog(5) logging support.
+- * $Id: xferlog.c,v 1.9 2011-03-17 13:48:21 castaglia Exp $
++ * $Id: xferlog.c,v 1.10 2011-04-22 02:49:17 castaglia Exp $
+  */
+ 
+ #include "conf.h"
+@@ -122,5 +122,6 @@ int xferlog_write(long xfertime, const char *remhost, off_t fsize, char *fname,
+ 
+   buf[sizeof(buf)-1] = '\0';
+ 
++  pr_log_event_generate(PR_LOG_TYPE_XFERLOG, xferlogfd, -1, buf, len);
+   return write(xferlogfd, buf, len);
+ }
+

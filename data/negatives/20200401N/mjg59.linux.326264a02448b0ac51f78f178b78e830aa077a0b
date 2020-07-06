@@ -1,0 +1,74 @@
+commit 326264a02448b0ac51f78f178b78e830aa077a0b
+Author: Frederic Weisbecker <fweisbec@gmail.com>
+Date:   Thu Feb 18 18:24:18 2010 +0100
+
+    hw-breakpoint: Keep track of dr7 local enable bits
+    
+    When the user enables breakpoints through dr7, he can choose
+    between "local" or "global" enable bits but given how linux is
+    implemented, both have the same effect.
+    
+    That said we don't keep track how the user enabled the breakpoints
+    so when the user requests the dr7 value, we only translate the
+    "enabled" status using the global enabled bits. It means that if
+    the user enabled a breakpoint using the local enabled bit, reading
+    back dr7 will set the global bit and clear the local one.
+    
+    Apps like Wine expect a full dr7 POKEUSER/PEEKUSER match for emulated
+    softwares that implement old reverse engineering protection schemes.
+    
+    We fix that by keeping track of the whole dr7 value given by the user
+    in the thread structure to drop this bug. We'll think about
+    something more proper later.
+    
+    This fixes a 2.6.32 - 2.6.33-x ptrace regression.
+    
+    Reported-and-tested-by: Michael Stefaniuc <mstefani@redhat.com>
+    Signed-off-by: Frederic Weisbecker <fweisbec@gmail.com>
+    Acked-by: K.Prasad <prasad@linux.vnet.ibm.com>
+    Cc: Alan Stern <stern@rowland.harvard.edu>
+    Cc: Maneesh Soni <maneesh@linux.vnet.ibm.com>
+    Cc: Alexandre Julliard <julliard@winehq.org>
+    Cc: Rafael J. Wysocki <rjw@sisk.pl>
+    Cc: Maciej Rutecki <maciej.rutecki@gmail.com>
+
+diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+index fc801bab1b3b..b753ea59703a 100644
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -450,6 +450,8 @@ struct thread_struct {
+ 	struct perf_event	*ptrace_bps[HBP_NUM];
+ 	/* Debug status used for traps, single steps, etc... */
+ 	unsigned long           debugreg6;
++	/* Keep track of the exact dr7 value set by the user */
++	unsigned long           ptrace_dr7;
+ 	/* Fault info: */
+ 	unsigned long		cr2;
+ 	unsigned long		trap_no;
+diff --git a/arch/x86/kernel/ptrace.c b/arch/x86/kernel/ptrace.c
+index 017d937639fe..0c1033d61e59 100644
+--- a/arch/x86/kernel/ptrace.c
++++ b/arch/x86/kernel/ptrace.c
+@@ -702,7 +702,7 @@ static unsigned long ptrace_get_debugreg(struct task_struct *tsk, int n)
+ 	} else if (n == 6) {
+ 		val = thread->debugreg6;
+ 	 } else if (n == 7) {
+-		val = ptrace_get_dr7(thread->ptrace_bps);
++		val = thread->ptrace_dr7;
+ 	}
+ 	return val;
+ }
+@@ -778,8 +778,11 @@ int ptrace_set_debugreg(struct task_struct *tsk, int n, unsigned long val)
+ 			return rc;
+ 	}
+ 	/* All that's left is DR7 */
+-	if (n == 7)
++	if (n == 7) {
+ 		rc = ptrace_write_dr7(tsk, val);
++		if (!rc)
++			thread->ptrace_dr7 = val;
++	}
+ 
+ ret_path:
+ 	return rc;
+

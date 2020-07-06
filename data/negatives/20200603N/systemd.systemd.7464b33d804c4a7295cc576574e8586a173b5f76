@@ -1,0 +1,68 @@
+commit 7464b33d804c4a7295cc576574e8586a173b5f76
+Author: Zbigniew Jędrzejewski-Szmek <zbyszek@in.waw.pl>
+Date:   Tue Apr 2 13:52:51 2013 -0400
+
+    nss-myhostname: do not use _cleanup_
+    
+    mss-myhostname wasn't working because of underlinking. Instead of
+    fixing the underlinking, just remove the use of _cleanup_ macros.
+    
+    It is impolite to use our utility functions in modules designed to be
+    loaded by others. So cleanup macros which (at some point) call assert
+    which calls log_assert_failed, should not be used. Revert this part of
+    commit d73c3269c.
+
+diff --git a/src/nss-myhostname/netlink.c b/src/nss-myhostname/netlink.c
+index 2329f0094..b1ef912c8 100644
+--- a/src/nss-myhostname/netlink.c
++++ b/src/nss-myhostname/netlink.c
+@@ -35,8 +35,6 @@
+ #include <stdlib.h>
+ 
+ #include "ifconf.h"
+-#include "macro.h"
+-#include "util.h"
+ 
+ #define SEQ 4711
+ 
+@@ -172,27 +170,33 @@ int ifconf_acquire_addresses(struct address **_list, unsigned *_n_list) {
+         int r, on = 1;
+         struct address *list = NULL;
+         unsigned n_list = 0;
+-        int _cleanup_close_ fd;
++        int fd;
+ 
+         fd = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
+         if (fd < 0)
+                 return -errno;
+ 
+-        if (setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on)) < 0)
+-                return -errno;
++        if (setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on)) < 0) {
++                r = -errno;
++                goto finish;
++        }
+ 
+-        if (send(fd, &req, req.hdr.nlmsg_len, 0) < 0)
+-                return -errno;
++        if (send(fd, &req, req.hdr.nlmsg_len, 0) < 0) {
++                r = -errno;
++                goto finish;
++        }
+ 
+         while((r = read_reply(fd, &list, &n_list)) == 0)
+                 ;
+ 
++finish:
++        close(fd);
++
+         if (r < 0) {
+                 free(list);
+                 return r;
+         }
+ 
+-        assert(n_list == 0 || list);
+         qsort(list, n_list, sizeof(struct address), address_compare);
+ 
+         *_list = list;
+

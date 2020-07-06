@@ -1,0 +1,84 @@
+commit e34b9c94b6e8d63f94387f5148434db5f8f79084
+Author: Ishizaki Kou <kou.ishizaki@toshiba.co.jp>
+Date:   Thu May 31 19:33:04 2007 +1000
+
+    [POWERPC] of_serial: add port type checking
+    
+    Currently, of_serial driver supports only 8250 compatible ports, but
+    prepares that others can easily be added.  Yet unregister routine
+    assumes port is 8250.  This corrects unregister routine to check
+    port type.
+    
+    Signed-off-by: Kou Ishizaki <kou.ishizaki@toshiba.co.jp>
+    Acked-by: Arnd Bergmann <arnd@arndb.de>
+    Signed-off-by: Paul Mackerras <paulus@samba.org>
+
+diff --git a/drivers/serial/of_serial.c b/drivers/serial/of_serial.c
+index d7752af1c7ec..a64d85821996 100644
+--- a/drivers/serial/of_serial.c
++++ b/drivers/serial/of_serial.c
+@@ -17,6 +17,11 @@
+ #include <asm/of_platform.h>
+ #include <asm/prom.h>
+ 
++struct of_serial_info {
++	int type;
++	int line;
++};
++
+ /*
+  * Fill a struct uart_port for a given device node
+  */
+@@ -62,6 +67,7 @@ static int __devinit of_platform_serial_setup(struct of_device *ofdev,
+ static int __devinit of_platform_serial_probe(struct of_device *ofdev,
+ 						const struct of_device_id *id)
+ {
++	struct of_serial_info *info;
+ 	struct uart_port port;
+ 	int port_type;
+ 	int ret;
+@@ -69,6 +75,10 @@ static int __devinit of_platform_serial_probe(struct of_device *ofdev,
+ 	if (of_find_property(ofdev->node, "used-by-rtas", NULL))
+ 		return -EBUSY;
+ 
++	info = kmalloc(sizeof(*info), GFP_KERNEL);
++	if (info == NULL)
++		return -ENOMEM;
++
+ 	port_type = (unsigned long)id->data;
+ 	ret = of_platform_serial_setup(ofdev, port_type, &port);
+ 	if (ret)
+@@ -88,9 +98,12 @@ static int __devinit of_platform_serial_probe(struct of_device *ofdev,
+ 	if (ret < 0)
+ 		goto out;
+ 
+-	ofdev->dev.driver_data = (void *)(unsigned long)ret;
++	info->type = port_type;
++	info->line = ret;
++	ofdev->dev.driver_data = info;
+ 	return 0;
+ out:
++	kfree(info);
+ 	irq_dispose_mapping(port.irq);
+ 	return ret;
+ }
+@@ -100,8 +113,16 @@ static int __devinit of_platform_serial_probe(struct of_device *ofdev,
+  */
+ static int of_platform_serial_remove(struct of_device *ofdev)
+ {
+-	int line = (unsigned long)ofdev->dev.driver_data;
+-	serial8250_unregister_port(line);
++	struct of_serial_info *info = ofdev->dev.driver_data;
++	switch (info->type) {
++	case PORT_8250 ... PORT_MAX_8250:
++		serial8250_unregister_port(info->line);
++		break;
++	default:
++		/* need to add code for these */
++		break;
++	}
++	kfree(info);
+ 	return 0;
+ }
+ 
+

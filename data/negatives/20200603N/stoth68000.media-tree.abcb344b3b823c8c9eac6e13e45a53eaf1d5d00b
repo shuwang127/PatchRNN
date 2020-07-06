@@ -1,0 +1,180 @@
+commit abcb344b3b823c8c9eac6e13e45a53eaf1d5d00b
+Author: Kalle Valo <kvalo@qca.qualcomm.com>
+Date:   Fri Jul 22 08:26:20 2011 +0300
+
+    ath6kl: implement suspend support
+    
+    For now this is implemented so that if host supports power is kept in
+    the chip. If that's not supported, an error is returned and sdio stack
+    will remove the device during suspend.
+    
+    Signed-off-by: Kalle Valo <kvalo@qca.qualcomm.com>
+
+diff --git a/drivers/net/wireless/ath/ath6kl/cfg80211.c b/drivers/net/wireless/ath/ath6kl/cfg80211.c
+index b2b70e6618f5..9128aa3c2b63 100644
+--- a/drivers/net/wireless/ath/ath6kl/cfg80211.c
++++ b/drivers/net/wireless/ath/ath6kl/cfg80211.c
+@@ -17,6 +17,7 @@
+ #include "core.h"
+ #include "cfg80211.h"
+ #include "debug.h"
++#include "hif-ops.h"
+ 
+ #define RATETAB_ENT(_rate, _rateid, _flags) {   \
+ 	.bitrate    = (_rate),                  \
+@@ -1424,6 +1425,16 @@ static int ath6kl_flush_pmksa(struct wiphy *wiphy, struct net_device *netdev)
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_PM
++static int ar6k_cfg80211_suspend(struct wiphy *wiphy,
++				 struct cfg80211_wowlan *wow)
++{
++	struct ath6kl *ar = wiphy_priv(wiphy);
++
++	return ath6kl_hif_suspend(ar);
++}
++#endif
++
+ static struct cfg80211_ops ath6kl_cfg80211_ops = {
+ 	.change_virtual_intf = ath6kl_cfg80211_change_iface,
+ 	.scan = ath6kl_cfg80211_scan,
+@@ -1443,6 +1454,9 @@ static struct cfg80211_ops ath6kl_cfg80211_ops = {
+ 	.set_pmksa = ath6kl_set_pmksa,
+ 	.del_pmksa = ath6kl_del_pmksa,
+ 	.flush_pmksa = ath6kl_flush_pmksa,
++#ifdef CONFIG_PM
++	.suspend = ar6k_cfg80211_suspend,
++#endif
+ };
+ 
+ struct wireless_dev *ath6kl_cfg80211_init(struct device *dev)
+diff --git a/drivers/net/wireless/ath/ath6kl/core.h b/drivers/net/wireless/ath/ath6kl/core.h
+index a1aa2ef398f7..4405ab56bb87 100644
+--- a/drivers/net/wireless/ath/ath6kl/core.h
++++ b/drivers/net/wireless/ath/ath6kl/core.h
+@@ -544,6 +544,7 @@ void ath6kl_pspoll_event(struct ath6kl *ar, u8 aid);
+ 
+ void ath6kl_dtimexpiry_event(struct ath6kl *ar);
+ void ath6kl_disconnect(struct ath6kl *ar);
++void ath6kl_deep_sleep_enable(struct ath6kl *ar);
+ void aggr_recv_delba_req_evt(struct ath6kl *ar, u8 tid);
+ void aggr_recv_addba_req_evt(struct ath6kl *ar, u8 tid, u16 seq_no,
+ 			     u8 win_sz);
+diff --git a/drivers/net/wireless/ath/ath6kl/hif-ops.h b/drivers/net/wireless/ath/ath6kl/hif-ops.h
+index c923979776a0..d6c898f3d0b3 100644
+--- a/drivers/net/wireless/ath/ath6kl/hif-ops.h
++++ b/drivers/net/wireless/ath/ath6kl/hif-ops.h
+@@ -69,4 +69,9 @@ static inline void ath6kl_hif_cleanup_scatter(struct ath6kl *ar)
+ 	return ar->hif_ops->cleanup_scatter(ar);
+ }
+ 
++static inline int ath6kl_hif_suspend(struct ath6kl *ar)
++{
++	return ar->hif_ops->suspend(ar);
++}
++
+ #endif
+diff --git a/drivers/net/wireless/ath/ath6kl/hif.h b/drivers/net/wireless/ath/ath6kl/hif.h
+index 5ceff54775a1..797e2d1d9bf9 100644
+--- a/drivers/net/wireless/ath/ath6kl/hif.h
++++ b/drivers/net/wireless/ath/ath6kl/hif.h
+@@ -202,6 +202,7 @@ struct ath6kl_hif_ops {
+ 	int (*scat_req_rw) (struct ath6kl *ar,
+ 			    struct hif_scatter_req *scat_req);
+ 	void (*cleanup_scatter)(struct ath6kl *ar);
++	int (*suspend)(struct ath6kl *ar);
+ };
+ 
+ #endif
+diff --git a/drivers/net/wireless/ath/ath6kl/main.c b/drivers/net/wireless/ath/ath6kl/main.c
+index 868838bb6b88..b64b2a357560 100644
+--- a/drivers/net/wireless/ath/ath6kl/main.c
++++ b/drivers/net/wireless/ath/ath6kl/main.c
+@@ -795,6 +795,41 @@ void ath6kl_disconnect(struct ath6kl *ar)
+ 	}
+ }
+ 
++void ath6kl_deep_sleep_enable(struct ath6kl *ar)
++{
++	switch (ar->sme_state) {
++	case SME_CONNECTING:
++		cfg80211_connect_result(ar->net_dev, ar->bssid, NULL, 0,
++					NULL, 0,
++					WLAN_STATUS_UNSPECIFIED_FAILURE,
++					GFP_KERNEL);
++		break;
++	case SME_CONNECTED:
++	default:
++		/*
++		 * FIXME: oddly enough smeState is in DISCONNECTED during
++		 * suspend, why? Need to send disconnected event in that
++		 * state.
++		 */
++		cfg80211_disconnected(ar->net_dev, 0, NULL, 0, GFP_KERNEL);
++		break;
++	}
++
++	if (test_bit(CONNECTED, &ar->flag) ||
++	    test_bit(CONNECT_PEND, &ar->flag))
++		ath6kl_wmi_disconnect_cmd(ar->wmi);
++
++	ar->sme_state = SME_DISCONNECTED;
++
++	/* disable scanning */
++	if (ath6kl_wmi_scanparams_cmd(ar->wmi, 0xFFFF, 0, 0, 0, 0, 0, 0, 0,
++				      0, 0) != 0)
++		printk(KERN_WARNING "ath6kl: failed to disable scan "
++		       "during suspend\n");
++
++	ath6kl_cfg80211_scan_complete_event(ar, -ECANCELED);
++}
++
+ /* WMI Event handlers */
+ 
+ static const char *get_hw_id_string(u32 id)
+diff --git a/drivers/net/wireless/ath/ath6kl/sdio.c b/drivers/net/wireless/ath/ath6kl/sdio.c
+index f393090ecefe..852a0ccc8033 100644
+--- a/drivers/net/wireless/ath/ath6kl/sdio.c
++++ b/drivers/net/wireless/ath/ath6kl/sdio.c
+@@ -726,6 +726,31 @@ static int ath6kl_sdio_enable_scatter(struct ath6kl *ar)
+ 	return 0;
+ }
+ 
++static int ath6kl_sdio_suspend(struct ath6kl *ar)
++{
++	struct ath6kl_sdio *ar_sdio = ath6kl_sdio_priv(ar);
++	struct sdio_func *func = ar_sdio->func;
++	mmc_pm_flag_t flags;
++	int ret;
++
++	flags = sdio_get_host_pm_caps(func);
++
++	if (!(flags & MMC_PM_KEEP_POWER))
++		/* as host doesn't support keep power we need to bail out */
++		return -EINVAL;
++
++	ret = sdio_set_host_pm_flags(func, MMC_PM_KEEP_POWER);
++	if (ret) {
++		printk(KERN_ERR "ath6kl: set sdio pm flags failed: %d\n",
++		       ret);
++		return ret;
++	}
++
++	ath6kl_deep_sleep_enable(ar);
++
++	return 0;
++}
++
+ static const struct ath6kl_hif_ops ath6kl_sdio_ops = {
+ 	.read_write_sync = ath6kl_sdio_read_write_sync,
+ 	.write_async = ath6kl_sdio_write_async,
+@@ -736,6 +761,7 @@ static const struct ath6kl_hif_ops ath6kl_sdio_ops = {
+ 	.enable_scatter = ath6kl_sdio_enable_scatter,
+ 	.scat_req_rw = ath6kl_sdio_async_rw_scatter,
+ 	.cleanup_scatter = ath6kl_sdio_cleanup_scatter,
++	.suspend = ath6kl_sdio_suspend,
+ };
+ 
+ static int ath6kl_sdio_probe(struct sdio_func *func,
+

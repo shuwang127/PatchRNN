@@ -1,0 +1,86 @@
+commit 06abdfb47ee745a4d79721de24260815ec6bca2b
+Author: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Date:   Sun May 6 14:50:13 2007 -0700
+
+    get_unmapped_area handles MAP_FIXED in generic code
+    
+    generic arch_get_unmapped_area() now handles MAP_FIXED.  Now that all
+    implementations have been fixed, change the toplevel get_unmapped_area() to
+    call into arch or drivers for the MAP_FIXED case.
+    
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Cc: Richard Henderson <rth@twiddle.net>
+    Cc: Ivan Kokshaysky <ink@jurassic.park.msu.ru>
+    Cc: Russell King <rmk+kernel@arm.linux.org.uk>
+    Cc: David Howells <dhowells@redhat.com>
+    Cc: Andi Kleen <ak@suse.de>
+    Cc: "Luck, Tony" <tony.luck@intel.com>
+    Cc: Kyle McMartin <kyle@mcmartin.ca>
+    Cc: Grant Grundler <grundler@parisc-linux.org>
+    Cc: Matthew Wilcox <willy@debian.org>
+    Cc: "David S. Miller" <davem@davemloft.net>
+    Cc: William Irwin <bill.irwin@oracle.com>
+    Cc: Adam Litke <agl@us.ibm.com>
+    Cc: David Gibson <david@gibson.dropbear.id.au>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 88da687bde89..a6b7c796352b 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1200,6 +1200,9 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
+ 	if (len > TASK_SIZE)
+ 		return -ENOMEM;
+ 
++	if (flags & MAP_FIXED)
++		return addr;
++
+ 	if (addr) {
+ 		addr = PAGE_ALIGN(addr);
+ 		vma = find_vma(mm, addr);
+@@ -1273,6 +1276,9 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
+ 	if (len > TASK_SIZE)
+ 		return -ENOMEM;
+ 
++	if (flags & MAP_FIXED)
++		return addr;
++
+ 	/* requesting a specific address */
+ 	if (addr) {
+ 		addr = PAGE_ALIGN(addr);
+@@ -1361,22 +1367,21 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
+ 		unsigned long pgoff, unsigned long flags)
+ {
+ 	unsigned long ret;
+-
+-	if (!(flags & MAP_FIXED)) {
+-		unsigned long (*get_area)(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
+-
+-		get_area = current->mm->get_unmapped_area;
+-		if (file && file->f_op && file->f_op->get_unmapped_area)
+-			get_area = file->f_op->get_unmapped_area;
+-		addr = get_area(file, addr, len, pgoff, flags);
+-		if (IS_ERR_VALUE(addr))
+-			return addr;
+-	}
++	unsigned long (*get_area)(struct file *, unsigned long,
++				  unsigned long, unsigned long, unsigned long);
++
++	get_area = current->mm->get_unmapped_area;
++	if (file && file->f_op && file->f_op->get_unmapped_area)
++		get_area = file->f_op->get_unmapped_area;
++	addr = get_area(file, addr, len, pgoff, flags);
++	if (IS_ERR_VALUE(addr))
++		return addr;
+ 
+ 	if (addr > TASK_SIZE - len)
+ 		return -ENOMEM;
+ 	if (addr & ~PAGE_MASK)
+ 		return -EINVAL;
++
+ 	if (file && is_file_hugepages(file))  {
+ 		/*
+ 		 * Check if the given range is hugepage aligned, and
+

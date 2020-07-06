@@ -1,0 +1,55 @@
+commit b9b6e80ad3b11778f1066d698a838bcc86efb6be
+Author: Paul Burton <paul.burton@imgtec.com>
+Date:   Fri Aug 19 17:43:56 2016 +0100
+
+    scsi: sg: Avoid overflow when USER_HZ > HZ
+    
+    Calculating the maximum timeout that a user can set via the
+    SG_SET_TIMEOUT ioctl involves multiplying INT_MAX by USER_HZ/HZ. If
+    USER_HZ is larger than HZ then this results in an overflow when
+    performed as a 32 bit integer calculation, resulting in compiler
+    warnings such as the following:
+    
+      drivers/scsi/sg.c: In function 'sg_ioctl':
+      drivers/scsi/sg.c:91:67: warning: integer overflow in expression [-Woverflow]
+       #define MULDIV(X,MUL,DIV) ((((X % DIV) * MUL) / DIV) + ((X / DIV) * MUL))
+                                                                         ^
+      drivers/scsi/sg.c:887:14: note: in expansion of macro 'MULDIV'
+         if (val >= MULDIV (INT_MAX, USER_HZ, HZ))
+                    ^
+      drivers/scsi/sg.c:91:67: warning: integer overflow in expression [-Woverflow]
+       #define MULDIV(X,MUL,DIV) ((((X % DIV) * MUL) / DIV) + ((X / DIV) * MUL))
+                                                                         ^
+      drivers/scsi/sg.c:888:13: note: in expansion of macro 'MULDIV'
+             val = MULDIV (INT_MAX, USER_HZ, HZ);
+                   ^
+    
+    Avoid this overflow by performing the (constant) arithmetic on 64 bit
+    integers, which ensures that overflow from multiplying the 32 bit values
+    cannot occur. When converting the result back to a 32 bit integer use
+    min_t to ensure that we don't simply truncate a value beyond INT_MAX to
+    a 32 bit integer, but instead use INT_MAX where the result was larger
+    than it. As the values are all compile time constant the 64 bit
+    arithmetic should have no runtime cost.
+    
+    Signed-off-by: Paul Burton <paul.burton@imgtec.com>
+    Acked-by: Douglas Gilbert <dgilbert@interlog.com>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/sg.c b/drivers/scsi/sg.c
+index ae7d9bdf409c..bb5ec2d6abdf 100644
+--- a/drivers/scsi/sg.c
++++ b/drivers/scsi/sg.c
+@@ -884,8 +884,9 @@ sg_ioctl(struct file *filp, unsigned int cmd_in, unsigned long arg)
+ 			return result;
+ 		if (val < 0)
+ 			return -EIO;
+-		if (val >= MULDIV (INT_MAX, USER_HZ, HZ))
+-		    val = MULDIV (INT_MAX, USER_HZ, HZ);
++		if (val >= MULDIV((s64)INT_MAX, USER_HZ, HZ))
++			val = min_t(s64, MULDIV((s64)INT_MAX, USER_HZ, HZ),
++				    INT_MAX);
+ 		sfp->timeout_user = val;
+ 		sfp->timeout = MULDIV (val, HZ, USER_HZ);
+ 
+

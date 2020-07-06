@@ -1,0 +1,112 @@
+commit a1d46cffaf40e04acb0ecab14980ece3ef1ab933
+Author: Darrick J. Wong <darrick.wong@oracle.com>
+Date:   Mon Sep 19 10:24:36 2016 +1000
+
+    xfs: remove xfs_btree_bigkey
+    
+    Remove the xfs_btree_bigkey mess and simply make xfs_btree_key big enough
+    to hold both keys in-core.
+    
+    Signed-off-by: Darrick J. Wong <darrick.wong@oracle.com>
+    Reviewed-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Dave Chinner <david@fromorbit.com>
+
+diff --git a/fs/xfs/libxfs/xfs_btree.c b/fs/xfs/libxfs/xfs_btree.c
+index 08569792fe20..7be8d9cda2b6 100644
+--- a/fs/xfs/libxfs/xfs_btree.c
++++ b/fs/xfs/libxfs/xfs_btree.c
+@@ -2070,7 +2070,7 @@ __xfs_btree_updkeys(
+ 	struct xfs_buf		*bp0,
+ 	bool			force_all)
+ {
+-	union xfs_btree_bigkey	key;	/* keys from current level */
++	union xfs_btree_key	key;	/* keys from current level */
+ 	union xfs_btree_key	*lkey;	/* keys from the next level up */
+ 	union xfs_btree_key	*hkey;
+ 	union xfs_btree_key	*nlkey;	/* keys from the next level up */
+@@ -2086,7 +2086,7 @@ __xfs_btree_updkeys(
+ 
+ 	trace_xfs_btree_updkeys(cur, level, bp0);
+ 
+-	lkey = (union xfs_btree_key *)&key;
++	lkey = &key;
+ 	hkey = xfs_btree_high_key_from_key(cur, lkey);
+ 	xfs_btree_get_keys(cur, block, lkey);
+ 	for (level++; level < cur->bc_nlevels; level++) {
+@@ -3226,7 +3226,7 @@ xfs_btree_insrec(
+ 	struct xfs_buf		*bp;	/* buffer for block */
+ 	union xfs_btree_ptr	nptr;	/* new block ptr */
+ 	struct xfs_btree_cur	*ncur;	/* new btree cursor */
+-	union xfs_btree_bigkey	nkey;	/* new block key */
++	union xfs_btree_key	nkey;	/* new block key */
+ 	union xfs_btree_key	*lkey;
+ 	int			optr;	/* old key/record index */
+ 	int			ptr;	/* key/record index */
+@@ -3241,7 +3241,7 @@ xfs_btree_insrec(
+ 	XFS_BTREE_TRACE_ARGIPR(cur, level, *ptrp, &rec);
+ 
+ 	ncur = NULL;
+-	lkey = (union xfs_btree_key *)&nkey;
++	lkey = &nkey;
+ 
+ 	/*
+ 	 * If we have an external root pointer, and we've made it to the
+@@ -3444,14 +3444,14 @@ xfs_btree_insert(
+ 	union xfs_btree_ptr	nptr;	/* new block number (split result) */
+ 	struct xfs_btree_cur	*ncur;	/* new cursor (split result) */
+ 	struct xfs_btree_cur	*pcur;	/* previous level's cursor */
+-	union xfs_btree_bigkey	bkey;	/* key of block to insert */
++	union xfs_btree_key	bkey;	/* key of block to insert */
+ 	union xfs_btree_key	*key;
+ 	union xfs_btree_rec	rec;	/* record to insert */
+ 
+ 	level = 0;
+ 	ncur = NULL;
+ 	pcur = cur;
+-	key = (union xfs_btree_key *)&bkey;
++	key = &bkey;
+ 
+ 	xfs_btree_set_ptr_null(cur, &nptr);
+ 
+diff --git a/fs/xfs/libxfs/xfs_btree.h b/fs/xfs/libxfs/xfs_btree.h
+index 04d0865e5e6d..f41a4cfff740 100644
+--- a/fs/xfs/libxfs/xfs_btree.h
++++ b/fs/xfs/libxfs/xfs_btree.h
+@@ -37,30 +37,18 @@ union xfs_btree_ptr {
+ 	__be64			l;	/* long form ptr */
+ };
+ 
+-union xfs_btree_key {
+-	struct xfs_bmbt_key		bmbt;
+-	xfs_bmdr_key_t			bmbr;	/* bmbt root block */
+-	xfs_alloc_key_t			alloc;
+-	struct xfs_inobt_key		inobt;
+-	struct xfs_rmap_key		rmap;
+-};
+-
+ /*
+- * In-core key that holds both low and high keys for overlapped btrees.
+- * The two keys are packed next to each other on disk, so do the same
+- * in memory.  Preserve the existing xfs_btree_key as a single key to
+- * avoid the mental model breakage that would happen if we passed a
+- * bigkey into a function that operates on a single key.
++ * The in-core btree key.  Overlapping btrees actually store two keys
++ * per pointer, so we reserve enough memory to hold both.  The __*bigkey
++ * items should never be accessed directly.
+  */
+-union xfs_btree_bigkey {
++union xfs_btree_key {
+ 	struct xfs_bmbt_key		bmbt;
+ 	xfs_bmdr_key_t			bmbr;	/* bmbt root block */
+ 	xfs_alloc_key_t			alloc;
+ 	struct xfs_inobt_key		inobt;
+-	struct {
+-		struct xfs_rmap_key	rmap;
+-		struct xfs_rmap_key	rmap_hi;
+-	};
++	struct xfs_rmap_key		rmap;
++	struct xfs_rmap_key		__rmap_bigkey[2];
+ };
+ 
+ union xfs_btree_rec {
+

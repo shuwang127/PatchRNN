@@ -1,0 +1,196 @@
+commit d66b3c71d2391d61a101ac00695b96112d908138
+Author: s <s@c6295689-39f2-0310-b995-f0e70906c6a9>
+Date:   Thu Dec 9 08:23:14 2010 +0000
+
+    fix: implicit depending on the RSA algo_info for GOSTR3410 algo
+    
+    add sc_card_find_gostr3410_alg function
+    
+    Thanks to Douglas E. Engert
+    http://www.opensc-project.org/pipermail/opensc-devel/2010-December/015408.html
+    
+    
+    git-svn-id: https://www.opensc-project.org/svnp/opensc/trunk@4931 c6295689-39f2-0310-b995-f0e70906c6a9
+
+diff --git a/src/libopensc/card.c b/src/libopensc/card.c
+index 42757deb..8a5d0262 100644
+--- a/src/libopensc/card.c
++++ b/src/libopensc/card.c
+@@ -720,15 +720,15 @@ int  _sc_card_add_ec_alg(sc_card_t *card, unsigned int key_length,
+ 	return _sc_card_add_algorithm(card, &info);
+ }
+ 
+-sc_algorithm_info_t * sc_card_find_ec_alg(sc_card_t *card,
+-		unsigned int key_length)
++static sc_algorithm_info_t * sc_card_find_alg(sc_card_t *card,
++		unsigned int algorithm, unsigned int key_length)
+ {
+ 	int i;
+ 
+ 	for (i = 0; i < card->algorithm_count; i++) {
+ 		sc_algorithm_info_t *info = &card->algorithms[i];
+ 
+-		if (info->algorithm != SC_ALGORITHM_EC)
++		if (info->algorithm != algorithm)
+ 			continue;
+ 		if (info->key_length != key_length)
+ 			continue;
+@@ -736,6 +736,12 @@ sc_algorithm_info_t * sc_card_find_ec_alg(sc_card_t *card,
+ 	}
+ 	return NULL;
+ }
++
++sc_algorithm_info_t * sc_card_find_ec_alg(sc_card_t *card,
++		unsigned int key_length)
++{
++	return sc_card_find_alg(card, SC_ALGORITHM_EC, key_length);
++}
+ 	
+ int _sc_card_add_rsa_alg(sc_card_t *card, unsigned int key_length,
+ 			 unsigned long flags, unsigned long exponent)
+@@ -754,18 +760,13 @@ int _sc_card_add_rsa_alg(sc_card_t *card, unsigned int key_length,
+ sc_algorithm_info_t * sc_card_find_rsa_alg(sc_card_t *card,
+ 		unsigned int key_length)
+ {
+-	int i;
+-
+-	for (i = 0; i < card->algorithm_count; i++) {
+-		sc_algorithm_info_t *info = &card->algorithms[i];
++	return sc_card_find_alg(card, SC_ALGORITHM_RSA, key_length);
++}
+ 
+-		if (info->algorithm != SC_ALGORITHM_RSA)
+-			continue;
+-		if (info->key_length != key_length)
+-			continue;
+-		return info;
+-	}
+-	return NULL;
++sc_algorithm_info_t * sc_card_find_gostr3410_alg(sc_card_t *card,
++		unsigned int key_length)
++{
++	return sc_card_find_alg(card, SC_ALGORITHM_GOSTR3410, key_length);
+ }
+ 
+ static int match_atr_table(sc_context_t *ctx, struct sc_atr_table *table, u8 *atr, size_t atr_len)
+diff --git a/src/libopensc/opensc.h b/src/libopensc/opensc.h
+index e990a4a9..00d86d06 100644
+--- a/src/libopensc/opensc.h
++++ b/src/libopensc/opensc.h
+@@ -1109,7 +1109,8 @@ struct sc_algorithm_info * sc_card_find_rsa_alg(sc_card_t *card,
+ 		unsigned int key_length);
+ struct sc_algorithm_info * sc_card_find_ec_alg(sc_card_t *card,
+ 		unsigned int field_length);
+-
++struct sc_algorithm_info * sc_card_find_gostr3410_alg(sc_card_t *card,
++		unsigned int key_length);
+ 
+ struct sc_card_error {
+ 	unsigned int SWs;
+diff --git a/src/libopensc/pkcs15-sec.c b/src/libopensc/pkcs15-sec.c
+index 19411267..7f727a24 100644
+--- a/src/libopensc/pkcs15-sec.c
++++ b/src/libopensc/pkcs15-sec.c
+@@ -86,14 +86,33 @@ int sc_pkcs15_decipher(struct sc_pkcs15_card *p15card,
+ 		return SC_ERROR_NOT_ALLOWED;
+ 	}
+ 
+-	/* Note ECDSA can not decrypt, so code is assuming RSA */
++	switch (obj->type) {
++		case SC_PKCS15_TYPE_PRKEY_RSA:
++			alg_info = sc_card_find_rsa_alg(p15card->card, prkey->modulus_length);
++			if (alg_info == NULL) {
++				sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
++						"Card does not support RSA with key length %d\n",
++						prkey->modulus_length);
++				return SC_ERROR_NOT_SUPPORTED;
++			}
++			senv.algorithm = SC_ALGORITHM_RSA;
++			break;
+ 
+-	alg_info = sc_card_find_rsa_alg(p15card->card, prkey->modulus_length);
+-	if (alg_info == NULL) {
+-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Card does not support RSA with key length %d\n", prkey->modulus_length);
+-		return SC_ERROR_NOT_SUPPORTED;
++		case SC_PKCS15_TYPE_PRKEY_GOSTR3410:
++			alg_info = sc_card_find_gostr3410_alg(p15card->card, prkey->modulus_length);
++			if (alg_info == NULL) {
++				sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
++						"Card does not support GOSTR3410 with key length %d\n",
++						prkey->modulus_length);
++				return SC_ERROR_NOT_SUPPORTED;
++			}
++			senv.algorithm = SC_ALGORITHM_GOSTR3410;
++			break;
++
++		default:
++			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Key type not supported\n");
++			return SC_ERROR_NOT_SUPPORTED;
+ 	}
+-	senv.algorithm = SC_ALGORITHM_RSA;
+ 
+ 	r = sc_get_encoding_flags(ctx, flags, alg_info->flags, &pad_flags, &sec_flags);
+ 	if (r != SC_SUCCESS)
+@@ -170,7 +189,7 @@ int sc_pkcs15_compute_signature(struct sc_pkcs15_card *p15card,
+ 	memset(&senv, 0, sizeof(senv));
+ 
+ 	if ((obj->type & SC_PKCS15_TYPE_CLASS_MASK) != SC_PKCS15_TYPE_PRKEY) {
+-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "This is not a private key");
++		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "This is not a private key\n");
+ 		return SC_ERROR_NOT_ALLOWED;
+ 	}
+ 		
+@@ -185,26 +204,38 @@ int sc_pkcs15_compute_signature(struct sc_pkcs15_card *p15card,
+ 	}
+ 
+ 	switch (obj->type) {
+-		/* FIXME -DEE GOSTR is misusing the sc_card_find_rsa_alg */
+-		case SC_PKCS15_TYPE_PRKEY_GOSTR3410:
+ 		case SC_PKCS15_TYPE_PRKEY_RSA:
+ 			modlen = prkey->modulus_length / 8;
+ 			alg_info = sc_card_find_rsa_alg(p15card->card, prkey->modulus_length);
+-
+ 			if (alg_info == NULL) {
+-				sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Card does not support RSA with key length %d\n", prkey->modulus_length);
++				sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
++						"Card does not support RSA with key length %d\n",
++						prkey->modulus_length);
+ 				return SC_ERROR_NOT_SUPPORTED;
+ 			}
+ 			senv.flags |= SC_SEC_ENV_ALG_PRESENT;
+ 			senv.algorithm = SC_ALGORITHM_RSA;
+ 			break;
+ 
++		case SC_PKCS15_TYPE_PRKEY_GOSTR3410:
++			modlen = (prkey->modulus_length + 7) / 8 * 2;
++			alg_info = sc_card_find_gostr3410_alg(p15card->card, prkey->modulus_length);
++			if (alg_info == NULL) {
++				sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
++						"Card does not support GOSTR3410 with key length %d\n",
++						prkey->modulus_length);
++				return SC_ERROR_NOT_SUPPORTED;
++			}
++			senv.flags |= SC_SEC_ENV_ALG_PRESENT;
++			senv.algorithm = SC_ALGORITHM_GOSTR3410;
++			break;
++
+ 		case SC_PKCS15_TYPE_PRKEY_EC:
+ 			modlen = ((prkey->field_length +7) / 8) * 2;  /* 2*nLen */ 
+ 			alg_info = sc_card_find_ec_alg(p15card->card, prkey->field_length);
+ 			if (alg_info == NULL) {
+ 				sc_debug(ctx, SC_LOG_DEBUG_NORMAL, 
+-						"Card does not support EC with field_size %d",
++						"Card does not support EC with field_size %d\n",
+ 						prkey->field_length);
+ 				return SC_ERROR_NOT_SUPPORTED;
+ 			}
+@@ -216,7 +247,7 @@ int sc_pkcs15_compute_signature(struct sc_pkcs15_card *p15card,
+ 			break;
+ 			/* add other crypto types here */
+ 		default:
+-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Key type not supported");
++			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Key type not supported\n");
+ 			return SC_ERROR_NOT_SUPPORTED;
+ 	}
+ 
+

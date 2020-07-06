@@ -1,0 +1,86 @@
+commit c303da6d713b87b7b3f999f5acce8ecc76ff1adb
+Author: NeilBrown <neilb@suse.de>
+Date:   Wed Feb 6 01:39:51 2008 -0800
+
+    md: give userspace control over removing failed devices when external metdata in use
+    
+    When a device fails, we must not allow an further writes to the array until
+    the device failure has been recorded in array metadata.  When metadata is
+    managed externally, this requires some synchronisation...
+    
+    Allow/require userspace to explicitly remove failed devices from active
+    service in the array by writing 'none' to the 'slot' attribute.  If this
+    reduces the number of failed devices to 0, the write block will automatically
+    be lowered.
+    
+    Signed-off-by: Neil Brown <neilb@suse.de>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index e2782a04012d..00788c56276f 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -1891,20 +1891,44 @@ static ssize_t
+ slot_store(mdk_rdev_t *rdev, const char *buf, size_t len)
+ {
+ 	char *e;
++	int err;
++	char nm[20];
+ 	int slot = simple_strtoul(buf, &e, 10);
+ 	if (strncmp(buf, "none", 4)==0)
+ 		slot = -1;
+ 	else if (e==buf || (*e && *e!= '\n'))
+ 		return -EINVAL;
+-	if (rdev->mddev->pers)
+-		/* Cannot set slot in active array (yet) */
+-		return -EBUSY;
+-	if (slot >= rdev->mddev->raid_disks)
+-		return -ENOSPC;
+-	rdev->raid_disk = slot;
+-	/* assume it is working */
+-	rdev->flags = 0;
+-	set_bit(In_sync, &rdev->flags);
++	if (rdev->mddev->pers) {
++		/* Setting 'slot' on an active array requires also
++		 * updating the 'rd%d' link, and communicating
++		 * with the personality with ->hot_*_disk.
++		 * For now we only support removing
++		 * failed/spare devices.  This normally happens automatically,
++		 * but not when the metadata is externally managed.
++		 */
++		if (slot != -1)
++			return -EBUSY;
++		if (rdev->raid_disk == -1)
++			return -EEXIST;
++		/* personality does all needed checks */
++		if (rdev->mddev->pers->hot_add_disk == NULL)
++			return -EINVAL;
++		err = rdev->mddev->pers->
++			hot_remove_disk(rdev->mddev, rdev->raid_disk);
++		if (err)
++			return err;
++		sprintf(nm, "rd%d", rdev->raid_disk);
++		sysfs_remove_link(&rdev->mddev->kobj, nm);
++		set_bit(MD_RECOVERY_NEEDED, &rdev->mddev->recovery);
++		md_wakeup_thread(rdev->mddev->thread);
++	} else {
++		if (slot >= rdev->mddev->raid_disks)
++			return -ENOSPC;
++		rdev->raid_disk = slot;
++		/* assume it is working */
++		rdev->flags = 0;
++		set_bit(In_sync, &rdev->flags);
++	}
+ 	return len;
+ }
+ 
+@@ -5549,6 +5573,7 @@ static int remove_and_add_spares(mddev_t *mddev)
+ 
+ 	ITERATE_RDEV(mddev,rdev,rtmp)
+ 		if (rdev->raid_disk >= 0 &&
++		    !mddev->external &&
+ 		    (test_bit(Faulty, &rdev->flags) ||
+ 		     ! test_bit(In_sync, &rdev->flags)) &&
+ 		    atomic_read(&rdev->nr_pending)==0) {
+

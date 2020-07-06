@@ -1,0 +1,124 @@
+commit 3fa841d7e7266f6fcc1b3885b905f5153ba897d8
+Author: NeilBrown <neilb@suse.de>
+Date:   Wed Sep 23 18:10:29 2009 +1000
+
+    md: report device as congested when suspended
+    
+    This should writeback from coming when the device is temporarily
+    suspended.
+    
+    Signed-off-by: NeilBrown <neilb@suse.de>
+
+diff --git a/drivers/md/linear.c b/drivers/md/linear.c
+index ea4842905444..1ceceb334d5e 100644
+--- a/drivers/md/linear.c
++++ b/drivers/md/linear.c
+@@ -108,6 +108,9 @@ static int linear_congested(void *data, int bits)
+ 	linear_conf_t *conf;
+ 	int i, ret = 0;
+ 
++	if (mddev_congested(mddev, bits))
++		return 1;
++
+ 	rcu_read_lock();
+ 	conf = rcu_dereference(mddev->private);
+ 
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index a3dd3c8ea681..26ba42a79129 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -262,6 +262,12 @@ static void mddev_resume(mddev_t *mddev)
+ 	mddev->pers->quiesce(mddev, 0);
+ }
+ 
++int mddev_congested(mddev_t *mddev, int bits)
++{
++	return mddev->suspended;
++}
++EXPORT_SYMBOL(mddev_congested);
++
+ 
+ static inline mddev_t *mddev_get(mddev_t *mddev)
+ {
+diff --git a/drivers/md/md.h b/drivers/md/md.h
+index f55d2ff95133..f184b69ef337 100644
+--- a/drivers/md/md.h
++++ b/drivers/md/md.h
+@@ -430,6 +430,7 @@ extern void md_write_end(mddev_t *mddev);
+ extern void md_done_sync(mddev_t *mddev, int blocks, int ok);
+ extern void md_error(mddev_t *mddev, mdk_rdev_t *rdev);
+ 
++extern int mddev_congested(mddev_t *mddev, int bits);
+ extern void md_super_write(mddev_t *mddev, mdk_rdev_t *rdev,
+ 			   sector_t sector, int size, struct page *page);
+ extern void md_super_wait(mddev_t *mddev);
+diff --git a/drivers/md/multipath.c b/drivers/md/multipath.c
+index 94c21c11b9bc..dcbf9d35928b 100644
+--- a/drivers/md/multipath.c
++++ b/drivers/md/multipath.c
+@@ -199,6 +199,9 @@ static int multipath_congested(void *data, int bits)
+ 	multipath_conf_t *conf = mddev->private;
+ 	int i, ret = 0;
+ 
++	if (mddev_congested(mddev, bits))
++		return 1;
++
+ 	rcu_read_lock();
+ 	for (i = 0; i < mddev->raid_disks ; i++) {
+ 		mdk_rdev_t *rdev = rcu_dereference(conf->multipaths[i].rdev);
+diff --git a/drivers/md/raid0.c b/drivers/md/raid0.c
+index 68a4d129206e..d3a4ce06015a 100644
+--- a/drivers/md/raid0.c
++++ b/drivers/md/raid0.c
+@@ -44,6 +44,9 @@ static int raid0_congested(void *data, int bits)
+ 	mdk_rdev_t **devlist = conf->devlist;
+ 	int i, ret = 0;
+ 
++	if (mddev_congested(mddev, bits))
++		return 1;
++
+ 	for (i = 0; i < mddev->raid_disks && !ret ; i++) {
+ 		struct request_queue *q = bdev_get_queue(devlist[i]->bdev);
+ 
+diff --git a/drivers/md/raid1.c b/drivers/md/raid1.c
+index 7efdeb44097f..a1eb4e13a112 100644
+--- a/drivers/md/raid1.c
++++ b/drivers/md/raid1.c
+@@ -576,6 +576,9 @@ static int raid1_congested(void *data, int bits)
+ 	conf_t *conf = mddev->private;
+ 	int i, ret = 0;
+ 
++	if (mddev_congested(mddev, bits))
++		return 1;
++
+ 	rcu_read_lock();
+ 	for (i = 0; i < mddev->raid_disks; i++) {
+ 		mdk_rdev_t *rdev = rcu_dereference(conf->mirrors[i].rdev);
+diff --git a/drivers/md/raid10.c b/drivers/md/raid10.c
+index 7872968fdfcc..191f42efecc2 100644
+--- a/drivers/md/raid10.c
++++ b/drivers/md/raid10.c
+@@ -631,6 +631,8 @@ static int raid10_congested(void *data, int bits)
+ 	conf_t *conf = mddev->private;
+ 	int i, ret = 0;
+ 
++	if (mddev_congested(mddev, bits))
++		return 1;
+ 	rcu_read_lock();
+ 	for (i = 0; i < mddev->raid_disks && ret == 0; i++) {
+ 		mdk_rdev_t *rdev = rcu_dereference(conf->mirrors[i].rdev);
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index bee3573ed1bd..9db84c98a41d 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -3332,6 +3332,9 @@ static int raid5_congested(void *data, int bits)
+ 	/* No difference between reads and writes.  Just check
+ 	 * how busy the stripe_cache is
+ 	 */
++
++	if (mddev_congested(mddev, bits))
++		return 1;
+ 	if (conf->inactive_blocked)
+ 		return 1;
+ 	if (conf->quiesce)
+

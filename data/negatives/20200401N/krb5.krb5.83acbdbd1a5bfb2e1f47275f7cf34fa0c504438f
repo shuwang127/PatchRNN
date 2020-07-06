@@ -1,0 +1,103 @@
+commit 83acbdbd1a5bfb2e1f47275f7cf34fa0c504438f
+Author: Greg Hudson <ghudson@mit.edu>
+Date:   Thu Apr 16 16:46:33 2009 +0000
+
+    Send explicit salt for SALTTYPE_NORMAL keys
+    
+    Change the signature of _make_etype_info_entry to take the canonical
+    client principal instead of the request structure.  Also fixes the salt
+    we compute for SALTTYPE_NOREALM keys.
+    
+    Sending an explicit salt for SALTTYPE_NORMAL keys is believed to be
+    necessary for some preauth scenarios involving aliases.
+    
+    ticket: 6470
+    target_version: 1.7
+    tags: pullup
+    
+    git-svn-id: svn://anonsvn.mit.edu/krb5/trunk@22264 dc483132-0cff-0310-8789-dd5450dbe970
+
+diff --git a/src/kdc/kdc_preauth.c b/src/kdc/kdc_preauth.c
+index 3dda38150..b153bbf25 100644
+--- a/src/kdc/kdc_preauth.c
++++ b/src/kdc/kdc_preauth.c
+@@ -1510,7 +1510,7 @@ cleanup:
+ 
+ static krb5_error_code
+ _make_etype_info_entry(krb5_context context,
+-		       krb5_kdc_req *request, krb5_key_data *client_key,
++		       krb5_principal client_princ, krb5_key_data *client_key,
+ 		       krb5_enctype etype, krb5_etype_info_entry **entry,
+ 		       int etype_info2)
+ {
+@@ -1529,8 +1529,7 @@ _make_etype_info_entry(krb5_context context,
+     tmp_entry->salt = 0;
+     tmp_entry->s2kparams.data = NULL;
+     tmp_entry->s2kparams.length = 0;
+-    retval = get_salt_from_key(context, request->client,
+-			       client_key, &salt);
++    retval = get_salt_from_key(context, client_princ, client_key, &salt);
+     if (retval)
+ 	goto fail;
+     if (etype_info2 && client_key->key_data_ver > 1 &&
+@@ -1609,10 +1608,10 @@ etype_info_helper(krb5_context context, krb5_kdc_req *request,
+ 	if (request_contains_enctype(context, request, db_etype)) {
+ 	    assert(etype_info2 ||
+ 		   !enctype_requires_etype_info_2(db_etype));
+-	    if ((retval = _make_etype_info_entry(context, request, client_key,
+-			    db_etype, &entry[i], etype_info2)) != 0) {
++	    retval = _make_etype_info_entry(context, client->princ, client_key,
++					    db_etype, &entry[i], etype_info2);
++	    if (retval != 0)
+ 		goto cleanup;
+-	    }
+ 	    entry[i+1] = 0;
+ 	    i++;
+ 	}
+@@ -1634,10 +1633,11 @@ etype_info_helper(krb5_context context, krb5_kdc_req *request,
+ 
+ 	    }
+ 	    if (request_contains_enctype(context, request, db_etype)) {
+-		if ((retval = _make_etype_info_entry(context, request,
+-				client_key, db_etype, &entry[i], etype_info2)) != 0) {
++		retval = _make_etype_info_entry(context, client->princ,
++						client_key, db_etype,
++						&entry[i], etype_info2);
++		if (retval != 0)
+ 		    goto cleanup;
+-		}
+ 		entry[i+1] = 0;
+ 		i++;
+ 	    }
+@@ -1732,9 +1732,9 @@ etype_info_as_rep_helper(krb5_context context, krb5_pa_data * padata,
+     }
+     entry[0] = NULL;
+     entry[1] = NULL;
+-    retval = _make_etype_info_entry(context, request,
+-				    client_key, encrypting_key->enctype,
+-				    entry, etype_info2);
++    retval = _make_etype_info_entry(context, client->princ, client_key,
++				    encrypting_key->enctype, entry,
++				    etype_info2);
+     if (retval)
+ 	goto cleanup;
+ 
+diff --git a/src/kdc/kdc_util.c b/src/kdc/kdc_util.c
+index 8e531f03b..33614437a 100644
+--- a/src/kdc/kdc_util.c
++++ b/src/kdc/kdc_util.c
+@@ -1566,6 +1566,13 @@ get_salt_from_key(krb5_context context, krb5_principal client,
+ 
+     switch (client_key->key_data_type[1]) {
+     case KRB5_KDB_SALTTYPE_NORMAL:
++	/*
++	 * The client could infer the salt from the principal, but
++	 * might use the wrong principal name if this is an alias.  So
++	 * it's more reliable to send an explicit salt.
++	 */
++	if ((retval = krb5_principal2salt(context, client, salt)))
++	    return retval;
+ 	break;
+     case KRB5_KDB_SALTTYPE_V4:
+ 	/* send an empty (V4) salt */
+

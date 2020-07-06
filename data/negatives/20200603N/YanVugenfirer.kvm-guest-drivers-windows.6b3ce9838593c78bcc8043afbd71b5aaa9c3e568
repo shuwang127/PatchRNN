@@ -1,0 +1,795 @@
+commit 6b3ce9838593c78bcc8043afbd71b5aaa9c3e568
+Author: Yan Vugenfirer <yvugenfi@redhat.com>
+Date:   Sun Jul 15 17:23:49 2012 +0200
+
+    [NetKVM] BZ#838002 - implement 'no pause on resume' feature in order to pass PM requirments test of HCK.
+
+diff --git a/NetKVM/Common/ParaNdis-Common.c b/NetKVM/Common/ParaNdis-Common.c
+index 4def319..25ec1fd 100644
+--- a/NetKVM/Common/ParaNdis-Common.c
++++ b/NetKVM/Common/ParaNdis-Common.c
+@@ -15,6 +15,9 @@
+ #include "ParaNdis-Common.tmh"
+ #endif
+ 
++static void ReuseReceiveBufferRegular(PARANDIS_ADAPTER *pContext, pIONetDescriptor pBuffersDescriptor);
++static void ReuseReceiveBufferPowerOff(PARANDIS_ADAPTER *pContext, pIONetDescriptor pBuffersDescriptor);
++
+ // TODO: remove when the problem solved
+ void WriteVirtIODeviceByte(ULONG_PTR ulRegister, u8 bValue);
+ 
+@@ -186,7 +189,7 @@ static void	GetConfigurationEntry(NDIS_HANDLE cfg, tConfigurationEntry *pEntry)
+ {
+ 	NDIS_STATUS status;
+ 	const char *statusName;
+-	NDIS_STRING name;
++	NDIS_STRING name = {0};
+ 	PNDIS_CONFIGURATION_PARAMETER pParam = NULL;
+ 	NDIS_PARAMETER_TYPE ParameterType = NdisParameterInteger;
+ 	NdisInitializeString(&name, (PUCHAR)pEntry->Name);
+@@ -218,7 +221,7 @@ static void	GetConfigurationEntry(NDIS_HANDLE cfg, tConfigurationEntry *pEntry)
+ 		statusName,
+ 		pEntry->Name,
+ 		pEntry->ulValue));
+-	NdisFreeString(name);
++	if (name.Buffer) NdisFreeString(name);
+ }
+ 
+ static void DisableLSOv4Permanently(PARANDIS_ADAPTER *pContext, LPCSTR procname, LPCSTR reason)
+@@ -791,6 +794,9 @@ NDIS_STATUS ParaNdis_InitializeContext(
+ 		pContext->bHasHardwareFilters = TRUE;
+ 	}
+ 
++	pContext->ReuseBufferProc = ReuseReceiveBufferRegular;
++
++	
+ 	NdisInitializeEvent(&pContext->ResetEvent);
+ 	DEBUG_EXIT_STATUS(0, status);
+ 	return status;
+@@ -1130,7 +1136,7 @@ NDIS_STATUS ParaNdis_FinishInitialization(PARANDIS_ADAPTER *pContext)
+ 	{
+ 		JustForCheckClearInterrupt(pContext, "start 3");
+ 		pContext->bEnableInterruptHandlingDPC = TRUE;
+-		pContext->powerState = NetDeviceStateD0;
++		ParaNdis_SetPowerState(pContext, NdisDeviceStateD0);
+ 		VirtIODeviceAddStatus(&pContext->IODevice, VIRTIO_CONFIG_S_DRIVER_OK);
+ 		JustForCheckClearInterrupt(pContext, "start 4");
+ 
+@@ -1321,7 +1327,7 @@ BOOLEAN ParaNdis_OnInterrupt(
+ 		// ignore interrupts with invalid status bits
+ 		if (
+ 			status == VIRTIO_NET_INVALID_INTERRUPT_STATUS ||
+-			pContext->powerState != NetDeviceStateD0
++			pContext->powerState != NdisDeviceStateD0
+ 			)
+ 			status = 0;
+ 		if (status)
+@@ -1350,7 +1356,7 @@ BOOLEAN ParaNdis_OnInterrupt(
+ 
+ 
+ /**********************************************************
+-It is called from Rx processing routines.
++It is called from Rx processing routines in regular mode of operation.
+ Returns received buffer back to VirtIO queue, inserting it to NetReceiveBuffers.
+ If needed, signals end of RX pause operation
+ 
+@@ -1360,10 +1366,8 @@ Parameters:
+ 	context
+ 	void *pDescriptor - pIONetDescriptor to return
+ ***********************************************************/
+-void ParaNdis_VirtIONetReuseRecvBuffer(PARANDIS_ADAPTER *pContext, void *pDescriptor)
++void ReuseReceiveBufferRegular(PARANDIS_ADAPTER *pContext, pIONetDescriptor pBuffersDescriptor)
+ {
+-	pIONetDescriptor pBuffersDescriptor = (pIONetDescriptor)pDescriptor;
+-
+ 	DEBUG_ENTRY(4);
+ 
+ 	if(!pBuffersDescriptor)
+@@ -1409,6 +1413,23 @@ void ParaNdis_VirtIONetReuseRecvBuffer(PARANDIS_ADAPTER *pContext, void *pDescri
+ 	}
+ }
+ 
++/**********************************************************
++It is called from Rx processing routines between power off and power on in non-paused mode (Win8).
++Returns received buffer to NetReceiveBuffers. 
++All the buffers will be placed into Virtio queue during power-on procedure
++
++Must be called with &pContext->ReceiveLock acquired
++
++Parameters:
++	context
++	void *pDescriptor - pIONetDescriptor to return
++***********************************************************/
++static void ReuseReceiveBufferPowerOff(PARANDIS_ADAPTER *pContext, pIONetDescriptor pBuffersDescriptor)
++{
++	RemoveEntryList(&pBuffersDescriptor->listEntry);
++	InsertTailList(&pContext->NetReceiveBuffers, &pBuffersDescriptor->listEntry);
++}
++
+ /**********************************************************
+ It is called from Tx processing routines
+ Gets all the fininshed buffer from VirtIO TX path and
+@@ -1991,7 +2012,7 @@ static UINT ParaNdis_ProcessRxPath(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacket
+ 			}
+ 			if (!b)
+ 			{
+-				ParaNdis_VirtIONetReuseRecvBuffer(pContext, pBuffersDescriptor);
++				pContext->ReuseBufferProc(pContext, pBuffersDescriptor);
+ 				//only possible reason for that is unexpected Vlan tag
+ 				//shall I count it as error?
+ 				pContext->Statistics.ifInErrors++;
+@@ -2030,7 +2051,7 @@ static UINT ParaNdis_ProcessRxPath(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacket
+ 		else
+ 		{
+ 			// reuse packet, there is no data or the RX is suppressed
+-			ParaNdis_VirtIONetReuseRecvBuffer(pContext, pBuffersDescriptor);
++			pContext->ReuseBufferProc(pContext, pBuffersDescriptor);
+ 		}
+ 	}
+ 	ParaNdis_DebugHistory(pContext, hopReceiveStat, NULL, nRetrieved, nReported, pContext->NetNofReceiveBuffers);
+@@ -2044,7 +2065,7 @@ static UINT ParaNdis_ProcessRxPath(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacket
+ 	return nReported;
+ }
+ 
+-void ParaNdis_ReportLinkStatus(PARANDIS_ADAPTER *pContext)
++void ParaNdis_ReportLinkStatus(PARANDIS_ADAPTER *pContext, BOOLEAN bForce)
+ {
+ 	BOOLEAN bConnected = TRUE;
+ 	if (pContext->bLinkDetectSupported)
+@@ -2055,7 +2076,7 @@ void ParaNdis_ReportLinkStatus(PARANDIS_ADAPTER *pContext)
+ 		VirtIODeviceGet(&pContext->IODevice, offset, &linkStatus, sizeof(linkStatus));
+ 		bConnected = (linkStatus & VIRTIO_NET_S_LINK_UP) != 0;
+ 	}
+-	ParaNdis_IndicateConnect(pContext, bConnected, FALSE);
++	ParaNdis_IndicateConnect(pContext, bConnected, bForce);
+ }
+ 
+ 
+@@ -2097,7 +2118,7 @@ ULONG ParaNdis_DPCWorkBody(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacketsToIndic
+ 			ParaNdis_DebugHistory(pContext, hopDPC, (PVOID)1, interruptSources, 0, 0);
+ 			if ((interruptSources & isControl) && pContext->bLinkDetectSupported)
+ 			{
+-				ParaNdis_ReportLinkStatus(pContext);
++				ParaNdis_ReportLinkStatus(pContext, FALSE);
+ 			}
+ 			if (interruptSources & isTransmit)
+ 			{
+@@ -2655,8 +2676,12 @@ VOID ParaNdis_PowerOn(PARANDIS_ADAPTER *pContext)
+ 	ParaNdis_UpdateDeviceFilters(pContext);
+ 
+ 	InitializeListHead(&TempList);
++	
+ 	/* submit all the receive buffers */
+ 	NdisAcquireSpinLock(&pContext->ReceiveLock);
++	
++	pContext->ReuseBufferProc = ReuseReceiveBufferRegular;
++	
+ 	while (!IsListEmpty(&pContext->NetReceiveBuffers))
+ 	{
+ 		pIONetDescriptor pBufferDescriptor =
+@@ -2680,14 +2705,20 @@ VOID ParaNdis_PowerOn(PARANDIS_ADAPTER *pContext)
+ 			pContext->NetMaxReceiveBuffers--;
+ 		}
+ 	}
+-	pContext->powerState = NetDeviceStateD0;
++	ParaNdis_SetPowerState(pContext, NdisDeviceStateD0);
+ 	pContext->bEnableInterruptHandlingDPC = TRUE;
+ 	VirtIODeviceAddStatus(&pContext->IODevice, VIRTIO_CONFIG_S_DRIVER_OK);
+ 	pContext->NetReceiveQueue->vq_ops->kick(pContext->NetReceiveQueue);
++	
+ 	NdisReleaseSpinLock(&pContext->ReceiveLock);
+ 
++	// if bFastSuspendInProcess is set by Win8 power-off procedure,
++	// the ParaNdis_Resume enables Tx and RX
++	// otherwise it does not do anything in Vista+ (Tx and RX are enabled after power-on by Restart)
+ 	ParaNdis_Resume(pContext);
+-	ParaNdis_ReportLinkStatus(pContext);
++	pContext->bFastSuspendInProcess = FALSE;
++	
++	ParaNdis_ReportLinkStatus(pContext, TRUE);
+ 	ParaNdis_DebugHistory(pContext, hopPowerOn, NULL, 0, 0, 0);
+ }
+ 
+@@ -2695,12 +2726,21 @@ VOID ParaNdis_PowerOff(PARANDIS_ADAPTER *pContext)
+ {
+ 	DEBUG_ENTRY(0);
+ 	ParaNdis_DebugHistory(pContext, hopPowerOff, NULL, 1, 0, 0);
+-	/* stop processing of interrupts, DPC and Send operations */
+-	ParaNdis_IndicateConnect(pContext, FALSE, FALSE);
+-	VirtIODeviceRemoveStatus(&pContext->IODevice, VIRTIO_CONFIG_S_DRIVER_OK);
+-	// TODO: Synchronize with IRQ
++
++	// if bFastSuspendInProcess is set by Win8 power-off procedure
++	// the ParaNdis_Suspend does fast Rx stop without waiting (=>srsPausing, if there are some RX packets in Ndis)
++	pContext->bFastSuspendInProcess = pContext->bNoPauseOnSuspend && pContext->ReceiveState == srsEnabled;
+ 	ParaNdis_Suspend(pContext);
+-	pContext->powerState = NetDeviceStateD3;
++	VirtIODeviceRemoveStatus(&pContext->IODevice, VIRTIO_CONFIG_S_DRIVER_OK);
++	
++	if (pContext->bFastSuspendInProcess)
++	{
++		NdisAcquireSpinLock(&pContext->ReceiveLock);
++		pContext->ReuseBufferProc = ReuseReceiveBufferPowerOff;
++		NdisReleaseSpinLock(&pContext->ReceiveLock);
++	}
++	
++	ParaNdis_SetPowerState(pContext, NdisDeviceStateD3);
+ 
+ 	PreventDPCServicing(pContext);
+ 
+diff --git a/NetKVM/Common/ParaNdis-Debug.c b/NetKVM/Common/ParaNdis-Debug.c
+index 6f34730..8f61bc5 100644
+--- a/NetKVM/Common/ParaNdis-Debug.c
++++ b/NetKVM/Common/ParaNdis-Debug.c
+@@ -61,6 +61,7 @@ static BOOLEAN KeRegisterBugCheckReasonCallbackDummyProc(
+     __in PUCHAR Component
+     )
+ {
++	CallbackRecord->State = 0;
+ 	return FALSE;
+ }
+ 
+diff --git a/NetKVM/Common/ndis56common.h b/NetKVM/Common/ndis56common.h
+index 221dbe6..31c1e36 100644
+--- a/NetKVM/Common/ndis56common.h
++++ b/NetKVM/Common/ndis56common.h
+@@ -315,6 +315,17 @@ typedef struct _tagMulticastData
+ 	UCHAR					MulticastList[ETH_LENGTH_OF_ADDRESS * PARANDIS_MULTICAST_LIST_SIZE];
+ }tMulticastData;
+ 
++typedef struct _tagIONetDescriptor {
++	LIST_ENTRY listEntry;
++	tCompletePhysicalAddress HeaderInfo;
++	tCompletePhysicalAddress DataInfo;
++	tPacketHolderType pHolder;
++	PVOID ReferenceValue;
++	UINT  nofUsedBuffers;
++} IONetDescriptor, * pIONetDescriptor;
++
++typedef void (*tReuseReceiveBufferProc)(void *pContext, pIONetDescriptor pDescriptor);
++
+ typedef struct _tagPARANDIS_ADAPTER
+ {
+ 	NDIS_HANDLE				DriverHandle;
+@@ -347,6 +358,9 @@ typedef struct _tagPARANDIS_ADAPTER
+ 	BOOLEAN					bUsingMSIX;
+ 	BOOLEAN					bUseIndirect;
+ 	BOOLEAN					bHasHardwareFilters;
++	BOOLEAN					bNoPauseOnSuspend;
++	BOOLEAN					bFastSuspendInProcess;
++	BOOLEAN					bResetInProgress;
+ 	ULONG					ulCurrentVlansFilterSet;
+ 	tMulticastData			MulticastData;
+ 	UINT					uNumberOfHandledRXPacketsInDPC;
+@@ -399,6 +413,7 @@ typedef struct _tagPARANDIS_ADAPTER
+ 	tSendReceiveState		ReceiveState;
+ 	ONPAUSECOMPLETEPROC		SendPauseCompletionProc;
+ 	ONPAUSECOMPLETEPROC		ReceivePauseCompletionProc;
++	tReuseReceiveBufferProc ReuseBufferProc;
+ 	/* Net part - management of buffers and queues of QEMU */
+ 	struct virtqueue *		NetControlQueue;
+ 	tCompletePhysicalAddress ControlQueueRing;
+@@ -519,15 +534,6 @@ BOOLEAN FORCEINLINE IsPrioritySupported(PARANDIS_ADAPTER *pContext)
+ 	return pContext->ulPriorityVlanSetting & 1;
+ }
+ 
+-typedef struct _tagIONetDescriptor {
+-	LIST_ENTRY listEntry;
+-	tCompletePhysicalAddress HeaderInfo;
+-	tCompletePhysicalAddress DataInfo;
+-	tPacketHolderType pHolder;
+-	PVOID ReferenceValue;
+-	UINT  nofUsedBuffers;
+-} IONetDescriptor, * pIONetDescriptor;
+-
+ BOOLEAN ParaNdis_ValidateMacAddress(
+ 	PUCHAR pcMacAddress,
+ 	BOOLEAN bLocal);
+@@ -543,10 +549,6 @@ VOID ParaNdis_CleanupContext(
+ 	PARANDIS_ADAPTER *pContext);
+ 
+ 
+-void ParaNdis_VirtIONetReuseRecvBuffer(
+-	PARANDIS_ADAPTER *pContext,
+-	void *pDescriptor);
+-
+ UINT ParaNdis_VirtIONetReleaseTransmitBuffers(
+ 	PARANDIS_ADAPTER *pContext);
+ 
+@@ -583,8 +585,10 @@ VOID ParaNdis_OnShutdown(
+ BOOLEAN ParaNdis_CheckForHang(
+ 	PARANDIS_ADAPTER *pContext);
+ 
+-void ParaNdis_ReportLinkStatus(
+-	PARANDIS_ADAPTER *pContext);
++VOID ParaNdis_ReportLinkStatus(
++	PARANDIS_ADAPTER *pContext,
++	BOOLEAN bForce);
++
+ VOID ParaNdis_PowerOn(
+ 	PARANDIS_ADAPTER *pContext
+ );
+@@ -774,6 +778,11 @@ VOID ParaNdis_UpdateDeviceFilters(
+ VOID ParaNdis_DeviceFiltersUpdateVlanId(
+ 	PARANDIS_ADAPTER *pContext);
+ 
++VOID ParaNdis_SetPowerState(
++	PARANDIS_ADAPTER *pContext,
++	NDIS_DEVICE_POWER_STATE newState);
++
++
+ #endif //-OFFLOAD_UNIT_TEST
+ 
+ typedef enum _tagppResult
+diff --git a/NetKVM/wlh/ParaNdis6-Driver.c b/NetKVM/wlh/ParaNdis6-Driver.c
+index 2cf58a0..c692117 100644
+--- a/NetKVM/wlh/ParaNdis6-Driver.c
++++ b/NetKVM/wlh/ParaNdis6-Driver.c
+@@ -89,6 +89,43 @@ static VOID ParaNdis_OnCPUChange(
+ 	}
+ }
+ 
++static const char *ConnectStateName(NDIS_MEDIA_CONNECT_STATE state)
++{
++	if (state == MediaConnectStateConnected) return "Connected";
++	if (state == MediaConnectStateDisconnected) return "Disconnected";
++	return "Unknown";
++}
++
++static void PostLinkState(PARANDIS_ADAPTER *pContext, NDIS_MEDIA_CONNECT_STATE connectState)
++{
++	NDIS_STATUS_INDICATION	indication;
++	NDIS_LINK_STATE         state;
++	NdisZeroMemory(&state, sizeof(state));
++	state.Header.Revision = NDIS_LINK_STATE_REVISION_1;
++	state.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
++	state.Header.Size = NDIS_SIZEOF_LINK_STATE_REVISION_1;
++	state.MediaConnectState = connectState;
++	state.MediaDuplexState = MediaDuplexStateFull;
++	state.RcvLinkSpeed = state.XmitLinkSpeed =
++		connectState == MediaConnectStateConnected ?
++			PARANDIS_MAXIMUM_RECEIVE_SPEED :
++			NDIS_LINK_SPEED_UNKNOWN;
++	state.PauseFunctions = NdisPauseFunctionsUnsupported;
++
++	NdisZeroMemory(&indication, sizeof(indication));
++
++	indication.Header.Type = NDIS_OBJECT_TYPE_STATUS_INDICATION;
++	indication.Header.Revision = NDIS_STATUS_INDICATION_REVISION_1;
++	indication.Header.Size = NDIS_SIZEOF_STATUS_INDICATION_REVISION_1;
++	indication.SourceHandle = pContext->MiniportHandle;
++	indication.StatusCode = NDIS_STATUS_LINK_STATE;
++	indication.StatusBuffer = &state;
++	indication.StatusBufferSize = sizeof(state);
++	DPrintf(0, ("Indicating %s", ConnectStateName(connectState)));
++	ParaNdis_DebugHistory(pContext, hopConnectIndication, NULL, connectState, 0, 0);
++	NdisMIndicateStatusEx(pContext->MiniportHandle , &indication);
++}
++
+ /**********************************************************
+ Produces connect indication to NDIS
+ Parameters:
+@@ -97,45 +134,25 @@ Parameters:
+ ***********************************************************/
+ void ParaNdis_IndicateConnect(PARANDIS_ADAPTER *pContext, BOOLEAN bConnected, BOOLEAN bForce)
+ {
+-	NDIS_STATUS status;
+-	NDIS_STATUS_INDICATION	indication;
+-	NDIS_LINK_STATE         state;
++	NDIS_MEDIA_CONNECT_STATE connectState = bConnected ? MediaConnectStateConnected : MediaConnectStateDisconnected;
+ 	DEBUG_ENTRY(3);
+ 
+-	if (bConnected != pContext->bConnected)
++	if (bConnected != pContext->bConnected || bForce)
+ 	{
+ 		pContext->bConnected = bConnected;
+-
+-		NdisZeroMemory(&state, sizeof(state));
+-		state.Header.Revision = NDIS_LINK_STATE_REVISION_1;
+-		state.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+-		state.Header.Size = NDIS_SIZEOF_LINK_STATE_REVISION_1;
+-		state.MediaConnectState =
+-			pContext->bConnected ?
+-				MediaConnectStateConnected :
+-				MediaConnectStateDisconnected;
+-		state.MediaDuplexState = MediaDuplexStateFull;
+-		state.RcvLinkSpeed = state.XmitLinkSpeed =
+-			pContext->bConnected ?
+-				PARANDIS_MAXIMUM_RECEIVE_SPEED :
+-				NDIS_LINK_SPEED_UNKNOWN;;
+-		state.PauseFunctions = NdisPauseFunctionsUnsupported;
+-
+-		NdisZeroMemory(&indication, sizeof(indication));
+-
+-		indication.Header.Type = NDIS_OBJECT_TYPE_STATUS_INDICATION;
+-		indication.Header.Revision = NDIS_STATUS_INDICATION_REVISION_1;
+-		indication.Header.Size = NDIS_SIZEOF_STATUS_INDICATION_REVISION_1;
+-		indication.SourceHandle = pContext->MiniportHandle;
+-		indication.StatusCode = NDIS_STATUS_LINK_STATE;
+-		indication.StatusBuffer = &state;
+-		indication.StatusBufferSize = sizeof(state);
+-		DPrintf(0, ("Indicating %sconnect", pContext->bConnected ? "" : "dis"));
+-		ParaNdis_DebugHistory(pContext, hopConnectIndication, NULL, bConnected, 0, 0);
+-		NdisMIndicateStatusEx(pContext->MiniportHandle , &indication);
++		PostLinkState(pContext, connectState);
+ 	}
+ }
+ 
++VOID ParaNdis_SetPowerState(PARANDIS_ADAPTER *pContext, NDIS_DEVICE_POWER_STATE newState)
++{
++	NDIS_DEVICE_POWER_STATE prev = pContext->powerState;
++	pContext->powerState = newState;
++
++	if (prev == NetDeviceStateD0 && newState == NetDeviceStateD3)
++		PostLinkState(pContext, MediaConnectStateUnknown);
++}
++
+ /**********************************************************
+ This is timer procedure for timer connect indication, if used
+ ***********************************************************/
+@@ -147,7 +164,7 @@ static VOID ConnectTimerCallback(
+ 	)
+ {
+ 	PARANDIS_ADAPTER *pContext = (PARANDIS_ADAPTER *)FunctionContext;
+-	ParaNdis_ReportLinkStatus(pContext);
++	ParaNdis_ReportLinkStatus(pContext, FALSE);
+ }
+ 
+ /**********************************************************
+@@ -205,6 +222,7 @@ static NDIS_STATUS ParaNdis6_Initialize(
+ {
+ 	NDIS_MINIPORT_ADAPTER_ATTRIBUTES        miniportAttributes;
+ 	NDIS_STATUS  status = NDIS_STATUS_SUCCESS;
++	BOOLEAN bNoPauseOnSuspend = FALSE;
+ 	PARANDIS_ADAPTER *pContext;
+ 	DEBUG_ENTRY(0);
+ 	/* allocate context structure */
+@@ -237,13 +255,17 @@ static NDIS_STATUS ParaNdis6_Initialize(
+ 		miniportAttributes.RegistrationAttributes.Header.Size = NDIS_SIZEOF_MINIPORT_ADAPTER_REGISTRATION_ATTRIBUTES_REVISION_1;
+ 		miniportAttributes.RegistrationAttributes.MiniportAdapterContext = pContext;
+ 		miniportAttributes.RegistrationAttributes.AttributeFlags =
+-#ifndef NO_VISTA_POWER_MANAGEMENT
+-			NDIS_MINIPORT_ATTRIBUTES_NO_HALT_ON_SUSPEND |
+-#endif
+ 			// actual for USB
+ 			// NDIS_MINIPORT_ATTRIBUTES_SURPRISE_REMOVE_OK
+ 			NDIS_MINIPORT_ATTRIBUTES_HARDWARE_DEVICE |
+ 			NDIS_MINIPORT_ATTRIBUTES_BUS_MASTER;
++#ifndef NO_VISTA_POWER_MANAGEMENT
++		miniportAttributes.RegistrationAttributes.AttributeFlags |= NDIS_MINIPORT_ATTRIBUTES_NO_HALT_ON_SUSPEND;
++#endif
++#if NDIS_SUPPORT_NDIS630
++		miniportAttributes.RegistrationAttributes.AttributeFlags |= NDIS_MINIPORT_ATTRIBUTES_NO_PAUSE_ON_SUSPEND;
++		bNoPauseOnSuspend = TRUE;
++#endif
+ 		miniportAttributes.RegistrationAttributes.CheckForHangTimeInSeconds = 4;
+ 		miniportAttributes.RegistrationAttributes.InterfaceType = NdisInterfacePci;
+ 		status = NdisMSetMiniportAttributes(miniportAdapterHandle, &miniportAttributes);
+@@ -255,11 +277,6 @@ static NDIS_STATUS ParaNdis6_Initialize(
+ 
+ 	if (status == NDIS_STATUS_SUCCESS)
+ 	{
+-		/* set mandatory fields which Common use */
+-		NdisZeroMemory(pContext, sizeof(PARANDIS_ADAPTER));
+-		pContext->ulUniqueID = InterlockedIncrement(&gID);
+-		pContext->DriverHandle = DriverHandle;
+-		pContext->MiniportHandle = miniportAdapterHandle;
+ 		/* prepare statistics struct for further reports */
+ 		pContext->Statistics.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+ 		pContext->Statistics.Header.Revision = NDIS_STATISTICS_INFO_REVISION_1;
+@@ -270,6 +287,7 @@ static NDIS_STATUS ParaNdis6_Initialize(
+ 		{
+ 			DPrintf(0, ("[%s] ERROR: ParaNdis6_InitializeContext failed (%X)!", __FUNCTION__, status));
+ 		}
++		pContext->bNoPauseOnSuspend = bNoPauseOnSuspend; 
+ 	}
+ 
+ 	if (status == NDIS_STATUS_SUCCESS)
+@@ -356,7 +374,9 @@ static NDIS_STATUS ParaNdis6_Initialize(
+ 	{
+ 		// no need to cleanup
+ 		NdisFreeMemory(pContext, 0, 0);
++		pContext = NULL;
+ 	}
++
+ 	if (pContext && status == NDIS_STATUS_SUCCESS)
+ 	{
+ 		status = ParaNdis_FinishInitialization(pContext);
+@@ -364,6 +384,7 @@ static NDIS_STATUS ParaNdis6_Initialize(
+ 		{
+ 			ParaNdis_CleanupContext(pContext);
+ 			NdisFreeMemory(pContext, 0, 0);
++			pContext = NULL;
+ 		}
+ 	}
+ 	if (pContext && status == NDIS_STATUS_SUCCESS)
+@@ -510,7 +531,7 @@ static NDIS_STATUS ParaNdis6_Restart(
+ 	ParaNdis6_ReceivePauseRestart(pContext, FALSE, NULL);
+ 	if (!pContext->ulMilliesToConnect)
+ 	{
+-		ParaNdis_ReportLinkStatus(pContext);
++		ParaNdis_ReportLinkStatus(pContext, FALSE);
+ 	}
+ 	ParaNdis_DebugHistory(pContext, hopSysResume, NULL, 0, 0, 0);
+ 	DEBUG_EXIT_STATUS(2, status);
+@@ -565,19 +586,26 @@ static void OnReceivePauseCompleteOnReset(PARANDIS_ADAPTER *pContext)
+ 
+ VOID ParaNdis_Suspend(PARANDIS_ADAPTER *pContext)
+ {
+-	DEBUG_ENTRY(0);
++	DPrintf(0, ("[%s]%s", __FUNCTION__, pContext->bFastSuspendInProcess ? "(Fast)" : ""));
+ 	NdisResetEvent(&pContext->ResetEvent);
+ 	if (NDIS_STATUS_PENDING != ParaNdis6_SendPauseRestart(pContext, TRUE, OnSendPauseCompleteOnReset))
+ 	{
+ 		NdisSetEvent(&pContext->ResetEvent);
+ 	}
+ 	NdisWaitEvent(&pContext->ResetEvent, 0);
+-	NdisResetEvent(&pContext->ResetEvent);
+-	if (NDIS_STATUS_PENDING != ParaNdis6_ReceivePauseRestart(pContext, TRUE, OnReceivePauseCompleteOnReset))
++	if (!pContext->bFastSuspendInProcess)
+ 	{
+-		NdisSetEvent(&pContext->ResetEvent);
++		NdisResetEvent(&pContext->ResetEvent);
++		if (NDIS_STATUS_PENDING != ParaNdis6_ReceivePauseRestart(pContext, TRUE, OnReceivePauseCompleteOnReset))
++		{
++			NdisSetEvent(&pContext->ResetEvent);
++		}
++		NdisWaitEvent(&pContext->ResetEvent, 0);
++	}
++	else
++	{
++		ParaNdis6_ReceivePauseRestart(pContext, TRUE, NULL);
+ 	}
+-	NdisWaitEvent(&pContext->ResetEvent, 0);
+ 	DEBUG_EXIT_STATUS(0, 0);
+ }
+ 
+@@ -589,11 +617,13 @@ static void OnResetWorkItem(PVOID  WorkItemContext, NDIS_HANDLE  NdisIoWorkItemH
+ 	DEBUG_ENTRY(0);
+ 	bSendActive = pContext->SendState == srsEnabled;
+ 	bReceiveActive = pContext->ReceiveState == srsEnabled;
+-
++	pContext->bResetInProgress = TRUE;
++	ParaNdis_Suspend(pContext);
+ 	ParaNdis_PowerOff(pContext);
+ 	ParaNdis_PowerOn(pContext);
+ 	if (bSendActive) ParaNdis6_SendPauseRestart(pContext, FALSE, NULL);
+ 	if (bReceiveActive) ParaNdis6_ReceivePauseRestart(pContext, FALSE, NULL);
++	pContext->bResetInProgress = FALSE;
+ 
+ 	NdisFreeMemory(pwi, 0, 0);
+ 	NdisFreeIoWorkItem(NdisIoWorkItemHandle);
+@@ -639,8 +669,12 @@ static NDIS_STATUS ParaNdis6_Reset(
+ 
+ VOID ParaNdis_Resume(PARANDIS_ADAPTER *pContext)
+ {
+-	/* nothing to do */
+-	DEBUG_EXIT_STATUS(0, 0);
++	DPrintf(0, ("[%s] %s", __FUNCTION__, pContext->bFastSuspendInProcess ? " Resuming TX and RX" : "(nothing to do)"));
++	if (pContext->bFastSuspendInProcess)
++	{
++		ParaNdis6_SendPauseRestart(pContext, FALSE, NULL);
++		ParaNdis6_ReceivePauseRestart(pContext, FALSE, NULL);
++	}
+ }
+ 
+ 
+@@ -929,7 +963,7 @@ static NDIS_STATUS ReadGlobalConfigurationEntry(NDIS_HANDLE cfg, const char *_na
+ {
+ 	NDIS_STATUS status;
+ 	PNDIS_CONFIGURATION_PARAMETER pParam = NULL;
+-	NDIS_STRING name;
++	NDIS_STRING name = {0};
+ 	const char *statusName;
+ 	NDIS_PARAMETER_TYPE ParameterType = NdisParameterInteger;
+ 	NdisInitializeString(&name, (PUCHAR)_name);
+@@ -949,7 +983,7 @@ static NDIS_STATUS ReadGlobalConfigurationEntry(NDIS_HANDLE cfg, const char *_na
+ 		statusName = "nothing";
+ 	}
+ 	DPrintf(2, ("[%s] %s read for %s - 0x%x", __FUNCTION__, statusName, _name, *pValue));
+-	NdisFreeString(name);
++	if (name.Buffer) NdisFreeString(name);
+ 	return status;
+ }
+ 
+@@ -1072,6 +1106,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject, PUNICODE_STRING pRegistryPath
+ 			&chars,
+ 			&DriverHandle);
+ 
++#if 0
+ 	if (status == NDIS_STATUS_SUCCESS)
+ 	{
+ 		NDIS_STRING usRegister, usDeregister;
+@@ -1087,9 +1122,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject, PUNICODE_STRING pRegistryPath
+ 		}
+ 		ProcessorChangeCallbackHandle = ParaNdis2008_RegisterCallback(
+ 			ParaNdis_OnCPUChange,
+-			NULL,
++			&DriverHandle,
+ 			KE_PROCESSOR_CHANGE_ADD_EXISTING);
+ 	}
++#endif
+ 	if (status == NDIS_STATUS_SUCCESS)
+ 	{
+ 		RetrieveDriverConfiguration();
+diff --git a/NetKVM/wlh/ParaNdis6-Impl.c b/NetKVM/wlh/ParaNdis6-Impl.c
+index 839ef44..c51680b 100644
+--- a/NetKVM/wlh/ParaNdis6-Impl.c
++++ b/NetKVM/wlh/ParaNdis6-Impl.c
+@@ -449,6 +449,7 @@ static NDIS_STATUS SetInterruptMessage(PARANDIS_ADAPTER *pContext, UINT queueInd
+ 		pMessage = &pContext->ulControlMessage;
+ 		break;
+ 	default:
++		val = (ULONG)-1;
+ 		break;
+ 	}
+ 
+@@ -885,7 +886,7 @@ VOID ParaNdis6_ReturnNetBufferLists(
+ 		NET_BUFFER_LIST_NEXT_NBL(pTemp) = NULL;
+ 		NdisFreeNetBufferList(pTemp);
+ 		NdisAcquireSpinLock(&pContext->ReceiveLock);
+-		ParaNdis_VirtIONetReuseRecvBuffer(pContext, pBuffersDescriptor);
++		pContext->ReuseBufferProc(pContext, pBuffersDescriptor);
+ 		NdisReleaseSpinLock(&pContext->ReceiveLock);
+ 	}
+ }
+@@ -1349,7 +1350,7 @@ static void CompleteBufferLists(
+ 		ParaNdis_DebugHistory(pContext, hopSendComplete, pTemp, 0, lRestToReturn, status);
+ 		pTemp = NET_BUFFER_LIST_NEXT_NBL(pTemp);
+ 	}
+-	NdisMSendNetBufferListsComplete(pContext->MiniportHandle,
++	if (pNBL) NdisMSendNetBufferListsComplete(pContext->MiniportHandle,
+ 			pNBL,
+ 			IsDpc ? NDIS_SEND_COMPLETE_FLAGS_DISPATCH_LEVEL : 0
+ 			);
+@@ -1375,6 +1376,25 @@ static PNET_BUFFER_LIST GetTail(PNET_BUFFER_LIST pNBL)
+ 	return pNBL;
+ }
+ 
++static NDIS_STATUS ExactSendFailureStatus(PARANDIS_ADAPTER *pContext)
++{
++	NDIS_STATUS status = NDIS_STATUS_FAILURE;
++	if (pContext->SendState != srsEnabled ) status = NDIS_STATUS_PAUSED;
++	if (!pContext->bConnected) status = NDIS_STATUS_MEDIA_DISCONNECTED;
++	if (pContext->bSurprizeRemoved) status = NDIS_STATUS_NOT_ACCEPTED;
++	// override NDIS_STATUS_PAUSED is there is a specific reason of implicit paused state
++	if (pContext->powerState != NdisDeviceStateD0) status = NDIS_STATUS_LOW_POWER_STATE;
++	if (pContext->bResetInProgress) status = NDIS_STATUS_RESET_IN_PROGRESS;
++	return status;
++}
++
++static BOOLEAN FORCEINLINE IsSendPossible(PARANDIS_ADAPTER *pContext)
++{
++	BOOLEAN b;
++	b =  !pContext->bSurprizeRemoved && pContext->bConnected && pContext->SendState == srsEnabled;
++	return b;
++}
++
+ /*********************************************************************
+ Prepares single NBL to be mapped and sent:
+ Allocate per-NBL entry and save it in NBL->Scratch
+@@ -1743,7 +1763,7 @@ VOID ParaNdis6_Send(
+ 		nextList = NET_BUFFER_LIST_NEXT_NBL(nextList);
+ 		NET_BUFFER_LIST_NEXT_NBL(temp) = NULL;
+ 
+-		if (bOK && !pContext->bSurprizeRemoved && pContext->bConnected && pContext->SendState == srsEnabled)
++		if (bOK && IsSendPossible(pContext))
+ 		{
+ 			ParaNdis_DebugHistory(pContext, hopSendNBLRequest, temp, NUMBER_OF_PACKETS_IN_NBL(temp), 0, 0);
+ 			StartTransferSingleNBL(pContext, temp);
+@@ -1751,9 +1771,7 @@ VOID ParaNdis6_Send(
+ 		else
+ 		{
+ 			NDIS_STATUS status = NDIS_STATUS_FAILURE;
+-			if (pContext->SendState != srsEnabled) status = NDIS_STATUS_PAUSED;
+-			if (!pContext->bConnected) status = NDIS_STATUS_MEDIA_DISCONNECTED;
+-			if (pContext->bSurprizeRemoved) status = NDIS_STATUS_NOT_ACCEPTED;
++			status = ExactSendFailureStatus(pContext);
+ 			CompleteBufferLists(pContext, temp, status, IsDpc);
+ 		}
+ 	}
+@@ -2018,7 +2036,6 @@ static FORCEINLINE void InitializeTransferParameters(tNetBufferEntry *pnbe, tTxO
+ 	}
+ }
+ 
+-
+ /**********************************************************
+ Implements NDIS6-specific processing of TX path
+ Parameters:
+@@ -2040,11 +2057,10 @@ VOID ParaNdis_ProcessTx(PARANDIS_ADAPTER *pContext, BOOLEAN IsDpc)
+ 		// release some buffers
+ 		ParaNdis_VirtIONetReleaseTransmitBuffers(pContext);
+ 	}
+-	if (!pContext->bConnected || pContext->SendState != srsEnabled)
++	if (!IsSendPossible(pContext))
+ 	{
+ 		pNBLFailNow = RemoveAllNonWaitingNBLs(pContext);
+-		if (pContext->SendState != srsEnabled ) status = NDIS_STATUS_PAUSED;
+-		if (!pContext->bConnected) status = NDIS_STATUS_MEDIA_DISCONNECTED;
++		status = ExactSendFailureStatus(pContext);
+ 		if (pNBLFailNow)
+ 		{
+ 			DPrintf(0, (__FUNCTION__ " Failing send"));
+@@ -2270,7 +2286,7 @@ NDIS_STATUS ParaNdis6_SendPauseRestart(
+ 		ParaNdis_DebugHistory(pContext, hopInternalSendResume, NULL, 0, 0, 0);
+ 	}
+ 	NdisReleaseSpinLock(&pContext->SendLock);
+-	if (pNBL) CompleteBufferLists(pContext, pNBL, NDIS_STATUS_PAUSED, FALSE);
++	if (pNBL) CompleteBufferLists(pContext, pNBL, ExactSendFailureStatus(pContext), FALSE);
+ 	return status;
+ }
+ 
+diff --git a/NetKVM/wlh/ParaNdis6.h b/NetKVM/wlh/ParaNdis6.h
+index 31394c0..511413a 100644
+--- a/NetKVM/wlh/ParaNdis6.h
++++ b/NetKVM/wlh/ParaNdis6.h
+@@ -59,6 +59,7 @@ NDIS_STATUS ParaNdis6_ReceivePauseRestart(
+ 	ONPAUSECOMPLETEPROC Callback
+ 	);
+ 
++
+ VOID ParaNdis6_OnInterruptRecoveryTimer(
+ 	PARANDIS_ADAPTER *pContext);
+ 
+diff --git a/NetKVM/wxp/ParaNdis5-Driver.c b/NetKVM/wxp/ParaNdis5-Driver.c
+index 980426d..a1052a6 100644
+--- a/NetKVM/wxp/ParaNdis5-Driver.c
++++ b/NetKVM/wxp/ParaNdis5-Driver.c
+@@ -143,7 +143,7 @@ static NDIS_STATUS ParaNdis5_Initialize(OUT PNDIS_STATUS OpenErrorStatus,
+ 			ParaNdis5_StopReceive(pContext, FALSE, NULL);
+ 			if (!pContext->ulMilliesToConnect)
+ 			{
+-				ParaNdis_ReportLinkStatus(pContext);
++				ParaNdis_ReportLinkStatus(pContext, FALSE);
+ 			}
+ 			else
+ 			{
+@@ -218,10 +218,12 @@ static void OnResetWorkItem(NDIS_WORK_ITEM * pWorkItem, PVOID  Context)
+ 	PARANDIS_ADAPTER *pContext = pwi->pContext;
+ 	DEBUG_ENTRY(0);
+ 
++	pContext->bResetInProgress = TRUE;
+ 	ParaNdis_IndicateConnect(pContext, FALSE, FALSE);
+ 	ParaNdis_Suspend(pContext);
+ 	ParaNdis_Resume(pContext);
+-	ParaNdis_ReportLinkStatus(pContext);
++	pContext->bResetInProgress = FALSE;
++	ParaNdis_ReportLinkStatus(pContext, FALSE);
+ 
+ 	NdisFreeMemory(pwi, 0, 0);
+ 	ParaNdis_DebugHistory(pContext, hopSysReset, NULL, 0, NDIS_STATUS_SUCCESS, 0);
+diff --git a/NetKVM/wxp/ParaNdis5-Impl.c b/NetKVM/wxp/ParaNdis5-Impl.c
+index 6a495b9..10ba6c2 100644
+--- a/NetKVM/wxp/ParaNdis5-Impl.c
++++ b/NetKVM/wxp/ParaNdis5-Impl.c
+@@ -122,6 +122,11 @@ VOID ParaNdis_IndicateConnect(PARANDIS_ADAPTER *pContext, BOOLEAN bConnected, BO
+ 	}
+ }
+ 
++VOID ParaNdis_SetPowerState(PARANDIS_ADAPTER *pContext, NDIS_DEVICE_POWER_STATE newState)
++{
++	//NDIS_DEVICE_POWER_STATE prev = pContext->powerState;
++	pContext->powerState = newState;
++}
+ 
+ 
+ /**********************************************************
+@@ -138,7 +143,7 @@ static VOID OnConnectTimer(
+ 	)
+ {
+ 	PARANDIS_ADAPTER *pContext = (PARANDIS_ADAPTER *)FunctionContext;
+-	ParaNdis_ReportLinkStatus(pContext);
++	ParaNdis_ReportLinkStatus(pContext, FALSE);
+ }
+ 
+ /**********************************************************
+@@ -1056,7 +1061,7 @@ VOID ParaNdis5_ReturnPacket(IN NDIS_HANDLE  MiniportAdapterContext,IN PNDIS_PACK
+ 	DPrintf(4, ("[%s] buffer %p", __FUNCTION__, pBufferDescriptor));
+ 
+ 	NdisAcquireSpinLock(&pContext->ReceiveLock);
+-	ParaNdis_VirtIONetReuseRecvBuffer(pContext, pBufferDescriptor);
++	pContext->ReuseBufferProc(pContext, pBufferDescriptor);
+ 	NdisReleaseSpinLock(&pContext->ReceiveLock);
+ }
+ 
+

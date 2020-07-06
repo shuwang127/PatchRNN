@@ -1,0 +1,93 @@
+commit e52a99f756eff14935edd1893dc9ec7660078f82
+Author: Alexander Graf <agraf@suse.de>
+Date:   Fri Aug 22 13:56:18 2014 +0200
+
+    linux-user: Simplify timerid checks on g_posix_timers range
+    
+    We check whether the passed in timer id is negative on all calls
+    that involve g_posix_timers.
+    
+    However, these checks are bogus. First off we limit the timer_id to
+    16 bits which is not what Linux does. Then we check whether it's negative
+    which it can't be because we masked it.
+    
+    We can safely remove the masking. For the negativity check we can just
+    treat the timerid as unsigned and only check for upper boundaries.
+    
+    Signed-off-by: Alexander Graf <agraf@suse.de>
+    Signed-off-by: Riku Voipio <riku.voipio@linaro.org>
+
+diff --git a/linux-user/syscall.c b/linux-user/syscall.c
+index dcb9df90e6..7087a56dd1 100644
+--- a/linux-user/syscall.c
++++ b/linux-user/syscall.c
+@@ -9615,11 +9615,12 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
+     {
+         /* args: timer_t timerid, int flags, const struct itimerspec *new_value,
+          * struct itimerspec * old_value */
+-        arg1 &= 0xffff;
+-        if (arg3 == 0 || arg1 < 0 || arg1 >= ARRAY_SIZE(g_posix_timers)) {
++        target_ulong timerid = arg1;
++
++        if (arg3 == 0 || timerid >= ARRAY_SIZE(g_posix_timers)) {
+             ret = -TARGET_EINVAL;
+         } else {
+-            timer_t htimer = g_posix_timers[arg1];
++            timer_t htimer = g_posix_timers[timerid];
+             struct itimerspec hspec_new = {{0},}, hspec_old = {{0},};
+ 
+             target_to_host_itimerspec(&hspec_new, arg3);
+@@ -9635,13 +9636,14 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
+     case TARGET_NR_timer_gettime:
+     {
+         /* args: timer_t timerid, struct itimerspec *curr_value */
+-        arg1 &= 0xffff;
++        target_ulong timerid = arg1;
++
+         if (!arg2) {
+             return -TARGET_EFAULT;
+-        } else if (arg1 < 0 || arg1 >= ARRAY_SIZE(g_posix_timers)) {
++        } else if (timerid >= ARRAY_SIZE(g_posix_timers)) {
+             ret = -TARGET_EINVAL;
+         } else {
+-            timer_t htimer = g_posix_timers[arg1];
++            timer_t htimer = g_posix_timers[timerid];
+             struct itimerspec hspec;
+             ret = get_errno(timer_gettime(htimer, &hspec));
+ 
+@@ -9657,11 +9659,12 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
+     case TARGET_NR_timer_getoverrun:
+     {
+         /* args: timer_t timerid */
+-        arg1 &= 0xffff;
+-        if (arg1 < 0 || arg1 >= ARRAY_SIZE(g_posix_timers)) {
++        target_ulong timerid = arg1;
++
++        if (timerid >= ARRAY_SIZE(g_posix_timers)) {
+             ret = -TARGET_EINVAL;
+         } else {
+-            timer_t htimer = g_posix_timers[arg1];
++            timer_t htimer = g_posix_timers[timerid];
+             ret = get_errno(timer_getoverrun(htimer));
+         }
+         break;
+@@ -9672,13 +9675,14 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
+     case TARGET_NR_timer_delete:
+     {
+         /* args: timer_t timerid */
+-        arg1 &= 0xffff;
+-        if (arg1 < 0 || arg1 >= ARRAY_SIZE(g_posix_timers)) {
++        target_ulong timerid = arg1;
++
++        if (timerid >= ARRAY_SIZE(g_posix_timers)) {
+             ret = -TARGET_EINVAL;
+         } else {
+-            timer_t htimer = g_posix_timers[arg1];
++            timer_t htimer = g_posix_timers[timerid];
+             ret = get_errno(timer_delete(htimer));
+-            g_posix_timers[arg1] = 0;
++            g_posix_timers[timerid] = 0;
+         }
+         break;
+     }
+

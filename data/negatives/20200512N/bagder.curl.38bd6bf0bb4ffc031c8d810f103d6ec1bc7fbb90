@@ -1,0 +1,246 @@
+commit 38bd6bf0bb4ffc031c8d810f103d6ec1bc7fbb90
+Author: Daniel Stenberg <daniel@haxx.se>
+Date:   Mon May 18 08:56:29 2015 +0200
+
+    bundles: store no/default/pipeline/multiplex
+    
+    to allow code to act differently on the situation.
+    
+    Also added some more info message for the connection re-use function to
+    make it clearer when connections are not re-used.
+
+diff --git a/lib/conncache.c b/lib/conncache.c
+index 5496f097c..634b673e3 100644
+--- a/lib/conncache.c
++++ b/lib/conncache.c
+@@ -56,7 +56,7 @@ static CURLcode bundle_create(struct SessionHandle *data,
+     return CURLE_OUT_OF_MEMORY;
+ 
+   (*cb_ptr)->num_connections = 0;
+-  (*cb_ptr)->server_supports_pipelining = FALSE;
++  (*cb_ptr)->multiuse = BUNDLE_UNKNOWN;
+ 
+   (*cb_ptr)->conn_list = Curl_llist_alloc((curl_llist_dtor) conn_llist_dtor);
+   if(!(*cb_ptr)->conn_list) {
+@@ -205,10 +205,8 @@ CURLcode Curl_conncache_add_conn(struct conncache *connc,
+       return result;
+ 
+     key = hashkey(conn);
+-    if(!key) {
+-      bundle_destroy(new_bundle);
++    if(!key)
+       return CURLE_OUT_OF_MEMORY;
+-    }
+ 
+     rc = conncache_add_bundle(data->state.conn_cache, key, new_bundle);
+     free(key);
+diff --git a/lib/conncache.h b/lib/conncache.h
+index cff750983..59181bf3d 100644
+--- a/lib/conncache.h
++++ b/lib/conncache.h
+@@ -30,9 +30,13 @@ struct conncache {
+   struct timeval last_cleanup;
+ };
+ 
++#define BUNDLE_NO_MULTIUSE -1
++#define BUNDLE_UNKNOWN     0  /* initial value */
++#define BUNDLE_PIPELINING  1
++#define BUNDLE_MULTIPLEX   2
++
+ struct connectbundle {
+-  bool server_supports_pipelining; /* TRUE if server supports pipelining,
+-                                      set after first response */
++  int multiuse;                 /* supports multi-use */
+   size_t num_connections;       /* Number of connections in the bundle */
+   struct curl_llist *conn_list; /* The connectdata members of the bundle */
+ };
+diff --git a/lib/http.c b/lib/http.c
+index 6d11c288b..28da5c47b 100644
+--- a/lib/http.c
++++ b/lib/http.c
+@@ -3375,7 +3375,7 @@ CURLcode Curl_http_readwrite_headers(struct SessionHandle *data,
+ 
+           /* HTTP/2 cannot blacklist multiplexing since it is a core
+              functionality of the protocol */
+-          conn->bundle->server_supports_pipelining = TRUE;
++          conn->bundle->multiuse = BUNDLE_MULTIPLEX;
+         }
+         else if(conn->httpversion >= 11 &&
+                 !conn->bits.close) {
+@@ -3390,7 +3390,7 @@ CURLcode Curl_http_readwrite_headers(struct SessionHandle *data,
+           cb_ptr = conn->bundle;
+           if(cb_ptr) {
+             if(!Curl_pipeline_site_blacklisted(data, conn))
+-              cb_ptr->server_supports_pipelining = TRUE;
++              cb_ptr->multiuse = BUNDLE_PIPELINING;
+           }
+         }
+ 
+@@ -3474,9 +3474,9 @@ CURLcode Curl_http_readwrite_headers(struct SessionHandle *data,
+         char *server_name = Curl_copy_header_value(k->p);
+ 
+         /* Turn off pipelining if the server version is blacklisted  */
+-        if(conn->bundle && conn->bundle->server_supports_pipelining) {
++        if(conn->bundle && (conn->bundle->multiuse == BUNDLE_PIPELINING)) {
+           if(Curl_pipeline_server_blacklisted(data, server_name))
+-            conn->bundle->server_supports_pipelining = FALSE;
++            conn->bundle->multiuse = BUNDLE_NO_MULTIUSE;
+         }
+         free(server_name);
+       }
+diff --git a/lib/http2.c b/lib/http2.c
+index b492e286a..7e58a7897 100644
+--- a/lib/http2.c
++++ b/lib/http2.c
+@@ -32,7 +32,7 @@
+ #include "curl_base64.h"
+ #include "rawstr.h"
+ #include "multiif.h"
+-#include "bundles.h"
++#include "conncache.h"
+ 
+ /* The last #include files should be: */
+ #include "curl_memory.h"
+@@ -1196,7 +1196,7 @@ CURLcode Curl_http2_setup(struct connectdata *conn)
+ 
+   conn->bits.multiplex = TRUE; /* at least potentially multiplexed */
+   conn->httpversion = 20;
+-  conn->bundle->server_supports_pipelining = TRUE;
++  conn->bundle->multiuse = BUNDLE_MULTIPLEX;
+ 
+   return CURLE_OK;
+ }
+diff --git a/lib/multi.c b/lib/multi.c
+index 498f4101f..c6bfe23c9 100644
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -2730,11 +2730,6 @@ size_t Curl_multi_max_total_connections(struct Curl_multi *multi)
+   return multi ? multi->max_total_connections : 0;
+ }
+ 
+-size_t Curl_multi_max_pipeline_length(struct Curl_multi *multi)
+-{
+-  return multi ? multi->max_pipeline_length : 0;
+-}
+-
+ curl_off_t Curl_multi_content_length_penalty_size(struct Curl_multi *multi)
+ {
+   return multi ? multi->content_length_penalty_size : 0;
+diff --git a/lib/multiif.h b/lib/multiif.h
+index 152cb8be2..1a7cf6954 100644
+--- a/lib/multiif.h
++++ b/lib/multiif.h
+@@ -59,9 +59,6 @@ void Curl_multi_process_pending_handles(struct Curl_multi *multi);
+ /* Return the value of the CURLMOPT_MAX_HOST_CONNECTIONS option */
+ size_t Curl_multi_max_host_connections(struct Curl_multi *multi);
+ 
+-/* Return the value of the CURLMOPT_MAX_PIPELINE_LENGTH option */
+-size_t Curl_multi_max_pipeline_length(struct Curl_multi *multi);
+-
+ /* Return the value of the CURLMOPT_CONTENT_LENGTH_PENALTY_SIZE option */
+ curl_off_t Curl_multi_content_length_penalty_size(struct Curl_multi *multi);
+ 
+diff --git a/lib/url.c b/lib/url.c
+index bd95cef68..74f3c9496 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -3081,6 +3081,13 @@ static void prune_dead_connections(struct SessionHandle *data)
+   }
+ }
+ 
++
++static size_t max_pipeline_length(struct Curl_multi *multi)
++{
++  return multi ? multi->max_pipeline_length : 0;
++}
++
++
+ /*
+  * Given one filled in connection struct (named needle), this function should
+  * detect if there already is one that has all the significant details
+@@ -3120,7 +3127,7 @@ ConnectionExists(struct SessionHandle *data,
+      particular host */
+   bundle = Curl_conncache_find_bundle(needle, data->state.conn_cache);
+   if(bundle) {
+-    size_t max_pipe_len = Curl_multi_max_pipeline_length(data->multi);
++    size_t max_pipe_len = max_pipeline_length(data->multi);
+     size_t best_pipe_len = max_pipe_len;
+     struct curl_llist_element *curr;
+ 
+@@ -3128,7 +3135,7 @@ ConnectionExists(struct SessionHandle *data,
+           needle->host.name, (void *)bundle);
+ 
+     /* We can't pipe if we don't know anything about the server */
+-    if(canPipeline && !bundle->server_supports_pipelining) {
++    if(canPipeline && (bundle->multiuse <= BUNDLE_UNKNOWN)) {
+       infof(data, "Server doesn't support multi-use (yet)\n");
+       canPipeline = FALSE;
+     }
+@@ -3154,16 +3161,19 @@ ConnectionExists(struct SessionHandle *data,
+       pipeLen = check->send_pipe->size + check->recv_pipe->size;
+ 
+       if(canPipeline) {
+-        /* Make sure the pipe has only GET requests */
+-        struct SessionHandle* sh = gethandleathead(check->send_pipe);
+-        struct SessionHandle* rh = gethandleathead(check->recv_pipe);
+-        if(sh) {
+-          if(!IsPipeliningPossible(sh, check))
+-            continue;
+-        }
+-        else if(rh) {
+-          if(!IsPipeliningPossible(rh, check))
+-            continue;
++
++        if(!check->bits.multiplex) {
++          /* If not multiplexing, make sure the pipe has only GET requests */
++          struct SessionHandle* sh = gethandleathead(check->send_pipe);
++          struct SessionHandle* rh = gethandleathead(check->recv_pipe);
++          if(sh) {
++            if(!IsPipeliningPossible(sh, check))
++              continue;
++          }
++          else if(rh) {
++            if(!IsPipeliningPossible(rh, check))
++              continue;
++          }
+         }
+       }
+       else {
+@@ -3342,8 +3352,10 @@ ConnectionExists(struct SessionHandle *data,
+           }
+ 
+           /* We can't use the connection if the pipe is full */
+-          if(pipeLen >= max_pipe_len)
++          if(pipeLen >= max_pipe_len) {
++            infof(data, "Pipe is full, skip (%d)\n", pipeLen);
+             continue;
++          }
+ 
+           /* We can't use the connection if the pipe is penalized */
+           if(Curl_pipeline_penalized(data, check))
+@@ -5715,8 +5727,11 @@ static CURLcode create_conn(struct SessionHandle *data,
+         conn_candidate->data = data;
+         (void)Curl_disconnect(conn_candidate, /* dead_connection */ FALSE);
+       }
+-      else
++      else {
++        infof(data, "No more connections allowed to host: %d\n",
++              max_host_connections);
+         no_connections_available = TRUE;
++      }
+     }
+ 
+     if(max_total_connections > 0 &&
+@@ -5731,8 +5746,10 @@ static CURLcode create_conn(struct SessionHandle *data,
+         conn_candidate->data = data;
+         (void)Curl_disconnect(conn_candidate, /* dead_connection */ FALSE);
+       }
+-      else
++      else {
++        infof(data, "No connections available in cache\n");
+         no_connections_available = TRUE;
++      }
+     }
+ 
+ 
+

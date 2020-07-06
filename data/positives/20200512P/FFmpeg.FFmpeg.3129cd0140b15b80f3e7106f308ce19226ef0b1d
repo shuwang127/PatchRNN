@@ -1,0 +1,109 @@
+commit 3129cd0140b15b80f3e7106f308ce19226ef0b1d
+Author: Michael Niedermayer <michaelni@gmx.at>
+Date:   Sat Nov 13 01:27:35 2004 +0000
+
+    allocate a few bytes more for extradata so the bitstream reader if its used by the codec for parsing extardata, doesnt read over the end
+    
+    Originally committed as revision 3679 to svn://svn.ffmpeg.org/ffmpeg/trunk
+
+diff --git a/libavformat/asf.c b/libavformat/asf.c
+index 9f94137dc0..64444b1277 100644
+--- a/libavformat/asf.c
++++ b/libavformat/asf.c
+@@ -274,7 +274,7 @@ static int asf_read_header(AVFormatContext *s, AVFormatParameters *ap)
+ 		url_fskip(pb, 20);
+ 		if (size > 40) {
+ 		    st->codec.extradata_size = size - 40;
+-		    st->codec.extradata = av_mallocz(st->codec.extradata_size);
++		    st->codec.extradata = av_mallocz(st->codec.extradata_size + FF_INPUT_BUFFER_PADDING_SIZE);
+ 		    get_buffer(pb, st->codec.extradata, st->codec.extradata_size);
+ 		}
+ 
+diff --git a/libavformat/avidec.c b/libavformat/avidec.c
+index 4af4a0d3ed..72989fcc80 100644
+--- a/libavformat/avidec.c
++++ b/libavformat/avidec.c
+@@ -301,7 +301,7 @@ static int avi_read_header(AVFormatContext *s, AVFormatParameters *ap)
+                     get_le32(pb); /* ClrImportant */
+ 
+                     st->codec.extradata_size= size - 10*4;
+-                    st->codec.extradata= av_malloc(st->codec.extradata_size);
++                    st->codec.extradata= av_malloc(st->codec.extradata_size + FF_INPUT_BUFFER_PADDING_SIZE);
+                     get_buffer(pb, st->codec.extradata, st->codec.extradata_size);
+                     
+                     if(st->codec.extradata_size & 1) //FIXME check if the encoder really did this correctly
+diff --git a/libavformat/mov.c b/libavformat/mov.c
+index b0f4b8bf6b..2b05b9486f 100644
+--- a/libavformat/mov.c
++++ b/libavformat/mov.c
+@@ -569,7 +569,7 @@ static int mov_read_esds(MOVContext *c, ByteIOContext *pb, MOV_atom_t atom)
+ #ifdef DEBUG
+ 	    av_log(NULL, AV_LOG_DEBUG, "Specific MPEG4 header len=%d\n", len);
+ #endif
+-	    st->codec.extradata = (uint8_t*) av_mallocz(len);
++	    st->codec.extradata = (uint8_t*) av_mallocz(len + FF_INPUT_BUFFER_PADDING_SIZE);
+ 	    if (st->codec.extradata) {
+ 		get_buffer(pb, st->codec.extradata, len);
+ 		st->codec.extradata_size = len;
+@@ -680,7 +680,7 @@ static int mov_read_smi(MOVContext *c, ByteIOContext *pb, MOV_atom_t atom)
+     // this should be fixed and just SMI header should be passed
+     av_free(st->codec.extradata);
+     st->codec.extradata_size = 0x5a + atom.size;
+-    st->codec.extradata = (uint8_t*) av_mallocz(st->codec.extradata_size);
++    st->codec.extradata = (uint8_t*) av_mallocz(st->codec.extradata_size + FF_INPUT_BUFFER_PADDING_SIZE);
+ 
+     if (st->codec.extradata) {
+ 	strcpy(st->codec.extradata, "SVQ3"); // fake
+diff --git a/libavformat/nut.c b/libavformat/nut.c
+index 544036670b..67b317ed69 100644
+--- a/libavformat/nut.c
++++ b/libavformat/nut.c
+@@ -982,7 +982,7 @@ static int decode_stream_header(NUTContext *nut){
+     /* codec specific data headers */
+     while(get_v(bc) != 0){
+         st->codec.extradata_size= get_v(bc);
+-        st->codec.extradata= av_mallocz(st->codec.extradata_size);
++        st->codec.extradata= av_mallocz(st->codec.extradata_size + FF_INPUT_BUFFER_PADDING_SIZE);
+         get_buffer(bc, st->codec.extradata, st->codec.extradata_size);            
+ //	    url_fskip(bc, get_v(bc));
+     }
+diff --git a/libavformat/ogg.c b/libavformat/ogg.c
+index 00c9f3ffd0..e0a72306c9 100644
+--- a/libavformat/ogg.c
++++ b/libavformat/ogg.c
+@@ -196,7 +196,7 @@ static int ogg_read_header(AVFormatContext *avfcontext, AVFormatParameters *ap)
+             return -1;
+         }
+         codec->extradata_size+= 2 + op.bytes;
+-        codec->extradata= av_realloc(codec->extradata, codec->extradata_size);
++        codec->extradata= av_realloc(codec->extradata, codec->extradata_size + FF_INPUT_BUFFER_PADDING_SIZE);
+         p= codec->extradata + codec->extradata_size - 2 - op.bytes;
+         *(p++)= op.bytes>>8;
+         *(p++)= op.bytes&0xFF;
+diff --git a/libavformat/rtsp.c b/libavformat/rtsp.c
+index af898ba217..2b6fa8844a 100644
+--- a/libavformat/rtsp.c
++++ b/libavformat/rtsp.c
+@@ -211,7 +211,7 @@ static void sdp_parse_fmtp(AVCodecContext *codec, const char *p)
+             if (!strcmp(attr, "config")) {
+                 /* decode the hexa encoded parameter */
+                 len = hex_to_data(NULL, value);
+-                codec->extradata = av_mallocz(len);
++                codec->extradata = av_mallocz(len + FF_INPUT_BUFFER_PADDING_SIZE);
+                 if (!codec->extradata)
+                     goto fail;
+                 codec->extradata_size = len;
+diff --git a/libavformat/wav.c b/libavformat/wav.c
+index 3497126e67..f2bb503b21 100644
+--- a/libavformat/wav.c
++++ b/libavformat/wav.c
+@@ -154,7 +154,7 @@ void get_wav_header(ByteIOContext *pb, AVCodecContext *codec, int size)
+ 	if (codec->extradata_size > 0) {
+ 	    if (codec->extradata_size > size - 18)
+ 	        codec->extradata_size = size - 18;
+-            codec->extradata = av_mallocz(codec->extradata_size);
++            codec->extradata = av_mallocz(codec->extradata_size + FF_INPUT_BUFFER_PADDING_SIZE);
+             get_buffer(pb, codec->extradata, codec->extradata_size);
+         } else
+ 	    codec->extradata_size = 0;
+

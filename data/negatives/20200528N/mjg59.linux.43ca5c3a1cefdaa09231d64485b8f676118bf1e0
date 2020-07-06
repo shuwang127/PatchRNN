@@ -1,0 +1,230 @@
+commit 43ca5c3a1cefdaa09231d64485b8f676118bf1e0
+Author: Heiko Carstens <heiko.carstens@de.ibm.com>
+Date:   Thu Apr 17 07:46:23 2008 +0200
+
+    [S390] Convert monitor calls to function calls.
+    
+    Remove the program check generating monitor calls and use function
+    calls instead. Theres is no real advantage in using monitor calls,
+    but they do make debugging harder, because of all the program checks
+    it generates.
+    
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+    Signed-off-by: Heiko Carstens <heiko.carstens@de.ibm.com>
+
+diff --git a/arch/s390/kernel/process.c b/arch/s390/kernel/process.c
+index ce203154d8ce..eb768ce88672 100644
+--- a/arch/s390/kernel/process.c
++++ b/arch/s390/kernel/process.c
+@@ -76,6 +76,7 @@ unsigned long thread_saved_pc(struct task_struct *tsk)
+  * Need to know about CPUs going idle?
+  */
+ static ATOMIC_NOTIFIER_HEAD(idle_chain);
++DEFINE_PER_CPU(struct s390_idle_data, s390_idle);
+ 
+ int register_idle_notifier(struct notifier_block *nb)
+ {
+@@ -89,9 +90,33 @@ int unregister_idle_notifier(struct notifier_block *nb)
+ }
+ EXPORT_SYMBOL(unregister_idle_notifier);
+ 
+-void do_monitor_call(struct pt_regs *regs, long interruption_code)
++static int s390_idle_enter(void)
++{
++	struct s390_idle_data *idle;
++	int nr_calls = 0;
++	void *hcpu;
++	int rc;
++
++	hcpu = (void *)(long)smp_processor_id();
++	rc = __atomic_notifier_call_chain(&idle_chain, S390_CPU_IDLE, hcpu, -1,
++					  &nr_calls);
++	if (rc == NOTIFY_BAD) {
++		nr_calls--;
++		__atomic_notifier_call_chain(&idle_chain, S390_CPU_NOT_IDLE,
++					     hcpu, nr_calls, NULL);
++		return rc;
++	}
++	idle = &__get_cpu_var(s390_idle);
++	spin_lock(&idle->lock);
++	idle->idle_count++;
++	idle->in_idle = 1;
++	idle->idle_enter = get_clock();
++	spin_unlock(&idle->lock);
++	return NOTIFY_OK;
++}
++
++void s390_idle_leave(void)
+ {
+-#ifdef CONFIG_SMP
+ 	struct s390_idle_data *idle;
+ 
+ 	idle = &__get_cpu_var(s390_idle);
+@@ -99,10 +124,6 @@ void do_monitor_call(struct pt_regs *regs, long interruption_code)
+ 	idle->idle_time += get_clock() - idle->idle_enter;
+ 	idle->in_idle = 0;
+ 	spin_unlock(&idle->lock);
+-#endif
+-	/* disable monitor call class 0 */
+-	__ctl_clear_bit(8, 15);
+-
+ 	atomic_notifier_call_chain(&idle_chain, S390_CPU_NOT_IDLE,
+ 				   (void *)(long) smp_processor_id());
+ }
+@@ -113,61 +134,30 @@ extern void s390_handle_mcck(void);
+  */
+ static void default_idle(void)
+ {
+-	int cpu, rc;
+-	int nr_calls = 0;
+-	void *hcpu;
+-#ifdef CONFIG_SMP
+-	struct s390_idle_data *idle;
+-#endif
+-
+ 	/* CPU is going idle. */
+-	cpu = smp_processor_id();
+-	hcpu = (void *)(long)cpu;
+ 	local_irq_disable();
+ 	if (need_resched()) {
+ 		local_irq_enable();
+ 		return;
+ 	}
+-
+-	rc = __atomic_notifier_call_chain(&idle_chain, S390_CPU_IDLE, hcpu, -1,
+-					  &nr_calls);
+-	if (rc == NOTIFY_BAD) {
+-		nr_calls--;
+-		__atomic_notifier_call_chain(&idle_chain, S390_CPU_NOT_IDLE,
+-					     hcpu, nr_calls, NULL);
++	if (s390_idle_enter() == NOTIFY_BAD) {
+ 		local_irq_enable();
+ 		return;
+ 	}
+-
+-	/* enable monitor call class 0 */
+-	__ctl_set_bit(8, 15);
+-
+ #ifdef CONFIG_HOTPLUG_CPU
+-	if (cpu_is_offline(cpu)) {
++	if (cpu_is_offline(smp_processor_id())) {
+ 		preempt_enable_no_resched();
+ 		cpu_die();
+ 	}
+ #endif
+-
+ 	local_mcck_disable();
+ 	if (test_thread_flag(TIF_MCCK_PENDING)) {
+ 		local_mcck_enable();
+-		/* disable monitor call class 0 */
+-		__ctl_clear_bit(8, 15);
+-		atomic_notifier_call_chain(&idle_chain, S390_CPU_NOT_IDLE,
+-					   hcpu);
++		s390_idle_leave();
+ 		local_irq_enable();
+ 		s390_handle_mcck();
+ 		return;
+ 	}
+-#ifdef CONFIG_SMP
+-	idle = &__get_cpu_var(s390_idle);
+-	spin_lock(&idle->lock);
+-	idle->idle_count++;
+-	idle->in_idle = 1;
+-	idle->idle_enter = get_clock();
+-	spin_unlock(&idle->lock);
+-#endif
+ 	trace_hardirqs_on();
+ 	/* Wait for external, I/O or machine check interrupt. */
+ 	__load_psw_mask(psw_kernel_bits | PSW_MASK_WAIT |
+diff --git a/arch/s390/kernel/s390_ext.c b/arch/s390/kernel/s390_ext.c
+index acf93dba7727..3a8772d3baea 100644
+--- a/arch/s390/kernel/s390_ext.c
++++ b/arch/s390/kernel/s390_ext.c
+@@ -13,7 +13,7 @@
+ #include <linux/errno.h>
+ #include <linux/kernel_stat.h>
+ #include <linux/interrupt.h>
+-
++#include <asm/cpu.h>
+ #include <asm/lowcore.h>
+ #include <asm/s390_ext.h>
+ #include <asm/irq_regs.h>
+@@ -119,7 +119,7 @@ void do_extint(struct pt_regs *regs, unsigned short code)
+ 
+ 	old_regs = set_irq_regs(regs);
+ 	irq_enter();
+-	asm volatile ("mc 0,0");
++	s390_idle_check();
+ 	if (S390_lowcore.int_clock >= S390_lowcore.jiffy_timer)
+ 		/**
+ 		 * Make sure that the i/o interrupt did not "overtake"
+diff --git a/arch/s390/kernel/smp.c b/arch/s390/kernel/smp.c
+index d1e8e8a3fb66..5a445b1b1217 100644
+--- a/arch/s390/kernel/smp.c
++++ b/arch/s390/kernel/smp.c
+@@ -73,7 +73,6 @@ static int smp_cpu_state[NR_CPUS];
+ static int cpu_management;
+ 
+ static DEFINE_PER_CPU(struct cpu, cpu_devices);
+-DEFINE_PER_CPU(struct s390_idle_data, s390_idle);
+ 
+ static void smp_ext_bitcall(int, ec_bit_sig);
+ 
+diff --git a/arch/s390/kernel/traps.c b/arch/s390/kernel/traps.c
+index 60f728aeaf12..9452a205629b 100644
+--- a/arch/s390/kernel/traps.c
++++ b/arch/s390/kernel/traps.c
+@@ -59,7 +59,6 @@ int sysctl_userprocess_debug = 0;
+ 
+ extern pgm_check_handler_t do_protection_exception;
+ extern pgm_check_handler_t do_dat_exception;
+-extern pgm_check_handler_t do_monitor_call;
+ extern pgm_check_handler_t do_asce_exception;
+ 
+ #define stack_pointer ({ void **sp; asm("la %0,0(15)" : "=&d" (sp)); sp; })
+@@ -739,6 +738,5 @@ void __init trap_init(void)
+         pgm_check_table[0x15] = &operand_exception;
+         pgm_check_table[0x1C] = &space_switch_exception;
+         pgm_check_table[0x1D] = &hfp_sqrt_exception;
+-	pgm_check_table[0x40] = &do_monitor_call;
+ 	pfault_irq_init();
+ }
+diff --git a/drivers/s390/cio/cio.c b/drivers/s390/cio/cio.c
+index 60590a12d529..6dbe9488d3f9 100644
+--- a/drivers/s390/cio/cio.c
++++ b/drivers/s390/cio/cio.c
+@@ -24,6 +24,7 @@
+ #include <asm/ipl.h>
+ #include <asm/chpid.h>
+ #include <asm/airq.h>
++#include <asm/cpu.h>
+ #include "cio.h"
+ #include "css.h"
+ #include "chsc.h"
+@@ -649,7 +650,7 @@ do_IRQ (struct pt_regs *regs)
+ 
+ 	old_regs = set_irq_regs(regs);
+ 	irq_enter();
+-	asm volatile ("mc 0,0");
++	s390_idle_check();
+ 	if (S390_lowcore.int_clock >= S390_lowcore.jiffy_timer)
+ 		/**
+ 		 * Make sure that the i/o interrupt did not "overtake"
+diff --git a/include/asm-s390/cpu.h b/include/asm-s390/cpu.h
+index 352dde194f3c..e5a6a9ba3adf 100644
+--- a/include/asm-s390/cpu.h
++++ b/include/asm-s390/cpu.h
+@@ -22,4 +22,12 @@ struct s390_idle_data {
+ 
+ DECLARE_PER_CPU(struct s390_idle_data, s390_idle);
+ 
++void s390_idle_leave(void);
++
++static inline void s390_idle_check(void)
++{
++	if ((&__get_cpu_var(s390_idle))->in_idle)
++		s390_idle_leave();
++}
++
+ #endif /* _ASM_S390_CPU_H_ */
+

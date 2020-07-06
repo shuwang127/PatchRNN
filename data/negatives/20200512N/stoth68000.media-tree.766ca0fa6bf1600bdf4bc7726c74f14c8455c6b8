@@ -1,0 +1,528 @@
+commit 766ca0fa6bf1600bdf4bc7726c74f14c8455c6b8
+Author: Ben Hutchings <bhutchings@solarflare.com>
+Date:   Fri Dec 12 21:59:24 2008 -0800
+
+    sfc: Rework MAC, PHY and board event handling
+    
+    From: Steve Hodgson <shodgson@solarflare.com>
+    
+    MAC, PHY and board events may be separately enabled and signalled.
+    Our current arrangement of chaining the polling functions can result
+    in events being missed.  Change them to be more independent.
+    
+    Signed-off-by: Ben Hutchings <bhutchings@solarflare.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/sfc/efx.c b/drivers/net/sfc/efx.c
+index 7214ea6f7e1d..ce1c7d3cd12e 100644
+--- a/drivers/net/sfc/efx.c
++++ b/drivers/net/sfc/efx.c
+@@ -612,10 +612,9 @@ void efx_reconfigure_port(struct efx_nic *efx)
+ /* Asynchronous efx_reconfigure_port work item. To speed up efx_flush_all()
+  * we don't efx_reconfigure_port() if the port is disabled. Care is taken
+  * in efx_stop_all() and efx_start_port() to prevent PHY events being lost */
+-static void efx_reconfigure_work(struct work_struct *data)
++static void efx_phy_work(struct work_struct *data)
+ {
+-	struct efx_nic *efx = container_of(data, struct efx_nic,
+-					   reconfigure_work);
++	struct efx_nic *efx = container_of(data, struct efx_nic, phy_work);
+ 
+ 	mutex_lock(&efx->mac_lock);
+ 	if (efx->port_enabled)
+@@ -623,6 +622,16 @@ static void efx_reconfigure_work(struct work_struct *data)
+ 	mutex_unlock(&efx->mac_lock);
+ }
+ 
++static void efx_mac_work(struct work_struct *data)
++{
++	struct efx_nic *efx = container_of(data, struct efx_nic, mac_work);
++
++	mutex_lock(&efx->mac_lock);
++	if (efx->port_enabled)
++		efx->mac_op->irq(efx);
++	mutex_unlock(&efx->mac_lock);
++}
++
+ static int efx_probe_port(struct efx_nic *efx)
+ {
+ 	int rc;
+@@ -688,7 +697,7 @@ static int efx_init_port(struct efx_nic *efx)
+ 
+ /* Allow efx_reconfigure_port() to be scheduled, and close the window
+  * between efx_stop_port and efx_flush_all whereby a previously scheduled
+- * efx_reconfigure_port() may have been cancelled */
++ * efx_phy_work()/efx_mac_work() may have been cancelled */
+ static void efx_start_port(struct efx_nic *efx)
+ {
+ 	EFX_LOG(efx, "start port\n");
+@@ -697,13 +706,14 @@ static void efx_start_port(struct efx_nic *efx)
+ 	mutex_lock(&efx->mac_lock);
+ 	efx->port_enabled = true;
+ 	__efx_reconfigure_port(efx);
++	efx->mac_op->irq(efx);
+ 	mutex_unlock(&efx->mac_lock);
+ }
+ 
+-/* Prevent efx_reconfigure_work and efx_monitor() from executing, and
+- * efx_set_multicast_list() from scheduling efx_reconfigure_work.
+- * efx_reconfigure_work can still be scheduled via NAPI processing
+- * until efx_flush_all() is called */
++/* Prevent efx_phy_work, efx_mac_work, and efx_monitor() from executing,
++ * and efx_set_multicast_list() from scheduling efx_phy_work. efx_phy_work
++ * and efx_mac_work may still be scheduled via NAPI processing until
++ * efx_flush_all() is called */
+ static void efx_stop_port(struct efx_nic *efx)
+ {
+ 	EFX_LOG(efx, "stop port\n");
+@@ -1094,7 +1104,8 @@ static void efx_flush_all(struct efx_nic *efx)
+ 		cancel_delayed_work_sync(&rx_queue->work);
+ 
+ 	/* Stop scheduled port reconfigurations */
+-	cancel_work_sync(&efx->reconfigure_work);
++	cancel_work_sync(&efx->mac_work);
++	cancel_work_sync(&efx->phy_work);
+ 
+ }
+ 
+@@ -1131,7 +1142,7 @@ static void efx_stop_all(struct efx_nic *efx)
+ 	 * window to loose phy events */
+ 	efx_stop_port(efx);
+ 
+-	/* Flush reconfigure_work, refill_workqueue, monitor_work */
++	/* Flush efx_phy_work, efx_mac_work, refill_workqueue, monitor_work */
+ 	efx_flush_all(efx);
+ 
+ 	/* Isolate the MAC from the TX and RX engines, so that queue
+@@ -1203,24 +1214,31 @@ static void efx_monitor(struct work_struct *data)
+ {
+ 	struct efx_nic *efx = container_of(data, struct efx_nic,
+ 					   monitor_work.work);
++	int rc;
+ 
+ 	EFX_TRACE(efx, "hardware monitor executing on CPU %d\n",
+ 		  raw_smp_processor_id());
+ 
+-
+ 	/* If the mac_lock is already held then it is likely a port
+ 	 * reconfiguration is already in place, which will likely do
+ 	 * most of the work of check_hw() anyway. */
+-	if (!mutex_trylock(&efx->mac_lock)) {
+-		queue_delayed_work(efx->workqueue, &efx->monitor_work,
+-				   efx_monitor_interval);
+-		return;
++	if (!mutex_trylock(&efx->mac_lock))
++		goto out_requeue;
++	if (!efx->port_enabled)
++		goto out_unlock;
++	rc = efx->board_info.monitor(efx);
++	if (rc) {
++		EFX_ERR(efx, "Board sensor %s; shutting down PHY\n",
++			(rc == -ERANGE) ? "reported fault" : "failed");
++		efx->phy_mode |= PHY_MODE_LOW_POWER;
++		falcon_sim_phy_event(efx);
+ 	}
++	efx->phy_op->poll(efx);
++	efx->mac_op->poll(efx);
+ 
+-	if (efx->port_enabled)
+-		efx->mac_op->check_hw(efx);
++out_unlock:
+ 	mutex_unlock(&efx->mac_lock);
+-
++out_requeue:
+ 	queue_delayed_work(efx->workqueue, &efx->monitor_work,
+ 			   efx_monitor_interval);
+ }
+@@ -1477,7 +1495,7 @@ static void efx_set_multicast_list(struct net_device *net_dev)
+ 		return;
+ 
+ 	if (changed)
+-		queue_work(efx->workqueue, &efx->reconfigure_work);
++		queue_work(efx->workqueue, &efx->phy_work);
+ 
+ 	/* Create and activate new global multicast hash table */
+ 	falcon_set_multicast_hash(efx);
+@@ -1800,12 +1818,14 @@ void efx_port_dummy_op_blink(struct efx_nic *efx, bool blink) {}
+ 
+ static struct efx_mac_operations efx_dummy_mac_operations = {
+ 	.reconfigure	= efx_port_dummy_op_void,
++	.poll		= efx_port_dummy_op_void,
++	.irq		= efx_port_dummy_op_void,
+ };
+ 
+ static struct efx_phy_operations efx_dummy_phy_operations = {
+ 	.init		 = efx_port_dummy_op_int,
+ 	.reconfigure	 = efx_port_dummy_op_void,
+-	.check_hw        = efx_port_dummy_op_int,
++	.poll		 = efx_port_dummy_op_void,
+ 	.fini		 = efx_port_dummy_op_void,
+ 	.clear_interrupt = efx_port_dummy_op_void,
+ };
+@@ -1857,7 +1877,8 @@ static int efx_init_struct(struct efx_nic *efx, struct efx_nic_type *type,
+ 	efx->mac_op = &efx_dummy_mac_operations;
+ 	efx->phy_op = &efx_dummy_phy_operations;
+ 	efx->mii.dev = net_dev;
+-	INIT_WORK(&efx->reconfigure_work, efx_reconfigure_work);
++	INIT_WORK(&efx->phy_work, efx_phy_work);
++	INIT_WORK(&efx->mac_work, efx_mac_work);
+ 	atomic_set(&efx->netif_stop_count, 1);
+ 
+ 	for (i = 0; i < EFX_MAX_CHANNELS; i++) {
+diff --git a/drivers/net/sfc/falcon.c b/drivers/net/sfc/falcon.c
+index fde4e7912c39..5a70ee7e8142 100644
+--- a/drivers/net/sfc/falcon.c
++++ b/drivers/net/sfc/falcon.c
+@@ -910,22 +910,20 @@ static void falcon_handle_global_event(struct efx_channel *channel,
+ 				       efx_qword_t *event)
+ {
+ 	struct efx_nic *efx = channel->efx;
+-	bool is_phy_event = false, handled = false;
++	bool handled = false;
+ 
+-	/* Check for interrupt on either port.  Some boards have a
+-	 * single PHY wired to the interrupt line for port 1. */
+ 	if (EFX_QWORD_FIELD(*event, G_PHY0_INTR) ||
+ 	    EFX_QWORD_FIELD(*event, G_PHY1_INTR) ||
+-	    EFX_QWORD_FIELD(*event, XG_PHY_INTR))
+-		is_phy_event = true;
++	    EFX_QWORD_FIELD(*event, XG_PHY_INTR) ||
++	    EFX_QWORD_FIELD(*event, XFP_PHY_INTR)) {
++		efx->phy_op->clear_interrupt(efx);
++		queue_work(efx->workqueue, &efx->phy_work);
++		handled = true;
++	}
+ 
+ 	if ((falcon_rev(efx) >= FALCON_REV_B0) &&
+-	    EFX_QWORD_FIELD(*event, XG_MNT_INTR_B0))
+-		is_phy_event = true;
+-
+-	if (is_phy_event) {
+-		efx->phy_op->clear_interrupt(efx);
+-		queue_work(efx->workqueue, &efx->reconfigure_work);
++	    EFX_QWORD_FIELD(*event, XG_MNT_INTR_B0)) {
++		queue_work(efx->workqueue, &efx->mac_work);
+ 		handled = true;
+ 	}
+ 
+diff --git a/drivers/net/sfc/falcon_gmac.c b/drivers/net/sfc/falcon_gmac.c
+index b6e6eb963905..8865eae20ac5 100644
+--- a/drivers/net/sfc/falcon_gmac.c
++++ b/drivers/net/sfc/falcon_gmac.c
+@@ -221,13 +221,9 @@ static void falcon_update_stats_gmac(struct efx_nic *efx)
+ 	mac_stats->rx_lt64 = mac_stats->rx_good_lt64 + mac_stats->rx_bad_lt64;
+ }
+ 
+-static int falcon_check_gmac(struct efx_nic *efx)
+-{
+-	return efx->phy_op->check_hw(efx);
+-}
+-
+ struct efx_mac_operations falcon_gmac_operations = {
+ 	.reconfigure	= falcon_reconfigure_gmac,
+ 	.update_stats	= falcon_update_stats_gmac,
+-	.check_hw	= falcon_check_gmac,
++	.irq		= efx_port_dummy_op_void,
++	.poll		= efx_port_dummy_op_void,
+ };
+diff --git a/drivers/net/sfc/falcon_hwdefs.h b/drivers/net/sfc/falcon_hwdefs.h
+index 5553df888b84..a58c627f51aa 100644
+--- a/drivers/net/sfc/falcon_hwdefs.h
++++ b/drivers/net/sfc/falcon_hwdefs.h
+@@ -1051,6 +1051,8 @@
+ #define XG_MNT_INTR_B0_WIDTH 1
+ #define RX_RECOVERY_A1_LBN 11
+ #define RX_RECOVERY_A1_WIDTH 1
++#define XFP_PHY_INTR_LBN 10
++#define XFP_PHY_INTR_WIDTH 1
+ #define XG_PHY_INTR_LBN 9
+ #define XG_PHY_INTR_WIDTH 1
+ #define G_PHY1_INTR_LBN 8
+diff --git a/drivers/net/sfc/falcon_xmac.c b/drivers/net/sfc/falcon_xmac.c
+index 0ce8f015386c..5a03713685ac 100644
+--- a/drivers/net/sfc/falcon_xmac.c
++++ b/drivers/net/sfc/falcon_xmac.c
+@@ -342,33 +342,35 @@ static void falcon_update_stats_xmac(struct efx_nic *efx)
+ 		 mac_stats->rx_control * 64);
+ }
+ 
+-static int falcon_check_xmac(struct efx_nic *efx)
++static void falcon_xmac_irq(struct efx_nic *efx)
+ {
+-	bool xaui_link_ok;
+-	int rc;
++	/* The XGMII link has a transient fault, which indicates either:
++	 *   - there's a transient xgmii fault
++	 *   - falcon's end of the xaui link may need a kick
++	 *   - the wire-side link may have gone down, but the lasi/poll()
++	 *     hasn't noticed yet.
++	 *
++	 * We only want to even bother polling XAUI if we're confident it's
++	 * not (1) or (3). In both cases, the only reliable way to spot this
++	 * is to wait a bit. We do this here by forcing the mac link state
++	 * to down, and waiting for the mac poll to come round and check
++	 */
++	efx->mac_up = false;
++}
+ 
+-	if ((efx->loopback_mode == LOOPBACK_NETWORK) ||
+-	    efx_phy_mode_disabled(efx->phy_mode))
+-		return 0;
++static void falcon_poll_xmac(struct efx_nic *efx)
++{
++	if (!EFX_WORKAROUND_5147(efx) || !efx->link_up || efx->mac_up)
++		return;
+ 
+ 	falcon_mask_status_intr(efx, false);
+-	xaui_link_ok = falcon_xaui_link_ok(efx);
+-
+-	if (EFX_WORKAROUND_5147(efx) && !xaui_link_ok)
+-		falcon_reset_xaui(efx);
+-
+-	/* Call the PHY check_hw routine */
+-	rc = efx->phy_op->check_hw(efx);
+-
+-	/* Unmask interrupt if everything was (and still is) ok */
+-	if (xaui_link_ok && efx->link_up)
+-		falcon_mask_status_intr(efx, true);
+-
+-	return rc;
++	falcon_check_xaui_link_up(efx, 1);
++	falcon_mask_status_intr(efx, true);
+ }
+ 
+ struct efx_mac_operations falcon_xmac_operations = {
+ 	.reconfigure	= falcon_reconfigure_xmac,
+ 	.update_stats	= falcon_update_stats_xmac,
+-	.check_hw	= falcon_check_xmac,
++	.irq		= falcon_xmac_irq,
++	.poll		= falcon_poll_xmac,
+ };
+diff --git a/drivers/net/sfc/net_driver.h b/drivers/net/sfc/net_driver.h
+index fb8d72527a34..61d09a2fa724 100644
+--- a/drivers/net/sfc/net_driver.h
++++ b/drivers/net/sfc/net_driver.h
+@@ -544,12 +544,14 @@ static inline enum efx_fc_type efx_fc_resolve(enum efx_fc_type wanted_fc,
+  * struct efx_mac_operations - Efx MAC operations table
+  * @reconfigure: Reconfigure MAC. Serialised by the mac_lock
+  * @update_stats: Update statistics
+- * @check_hw: Check hardware. Serialised by the mac_lock
++ * @irq: Hardware MAC event callback. Serialised by the mac_lock
++ * @poll: Poll for hardware state. Serialised by the mac_lock
+  */
+ struct efx_mac_operations {
+ 	void (*reconfigure) (struct efx_nic *efx);
+ 	void (*update_stats) (struct efx_nic *efx);
+-	int (*check_hw) (struct efx_nic *efx);
++	void (*irq) (struct efx_nic *efx);
++	void (*poll) (struct efx_nic *efx);
+ };
+ 
+ /**
+@@ -559,7 +561,7 @@ struct efx_mac_operations {
+  * @reconfigure: Reconfigure PHY (e.g. for new link parameters)
+  * @clear_interrupt: Clear down interrupt
+  * @blink: Blink LEDs
+- * @check_hw: Check hardware
++ * @poll: Poll for hardware state. Serialised by the mac_lock.
+  * @get_settings: Get ethtool settings. Serialised by the mac_lock.
+  * @set_settings: Set ethtool settings. Serialised by the mac_lock.
+  * @set_xnp_advertise: Set abilities advertised in Extended Next Page
+@@ -573,7 +575,7 @@ struct efx_phy_operations {
+ 	void (*fini) (struct efx_nic *efx);
+ 	void (*reconfigure) (struct efx_nic *efx);
+ 	void (*clear_interrupt) (struct efx_nic *efx);
+-	int (*check_hw) (struct efx_nic *efx);
++	void (*poll) (struct efx_nic *efx);
+ 	int (*test) (struct efx_nic *efx);
+ 	void (*get_settings) (struct efx_nic *efx,
+ 			      struct ethtool_cmd *ecmd);
+@@ -728,10 +730,10 @@ union efx_multicast_hash {
+  * @mac_lock: MAC access lock. Protects @port_enabled, @phy_mode,
+  *	@port_inhibited, efx_monitor() and efx_reconfigure_port()
+  * @port_enabled: Port enabled indicator.
+- *	Serialises efx_stop_all(), efx_start_all() and efx_monitor() and
+- *	efx_reconfigure_work with kernel interfaces. Safe to read under any
+- *	one of the rtnl_lock, mac_lock, or netif_tx_lock, but all three must
+- *	be held to modify it.
++ *	Serialises efx_stop_all(), efx_start_all(), efx_monitor(),
++ *	efx_phy_work(), and efx_mac_work() with kernel interfaces. Safe to read
++ *	under any one of the rtnl_lock, mac_lock, or netif_tx_lock, but all
++ *	three must be held to modify it.
+  * @port_inhibited: If set, the netif_carrier is always off. Hold the mac_lock
+  * @port_initialized: Port initialized?
+  * @net_dev: Operating system network device. Consider holding the rtnl lock
+@@ -762,7 +764,8 @@ union efx_multicast_hash {
+  * @promiscuous: Promiscuous flag. Protected by netif_tx_lock.
+  * @multicast_hash: Multicast hash table
+  * @wanted_fc: Wanted flow control flags
+- * @reconfigure_work: work item for dealing with PHY events
++ * @phy_work: work item for dealing with PHY events
++ * @mac_work: work item for dealing with MAC events
+  * @loopback_mode: Loopback status
+  * @loopback_modes: Supported loopback mode bitmask
+  * @loopback_selftest: Offline self-test private state
+@@ -810,6 +813,7 @@ struct efx_nic {
+ 	struct falcon_nic_data *nic_data;
+ 
+ 	struct mutex mac_lock;
++	struct work_struct mac_work;
+ 	bool port_enabled;
+ 	bool port_inhibited;
+ 
+@@ -830,6 +834,7 @@ struct efx_nic {
+ 
+ 	enum phy_type phy_type;
+ 	spinlock_t phy_lock;
++	struct work_struct phy_work;
+ 	struct efx_phy_operations *phy_op;
+ 	void *phy_data;
+ 	struct mii_if_info mii;
+@@ -845,7 +850,6 @@ struct efx_nic {
+ 	bool promiscuous;
+ 	union efx_multicast_hash multicast_hash;
+ 	enum efx_fc_type wanted_fc;
+-	struct work_struct reconfigure_work;
+ 
+ 	atomic_t rx_reset;
+ 	enum efx_loopback_mode loopback_mode;
+diff --git a/drivers/net/sfc/selftest.c b/drivers/net/sfc/selftest.c
+index 8142e37a518f..578b7f410ed4 100644
+--- a/drivers/net/sfc/selftest.c
++++ b/drivers/net/sfc/selftest.c
+@@ -594,12 +594,14 @@ static int efx_test_loopbacks(struct efx_nic *efx, struct ethtool_cmd ecmd,
+ 		efx->loopback_mode = mode;
+ 		efx_reconfigure_port(efx);
+ 
+-		/* Wait for the PHY to signal the link is up */
++		/* Wait for the PHY to signal the link is up. Interrupts
++		 * are enabled for PHY's using LASI, otherwise we poll()
++		 * quickly */
+ 		count = 0;
+ 		do {
+ 			struct efx_channel *channel = &efx->channel[0];
+ 
+-			efx->mac_op->check_hw(efx);
++			efx->phy_op->poll(efx);
+ 			schedule_timeout_uninterruptible(HZ / 10);
+ 			if (channel->work_pending)
+ 				efx_process_channel_now(channel);
+diff --git a/drivers/net/sfc/tenxpress.c b/drivers/net/sfc/tenxpress.c
+index 634ff9198823..7256ea4abf9c 100644
+--- a/drivers/net/sfc/tenxpress.c
++++ b/drivers/net/sfc/tenxpress.c
+@@ -348,50 +348,34 @@ static void tenxpress_phy_reconfigure(struct efx_nic *efx)
+ 	efx->link_fc = mdio_clause45_get_pause(efx);
+ }
+ 
+-static void tenxpress_phy_clear_interrupt(struct efx_nic *efx)
+-{
+-	/* Nothing done here - LASI interrupts aren't reliable so poll  */
+-}
+-
+-
+ /* Poll PHY for interrupt */
+-static int tenxpress_phy_check_hw(struct efx_nic *efx)
++static void tenxpress_phy_poll(struct efx_nic *efx)
+ {
+ 	struct tenxpress_phy_data *phy_data = efx->phy_data;
+-	bool link_ok;
+-	int rc = 0;
++	bool change = false, link_ok;
++	unsigned link_fc;
+ 
+ 	link_ok = tenxpress_link_ok(efx);
++	if (link_ok != efx->link_up) {
++		change = true;
++	} else {
++		link_fc = mdio_clause45_get_pause(efx);
++		if (link_fc != efx->link_fc)
++			change = true;
++	}
+ 	tenxpress_check_bad_lp(efx, link_ok);
+ 
+-	if (link_ok != efx->link_up)
++	if (change)
+ 		falcon_sim_phy_event(efx);
+ 
+ 	if (phy_data->phy_mode != PHY_MODE_NORMAL)
+-		return 0;
++		return;
+ 
+ 	if (atomic_read(&phy_data->bad_crc_count) > crc_error_reset_threshold) {
+ 		EFX_ERR(efx, "Resetting XAUI due to too many CRC errors\n");
+ 		falcon_reset_xaui(efx);
+ 		atomic_set(&phy_data->bad_crc_count, 0);
+ 	}
+-
+-	rc = efx->board_info.monitor(efx);
+-	if (rc) {
+-		EFX_ERR(efx, "Board sensor %s; shutting down PHY\n",
+-			(rc == -ERANGE) ? "reported fault" : "failed");
+-		if (efx->phy_mode & PHY_MODE_OFF) {
+-			/* Assume that board has shut PHY off */
+-			phy_data->phy_mode = PHY_MODE_OFF;
+-		} else {
+-			efx->phy_mode |= PHY_MODE_LOW_POWER;
+-			mdio_clause45_set_mmds_lpower(efx, true,
+-						      efx->phy_op->mmds);
+-			phy_data->phy_mode |= PHY_MODE_LOW_POWER;
+-		}
+-	}
+-
+-	return rc;
+ }
+ 
+ static void tenxpress_phy_fini(struct efx_nic *efx)
+@@ -461,9 +445,9 @@ struct efx_phy_operations falcon_tenxpress_phy_ops = {
+ 	.macs		  = EFX_XMAC,
+ 	.init             = tenxpress_phy_init,
+ 	.reconfigure      = tenxpress_phy_reconfigure,
+-	.check_hw         = tenxpress_phy_check_hw,
++	.poll             = tenxpress_phy_poll,
+ 	.fini             = tenxpress_phy_fini,
+-	.clear_interrupt  = tenxpress_phy_clear_interrupt,
++	.clear_interrupt  = efx_port_dummy_op_void,
+ 	.test             = tenxpress_phy_test,
+ 	.get_settings	  = tenxpress_get_settings,
+ 	.set_settings	  = mdio_clause45_set_settings,
+diff --git a/drivers/net/sfc/xfp_phy.c b/drivers/net/sfc/xfp_phy.c
+index fbe8e25a1ed5..345ffc310dca 100644
+--- a/drivers/net/sfc/xfp_phy.c
++++ b/drivers/net/sfc/xfp_phy.c
+@@ -119,24 +119,12 @@ static int xfp_link_ok(struct efx_nic *efx)
+ 	return mdio_clause45_links_ok(efx, XFP_REQUIRED_DEVS);
+ }
+ 
+-static int xfp_phy_check_hw(struct efx_nic *efx)
++static void xfp_phy_poll(struct efx_nic *efx)
+ {
+-	int rc = 0;
+ 	int link_up = xfp_link_ok(efx);
+ 	/* Simulate a PHY event if link state has changed */
+ 	if (link_up != efx->link_up)
+ 		falcon_sim_phy_event(efx);
+-
+-	rc = efx->board_info.monitor(efx);
+-	if (rc) {
+-		struct xfp_phy_data *phy_data = efx->phy_data;
+-		EFX_ERR(efx, "XFP sensor alert; putting PHY into low power\n");
+-		efx->phy_mode |= PHY_MODE_LOW_POWER;
+-		mdio_clause45_set_mmds_lpower(efx, 1, XFP_REQUIRED_DEVS);
+-		phy_data->phy_mode |= PHY_MODE_LOW_POWER;
+-	}
+-
+-	return rc;
+ }
+ 
+ static void xfp_phy_reconfigure(struct efx_nic *efx)
+@@ -173,7 +161,7 @@ struct efx_phy_operations falcon_xfp_phy_ops = {
+ 	.macs		 = EFX_XMAC,
+ 	.init            = xfp_phy_init,
+ 	.reconfigure     = xfp_phy_reconfigure,
+-	.check_hw        = xfp_phy_check_hw,
++	.poll            = xfp_phy_poll,
+ 	.fini            = xfp_phy_fini,
+ 	.clear_interrupt = xfp_phy_clear_interrupt,
+ 	.get_settings    = mdio_clause45_get_settings,
+

@@ -1,0 +1,42 @@
+commit 0c88a5d3eb8cd6891a52eb285b37b1458f0b4b16
+Author: Michael Niedermayer <michael@niedermayer.cc>
+Date:   Sun Aug 26 15:57:54 2018 +0200
+
+    avcodec/wmv2dec: skip frames that have only skiped MBs
+    
+    This requires us to pre-parse the skip data, as we want to
+    detect this before allocating all the arrays
+    
+    Fixes: Timeout
+    Fixes: 9708/clusterfuzz-testcase-minimized-ffmpeg_AV_CODEC_ID_WMV2_fuzzer-5729709861109760
+    
+    Found-by: continuous fuzzing process https://github.com/google/oss-fuzz/tree/master/projects/ffmpeg
+    Signed-off-by: Michael Niedermayer <michael@niedermayer.cc>
+
+diff --git a/libavcodec/wmv2dec.c b/libavcodec/wmv2dec.c
+index ea0e0594b5..4f97d9227c 100644
+--- a/libavcodec/wmv2dec.c
++++ b/libavcodec/wmv2dec.c
+@@ -141,6 +141,21 @@ int ff_wmv2_decode_picture_header(MpegEncContext *s)
+     if (s->qscale <= 0)
+         return AVERROR_INVALIDDATA;
+ 
++    if (s->pict_type != AV_PICTURE_TYPE_I && show_bits(&s->gb, 1)) {
++        GetBitContext gb = s->gb;
++        int skip_type = get_bits(&gb, 2);
++        int run = skip_type == SKIP_TYPE_COL ? s->mb_width : s->mb_height;
++
++        while (run > 0) {
++            int block = FFMIN(run, 25);
++            if (get_bits(&gb, block) + 1 != 1<<block)
++                break;
++            run -= block;
++        }
++        if (!run)
++            return FRAME_SKIPPED;
++    }
++
+     return 0;
+ }
+ 
+

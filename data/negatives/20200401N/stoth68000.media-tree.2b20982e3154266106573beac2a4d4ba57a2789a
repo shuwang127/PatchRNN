@@ -1,0 +1,98 @@
+commit 2b20982e3154266106573beac2a4d4ba57a2789a
+Author: Josef Bacik <josef@redhat.com>
+Date:   Fri Dec 3 13:17:53 2010 -0500
+
+    Btrfs: deal with space cache errors better
+    
+    Currently if the space cache inode generation number doesn't match the
+    generation number in the space cache header we will just fail to load the space
+    cache, but we won't mark the space cache as an error, so we'll keep getting that
+    error each time somebody tries to cache that block group until we actually clear
+    the thing.  Fix this by marking the space cache as having an error so we only
+    get the message once.  This patch also makes it so that we don't try and setup
+    space cache for a block group that isn't cached, since we won't be able to write
+    it out anyway.  None of these problems are actual problems, they are just
+    annoying and sub-optimal.  Thanks,
+    
+    Signed-off-by: Josef Bacik <josef@redhat.com>
+
+diff --git a/fs/btrfs/extent-tree.c b/fs/btrfs/extent-tree.c
+index ddaf6340fe7f..8c56f5b38948 100644
+--- a/fs/btrfs/extent-tree.c
++++ b/fs/btrfs/extent-tree.c
+@@ -2742,6 +2742,7 @@ static int cache_save_setup(struct btrfs_block_group_cache *block_group,
+ 	struct btrfs_root *root = block_group->fs_info->tree_root;
+ 	struct inode *inode = NULL;
+ 	u64 alloc_hint = 0;
++	int dcs = BTRFS_DC_ERROR;
+ 	int num_pages = 0;
+ 	int retries = 0;
+ 	int ret = 0;
+@@ -2796,6 +2797,8 @@ static int cache_save_setup(struct btrfs_block_group_cache *block_group,
+ 
+ 	spin_lock(&block_group->lock);
+ 	if (block_group->cached != BTRFS_CACHE_FINISHED) {
++		/* We're not cached, don't bother trying to write stuff out */
++		dcs = BTRFS_DC_WRITTEN;
+ 		spin_unlock(&block_group->lock);
+ 		goto out_put;
+ 	}
+@@ -2822,6 +2825,8 @@ static int cache_save_setup(struct btrfs_block_group_cache *block_group,
+ 	ret = btrfs_prealloc_file_range_trans(inode, trans, 0, 0, num_pages,
+ 					      num_pages, num_pages,
+ 					      &alloc_hint);
++	if (!ret)
++		dcs = BTRFS_DC_SETUP;
+ 	btrfs_free_reserved_data_space(inode, num_pages);
+ out_put:
+ 	iput(inode);
+@@ -2829,10 +2834,7 @@ static int cache_save_setup(struct btrfs_block_group_cache *block_group,
+ 	btrfs_release_path(root, path);
+ out:
+ 	spin_lock(&block_group->lock);
+-	if (ret)
+-		block_group->disk_cache_state = BTRFS_DC_ERROR;
+-	else
+-		block_group->disk_cache_state = BTRFS_DC_SETUP;
++	block_group->disk_cache_state = dcs;
+ 	spin_unlock(&block_group->lock);
+ 
+ 	return ret;
+diff --git a/fs/btrfs/free-space-cache.c b/fs/btrfs/free-space-cache.c
+index 22ee0dc2e6b8..60d684266959 100644
+--- a/fs/btrfs/free-space-cache.c
++++ b/fs/btrfs/free-space-cache.c
+@@ -290,7 +290,7 @@ int load_free_space_cache(struct btrfs_fs_info *fs_info,
+ 		       (unsigned long long)BTRFS_I(inode)->generation,
+ 		       (unsigned long long)generation,
+ 		       (unsigned long long)block_group->key.objectid);
+-		goto out;
++		goto free_cache;
+ 	}
+ 
+ 	if (!num_entries)
+@@ -524,6 +524,12 @@ int btrfs_write_out_cache(struct btrfs_root *root,
+ 		return 0;
+ 	}
+ 
++	node = rb_first(&block_group->free_space_offset);
++	if (!node) {
++		iput(inode);
++		return 0;
++	}
++
+ 	last_index = (i_size_read(inode) - 1) >> PAGE_CACHE_SHIFT;
+ 	filemap_write_and_wait(inode->i_mapping);
+ 	btrfs_wait_ordered_range(inode, inode->i_size &
+@@ -543,10 +549,6 @@ int btrfs_write_out_cache(struct btrfs_root *root,
+ 	 */
+ 	first_page_offset = (sizeof(u32) * num_checksums) + sizeof(u64);
+ 
+-	node = rb_first(&block_group->free_space_offset);
+-	if (!node)
+-		goto out_free;
+-
+ 	/*
+ 	 * Lock all pages first so we can lock the extent safely.
+ 	 *
+

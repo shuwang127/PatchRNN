@@ -1,0 +1,61 @@
+commit bcc01b4d852c73dbd4cc569c905b5ab1833d00d3
+Author: H Hartley Sweeten <hsweeten@visionengravers.com>
+Date:   Wed Jun 5 15:36:24 2013 -0700
+
+    staging: comedi: pcmad: return errno if AI conversion times out
+    
+    Instead of returning invalid data, return -ETIME if the analog input
+    conversion times out.
+    
+    Signed-off-by: H Hartley Sweeten <hsweeten@visionengravers.com>
+    Cc: Ian Abbott <abbotti@mev.co.uk>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/comedi/drivers/pcmad.c b/drivers/staging/comedi/drivers/pcmad.c
+index 79cc2e630464..f64e75b871a7 100644
+--- a/drivers/staging/comedi/drivers/pcmad.c
++++ b/drivers/staging/comedi/drivers/pcmad.c
+@@ -72,25 +72,37 @@ struct pcmad_priv_struct {
+ 
+ #define TIMEOUT	100
+ 
++static int pcmad_ai_wait_for_eoc(struct comedi_device *dev,
++				 int timeout)
++{
++	int i;
++
++	for (i = 0; i < timeout; i++) {
++		if ((inb(dev->iobase + PCMAD_STATUS) & 0x3) == 0x3)
++			return 0;
++	}
++	return -ETIME;
++}
++
+ static int pcmad_ai_insn_read(struct comedi_device *dev,
+ 			      struct comedi_subdevice *s,
+ 			      struct comedi_insn *insn, unsigned int *data)
+ {
+ 	const struct pcmad_board_struct *board = comedi_board(dev);
+ 	struct pcmad_priv_struct *devpriv = dev->private;
+-	int i;
+ 	int chan;
+ 	int n;
++	int ret;
+ 
+ 	chan = CR_CHAN(insn->chanspec);
+ 
+ 	for (n = 0; n < insn->n; n++) {
+ 		outb(chan, dev->iobase + PCMAD_CONVERT);
+ 
+-		for (i = 0; i < TIMEOUT; i++) {
+-			if ((inb(dev->iobase + PCMAD_STATUS) & 0x3) == 0x3)
+-				break;
+-		}
++		ret = pcmad_ai_wait_for_eoc(dev, TIMEOUT);
++		if (ret)
++			return ret;
++
+ 		data[n] = inb(dev->iobase + PCMAD_LSB);
+ 		data[n] |= (inb(dev->iobase + PCMAD_MSB) << 8);
+ 
+

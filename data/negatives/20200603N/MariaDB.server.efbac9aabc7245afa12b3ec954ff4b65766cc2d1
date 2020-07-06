@@ -1,0 +1,143 @@
+commit efbac9aabc7245afa12b3ec954ff4b65766cc2d1
+Author: Timothy Smith <timothy.smith@sun.com>
+Date:   Sun Dec 14 12:18:59 2008 -0700
+
+    Complete application of InnoDB snapshot innodb-5.1-ss2485, part 1.  Fixes
+    
+    Bug #36819: ut_usectime does not handle errors from gettimeofday
+    
+    
+    Detailed revision comments:
+    
+    r2480 | vasil | 2008-05-27 11:40:07 +0300 (Tue, 27 May 2008) | 11 lines
+    branches/5.1:
+    
+    Fix Bug#36819 ut_usectime does not handle errors from gettimeofday
+    
+    by retrying gettimeofday() several times if it fails in ut_usectime().
+    If it fails on all calls then return error to the caller to be handled
+    at higher level.
+    
+    Update the variable innodb_row_lock_time_max in SHOW STATUS output only
+    if ut_usectime() was successful.
+
+diff --git a/storage/innobase/include/ut0ut.h b/storage/innobase/include/ut0ut.h
+index a60ce73c35a..8ad1782b178 100644
+--- a/storage/innobase/include/ut0ut.h
++++ b/storage/innobase/include/ut0ut.h
+@@ -145,11 +145,15 @@ ib_time_t
+ ut_time(void);
+ /*=========*/
+ /**************************************************************
+-Returns system time. */
++Returns system time.
++Upon successful completion, the value 0 is returned; otherwise the
++value -1 is returned and the global variable errno is set to indicate the
++error. */
+ 
+-void
++int
+ ut_usectime(
+ /*========*/
++			/* out: 0 on success, -1 otherwise */
+ 	ulint*	sec,	/* out: seconds since the Epoch */
+ 	ulint*	ms);	/* out: microseconds since the Epoch+*sec */
+ /**************************************************************
+diff --git a/storage/innobase/srv/srv0srv.c b/storage/innobase/srv/srv0srv.c
+index 773b5d583e0..e8b7bd4cee2 100644
+--- a/storage/innobase/srv/srv0srv.c
++++ b/storage/innobase/srv/srv0srv.c
+@@ -1453,8 +1453,11 @@ srv_suspend_mysql_thread(
+ 		srv_n_lock_wait_count++;
+ 		srv_n_lock_wait_current_count++;
+ 
+-		ut_usectime(&sec, &ms);
+-		start_time = (ib_longlong)sec * 1000000 + ms;
++		if (ut_usectime(&sec, &ms) == -1) {
++			start_time = -1;
++		} else {
++			start_time = (ib_longlong)sec * 1000000 + ms;
++		}
+ 	}
+ 	/* Wake the lock timeout monitor thread, if it is suspended */
+ 
+@@ -1508,14 +1511,20 @@ srv_suspend_mysql_thread(
+ 	wait_time = ut_difftime(ut_time(), slot->suspend_time);
+ 
+ 	if (thr->lock_state == QUE_THR_LOCK_ROW) {
+-		ut_usectime(&sec, &ms);
+-		finish_time = (ib_longlong)sec * 1000000 + ms;
++		if (ut_usectime(&sec, &ms) == -1) {
++			finish_time = -1;
++		} else {
++			finish_time = (ib_longlong)sec * 1000000 + ms;
++		}
+ 
+ 		diff_time = (ulint) (finish_time - start_time);
+ 
+ 		srv_n_lock_wait_current_count--;
+ 		srv_n_lock_wait_time = srv_n_lock_wait_time + diff_time;
+-		if (diff_time > srv_n_lock_max_wait_time) {
++		if (diff_time > srv_n_lock_max_wait_time &&
++		    /* only update the variable if we successfully
++		    retrieved the start and finish times. See Bug#36819. */
++		    start_time != -1 && finish_time != -1) {
+ 			srv_n_lock_max_wait_time = diff_time;
+ 		}
+ 	}
+diff --git a/storage/innobase/ut/ut0ut.c b/storage/innobase/ut/ut0ut.c
+index 1ca278cd633..6b5bcef1830 100644
+--- a/storage/innobase/ut/ut0ut.c
++++ b/storage/innobase/ut/ut0ut.c
+@@ -112,19 +112,45 @@ ut_time(void)
+ }
+ 
+ /**************************************************************
+-Returns system time. */
++Returns system time.
++Upon successful completion, the value 0 is returned; otherwise the
++value -1 is returned and the global variable errno is set to indicate the
++error. */
+ 
+-void
++int
+ ut_usectime(
+ /*========*/
++			/* out: 0 on success, -1 otherwise */
+ 	ulint*	sec,	/* out: seconds since the Epoch */
+ 	ulint*	ms)	/* out: microseconds since the Epoch+*sec */
+ {
+ 	struct timeval	tv;
++	int		ret;
++	int		errno_gettimeofday;
++	int		i;
++
++	for (i = 0; i < 10; i++) {
++
++		ret = ut_gettimeofday(&tv, NULL);
++
++		if (ret == -1) {
++			errno_gettimeofday = errno;
++			ut_print_timestamp(stderr);
++			fprintf(stderr, "  InnoDB: gettimeofday(): %s\n",
++				strerror(errno_gettimeofday));
++			os_thread_sleep(100000);  /* 0.1 sec */
++			errno = errno_gettimeofday;
++		} else {
++			break;
++		}
++	}
++
++	if (ret != -1) {
++		*sec = (ulint) tv.tv_sec;
++		*ms  = (ulint) tv.tv_usec;
++	}
+ 
+-	ut_gettimeofday(&tv, NULL);
+-	*sec = (ulint) tv.tv_sec;
+-	*ms  = (ulint) tv.tv_usec;
++	return(ret);
+ }
+ 
+ /**************************************************************
+

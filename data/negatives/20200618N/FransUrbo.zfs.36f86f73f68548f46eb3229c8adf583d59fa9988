@@ -1,0 +1,84 @@
+commit 36f86f73f68548f46eb3229c8adf583d59fa9988
+Author: Ned Bass <bass6@llnl.gov>
+Date:   Wed Jan 30 09:48:57 2013 -0800
+
+    Fix mismatch between SA header size and layout
+    
+    When a system attribute layout is created an inconsistency may occur
+    between the system attribute header (sa_hdr_phys_t) size and the
+    variable-sized attribute count stored in the layout.  The inconsistency
+    results in the following failed assertion when SA_HDR_SIZE_MATCH_LAYOUT
+    returns false:
+    
+    SPLError: 11315:0:(sa.c:1541:sa_find_idx_tab())
+    ASSERTION((IS_SA_BONUSTYPE(bonustype) && SA_HDR_SIZE_MATCH_LAYOUT(hdr,
+    tb)) || !IS_SA_BONUSTYPE(bonustype) || (IS_SA_BONUSTYPE(bonustype) &&
+    hdr->sa_layout_info == 0)) failed
+    
+    The bug originates in this snippet from sa_find_sizes().
+    
+        if (is_var_sz && var_size > 1) {
+                if (P2ROUNDUP(hdrsize + sizeof (uint16_t),
+                    *total < full_space) {
+                        hdrsize += sizeof (uint16_t);
+    
+    This assumes that the current variable-sized attribute will be stored in
+    the current buffer and accounts for the space needed to store its size
+    in the sa_hdr_phys_t. However if the next attribute spills over we need
+    to store a blkptr_t at the end of the bonus buffer to point to the spill
+    block. If the current attribute is in the way of the blkptr_t then it
+    too will be relocated into the spill block. But since we've already
+    accounted for it in the header size we get the inconsistency described
+    above.
+    
+    To avoid this, record the index of the last variable-sized attribute
+    that prompted a hdrsize increase, and reverse the increase if we later
+    determine that that attribute will be relocated to the spill block.
+    
+    Signed-off-by: Matthew Ahrens <mahrens@delphix.com>
+    Signed-off-by: Brian Behlendorf <behlendorf1@llnl.gov>
+    Closes #1250
+
+diff --git a/module/zfs/sa.c b/module/zfs/sa.c
+index 91d4074af..f4d264f71 100644
+--- a/module/zfs/sa.c
++++ b/module/zfs/sa.c
+@@ -572,6 +572,7 @@ sa_find_sizes(sa_os_t *sa, sa_bulk_attr_t *attr_desc, int attr_count,
+ {
+ 	int var_size = 0;
+ 	int i;
++	int j = -1;
+ 	int full_space;
+ 	int hdrsize;
+ 	boolean_t done = B_FALSE;
+@@ -611,7 +612,14 @@ sa_find_sizes(sa_os_t *sa, sa_bulk_attr_t *attr_desc, int attr_count,
+ 		if (is_var_sz && var_size > 1) {
+ 			if (P2ROUNDUP(hdrsize + sizeof (uint16_t), 8) +
+ 			    *total < full_space) {
++				/*
++				 * Account for header space used by array of
++				 * optional sizes of variable-length attributes.
++				 * Record the index in case this increase needs
++				 * to be reversed due to spill-over.
++				 */
+ 				hdrsize += sizeof (uint16_t);
++				j = i;
+ 			} else {
+ 				done = B_TRUE;
+ 				*index = i;
+@@ -640,6 +648,14 @@ next:
+ 			*will_spill = B_TRUE;
+ 	}
+ 
++	/*
++	 * j holds the index of the last variable-sized attribute for
++	 * which hdrsize was increased.  Reverse the increase if that
++	 * attribute will be relocated to the spill block.
++	 */
++	if (*will_spill && j == *index)
++		hdrsize -= sizeof (uint16_t);
++
+ 	hdrsize = P2ROUNDUP(hdrsize, 8);
+ 	return (hdrsize);
+ }
+

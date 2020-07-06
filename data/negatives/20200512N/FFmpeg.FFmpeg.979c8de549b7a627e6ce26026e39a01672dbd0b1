@@ -1,0 +1,81 @@
+commit 979c8de549b7a627e6ce26026e39a01672dbd0b1
+Author: Justin Ruggles <justin.ruggles@gmail.com>
+Date:   Thu Nov 3 22:10:15 2011 -0400
+
+    sipr: use a function pointer to select the decode_frame function
+
+diff --git a/libavcodec/sipr.c b/libavcodec/sipr.c
+index 4257496e0e..10a12c52a5 100644
+--- a/libavcodec/sipr.c
++++ b/libavcodec/sipr.c
+@@ -492,8 +492,12 @@ static av_cold int sipr_decoder_init(AVCodecContext * avctx)
+ 
+     av_log(avctx, AV_LOG_DEBUG, "Mode: %s\n", modes[ctx->mode].mode_name);
+ 
+-    if (ctx->mode == MODE_16k)
++    if (ctx->mode == MODE_16k) {
+         ff_sipr_init_16k(ctx);
++        ctx->decode_frame = ff_sipr_decode_frame_16k;
++    } else {
++        ctx->decode_frame = decode_frame;
++    }
+ 
+     for (i = 0; i < LP_FILTER_ORDER; i++)
+         ctx->lsp_history[i] = cos((i+1) * M_PI / (LP_FILTER_ORDER + 1));
+@@ -541,10 +545,7 @@ static int sipr_decode_frame(AVCodecContext *avctx, void *datap,
+     for (i = 0; i < mode_par->frames_per_packet; i++) {
+         decode_parameters(&parm, &gb, mode_par);
+ 
+-        if (ctx->mode == MODE_16k)
+-            ff_sipr_decode_frame_16k(ctx, &parm, data);
+-        else
+-            decode_frame(ctx, &parm, data);
++        ctx->decode_frame(ctx, &parm, data);
+ 
+         data += subframe_size * mode_par->subframe_count;
+     }
+diff --git a/libavcodec/sipr.h b/libavcodec/sipr.h
+index 5b2198ea87..951532167f 100644
+--- a/libavcodec/sipr.h
++++ b/libavcodec/sipr.h
+@@ -53,8 +53,18 @@ typedef enum {
+     MODE_COUNT
+ } SiprMode;
+ 
+-typedef struct {
++typedef struct SiprParameters {
++    int ma_pred_switch;        ///< switched moving average predictor
++    int vq_indexes[5];
++    int pitch_delay[5];        ///< pitch delay
++    int gp_index[5];           ///< adaptive-codebook gain indexes
++    int16_t fc_indexes[5][10]; ///< fixed-codebook indexes
++    int gc_index[5];           ///< fixed-codebook gain indexes
++} SiprParameters;
++
++typedef struct SiprContext {
+     AVCodecContext *avctx;
++    AVFrame frame;
+ 
+     SiprMode mode;
+ 
+@@ -85,16 +95,10 @@ typedef struct {
+     float mem_preemph[LP_FILTER_ORDER_16k];
+     float synth[LP_FILTER_ORDER_16k];
+     double lsp_history_16k[16];
+-} SiprContext;
+ 
+-typedef struct {
+-    int ma_pred_switch;        ///< switched moving average predictor
+-    int vq_indexes[5];
+-    int pitch_delay[5];        ///< pitch delay
+-    int gp_index[5];           ///< adaptive-codebook gain indexes
+-    int16_t fc_indexes[5][10]; ///< fixed-codebook indexes
+-    int gc_index[5];           ///< fixed-codebook gain indexes
+-} SiprParameters;
++    void (*decode_frame)(struct SiprContext *ctx, SiprParameters *params,
++                         float *out_data);
++} SiprContext;
+ 
+ extern const float ff_pow_0_5[16];
+ 
+

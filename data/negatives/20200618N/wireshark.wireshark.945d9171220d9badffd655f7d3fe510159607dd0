@@ -1,0 +1,106 @@
+commit 945d9171220d9badffd655f7d3fe510159607dd0
+Author: Jeff Morriss <jeff.morriss@ulticom.com>
+Date:   Wed Oct 27 00:42:02 2010 +0000
+
+    From Thomas Boehne via https://bugs.wireshark.org/bugzilla/show_bug.cgi?id=5324 :
+    
+    As mentioned before, the heuristics used by packet-adwin-config were weak for
+    UDP packets. This patch creates a stronger heuristic by checking if one of the
+    MAC addresses in the UDP packets is in the range assigned to the manufacturer
+    of the devices that use this protocol (or if it is a broadcast).
+    
+    That should be relatively safe to do because the protocol is rarely used in
+    routed networks.
+    
+    svn path=/trunk/; revision=34654
+
+diff --git a/epan/dissectors/packet-adwin-config.c b/epan/dissectors/packet-adwin-config.c
+index 5be0c47337..6f8fb1d4c6 100644
+--- a/epan/dissectors/packet-adwin-config.c
++++ b/epan/dissectors/packet-adwin-config.c
+@@ -374,6 +374,45 @@ dissect_TCPFlashUpdate(tvbuff_t *tvb,  packet_info *pinfo _U_, proto_tree *adwin
+ 	ADWIN_ADD_BE(adwin_tree, data,             offset,  length);
+ }
+ 
++/* 00:50:c2:0a:2*:** */
++static char mac_iab_start[] = { 0x00, 0x50, 0xc2, 0x0a, 0x20, 0x00 };
++static char mac_iab_end[]   = { 0x00, 0x50, 0xc2, 0x0a, 0x2f, 0xff };
++
++/* 00:22:71:**:**:** */
++static char mac_oui_start[] = { 0x00, 0x22, 0x71, 0x00, 0x00, 0x00 };
++static char mac_oui_end[]   = { 0x00, 0x22, 0x71, 0xff, 0xff, 0xff };
++
++/* ff:ff:ff:ff:ff:ff */
++static char mac_broadcast[] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
++
++/* return TRUE if mac is in mac address range assigned to ADwin or if
++ * mac is broadcast */
++static gboolean
++is_adwin_mac_or_broadcast(address mac)
++{
++	if (mac.type != AT_ETHER)
++		return FALSE;
++
++	if (mac.len != 6) /* length of MAC address */
++		return FALSE;
++
++	if ((memcmp(mac.data, mac_iab_start, mac.len) >= 0) &&
++	    (memcmp(mac.data, mac_iab_end  , mac.len) <= 0))
++		return TRUE;
++
++	if ((memcmp(mac.data, mac_oui_start, mac.len) >= 0) &&
++	    (memcmp(mac.data, mac_oui_end, mac.len) <= 0))
++		return TRUE;
++
++	/* adwin configuration protocol uses MAC broadcasts for
++	   device discovery */
++	if (memcmp(mac.data, mac_broadcast, mac.len) == 0)
++		return TRUE;
++
++	return FALSE;
++}
++
++
+ /* Here we determine which type of packet is sent by looking at its
+    size. Let's hope that future ADwin packets always differ in size.
+    They probably will, since the server classifies the packets
+@@ -408,15 +447,18 @@ dissect_adwin_config(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
+ 	       || length == UDPInitAckLENGTH
+ 	       || length == UDPIXP425FlashUpdateLENGTH
+ 	       || length == UDPOutLENGTH))
+-		return (0);
++		return 0;
+ 
+ 	if(pinfo->ipproto == IP_PROTO_TCP &&
+ 	   !(pinfo->srcport == ADWIN_CONFIGURATION_PORT
+ 	     || pinfo->destport == ADWIN_CONFIGURATION_PORT))
+-		return(0);
++		return 0;
+ 
+ 	if (pinfo->ipproto != IP_PROTO_UDP && pinfo->ipproto != IP_PROTO_TCP)
+-		return (0);
++		return 0;
++
++	if (! (is_adwin_mac_or_broadcast(pinfo->dl_src) || is_adwin_mac_or_broadcast(pinfo->dl_dst)))
++		return 0;
+ 
+ 	col_set_str(pinfo->cinfo, COL_PROTOCOL, "ADwin Config");
+ 	col_clear(pinfo->cinfo, COL_INFO);
+@@ -428,7 +470,6 @@ dissect_adwin_config(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
+ 		adwin_config_tree = NULL;
+ 	}
+ 
+-
+ 	switch (pinfo->ipproto) {
+ 	case IP_PROTO_TCP:
+ 		tcp_dissect_pdus(tvb, pinfo, tree, 1, 4, get_adwin_TCPUpdate_len, dissect_TCPFlashUpdate);
+@@ -463,7 +504,7 @@ dissect_adwin_config(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
+ 			DISSECTOR_ASSERT_NOT_REACHED();
+ 		}
+ 
+-		if (check_col(pinfo->cinfo, COL_INFO)) 
++		if (check_col(pinfo->cinfo, COL_INFO))
+ 			col_add_str(pinfo->cinfo, COL_INFO,
+ 				    val_to_str(length, length_mapping,
+ 					"Unknown ADwin Configuration packet, length: %d"));
+

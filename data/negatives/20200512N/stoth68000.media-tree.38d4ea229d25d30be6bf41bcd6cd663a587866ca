@@ -1,0 +1,59 @@
+commit 38d4ea229d25d30be6bf41bcd6cd663a587866ca
+Author: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+Date:   Wed Mar 22 18:32:47 2017 +0100
+
+    cpufreq: schedutil: Trace frequency only if it has changed
+    
+    sugov_update_commit() calls trace_cpu_frequency() to record the
+    current CPU frequency if it has not changed in the fast switch case
+    to prevent utilities from getting confused (they may report that the
+    CPU is idle if the frequency has not been recorded for too long, for
+    example).
+    
+    However, that may cause the tracepoint to be triggered quite often
+    for no real reason (if the frequency doesn't change, we will not
+    modify the last update time stamp and governor computations may
+    run again shortly when that happens), so don't do that (arguably, it
+    is done to work around a utilities bug anyway).
+    
+    That allows code duplication in sugov_update_commit() to be reduced
+    somewhat too.
+    
+    Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+    Acked-by: Viresh Kumar <viresh.kumar@linaro.org>
+
+diff --git a/kernel/sched/cpufreq_schedutil.c b/kernel/sched/cpufreq_schedutil.c
+index c1ffb5dc8af6..1054f868d95c 100644
+--- a/kernel/sched/cpufreq_schedutil.c
++++ b/kernel/sched/cpufreq_schedutil.c
+@@ -98,22 +98,20 @@ static void sugov_update_commit(struct sugov_policy *sg_policy, u64 time,
+ {
+ 	struct cpufreq_policy *policy = sg_policy->policy;
+ 
++	if (sg_policy->next_freq == next_freq)
++		return;
++
++	sg_policy->next_freq = next_freq;
++	sg_policy->last_freq_update_time = time;
++
+ 	if (policy->fast_switch_enabled) {
+-		if (sg_policy->next_freq == next_freq) {
+-			trace_cpu_frequency(policy->cur, smp_processor_id());
+-			return;
+-		}
+-		sg_policy->next_freq = next_freq;
+-		sg_policy->last_freq_update_time = time;
+ 		next_freq = cpufreq_driver_fast_switch(policy, next_freq);
+ 		if (next_freq == CPUFREQ_ENTRY_INVALID)
+ 			return;
+ 
+ 		policy->cur = next_freq;
+ 		trace_cpu_frequency(next_freq, smp_processor_id());
+-	} else if (sg_policy->next_freq != next_freq) {
+-		sg_policy->next_freq = next_freq;
+-		sg_policy->last_freq_update_time = time;
++	} else {
+ 		sg_policy->work_in_progress = true;
+ 		irq_work_queue(&sg_policy->irq_work);
+ 	}
+

@@ -1,0 +1,131 @@
+commit 219595b6ee139d883b98a9a32efbe2970802200a
+Author: Tero Kristo <t-kristo@ti.com>
+Date:   Mon Sep 8 11:44:10 2014 +0300
+
+    ARM: OMAP4+: PRM: get rid of cpu_is_omap44xx calls from interrupt init
+    
+    The compatible DT node is now passed with the prm init, so there is no
+    need to do node matching here again. Added a new flag to the init data
+    also, to detect default IRQ support for OMAP4. Also, any booting omap4
+    DT setup always has a PRM node, so there is no need to check against
+    the special case where it would be missing.
+    
+    Signed-off-by: Tero Kristo <t-kristo@ti.com>
+
+diff --git a/arch/arm/mach-omap2/prm.h b/arch/arm/mach-omap2/prm.h
+index 3936e6c38cea..233bc84fbc0e 100644
+--- a/arch/arm/mach-omap2/prm.h
++++ b/arch/arm/mach-omap2/prm.h
+@@ -29,9 +29,11 @@ int omap2_prcm_base_init(void);
+  *
+  * PRM_HAS_IO_WAKEUP: has IO wakeup capability
+  * PRM_HAS_VOLTAGE: has voltage domains
++ * PRM_IRQ_DEFAULT: use default irq number for PRM irq
+  */
+-#define PRM_HAS_IO_WAKEUP	(1 << 0)
+-#define PRM_HAS_VOLTAGE		(1 << 1)
++#define PRM_HAS_IO_WAKEUP	BIT(0)
++#define PRM_HAS_VOLTAGE		BIT(1)
++#define PRM_IRQ_DEFAULT		BIT(2)
+ 
+ /*
+  * MAX_MODULE_SOFTRESET_WAIT: Maximum microseconds to wait for OMAP
+diff --git a/arch/arm/mach-omap2/prm44xx.c b/arch/arm/mach-omap2/prm44xx.c
+index 243133c4bf0d..c35ad0bedf81 100644
+--- a/arch/arm/mach-omap2/prm44xx.c
++++ b/arch/arm/mach-omap2/prm44xx.c
+@@ -703,10 +703,14 @@ static struct prm_ll_data omap44xx_prm_ll_data = {
+ 	.vp_clear_txdone	= omap4_prm_vp_clear_txdone,
+ };
+ 
++static const struct omap_prcm_init_data *prm_init_data;
++
+ int __init omap44xx_prm_init(const struct omap_prcm_init_data *data)
+ {
+ 	omap_prm_base_init();
+ 
++	prm_init_data = data;
++
+ 	if (data->flags & PRM_HAS_IO_WAKEUP)
+ 		prm_features |= PRM_HAS_IO_WAKEUP;
+ 
+@@ -718,16 +722,8 @@ int __init omap44xx_prm_init(const struct omap_prcm_init_data *data)
+ 	return prm_register(&omap44xx_prm_ll_data);
+ }
+ 
+-static const struct of_device_id omap_prm_dt_match_table[] = {
+-	{ .compatible = "ti,omap4-prm" },
+-	{ .compatible = "ti,omap5-prm" },
+-	{ .compatible = "ti,dra7-prm" },
+-	{ }
+-};
+-
+ static int omap44xx_prm_late_init(void)
+ {
+-	struct device_node *np;
+ 	int irq_num;
+ 
+ 	if (!(prm_features & PRM_HAS_IO_WAKEUP))
+@@ -737,31 +733,23 @@ static int omap44xx_prm_late_init(void)
+ 	if (!of_have_populated_dt())
+ 		return 0;
+ 
+-	np = of_find_matching_node(NULL, omap_prm_dt_match_table);
+-
+-	if (!np) {
+-		/* Default loaded up with OMAP4 values */
+-		if (!cpu_is_omap44xx())
+-			return 0;
+-	} else {
+-		irq_num = of_irq_get(np, 0);
+-		/*
+-		 * Already have OMAP4 IRQ num. For all other platforms, we need
+-		 * IRQ numbers from DT
+-		 */
+-		if (irq_num < 0 && !cpu_is_omap44xx()) {
+-			if (irq_num == -EPROBE_DEFER)
+-				return irq_num;
+-
+-			/* Have nothing to do */
+-			return 0;
+-		}
+-
+-		/* Once OMAP4 DT is filled as well */
+-		if (irq_num >= 0) {
+-			omap4_prcm_irq_setup.irq = irq_num;
+-			omap4_prcm_irq_setup.xlate_irq = NULL;
+-		}
++	irq_num = of_irq_get(prm_init_data->np, 0);
++	/*
++	 * Already have OMAP4 IRQ num. For all other platforms, we need
++	 * IRQ numbers from DT
++	 */
++	if (irq_num < 0 && !(prm_init_data->flags & PRM_IRQ_DEFAULT)) {
++		if (irq_num == -EPROBE_DEFER)
++			return irq_num;
++
++		/* Have nothing to do */
++		return 0;
++	}
++
++	/* Once OMAP4 DT is filled as well */
++	if (irq_num >= 0) {
++		omap4_prcm_irq_setup.irq = irq_num;
++		omap4_prcm_irq_setup.xlate_irq = NULL;
+ 	}
+ 
+ 	omap44xx_prm_enable_io_wakeup();
+diff --git a/arch/arm/mach-omap2/prm_common.c b/arch/arm/mach-omap2/prm_common.c
+index 04dfe8f844c9..6832a31e9a70 100644
+--- a/arch/arm/mach-omap2/prm_common.c
++++ b/arch/arm/mach-omap2/prm_common.c
+@@ -669,7 +669,7 @@ static struct omap_prcm_init_data omap4_prm_data __initdata = {
+ 	.index = TI_CLKM_PRM,
+ 	.init = omap44xx_prm_init,
+ 	.device_inst_offset = OMAP4430_PRM_DEVICE_INST,
+-	.flags = PRM_HAS_IO_WAKEUP | PRM_HAS_VOLTAGE,
++	.flags = PRM_HAS_IO_WAKEUP | PRM_HAS_VOLTAGE | PRM_IRQ_DEFAULT,
+ };
+ #endif
+ 
+

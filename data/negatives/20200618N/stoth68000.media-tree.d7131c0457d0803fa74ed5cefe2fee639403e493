@@ -1,0 +1,50 @@
+commit d7131c0457d0803fa74ed5cefe2fee639403e493
+Author: Bartosz Markowski <bartosz.markowski@tieto.com>
+Date:   Tue Mar 10 14:32:19 2015 +0100
+
+    ath10k: fix PMF by using AES-CMAC/IGTK software crypto
+    
+    While testing with older supplicant, .drv_set_key() was failing due to
+    higher than ath10k firmware could handle key_index (WMI_MAX_KEY_INDEX == 3).
+    
+    --
+    wpa_driver_nl80211_set_key: ifindex=15 alg=4 addr=0x7f02b129fbe3 key_idx=4 set_tx=0 seq_len=6 key_len=16
+        broadcast key
+    nl80211: set_key failed; err=-22 Invalid argument)
+    wlan0: WPA: Failed to configure IGTK to the driver
+    wlan0: RSN: Failed to configure IGTK
+    --
+    
+    In order to fix this case (PMF: AES-CMAC/IGTK) force the AES_CMAC cipher to
+    be handled by software.
+    
+    Signed-off-by: Bartosz Markowski <bartosz.markowski@tieto.com>
+    Signed-off-by: Kalle Valo <kvalo@qca.qualcomm.com>
+
+diff --git a/drivers/net/wireless/ath/ath10k/mac.c b/drivers/net/wireless/ath/ath10k/mac.c
+index e0831e2e2b1f..341f3c8d8bf2 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.c
++++ b/drivers/net/wireless/ath/ath10k/mac.c
+@@ -66,8 +66,8 @@ static int ath10k_send_key(struct ath10k_vif *arvif,
+ 		arg.key_cipher = WMI_CIPHER_WEP;
+ 		break;
+ 	case WLAN_CIPHER_SUITE_AES_CMAC:
+-		/* this one needs to be done in software */
+-		return 1;
++		WARN_ON(1);
++		return -EINVAL;
+ 	default:
+ 		ath10k_warn(ar, "cipher %d is not supported\n", key->cipher);
+ 		return -EOPNOTSUPP;
+@@ -4070,6 +4070,10 @@ static int ath10k_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+ 	int ret = 0;
+ 	u32 flags = 0;
+ 
++	/* this one needs to be done in software */
++	if (key->cipher == WLAN_CIPHER_SUITE_AES_CMAC)
++		return 1;
++
+ 	if (key->keyidx > WMI_MAX_KEY_INDEX)
+ 		return -ENOSPC;
+ 
+

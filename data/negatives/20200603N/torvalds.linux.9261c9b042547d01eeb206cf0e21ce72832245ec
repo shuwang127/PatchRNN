@@ -1,0 +1,54 @@
+commit 9261c9b042547d01eeb206cf0e21ce72832245ec
+Author: Eric Dumazet <dada1@cosmosbay.com>
+Date:   Tue Sep 6 14:51:39 2005 -0700
+
+    [NET]: Make sure l_linger is unsigned to avoid negative timeouts
+    
+    One of my x86_64 (linux 2.6.13) server log is filled with :
+    
+    schedule_timeout: wrong timeout value ffffffffffffff06 from ffffffff802e63ca
+    schedule_timeout: wrong timeout value ffffffffffffff06 from ffffffff802e63ca
+    schedule_timeout: wrong timeout value ffffffffffffff06 from ffffffff802e63ca
+    schedule_timeout: wrong timeout value ffffffffffffff06 from ffffffff802e63ca
+    schedule_timeout: wrong timeout value ffffffffffffff06 from ffffffff802e63ca
+    
+    This is because some application does a
+    
+    struct linger li;
+    li.l_onoff = 1;
+    li.l_linger = -1;
+    setsockopt(sock, SOL_SOCKET, SO_LINGER, &li, sizeof(li));
+    
+    And unfortunatly l_linger is defined as a 'signed int' in
+    include/linux/socket.h:
+    
+    struct linger {
+             int             l_onoff;        /* Linger active                */
+             int             l_linger;       /* How long to linger for       */
+    };
+    
+    I dont know if it's safe to change l_linger to 'unsigned int' in the
+    include file (It might be defined as int in ABI specs)
+    
+    Signed-off-by: Eric Dumazet <dada1@cosmosbay.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/core/sock.c b/net/core/sock.c
+index c13594579bfb..b32b1815ae5a 100644
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -341,11 +341,11 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
+ 				sock_reset_flag(sk, SOCK_LINGER);
+ 			else {
+ #if (BITS_PER_LONG == 32)
+-				if (ling.l_linger >= MAX_SCHEDULE_TIMEOUT/HZ)
++				if ((unsigned int)ling.l_linger >= MAX_SCHEDULE_TIMEOUT/HZ)
+ 					sk->sk_lingertime = MAX_SCHEDULE_TIMEOUT;
+ 				else
+ #endif
+-					sk->sk_lingertime = ling.l_linger * HZ;
++					sk->sk_lingertime = (unsigned int)ling.l_linger * HZ;
+ 				sock_set_flag(sk, SOCK_LINGER);
+ 			}
+ 			break;
+

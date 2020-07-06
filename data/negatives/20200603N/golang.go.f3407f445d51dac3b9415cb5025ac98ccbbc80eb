@@ -1,0 +1,514 @@
+commit f3407f445d51dac3b9415cb5025ac98ccbbc80eb
+Author: Russ Cox <rsc@golang.org>
+Date:   Fri Feb 15 11:18:55 2013 -0500
+
+    runtime: fix running under nohup
+    
+    There are two ways nohup(1) might be implemented:
+    it might mask away the signal, or it might set the handler
+    to SIG_IGN, both of which are inherited across fork+exec.
+    So two fixes:
+    
+    * Make sure to preserve the inherited signal mask at
+    minit instead of clearing it.
+    
+    * If the SIGHUP handler is SIG_IGN, leave it that way.
+    
+    Fixes #4491.
+    
+    R=golang-dev, mikioh.mikioh, iant
+    CC=golang-dev
+    https://golang.org/cl/7308102
+
+diff --git a/src/pkg/runtime/os_darwin.h b/src/pkg/runtime/os_darwin.h
+index 70cfcce846..83386fa94f 100644
+--- a/src/pkg/runtime/os_darwin.h
++++ b/src/pkg/runtime/os_darwin.h
+@@ -4,6 +4,7 @@
+ 
+ #define SIG_DFL ((void*)0)
+ #define SIG_IGN ((void*)1)
++#define SIGHUP 1
+ 
+ int32	runtime·bsdthread_create(void*, M*, G*, void(*)(void));
+ int32	runtime·bsdthread_register(void);
+diff --git a/src/pkg/runtime/os_freebsd.h b/src/pkg/runtime/os_freebsd.h
+index b440bfeec6..cb01e39e0a 100644
+--- a/src/pkg/runtime/os_freebsd.h
++++ b/src/pkg/runtime/os_freebsd.h
+@@ -1,5 +1,6 @@
+ #define SIG_DFL ((void*)0)
+ #define SIG_IGN ((void*)1)
++#define SIGHUP 1
+ 
+ int32	runtime·thr_new(ThrParam*, int32);
+ void	runtime·sighandler(int32 sig, Siginfo *info, void *context, G *gp);
+diff --git a/src/pkg/runtime/os_linux.h b/src/pkg/runtime/os_linux.h
+index 357b60eb45..5ae5d24feb 100644
+--- a/src/pkg/runtime/os_linux.h
++++ b/src/pkg/runtime/os_linux.h
+@@ -4,6 +4,7 @@
+ 
+ #define SIG_DFL ((void*)0)
+ #define SIG_IGN ((void*)1)
++#define SIGHUP 1
+ 
+ // Linux-specific system calls
+ int32	runtime·futex(uint32*, int32, uint32, Timespec*, uint32*, uint32);
+diff --git a/src/pkg/runtime/os_netbsd.h b/src/pkg/runtime/os_netbsd.h
+index 09e6832350..13a6279270 100644
+--- a/src/pkg/runtime/os_netbsd.h
++++ b/src/pkg/runtime/os_netbsd.h
+@@ -4,6 +4,7 @@
+ 
+ #define SIG_DFL ((void*)0)
+ #define SIG_IGN ((void*)1)
++#define SIGHUP 1
+ 
+ #define SIG_BLOCK 1
+ #define SIG_UNBLOCK 2
+diff --git a/src/pkg/runtime/os_openbsd.h b/src/pkg/runtime/os_openbsd.h
+index b2d79e7f99..2c6f3c4e90 100644
+--- a/src/pkg/runtime/os_openbsd.h
++++ b/src/pkg/runtime/os_openbsd.h
+@@ -4,6 +4,7 @@
+ 
+ #define SIG_DFL ((void*)0)
+ #define SIG_IGN ((void*)1)
++#define SIGHUP 1
+ 
+ #define SIG_BLOCK 1
+ #define SIG_UNBLOCK 2
+diff --git a/src/pkg/runtime/runtime.h b/src/pkg/runtime/runtime.h
+index 77f60cb4b5..6709e4f261 100644
+--- a/src/pkg/runtime/runtime.h
++++ b/src/pkg/runtime/runtime.h
+@@ -290,6 +290,7 @@ struct	M
+ 	GCStats	gcstats;
+ 	bool	racecall;
+ 	void*	racepc;
++	void*	sigset;
+ 	uint32	moreframesize_minalloc;
+ 
+ 	uintptr	settype_buf[1024];
+diff --git a/src/pkg/runtime/signal_darwin_386.c b/src/pkg/runtime/signal_darwin_386.c
+index aeb0f43223..deb16d7a60 100644
+--- a/src/pkg/runtime/signal_darwin_386.c
++++ b/src/pkg/runtime/signal_darwin_386.c
+@@ -133,6 +133,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(*(void**)sa.__sigaction_u == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_SIGINFO|SA_ONSTACK;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_darwin_amd64.c b/src/pkg/runtime/signal_darwin_amd64.c
+index 326fdd4f26..33dc9a6be5 100644
+--- a/src/pkg/runtime/signal_darwin_amd64.c
++++ b/src/pkg/runtime/signal_darwin_amd64.c
+@@ -143,6 +143,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(*(void**)sa.__sigaction_u == SIG_IGN)
++			return;
++	}
++		
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_SIGINFO|SA_ONSTACK;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_freebsd_386.c b/src/pkg/runtime/signal_freebsd_386.c
+index ae9f7321b9..3fbfee3f5c 100644
+--- a/src/pkg/runtime/signal_freebsd_386.c
++++ b/src/pkg/runtime/signal_freebsd_386.c
+@@ -128,6 +128,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa.__sigaction_u.__sa_sigaction == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_SIGINFO|SA_ONSTACK;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_freebsd_amd64.c b/src/pkg/runtime/signal_freebsd_amd64.c
+index 19382ec944..443e30cf86 100644
+--- a/src/pkg/runtime/signal_freebsd_amd64.c
++++ b/src/pkg/runtime/signal_freebsd_amd64.c
+@@ -136,6 +136,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa.__sigaction_u.__sa_sigaction == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_SIGINFO|SA_ONSTACK;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_freebsd_arm.c b/src/pkg/runtime/signal_freebsd_arm.c
+index e2bd9e8a2f..6cd532d6cb 100644
+--- a/src/pkg/runtime/signal_freebsd_arm.c
++++ b/src/pkg/runtime/signal_freebsd_arm.c
+@@ -151,6 +151,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa.__sigaction_u.__sa_sigaction == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_SIGINFO|SA_ONSTACK;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_linux_386.c b/src/pkg/runtime/signal_linux_386.c
+index 40e64013cf..cc4c8db5ca 100644
+--- a/src/pkg/runtime/signal_linux_386.c
++++ b/src/pkg/runtime/signal_linux_386.c
+@@ -124,6 +124,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa.k_sa_handler == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_ONSTACK | SA_SIGINFO | SA_RESTORER;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_linux_amd64.c b/src/pkg/runtime/signal_linux_amd64.c
+index 0c3a1e2173..6ca51f8c44 100644
+--- a/src/pkg/runtime/signal_linux_amd64.c
++++ b/src/pkg/runtime/signal_linux_amd64.c
+@@ -134,6 +134,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa.sa_handler == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_ONSTACK | SA_SIGINFO | SA_RESTORER;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_linux_arm.c b/src/pkg/runtime/signal_linux_arm.c
+index c425696d56..53ab07d36f 100644
+--- a/src/pkg/runtime/signal_linux_arm.c
++++ b/src/pkg/runtime/signal_linux_arm.c
+@@ -140,6 +140,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa.sa_handler == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_ONSTACK | SA_SIGINFO | SA_RESTORER;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_netbsd_386.c b/src/pkg/runtime/signal_netbsd_386.c
+index 34fa90bb24..f788f12f55 100644
+--- a/src/pkg/runtime/signal_netbsd_386.c
++++ b/src/pkg/runtime/signal_netbsd_386.c
+@@ -128,6 +128,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa._sa_u._sa_sigaction == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_SIGINFO|SA_ONSTACK;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_netbsd_amd64.c b/src/pkg/runtime/signal_netbsd_amd64.c
+index e9e1eaa557..5bdc143ad0 100644
+--- a/src/pkg/runtime/signal_netbsd_amd64.c
++++ b/src/pkg/runtime/signal_netbsd_amd64.c
+@@ -135,6 +135,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa._sa_u._sa_sigaction == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_SIGINFO|SA_ONSTACK;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_netbsd_arm.c b/src/pkg/runtime/signal_netbsd_arm.c
+index bc39a69b0e..5dfea5ca1c 100644
+--- a/src/pkg/runtime/signal_netbsd_arm.c
++++ b/src/pkg/runtime/signal_netbsd_arm.c
+@@ -157,6 +157,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa._sa_u._sa_sigaction == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_SIGINFO|SA_ONSTACK;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_openbsd_386.c b/src/pkg/runtime/signal_openbsd_386.c
+index bd040bd0eb..e1537fed82 100644
+--- a/src/pkg/runtime/signal_openbsd_386.c
++++ b/src/pkg/runtime/signal_openbsd_386.c
+@@ -124,6 +124,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa.__sigaction_u.__sa_sigaction == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_SIGINFO|SA_ONSTACK;
+ 	if(restart)
+diff --git a/src/pkg/runtime/signal_openbsd_amd64.c b/src/pkg/runtime/signal_openbsd_amd64.c
+index 3fdd3fbd18..a82d5163c6 100644
+--- a/src/pkg/runtime/signal_openbsd_amd64.c
++++ b/src/pkg/runtime/signal_openbsd_amd64.c
+@@ -133,6 +133,15 @@ runtime·setsig(int32 i, void (*fn)(int32, Siginfo*, void*, G*), bool restart)
+ {
+ 	Sigaction sa;
+ 
++	// If SIGHUP handler is SIG_IGN, assume running
++	// under nohup and do not set explicit handler.
++	if(i == SIGHUP) {
++		runtime·memclr((byte*)&sa, sizeof sa);
++		runtime·sigaction(i, nil, &sa);
++		if(sa.__sigaction_u.__sa_sigaction == SIG_IGN)
++			return;
++	}
++
+ 	runtime·memclr((byte*)&sa, sizeof sa);
+ 	sa.sa_flags = SA_SIGINFO|SA_ONSTACK;
+ 	if(restart)
+diff --git a/src/pkg/runtime/thread_darwin.c b/src/pkg/runtime/thread_darwin.c
+index 0758d6858d..d55ec8dc3e 100644
+--- a/src/pkg/runtime/thread_darwin.c
++++ b/src/pkg/runtime/thread_darwin.c
+@@ -10,7 +10,6 @@
+ extern SigTab runtime·sigtab[];
+ 
+ static Sigset sigset_all = ~(Sigset)0;
+-static Sigset sigset_none;
+ static Sigset sigset_prof = 1<<(SIGPROF-1);
+ 
+ static void
+@@ -99,6 +98,8 @@ runtime·newosproc(M *mp, G *gp, void *stk, void (*fn)(void))
+ 	}
+ 
+ 	runtime·sigprocmask(SIG_SETMASK, &sigset_all, &oset);
++	mp->sigset = runtime·mal(sizeof(Sigset));
++	*(Sigset*)mp->sigset = oset;
+ 	errno = runtime·bsdthread_create(stk, mp, gp, fn);
+ 	runtime·sigprocmask(SIG_SETMASK, &oset, nil);
+ 
+@@ -116,10 +117,9 @@ runtime·minit(void)
+ 	m->gsignal = runtime·malg(32*1024);	// OS X wants >=8K, Linux >=2K
+ 	runtime·signalstack((byte*)m->gsignal->stackguard - StackGuard, 32*1024);
+ 
+-	if(m->profilehz > 0)
+-		runtime·sigprocmask(SIG_SETMASK, &sigset_none, nil);
+-	else
+-		runtime·sigprocmask(SIG_SETMASK, &sigset_prof, nil);
++	if(m->sigset != nil)
++		runtime·sigprocmask(SIG_SETMASK, m->sigset, nil);
++	runtime·setprof(m->profilehz > 0);
+ }
+ 
+ // Mach IPC, to get at semaphores
+diff --git a/src/pkg/runtime/thread_freebsd.c b/src/pkg/runtime/thread_freebsd.c
+index eba794cb33..0521576050 100644
+--- a/src/pkg/runtime/thread_freebsd.c
++++ b/src/pkg/runtime/thread_freebsd.c
+@@ -14,7 +14,6 @@ extern int32 runtime·sys_umtx_op(uint32*, int32, uint32, void*, void*);
+ #define	HW_NCPU	3
+ 
+ static Sigset sigset_all = { ~(uint32)0, ~(uint32)0, ~(uint32)0, ~(uint32)0, };
+-static Sigset sigset_none = { 0, 0, 0, 0, };
+ 
+ static int32
+ getncpu(void)
+@@ -91,6 +90,8 @@ runtime·newosproc(M *mp, G *gp, void *stk, void (*fn)(void))
+ 	}
+ 
+ 	runtime·sigprocmask(&sigset_all, &oset);
++	mp->sigset = runtime·mal(sizeof(Sigset));
++	*(Sigset*)mp->sigset = oset;
+ 	runtime·memclr((byte*)&param, sizeof param);
+ 
+ 	param.start_func = runtime·thr_start;
+@@ -127,7 +128,8 @@ runtime·minit(void)
+ 	// Initialize signal handling
+ 	m->gsignal = runtime·malg(32*1024);
+ 	runtime·signalstack((byte*)m->gsignal->stackguard - StackGuard, 32*1024);
+-	runtime·sigprocmask(&sigset_none, nil);
++	if(m->sigset != nil)
++		runtime·sigprocmask(m->sigset, nil);
+ }
+ 
+ void
+diff --git a/src/pkg/runtime/thread_linux.c b/src/pkg/runtime/thread_linux.c
+index 778b9078b9..604b98e57f 100644
+--- a/src/pkg/runtime/thread_linux.c
++++ b/src/pkg/runtime/thread_linux.c
+@@ -14,7 +14,6 @@ int32 runtime·close(int32);
+ int32 runtime·read(int32, void*, int32);
+ 
+ static Sigset sigset_all = { ~(uint32)0, ~(uint32)0 };
+-static Sigset sigset_none;
+ 
+ // Linux futex.
+ //
+@@ -149,6 +148,8 @@ runtime·newosproc(M *mp, G *gp, void *stk, void (*fn)(void))
+ 	// Disable signals during clone, so that the new thread starts
+ 	// with signals disabled.  It will enable them in minit.
+ 	runtime·rtsigprocmask(SIG_SETMASK, &sigset_all, &oset, sizeof oset);
++	mp->sigset = runtime·mal(sizeof(Sigset));
++	*(Sigset*)mp->sigset = oset;
+ 	ret = runtime·clone(flags, stk, mp, gp, fn);
+ 	runtime·rtsigprocmask(SIG_SETMASK, &oset, nil, sizeof oset);
+ 
+@@ -177,7 +178,8 @@ runtime·minit(void)
+ 	// Initialize signal handling.
+ 	m->gsignal = runtime·malg(32*1024);	// OS X wants >=8K, Linux >=2K
+ 	runtime·signalstack((byte*)m->gsignal->stackguard - StackGuard, 32*1024);
+-	runtime·rtsigprocmask(SIG_SETMASK, &sigset_none, nil, sizeof sigset_none);
++	if(m->sigset != nil)
++		runtime·rtsigprocmask(SIG_SETMASK, m->sigset, nil, sizeof *m->sigset);
+ }
+ 
+ void
+diff --git a/src/pkg/runtime/thread_netbsd.c b/src/pkg/runtime/thread_netbsd.c
+index cf66d9c797..c689b55dfe 100644
+--- a/src/pkg/runtime/thread_netbsd.c
++++ b/src/pkg/runtime/thread_netbsd.c
+@@ -21,7 +21,6 @@ enum
+ extern SigTab runtime·sigtab[];
+ 
+ static Sigset sigset_all = { ~(uint32)0, ~(uint32)0, ~(uint32)0, ~(uint32)0, };
+-static Sigset sigset_none;
+ 
+ extern void runtime·getcontext(UcontextT *context);
+ extern int32 runtime·lwp_create(UcontextT *context, uintptr flags, void *lwpid);
+@@ -164,6 +163,9 @@ runtime·newosproc(M *mp, G *gp, void *stk, void (*fn)(void))
+ 	uc.uc_link = nil;
+ 	uc.uc_sigmask = sigset_all;
+ 
++	mp->sigset = runtime·mal(sizeof(Sigset));
++	runtime·sigprocmask(SIG_SETMASK, nil, mp->sigset);
++
+ 	runtime·lwp_mcontext_init(&uc.uc_mcontext, stk, mp, gp, fn);
+ 
+ 	ret = runtime·lwp_create(&uc, 0, &mp->procid);
+@@ -195,7 +197,8 @@ runtime·minit(void)
+ 	// Initialize signal handling
+ 	m->gsignal = runtime·malg(32*1024);
+ 	runtime·signalstack((byte*)m->gsignal->stackguard - StackGuard, 32*1024);
+-	runtime·sigprocmask(SIG_SETMASK, &sigset_none, nil);
++	if(m->sigset != nil)
++		runtime·sigprocmask(SIG_SETMASK, m->sigset, nil);
+ }
+ 
+ void
+diff --git a/src/pkg/runtime/thread_openbsd.c b/src/pkg/runtime/thread_openbsd.c
+index fd42f28e8b..4d30193c00 100644
+--- a/src/pkg/runtime/thread_openbsd.c
++++ b/src/pkg/runtime/thread_openbsd.c
+@@ -21,7 +21,6 @@ enum
+ extern SigTab runtime·sigtab[];
+ 
+ static Sigset sigset_all = ~(Sigset)0;
+-static Sigset sigset_none;
+ 
+ extern int64 runtime·tfork(void *param, uintptr psize, M *mp, G *gp, void (*fn)(void));
+ extern int32 runtime·thrsleep(void *ident, int32 clock_id, void *tsp, void *lock, const int32 *abort);
+@@ -142,6 +141,8 @@ runtime·newosproc(M *mp, G *gp, void *stk, void (*fn)(void))
+ 	param.tf_stack = stk;
+ 
+ 	oset = runtime·sigprocmask(SIG_SETMASK, sigset_all);
++	mp->sigset = runtime·mal(sizeof(Sigset));
++	*(Sigset*)mp->sigset = oset;
+ 	ret = runtime·tfork((byte*)&param, sizeof(param), mp, gp, fn);
+ 	runtime·sigprocmask(SIG_SETMASK, oset);
+ 
+@@ -172,7 +173,8 @@ runtime·minit(void)
+ 	// Initialize signal handling
+ 	m->gsignal = runtime·malg(32*1024);
+ 	runtime·signalstack((byte*)m->gsignal->stackguard - StackGuard, 32*1024);
+-	runtime·sigprocmask(SIG_SETMASK, sigset_none);
++	if(m->sigset != nil)
++		runtime·sigprocmask(SIG_SETMASK, m->sigset, nil, sizeof *m->sigset);
+ }
+ 
+ void
+

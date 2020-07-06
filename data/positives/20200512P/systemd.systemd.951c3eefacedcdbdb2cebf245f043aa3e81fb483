@@ -1,0 +1,60 @@
+commit 951c3eefacedcdbdb2cebf245f043aa3e81fb483
+Author: Martin Mikkelsen <mamikk@mamikk.no>
+Date:   Fri Jul 31 19:01:34 2015 +0200
+
+    bitmap: make bitmap_clear free the bitmap array
+    
+    Given two bitmaps and the following code:
+    
+      Bitmap *a = bitmap_new(), *b = bitmap_new();
+      bitmap_set(a, 1);
+      bitmap_clear(a);
+      bitmap_set(a, 0);
+      bitmap_set(b, 0);
+    
+    These two bitmaps should now have the same bits set and they should be
+    equal but bitmap_equal() will return false in this case because while
+    bitmap_clear() resets the number of elements in the array it does not
+    clear the array and bitmap_set() expects the array to be cleared.
+    GREEDY_REALLOC0 looks at the allocated size and not the actual size so
+    it does not clear any memory.
+    
+    Fix this by freeing the allocated memory and resetting the whole Bitmap
+    to an initial state in bitmap_clear().
+    
+    This also adds test code for this issue.
+
+diff --git a/src/basic/bitmap.c b/src/basic/bitmap.c
+index e7e19b3b6..7ea335703 100644
+--- a/src/basic/bitmap.c
++++ b/src/basic/bitmap.c
+@@ -145,7 +145,10 @@ bool bitmap_isclear(Bitmap *b) {
+ void bitmap_clear(Bitmap *b) {
+         assert(b);
+ 
++        free(b->bitmaps);
++        b->bitmaps = NULL;
+         b->n_bitmaps = 0;
++        b->bitmaps_allocated = 0;
+ }
+ 
+ bool bitmap_iterate(Bitmap *b, Iterator *i, unsigned *n) {
+diff --git a/src/test/test-bitmap.c b/src/test/test-bitmap.c
+index cb9e4a41f..ff2211774 100644
+--- a/src/test/test-bitmap.c
++++ b/src/test/test-bitmap.c
+@@ -111,5 +111,13 @@ int main(int argc, const char *argv[]) {
+         bitmap_unset(b, 0);
+         assert_se(bitmap_equal(b, b2));
+ 
++        assert_se(bitmap_set(b, 1) == 0);
++        bitmap_clear(b);
++        assert_se(bitmap_equal(b, b2));
++
++        assert_se(bitmap_set(b, 0) == 0);
++        assert_se(bitmap_set(b2, 0) == 0);
++        assert_se(bitmap_equal(b, b2));
++
+         return 0;
+ }
+

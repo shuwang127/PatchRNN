@@ -1,0 +1,227 @@
+commit c931ceeb780560ff652a8f9875f88778439ee87e
+Author: Inaky Perez-Gonzalez <inaky@linux.intel.com>
+Date:   Mon Oct 19 16:24:56 2009 +0900
+
+    wimax/i2400m: introduce i2400m_reset(), stopping TX and carrier
+    
+    Currently the i2400m driver was resetting by just calling
+    i2400m->bus_reset(). However, this was missing stopping the TX queue
+    and downing the carrier. This was causing, for the corner case of the
+    driver reseting a device that refuses to go out of idle mode, that a
+    few packets would be queued and more than one reset would go through,
+    making the recovery a wee bit messy.
+    
+    To avoid introducing the same cleanup in all the bus-specific driver,
+    introduced a i2400m_reset() function that takes care of house cleaning
+    and then calling the bus-level reset implementation.
+    
+    The bulk of the changes in all files are just to rename the call from
+    i2400m->bus_reset() to i2400m_reset().
+    
+    Signed-off-by: Inaky Perez-Gonzalez <inaky@linux.intel.com>
+
+diff --git a/drivers/net/wimax/i2400m/control.c b/drivers/net/wimax/i2400m/control.c
+index b69fd8834c78..944945540391 100644
+--- a/drivers/net/wimax/i2400m/control.c
++++ b/drivers/net/wimax/i2400m/control.c
+@@ -54,7 +54,7 @@
+  *   i2400m_set_init_config()
+  *   i2400m_cmd_get_state()
+  * i2400m_dev_shutdown()        Called by i2400m_dev_stop()
+- *   i2400m->bus_reset()
++ *   i2400m_reset()
+  *
+  * i2400m_{cmd,get,set}_*()
+  *   i2400m_msg_to_dev()
+@@ -343,7 +343,7 @@ void i2400m_report_tlv_system_state(struct i2400m *i2400m,
+ 		/* Huh? just in case, shut it down */
+ 		dev_err(dev, "HW BUG? unknown state %u: shutting down\n",
+ 			i2400m_state);
+-		i2400m->bus_reset(i2400m, I2400M_RT_WARM);
++		i2400m_reset(i2400m, I2400M_RT_WARM);
+ 		break;
+ 	};
+ 	d_fnend(3, dev, "(i2400m %p ss %p [%u]) = void\n",
+diff --git a/drivers/net/wimax/i2400m/debugfs.c b/drivers/net/wimax/i2400m/debugfs.c
+index 9b81af3f80a9..b1aec3e1892f 100644
+--- a/drivers/net/wimax/i2400m/debugfs.c
++++ b/drivers/net/wimax/i2400m/debugfs.c
+@@ -214,7 +214,7 @@ int debugfs_i2400m_reset_set(void *data, u64 val)
+ 	case I2400M_RT_WARM:
+ 	case I2400M_RT_COLD:
+ 	case I2400M_RT_BUS:
+-		result = i2400m->bus_reset(i2400m, rt);
++		result = i2400m_reset(i2400m, rt);
+ 		if (result >= 0)
+ 			result = 0;
+ 	default:
+diff --git a/drivers/net/wimax/i2400m/driver.c b/drivers/net/wimax/i2400m/driver.c
+index cc58a864bd06..96a615fe09de 100644
+--- a/drivers/net/wimax/i2400m/driver.c
++++ b/drivers/net/wimax/i2400m/driver.c
+@@ -255,7 +255,7 @@ int i2400m_op_reset(struct wimax_dev *wimax_dev)
+ 	mutex_lock(&i2400m->init_mutex);
+ 	i2400m->reset_ctx = &ctx;
+ 	mutex_unlock(&i2400m->init_mutex);
+-	result = i2400m->bus_reset(i2400m, I2400M_RT_WARM);
++	result = i2400m_reset(i2400m, I2400M_RT_WARM);
+ 	if (result < 0)
+ 		goto out;
+ 	result = wait_for_completion_timeout(&ctx.completion, 4*HZ);
+@@ -710,7 +710,7 @@ out_unlock:
+ 	mutex_unlock(&i2400m->init_mutex);
+ 	if (result == -EUCLEAN) {
+ 		/* ops, need to clean up [w/ init_mutex not held] */
+-		result = i2400m->bus_reset(i2400m, I2400M_RT_BUS);
++		result = i2400m_reset(i2400m, I2400M_RT_BUS);
+ 		if (result >= 0)
+ 			result = -ENODEV;
+ 	}
+@@ -815,6 +815,24 @@ void i2400m_init(struct i2400m *i2400m)
+ EXPORT_SYMBOL_GPL(i2400m_init);
+ 
+ 
++int i2400m_reset(struct i2400m *i2400m, enum i2400m_reset_type rt)
++{
++	struct net_device *net_dev = i2400m->wimax_dev.net_dev;
++
++	/*
++	 * Make sure we stop TXs and down the carrier before
++	 * resetting; this is needed to avoid things like
++	 * i2400m_wake_tx() scheduling stuff in parallel.
++	 */
++	if (net_dev->reg_state == NETREG_REGISTERED) {
++		netif_tx_disable(net_dev);
++		netif_carrier_off(net_dev);
++	}
++	return i2400m->bus_reset(i2400m, rt);
++}
++EXPORT_SYMBOL_GPL(i2400m_reset);
++
++
+ /**
+  * i2400m_setup - bus-generic setup function for the i2400m device
+  *
+diff --git a/drivers/net/wimax/i2400m/fw.c b/drivers/net/wimax/i2400m/fw.c
+index fda54bfdf70e..64cdfeb299ca 100644
+--- a/drivers/net/wimax/i2400m/fw.c
++++ b/drivers/net/wimax/i2400m/fw.c
+@@ -130,7 +130,7 @@
+  * i2400m_fw_dnload
+  *   i2400m_bootrom_init
+  *     i2400m_bm_cmd
+- *     i2400m->bus_reset
++ *     i2400m_reset
+  *   i2400m_dnload_init
+  *     i2400m_dnload_init_signed
+  *     i2400m_dnload_init_nonsigned
+@@ -902,7 +902,7 @@ do_reboot:
+ 	d_printf(4, dev, "device reboot: reboot command [%d # left]\n",
+ 		 count);
+ 	if ((flags & I2400M_BRI_NO_REBOOT) == 0)
+-		i2400m->bus_reset(i2400m, I2400M_RT_WARM);
++		i2400m_reset(i2400m, I2400M_RT_WARM);
+ 	result = i2400m_bm_cmd(i2400m, NULL, 0, &ack, sizeof(ack),
+ 			       I2400M_BM_CMD_RAW);
+ 	flags &= ~I2400M_BRI_NO_REBOOT;
+diff --git a/drivers/net/wimax/i2400m/i2400m.h b/drivers/net/wimax/i2400m/i2400m.h
+index 5eee985f2926..04df9bbe340f 100644
+--- a/drivers/net/wimax/i2400m/i2400m.h
++++ b/drivers/net/wimax/i2400m/i2400m.h
+@@ -717,6 +717,7 @@ unsigned i2400m_brh_get_signature(const struct i2400m_bootrom_header *hdr)
+  * Driver / device setup and internal functions
+  */
+ extern void i2400m_init(struct i2400m *);
++extern int i2400m_reset(struct i2400m *, enum i2400m_reset_type);
+ extern void i2400m_netdev_setup(struct net_device *net_dev);
+ extern int i2400m_sysfs_setup(struct device_driver *);
+ extern void i2400m_sysfs_release(struct device_driver *);
+diff --git a/drivers/net/wimax/i2400m/netdev.c b/drivers/net/wimax/i2400m/netdev.c
+index e7d1a51ee3fe..f67af4291f8c 100644
+--- a/drivers/net/wimax/i2400m/netdev.c
++++ b/drivers/net/wimax/i2400m/netdev.c
+@@ -171,8 +171,9 @@ void i2400m_wake_tx_work(struct work_struct *ws)
+ 		result = 0;
+ 	if (result < 0) {
+ 		dev_err(dev, "WAKE&TX: device didn't get out of idle: "
+-			"%d\n", result);
+-			goto error;
++			"%d - resetting\n", result);
++		i2400m_reset(i2400m, I2400M_RT_BUS);
++		goto error;
+ 	}
+ 	result = wait_event_timeout(i2400m->state_wq,
+ 				    i2400m->state != I2400M_SS_IDLE, 5 * HZ);
+@@ -180,7 +181,8 @@ void i2400m_wake_tx_work(struct work_struct *ws)
+ 		result = -ETIMEDOUT;
+ 	if (result < 0) {
+ 		dev_err(dev, "WAKE&TX: error waiting for device to exit IDLE: "
+-			"%d\n", result);
++			"%d - resetting\n", result);
++		i2400m_reset(i2400m, I2400M_RT_BUS);
+ 		goto error;
+ 	}
+ 	msleep(20);	/* device still needs some time or it drops it */
+diff --git a/drivers/net/wimax/i2400m/rx.c b/drivers/net/wimax/i2400m/rx.c
+index 64a44ca00675..e3d2a9de023c 100644
+--- a/drivers/net/wimax/i2400m/rx.c
++++ b/drivers/net/wimax/i2400m/rx.c
+@@ -828,7 +828,7 @@ void i2400m_roq_queue(struct i2400m *i2400m, struct i2400m_roq *roq,
+ 		dev_err(dev, "SW BUG? queue nsn %d (lbn %u ws %u)\n",
+ 			nsn, lbn, roq->ws);
+ 		i2400m_roq_log_dump(i2400m, roq);
+-		i2400m->bus_reset(i2400m, I2400M_RT_WARM);
++		i2400m_reset(i2400m, I2400M_RT_WARM);
+ 	} else {
+ 		__i2400m_roq_queue(i2400m, roq, skb, lbn, nsn);
+ 		i2400m_roq_log_add(i2400m, roq, I2400M_RO_TYPE_PACKET,
+@@ -894,7 +894,7 @@ void i2400m_roq_queue_update_ws(struct i2400m *i2400m, struct i2400m_roq *roq,
+ 		dev_err(dev, "SW BUG? queue_update_ws nsn %u (sn %u ws %u)\n",
+ 			nsn, sn, roq->ws);
+ 		i2400m_roq_log_dump(i2400m, roq);
+-		i2400m->bus_reset(i2400m, I2400M_RT_WARM);
++		i2400m_reset(i2400m, I2400M_RT_WARM);
+ 	} else {
+ 		/* if the queue is empty, don't bother as we'd queue
+ 		 * it and inmediately unqueue it -- just deliver it */
+diff --git a/drivers/net/wimax/i2400m/sdio.c b/drivers/net/wimax/i2400m/sdio.c
+index ec178928914e..20ab22ec291b 100644
+--- a/drivers/net/wimax/i2400m/sdio.c
++++ b/drivers/net/wimax/i2400m/sdio.c
+@@ -43,7 +43,7 @@
+  *     i2400m_release()
+  *     free_netdev(net_dev)
+  *
+- * i2400ms_bus_reset()            Called by i2400m->bus_reset
++ * i2400ms_bus_reset()            Called by i2400m_reset
+  *   __i2400ms_reset()
+  *     __i2400ms_send_barker()
+  */
+@@ -342,13 +342,6 @@ int i2400ms_bus_reset(struct i2400m *i2400m, enum i2400m_reset_type rt)
+ 					       sizeof(i2400m_COLD_BOOT_BARKER));
+ 	else if (rt == I2400M_RT_BUS) {
+ do_bus_reset:
+-		/* call netif_tx_disable() before sending IOE disable,
+-		 * so that all the tx from network layer are stopped
+-		 * while IOE is being reset. Make sure it is called
+-		 * only after register_netdev() was issued.
+-		 */
+-		if (i2400m->wimax_dev.net_dev->reg_state == NETREG_REGISTERED)
+-			netif_tx_disable(i2400m->wimax_dev.net_dev);
+ 
+ 		i2400ms_bus_release(i2400m);
+ 
+diff --git a/drivers/net/wimax/i2400m/usb.c b/drivers/net/wimax/i2400m/usb.c
+index 418db12b0cd7..5e079408f16e 100644
+--- a/drivers/net/wimax/i2400m/usb.c
++++ b/drivers/net/wimax/i2400m/usb.c
+@@ -58,7 +58,7 @@
+  *   i2400mu_rx_release()
+  *   i2400mu_tx_release()
+  *
+- * i2400mu_bus_reset()            Called by i2400m->bus_reset
++ * i2400mu_bus_reset()            Called by i2400m_reset
+  *   __i2400mu_reset()
+  *     __i2400mu_send_barker()
+  *   usb_reset_device()
+

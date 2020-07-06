@@ -1,0 +1,44 @@
+commit 9c9bdf4d50730fd04b06077e22d7a83b585f26b5
+Author: Stefan Richter <stefanr@s5r6.in-berlin.de>
+Date:   Tue Jul 17 02:15:36 2007 +0200
+
+    firewire: fix memory leak of fw_request instances
+    
+    Found and debugged by Jay Fenlason <fenlason@redhat.com>.
+    The bug was especially noticeable with direct I/O over fw-sbp2.
+    
+    Signed-off-by: Stefan Richter <stefanr@s5r6.in-berlin.de>
+    Signed-off-by: Kristian Høgsberg <krh@redhat.com>
+
+diff --git a/drivers/firewire/fw-transaction.c b/drivers/firewire/fw-transaction.c
+index c4b3417a5dac..3ce8e2fbe15f 100644
+--- a/drivers/firewire/fw-transaction.c
++++ b/drivers/firewire/fw-transaction.c
+@@ -605,8 +605,10 @@ fw_send_response(struct fw_card *card, struct fw_request *request, int rcode)
+ 	 * check is sufficient to ensure we don't send response to
+ 	 * broadcast packets or posted writes.
+ 	 */
+-	if (request->ack != ACK_PENDING)
++	if (request->ack != ACK_PENDING) {
++		kfree(request);
+ 		return;
++	}
+ 
+ 	if (rcode == RCODE_COMPLETE)
+ 		fw_fill_response(&request->response, request->request_header,
+diff --git a/drivers/firewire/fw-transaction.h b/drivers/firewire/fw-transaction.h
+index 5abed193f4a6..5ceaccd10564 100644
+--- a/drivers/firewire/fw-transaction.h
++++ b/drivers/firewire/fw-transaction.h
+@@ -123,6 +123,10 @@ typedef void (*fw_transaction_callback_t)(struct fw_card *card, int rcode,
+ 					  size_t length,
+ 					  void *callback_data);
+ 
++/*
++ * Important note:  The callback must guarantee that either fw_send_response()
++ * or kfree() is called on the @request.
++ */
+ typedef void (*fw_address_callback_t)(struct fw_card *card,
+ 				      struct fw_request *request,
+ 				      int tcode, int destination, int source,
+

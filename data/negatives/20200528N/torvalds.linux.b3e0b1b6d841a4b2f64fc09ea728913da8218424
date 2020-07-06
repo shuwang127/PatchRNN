@@ -1,0 +1,104 @@
+commit b3e0b1b6d841a4b2f64fc09ea728913da8218424
+Author: Peter Zijlstra <peterz@infradead.org>
+Date:   Fri Oct 16 14:39:38 2015 +0200
+
+    locking, sched: Introduce smp_cond_acquire() and use it
+    
+    Introduce smp_cond_acquire() which combines a control dependency and a
+    read barrier to form acquire semantics.
+    
+    This primitive has two benefits:
+    
+     - it documents control dependencies,
+     - its typically cheaper than using smp_load_acquire() in a loop.
+    
+    Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Mike Galbraith <efault@gmx.de>
+    Cc: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/include/linux/compiler.h b/include/linux/compiler.h
+index 4dac1036594f..00b042c49ccd 100644
+--- a/include/linux/compiler.h
++++ b/include/linux/compiler.h
+@@ -299,6 +299,23 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
+ 	__u.__val;					\
+ })
+ 
++/**
++ * smp_cond_acquire() - Spin wait for cond with ACQUIRE ordering
++ * @cond: boolean expression to wait for
++ *
++ * Equivalent to using smp_load_acquire() on the condition variable but employs
++ * the control dependency of the wait to reduce the barrier on many platforms.
++ *
++ * The control dependency provides a LOAD->STORE order, the additional RMB
++ * provides LOAD->LOAD order, together they provide LOAD->{LOAD,STORE} order,
++ * aka. ACQUIRE.
++ */
++#define smp_cond_acquire(cond)	do {		\
++	while (!(cond))				\
++		cpu_relax();			\
++	smp_rmb(); /* ctrl + rmb := acquire */	\
++} while (0)
++
+ #endif /* __KERNEL__ */
+ 
+ #endif /* __ASSEMBLY__ */
+diff --git a/kernel/locking/qspinlock.c b/kernel/locking/qspinlock.c
+index 986207887def..ed9d96708f93 100644
+--- a/kernel/locking/qspinlock.c
++++ b/kernel/locking/qspinlock.c
+@@ -433,8 +433,7 @@ void queued_spin_lock_slowpath(struct qspinlock *lock, u32 val)
+ 	 *
+ 	 */
+ 	pv_wait_head(lock, node);
+-	while ((val = smp_load_acquire(&lock->val.counter)) & _Q_LOCKED_PENDING_MASK)
+-		cpu_relax();
++	smp_cond_acquire(!((val = atomic_read(&lock->val)) & _Q_LOCKED_PENDING_MASK));
+ 
+ 	/*
+ 	 * claim the lock:
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 7063c6a07440..9f7862da2cd1 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -1968,19 +1968,13 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
+ 	/*
+ 	 * If the owning (remote) cpu is still in the middle of schedule() with
+ 	 * this task as prev, wait until its done referencing the task.
+-	 */
+-	while (p->on_cpu)
+-		cpu_relax();
+-	/*
+-	 * Combined with the control dependency above, we have an effective
+-	 * smp_load_acquire() without the need for full barriers.
+ 	 *
+ 	 * Pairs with the smp_store_release() in finish_lock_switch().
+ 	 *
+ 	 * This ensures that tasks getting woken will be fully ordered against
+ 	 * their previous state and preserve Program Order.
+ 	 */
+-	smp_rmb();
++	smp_cond_acquire(!p->on_cpu);
+ 
+ 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
+ 	p->state = TASK_WAKING;
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index b242775bf670..1e0bb4afe3fd 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -1076,7 +1076,7 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
+ 	 * In particular, the load of prev->state in finish_task_switch() must
+ 	 * happen before this.
+ 	 *
+-	 * Pairs with the control dependency and rmb in try_to_wake_up().
++	 * Pairs with the smp_cond_acquire() in try_to_wake_up().
+ 	 */
+ 	smp_store_release(&prev->on_cpu, 0);
+ #endif
+

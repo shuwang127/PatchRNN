@@ -1,0 +1,52 @@
+commit 148d3504c1d9f964cf14fafc46d2b7d1f0bed2b1
+Author: Frederic Weisbecker <fweisbec@gmail.com>
+Date:   Fri May 1 01:10:52 2009 +0200
+
+    kill-the-BKL/reiserfs: release the write lock inside get_neighbors()
+    
+    get_neighbors() is used to get the left and/or right blocks
+    against a given one in order to balance a tree.
+    
+    sb_bread() is used to read the buffer of these neighors blocks and
+    while it waits for this operation, it might sleep.
+    
+    The bkl was released at this point, and then we can also release
+    the write lock before calling sb_bread().
+    
+    This is safe because if the filesystem is changed after this
+    lock release, the function returns REPEAT_SEARCH (aka SCHEDULE_OCCURRED
+    in the function header comments) in order to repeat the neighbhor
+    research.
+    
+    [ Impact: release the reiserfs write lock when it is not needed ]
+    
+    Cc: Jeff Mahoney <jeffm@suse.com>
+    Cc: Chris Mason <chris.mason@oracle.com>
+    Cc: Alexander Beregalov <a.beregalov@gmail.com>
+    Signed-off-by: Frederic Weisbecker <fweisbec@gmail.com>
+
+diff --git a/fs/reiserfs/fix_node.c b/fs/reiserfs/fix_node.c
+index bf5f2cbdb063..3a685e3f754f 100644
+--- a/fs/reiserfs/fix_node.c
++++ b/fs/reiserfs/fix_node.c
+@@ -1971,7 +1971,9 @@ static int get_neighbors(struct tree_balance *tb, int h)
+ 		     tb->FL[h]) ? tb->lkey[h] : B_NR_ITEMS(tb->
+ 								       FL[h]);
+ 		son_number = B_N_CHILD_NUM(tb->FL[h], child_position);
++		reiserfs_write_unlock(sb);
+ 		bh = sb_bread(sb, son_number);
++		reiserfs_write_lock(sb);
+ 		if (!bh)
+ 			return IO_ERROR;
+ 		if (FILESYSTEM_CHANGED_TB(tb)) {
+@@ -2009,7 +2011,9 @@ static int get_neighbors(struct tree_balance *tb, int h)
+ 		child_position =
+ 		    (bh == tb->FR[h]) ? tb->rkey[h] + 1 : 0;
+ 		son_number = B_N_CHILD_NUM(tb->FR[h], child_position);
++		reiserfs_write_unlock(sb);
+ 		bh = sb_bread(sb, son_number);
++		reiserfs_write_lock(sb);
+ 		if (!bh)
+ 			return IO_ERROR;
+ 		if (FILESYSTEM_CHANGED_TB(tb)) {
+

@@ -1,0 +1,114 @@
+commit 9de7df17f037f234cb88bc904476871740508bcf
+Author: Andrew Beekhof <andrew@beekhof.net>
+Date:   Tue Mar 4 12:22:40 2014 +1100
+
+    Fix: cib: Memory leaks caused by ACLs returning filtered copies
+
+diff --git a/cib/callbacks.c b/cib/callbacks.c
+index f9f3f0411..91c654e7d 100644
+--- a/cib/callbacks.c
++++ b/cib/callbacks.c
+@@ -1231,9 +1231,14 @@ cib_process_command(xmlNode * request, xmlNode ** reply, xmlNode ** cib_diff, gb
+ 
+     crm_trace("cleanup");
+ 
++    if (cib_op_modifies(call_type) == FALSE && output != current_cib) {
++        free_xml(output);
++    }
++
+     if (call_type >= 0) {
+         cib_op_cleanup(call_type, call_options, &input, &output);
+     }
++
+     crm_trace("done");
+     return rc;
+ }
+diff --git a/lib/cib/cib_file.c b/lib/cib/cib_file.c
+index 5da84c938..4e4ada834 100644
+--- a/lib/cib/cib_file.c
++++ b/lib/cib/cib_file.c
+@@ -327,12 +327,13 @@ cib_file_perform_op_delegate(cib_t * cib, const char *op, const char *host, cons
+     }
+ 
+     if (output_data && output) {
+-        *output_data = copy_xml(output);
+-    }
++        if(output == in_mem_cib) {
++            *output_data = copy_xml(output);
++        } else {
++            *output_data = output;
++        }
+ 
+-    if (query == FALSE || (call_options & cib_no_children)) {
+-        free_xml(output);
+-    } else if (safe_str_eq(crm_element_name(output), "xpath-query")) {
++    } else if(output != in_mem_cib) {
+         free_xml(output);
+     }
+ 
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index f1326d505..fe5413f11 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -114,9 +114,12 @@ get_cib_copy(cib_t * cib)
+ 
+     if (cib->cmds->query(cib, NULL, &xml_cib, options) != pcmk_ok) {
+         crm_err("Couldnt retrieve the CIB");
++        free_xml(xml_cib);
+         return NULL;
++
+     } else if (xml_cib == NULL) {
+         crm_err("The CIB result was empty");
++        free_xml(xml_cib);
+         return NULL;
+     }
+ 
+@@ -356,16 +359,23 @@ cib_perform_op(const char *op, int call_options, cib_op_t * fn, gboolean is_quer
+         }
+ 
+         rc = (*fn) (op, call_options, section, req, input, cib_ro, result_cib, output);
+-        if(cib_filtered) {
+-            if(*output == cib_filtered) {
+-                cib_filtered = NULL;
+ 
+-            } else if(*output) {
+-                /* We're about to free the source XML */
+-                *output = copy_xml(*output);
+-            }
+-            free_xml(cib_filtered);
++        if(output == NULL) {
++            /* nothing */
++
++        } else if(cib_filtered == *output) {
++            cib_filtered = NULL; /* Let them have this copy */
++
++        } else if(cib_filtered) {
++            /* We're about to free the document of which *output is a part */
++            *output = copy_xml(*output);
++
++        } else if(*output != current_cib) {
++            /* Give them a copy they can free */
++            *output = copy_xml(*output);
+         }
++
++        free_xml(cib_filtered);
+         return rc;
+     }
+ 
+diff --git a/tools/crm_resource.c b/tools/crm_resource.c
+index 1d110031a..edf458125 100644
+--- a/tools/crm_resource.c
++++ b/tools/crm_resource.c
+@@ -2233,8 +2233,10 @@ main(int argc, char **argv)
+ 
+   bail:
+ 
+-    if (cib_conn != NULL) {
++    if (data_set.input != NULL) {
+         cleanup_alloc_calculations(&data_set);
++    }
++    if (cib_conn != NULL) {
+         cib_conn->cmds->signoff(cib_conn);
+         cib_delete(cib_conn);
+     }
+

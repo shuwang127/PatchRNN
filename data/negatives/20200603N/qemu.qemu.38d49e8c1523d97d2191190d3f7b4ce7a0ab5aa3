@@ -1,0 +1,63 @@
+commit 38d49e8c1523d97d2191190d3f7b4ce7a0ab5aa3
+Author: Jose Ricardo Ziviani <joserz@linux.vnet.ibm.com>
+Date:   Wed May 3 14:52:34 2017 -0600
+
+    vfio: enable 8-byte reads/writes to vfio
+    
+    This patch enables 8-byte writes and reads to VFIO. Such implemention
+    is already done but it's missing the 'case' to handle such accesses in
+    both vfio_region_write and vfio_region_read and the MemoryRegionOps:
+    impl.max_access_size and impl.min_access_size.
+    
+    After this patch, 8-byte writes such as:
+    
+    qemu_mutex_lock locked mutex 0x10905ad8
+    vfio_region_write  (0001:03:00.0:region1+0xc0, 0x4140c, 4)
+    vfio_region_write  (0001:03:00.0:region1+0xc4, 0xa0000, 4)
+    qemu_mutex_unlock unlocked mutex 0x10905ad8
+    
+    goes like this:
+    
+    qemu_mutex_lock locked mutex 0x10905ad8
+    vfio_region_write  (0001:03:00.0:region1+0xc0, 0xbfd0008, 8)
+    qemu_mutex_unlock unlocked mutex 0x10905ad8
+    
+    Signed-off-by: Jose Ricardo Ziviani <joserz@linux.vnet.ibm.com>
+    Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+
+diff --git a/hw/vfio/common.c b/hw/vfio/common.c
+index 6572c0744c..a8f12eeb35 100644
+--- a/hw/vfio/common.c
++++ b/hw/vfio/common.c
+@@ -119,6 +119,9 @@ void vfio_region_write(void *opaque, hwaddr addr,
+     case 4:
+         buf.dword = cpu_to_le32(data);
+         break;
++    case 8:
++        buf.qword = cpu_to_le64(data);
++        break;
+     default:
+         hw_error("vfio: unsupported write size, %d bytes", size);
+         break;
+@@ -173,6 +176,9 @@ uint64_t vfio_region_read(void *opaque,
+     case 4:
+         data = le32_to_cpu(buf.dword);
+         break;
++    case 8:
++        data = le64_to_cpu(buf.qword);
++        break;
+     default:
+         hw_error("vfio: unsupported read size, %d bytes", size);
+         break;
+@@ -194,6 +200,10 @@ const MemoryRegionOps vfio_region_ops = {
+         .min_access_size = 1,
+         .max_access_size = 8,
+     },
++    .impl = {
++        .min_access_size = 1,
++        .max_access_size = 8,
++    },
+ };
+ 
+ /*
+

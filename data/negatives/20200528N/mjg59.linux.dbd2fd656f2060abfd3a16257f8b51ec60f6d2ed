@@ -1,0 +1,432 @@
+commit dbd2fd656f2060abfd3a16257f8b51ec60f6d2ed
+Author: Johannes Berg <johannes.berg@intel.com>
+Date:   Thu Dec 9 19:58:59 2010 +0100
+
+    cfg80211/nl80211: separate unicast/multicast default TX keys
+    
+    Allow userspace to specify that a given key
+    is default only for unicast and/or multicast
+    transmissions. Only WEP keys are for both,
+    WPA/RSN keys set here are GTKs for multicast
+    only. For more future flexibility, allow to
+    specify all combiations.
+    
+    Wireless extensions can only set both so use
+    nl80211; WEP keys (connect keys) must be set
+    as default for both (but 802.1X WEP is still
+    possible).
+    
+    Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/iwmc3200wifi/cfg80211.c b/drivers/net/wireless/iwmc3200wifi/cfg80211.c
+index c6c0eff9b5ed..5a4982271e96 100644
+--- a/drivers/net/wireless/iwmc3200wifi/cfg80211.c
++++ b/drivers/net/wireless/iwmc3200wifi/cfg80211.c
+@@ -225,7 +225,8 @@ static int iwm_cfg80211_del_key(struct wiphy *wiphy, struct net_device *ndev,
+ 
+ static int iwm_cfg80211_set_default_key(struct wiphy *wiphy,
+ 					struct net_device *ndev,
+-					u8 key_index)
++					u8 key_index, bool unicast,
++					bool multicast)
+ {
+ 	struct iwm_priv *iwm = ndev_to_iwm(ndev);
+ 
+diff --git a/drivers/net/wireless/libertas/cfg.c b/drivers/net/wireless/libertas/cfg.c
+index dee32d3681a5..300be1931826 100644
+--- a/drivers/net/wireless/libertas/cfg.c
++++ b/drivers/net/wireless/libertas/cfg.c
+@@ -1422,7 +1422,8 @@ static int lbs_cfg_disconnect(struct wiphy *wiphy, struct net_device *dev,
+ 
+ static int lbs_cfg_set_default_key(struct wiphy *wiphy,
+ 				   struct net_device *netdev,
+-				   u8 key_index)
++				   u8 key_index, bool unicast,
++				   bool multicast)
+ {
+ 	struct lbs_private *priv = wiphy_priv(wiphy);
+ 
+diff --git a/drivers/net/wireless/rndis_wlan.c b/drivers/net/wireless/rndis_wlan.c
+index 19f3d568f700..4a4f00591447 100644
+--- a/drivers/net/wireless/rndis_wlan.c
++++ b/drivers/net/wireless/rndis_wlan.c
+@@ -554,7 +554,7 @@ static int rndis_del_key(struct wiphy *wiphy, struct net_device *netdev,
+ 			 u8 key_index, bool pairwise, const u8 *mac_addr);
+ 
+ static int rndis_set_default_key(struct wiphy *wiphy, struct net_device *netdev,
+-								u8 key_index);
++				 u8 key_index, bool unicast, bool multicast);
+ 
+ static int rndis_get_station(struct wiphy *wiphy, struct net_device *dev,
+ 					u8 *mac, struct station_info *sinfo);
+@@ -2381,7 +2381,7 @@ static int rndis_del_key(struct wiphy *wiphy, struct net_device *netdev,
+ }
+ 
+ static int rndis_set_default_key(struct wiphy *wiphy, struct net_device *netdev,
+-								u8 key_index)
++				 u8 key_index, bool unicast, bool multicast)
+ {
+ 	struct rndis_wlan_private *priv = wiphy_priv(wiphy);
+ 	struct usbnet *usbdev = priv->usbdev;
+diff --git a/include/linux/nl80211.h b/include/linux/nl80211.h
+index 380421253d16..b8fa25d741ba 100644
+--- a/include/linux/nl80211.h
++++ b/include/linux/nl80211.h
+@@ -851,6 +851,10 @@ enum nl80211_commands {
+  *
+  * @NL80211_ATTR_BSS_HTOPMODE: HT operation mode (u16)
+  *
++ * @NL80211_ATTR_KEY_DEFAULT_TYPES: A nested attribute containing flags
++ *	attributes, specifying what a key should be set as default as.
++ *	See &enum nl80211_key_default_types.
++ *
+  * @NL80211_ATTR_MAX: highest attribute number currently defined
+  * @__NL80211_ATTR_AFTER_LAST: internal use
+  */
+@@ -1029,6 +1033,8 @@ enum nl80211_attrs {
+ 
+ 	NL80211_ATTR_BSS_HT_OPMODE,
+ 
++	NL80211_ATTR_KEY_DEFAULT_TYPES,
++
+ 	/* add attributes here, update the policy in nl80211.c */
+ 
+ 	__NL80211_ATTR_AFTER_LAST,
+@@ -1774,6 +1780,23 @@ enum nl80211_wpa_versions {
+ 	NL80211_WPA_VERSION_2 = 1 << 1,
+ };
+ 
++/**
++ * enum nl80211_key_default_types - key default types
++ * @__NL80211_KEY_DEFAULT_TYPE_INVALID: invalid
++ * @NL80211_KEY_DEFAULT_TYPE_UNICAST: key should be used as default
++ *	unicast key
++ * @NL80211_KEY_DEFAULT_TYPE_MULTICAST: key should be used as default
++ *	multicast key
++ * @NUM_NL80211_KEY_DEFAULT_TYPES: number of default types
++ */
++enum nl80211_key_default_types {
++	__NL80211_KEY_DEFAULT_TYPE_INVALID,
++	NL80211_KEY_DEFAULT_TYPE_UNICAST,
++	NL80211_KEY_DEFAULT_TYPE_MULTICAST,
++
++	NUM_NL80211_KEY_DEFAULT_TYPES
++};
++
+ /**
+  * enum nl80211_key_attributes - key attributes
+  * @__NL80211_KEY_INVALID: invalid
+@@ -1790,6 +1813,9 @@ enum nl80211_wpa_versions {
+  * @NL80211_KEY_TYPE: the key type from enum nl80211_key_type, if not
+  *	specified the default depends on whether a MAC address was
+  *	given with the command using the key or not (u32)
++ * @NL80211_KEY_DEFAULT_TYPES: A nested attribute containing flags
++ *	attributes, specifying what a key should be set as default as.
++ *	See &enum nl80211_key_default_types.
+  * @__NL80211_KEY_AFTER_LAST: internal
+  * @NL80211_KEY_MAX: highest key attribute
+  */
+@@ -1802,6 +1828,7 @@ enum nl80211_key_attributes {
+ 	NL80211_KEY_DEFAULT,
+ 	NL80211_KEY_DEFAULT_MGMT,
+ 	NL80211_KEY_TYPE,
++	NL80211_KEY_DEFAULT_TYPES,
+ 
+ 	/* keep last */
+ 	__NL80211_KEY_AFTER_LAST,
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index 4d5acb013636..22be7c625b70 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -1211,7 +1211,7 @@ struct cfg80211_ops {
+ 			   u8 key_index, bool pairwise, const u8 *mac_addr);
+ 	int	(*set_default_key)(struct wiphy *wiphy,
+ 				   struct net_device *netdev,
+-				   u8 key_index);
++				   u8 key_index, bool unicast, bool multicast);
+ 	int	(*set_default_mgmt_key)(struct wiphy *wiphy,
+ 					struct net_device *netdev,
+ 					u8 key_index);
+@@ -1393,6 +1393,8 @@ struct cfg80211_ops {
+  *	control port protocol ethertype. The device also honours the
+  *	control_port_no_encrypt flag.
+  * @WIPHY_FLAG_IBSS_RSN: The device supports IBSS RSN.
++ * @WIPHY_FLAG_SUPPORTS_SEPARATE_DEFAULT_KEYS: The device supports separate
++ *	unicast and multicast TX keys.
+  */
+ enum wiphy_flags {
+ 	WIPHY_FLAG_CUSTOM_REGULATORY		= BIT(0),
+@@ -1404,6 +1406,7 @@ enum wiphy_flags {
+ 	WIPHY_FLAG_4ADDR_STATION		= BIT(6),
+ 	WIPHY_FLAG_CONTROL_PORT_PROTOCOL	= BIT(7),
+ 	WIPHY_FLAG_IBSS_RSN			= BIT(8),
++	WIPHY_FLAG_SUPPORTS_SEPARATE_DEFAULT_KEYS= BIT(9),
+ };
+ 
+ struct mac_address {
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index c30b8b72eedb..12f7dc048d34 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -295,7 +295,8 @@ static int ieee80211_get_key(struct wiphy *wiphy, struct net_device *dev,
+ 
+ static int ieee80211_config_default_key(struct wiphy *wiphy,
+ 					struct net_device *dev,
+-					u8 key_idx)
++					u8 key_idx, bool uni,
++					bool multi)
+ {
+ 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
+ 
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index 73a7f6d354c9..53f044370cde 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -171,6 +171,7 @@ static const struct nla_policy nl80211_policy[NL80211_ATTR_MAX+1] = {
+ 	[NL80211_ATTR_WIPHY_ANTENNA_RX] = { .type = NLA_U32 },
+ 	[NL80211_ATTR_MCAST_RATE] = { .type = NLA_U32 },
+ 	[NL80211_ATTR_OFFCHANNEL_TX_OK] = { .type = NLA_FLAG },
++	[NL80211_ATTR_KEY_DEFAULT_TYPES] = { .type = NLA_NESTED },
+ };
+ 
+ /* policy for the key attributes */
+@@ -182,6 +183,14 @@ static const struct nla_policy nl80211_key_policy[NL80211_KEY_MAX + 1] = {
+ 	[NL80211_KEY_DEFAULT] = { .type = NLA_FLAG },
+ 	[NL80211_KEY_DEFAULT_MGMT] = { .type = NLA_FLAG },
+ 	[NL80211_KEY_TYPE] = { .type = NLA_U32 },
++	[NL80211_KEY_DEFAULT_TYPES] = { .type = NLA_NESTED },
++};
++
++/* policy for the key default flags */
++static const struct nla_policy
++nl80211_key_default_policy[NUM_NL80211_KEY_DEFAULT_TYPES] = {
++	[NL80211_KEY_DEFAULT_TYPE_UNICAST] = { .type = NLA_FLAG },
++	[NL80211_KEY_DEFAULT_TYPE_MULTICAST] = { .type = NLA_FLAG },
+ };
+ 
+ /* ifidx get helper */
+@@ -314,6 +323,7 @@ struct key_parse {
+ 	int idx;
+ 	int type;
+ 	bool def, defmgmt;
++	bool def_uni, def_multi;
+ };
+ 
+ static int nl80211_parse_key_new(struct nlattr *key, struct key_parse *k)
+@@ -327,6 +337,13 @@ static int nl80211_parse_key_new(struct nlattr *key, struct key_parse *k)
+ 	k->def = !!tb[NL80211_KEY_DEFAULT];
+ 	k->defmgmt = !!tb[NL80211_KEY_DEFAULT_MGMT];
+ 
++	if (k->def) {
++		k->def_uni = true;
++		k->def_multi = true;
++	}
++	if (k->defmgmt)
++		k->def_multi = true;
++
+ 	if (tb[NL80211_KEY_IDX])
+ 		k->idx = nla_get_u8(tb[NL80211_KEY_IDX]);
+ 
+@@ -349,6 +366,19 @@ static int nl80211_parse_key_new(struct nlattr *key, struct key_parse *k)
+ 			return -EINVAL;
+ 	}
+ 
++	if (tb[NL80211_KEY_DEFAULT_TYPES]) {
++		struct nlattr *kdt[NUM_NL80211_KEY_DEFAULT_TYPES];
++		int err = nla_parse_nested(kdt,
++					   NUM_NL80211_KEY_DEFAULT_TYPES - 1,
++					   tb[NL80211_KEY_DEFAULT_TYPES],
++					   nl80211_key_default_policy);
++		if (err)
++			return err;
++
++		k->def_uni = kdt[NL80211_KEY_DEFAULT_TYPE_UNICAST];
++		k->def_multi = kdt[NL80211_KEY_DEFAULT_TYPE_MULTICAST];
++	}
++
+ 	return 0;
+ }
+ 
+@@ -373,12 +403,32 @@ static int nl80211_parse_key_old(struct genl_info *info, struct key_parse *k)
+ 	k->def = !!info->attrs[NL80211_ATTR_KEY_DEFAULT];
+ 	k->defmgmt = !!info->attrs[NL80211_ATTR_KEY_DEFAULT_MGMT];
+ 
++	if (k->def) {
++		k->def_uni = true;
++		k->def_multi = true;
++	}
++	if (k->defmgmt)
++		k->def_multi = true;
++
+ 	if (info->attrs[NL80211_ATTR_KEY_TYPE]) {
+ 		k->type = nla_get_u32(info->attrs[NL80211_ATTR_KEY_TYPE]);
+ 		if (k->type < 0 || k->type >= NUM_NL80211_KEYTYPES)
+ 			return -EINVAL;
+ 	}
+ 
++	if (info->attrs[NL80211_ATTR_KEY_DEFAULT_TYPES]) {
++		struct nlattr *kdt[NUM_NL80211_KEY_DEFAULT_TYPES];
++		int err = nla_parse_nested(
++				kdt, NUM_NL80211_KEY_DEFAULT_TYPES - 1,
++				info->attrs[NL80211_ATTR_KEY_DEFAULT_TYPES],
++				nl80211_key_default_policy);
++		if (err)
++			return err;
++
++		k->def_uni = kdt[NL80211_KEY_DEFAULT_TYPE_UNICAST];
++		k->def_multi = kdt[NL80211_KEY_DEFAULT_TYPE_MULTICAST];
++	}
++
+ 	return 0;
+ }
+ 
+@@ -401,6 +451,11 @@ static int nl80211_parse_key(struct genl_info *info, struct key_parse *k)
+ 	if (k->def && k->defmgmt)
+ 		return -EINVAL;
+ 
++	if (k->defmgmt) {
++		if (k->def_uni || !k->def_multi)
++			return -EINVAL;
++	}
++
+ 	if (k->idx != -1) {
+ 		if (k->defmgmt) {
+ 			if (k->idx < 4 || k->idx > 5)
+@@ -450,6 +505,8 @@ nl80211_parse_connkeys(struct cfg80211_registered_device *rdev,
+ 				goto error;
+ 			def = 1;
+ 			result->def = parse.idx;
++			if (!parse.def_uni || !parse.def_multi)
++				goto error;
+ 		} else if (parse.defmgmt)
+ 			goto error;
+ 		err = cfg80211_validate_key_settings(rdev, &parse.p,
+@@ -1586,8 +1643,6 @@ static int nl80211_set_key(struct sk_buff *skb, struct genl_info *info)
+ 	struct key_parse key;
+ 	int err;
+ 	struct net_device *dev = info->user_ptr[1];
+-	int (*func)(struct wiphy *wiphy, struct net_device *netdev,
+-		    u8 key_index);
+ 
+ 	err = nl80211_parse_key(info, &key);
+ 	if (err)
+@@ -1600,27 +1655,61 @@ static int nl80211_set_key(struct sk_buff *skb, struct genl_info *info)
+ 	if (!key.def && !key.defmgmt)
+ 		return -EINVAL;
+ 
+-	if (key.def)
+-		func = rdev->ops->set_default_key;
+-	else
+-		func = rdev->ops->set_default_mgmt_key;
++	wdev_lock(dev->ieee80211_ptr);
+ 
+-	if (!func)
+-		return -EOPNOTSUPP;
++	if (key.def) {
++		if (!rdev->ops->set_default_key) {
++			err = -EOPNOTSUPP;
++			goto out;
++		}
+ 
+-	wdev_lock(dev->ieee80211_ptr);
+-	err = nl80211_key_allowed(dev->ieee80211_ptr);
+-	if (!err)
+-		err = func(&rdev->wiphy, dev, key.idx);
++		err = nl80211_key_allowed(dev->ieee80211_ptr);
++		if (err)
++			goto out;
++
++		if (!(rdev->wiphy.flags &
++				WIPHY_FLAG_SUPPORTS_SEPARATE_DEFAULT_KEYS)) {
++			if (!key.def_uni || !key.def_multi) {
++				err = -EOPNOTSUPP;
++				goto out;
++			}
++		}
++
++		err = rdev->ops->set_default_key(&rdev->wiphy, dev, key.idx,
++						 key.def_uni, key.def_multi);
++
++		if (err)
++			goto out;
+ 
+ #ifdef CONFIG_CFG80211_WEXT
+-	if (!err) {
+-		if (func == rdev->ops->set_default_key)
+-			dev->ieee80211_ptr->wext.default_key = key.idx;
+-		else
+-			dev->ieee80211_ptr->wext.default_mgmt_key = key.idx;
+-	}
++		dev->ieee80211_ptr->wext.default_key = key.idx;
++#endif
++	} else {
++		if (key.def_uni || !key.def_multi) {
++			err = -EINVAL;
++			goto out;
++		}
++
++		if (!rdev->ops->set_default_mgmt_key) {
++			err = -EOPNOTSUPP;
++			goto out;
++		}
++
++		err = nl80211_key_allowed(dev->ieee80211_ptr);
++		if (err)
++			goto out;
++
++		err = rdev->ops->set_default_mgmt_key(&rdev->wiphy,
++						      dev, key.idx);
++		if (err)
++			goto out;
++
++#ifdef CONFIG_CFG80211_WEXT
++		dev->ieee80211_ptr->wext.default_mgmt_key = key.idx;
+ #endif
++	}
++
++ out:
+ 	wdev_unlock(dev->ieee80211_ptr);
+ 
+ 	return err;
+diff --git a/net/wireless/util.c b/net/wireless/util.c
+index 4de624ca4c63..7620ae2fcf18 100644
+--- a/net/wireless/util.c
++++ b/net/wireless/util.c
+@@ -689,7 +689,8 @@ void cfg80211_upload_connect_keys(struct wireless_dev *wdev)
+ 			continue;
+ 		}
+ 		if (wdev->connect_keys->def == i)
+-			if (rdev->ops->set_default_key(wdev->wiphy, dev, i)) {
++			if (rdev->ops->set_default_key(wdev->wiphy, dev,
++						       i, true, true)) {
+ 				netdev_err(dev, "failed to set defkey %d\n", i);
+ 				continue;
+ 			}
+diff --git a/net/wireless/wext-compat.c b/net/wireless/wext-compat.c
+index 12222ee6ebf2..3e5dbd4e4cd5 100644
+--- a/net/wireless/wext-compat.c
++++ b/net/wireless/wext-compat.c
+@@ -548,8 +548,8 @@ static int __cfg80211_set_encryption(struct cfg80211_registered_device *rdev,
+ 				__cfg80211_leave_ibss(rdev, wdev->netdev, true);
+ 				rejoin = true;
+ 			}
+-			err = rdev->ops->set_default_key(&rdev->wiphy,
+-							 dev, idx);
++			err = rdev->ops->set_default_key(&rdev->wiphy, dev,
++							 idx, true, true);
+ 		}
+ 		if (!err) {
+ 			wdev->wext.default_key = idx;
+@@ -627,8 +627,8 @@ int cfg80211_wext_siwencode(struct net_device *dev,
+ 		err = 0;
+ 		wdev_lock(wdev);
+ 		if (wdev->current_bss)
+-			err = rdev->ops->set_default_key(&rdev->wiphy,
+-							 dev, idx);
++			err = rdev->ops->set_default_key(&rdev->wiphy, dev,
++							 idx, true, true);
+ 		if (!err)
+ 			wdev->wext.default_key = idx;
+ 		wdev_unlock(wdev);
+

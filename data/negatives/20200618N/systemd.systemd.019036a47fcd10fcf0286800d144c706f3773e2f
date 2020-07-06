@@ -1,0 +1,250 @@
+commit 019036a47fcd10fcf0286800d144c706f3773e2f
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Fri Dec 18 20:09:30 2015 +0100
+
+    resolved: propagate the DNSSEC result from the transaction to the query and the the bus client
+    
+    It's useful to generate useful errors, so let's do that.
+
+diff --git a/src/resolve/resolved-bus.c b/src/resolve/resolved-bus.c
+index cda16b473..af08a0555 100644
+--- a/src/resolve/resolved-bus.c
++++ b/src/resolve/resolved-bus.c
+@@ -61,7 +61,8 @@ static int reply_query_state(DnsQuery *q) {
+                 return sd_bus_reply_method_errorf(q->request, BUS_ERROR_ABORTED, "Query aborted");
+ 
+         case DNS_TRANSACTION_DNSSEC_FAILED:
+-                return sd_bus_reply_method_errorf(q->request, BUS_ERROR_ABORTED, "DNSSEC validation failed");
++                return sd_bus_reply_method_errorf(q->request, BUS_ERROR_ABORTED, "DNSSEC validation failed: %s",
++                                                  dnssec_result_to_string(q->answer_dnssec_result));
+ 
+         case DNS_TRANSACTION_RCODE_FAILURE: {
+                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+diff --git a/src/resolve/resolved-dns-query.c b/src/resolve/resolved-dns-query.c
+index 7e4aee2a2..18d2d01bf 100644
+--- a/src/resolve/resolved-dns-query.c
++++ b/src/resolve/resolved-dns-query.c
+@@ -986,6 +986,7 @@ fail:
+ static void dns_query_accept(DnsQuery *q, DnsQueryCandidate *c) {
+         DnsTransactionState state = DNS_TRANSACTION_NO_SERVERS;
+         bool has_authenticated = false, has_non_authenticated = false;
++        DnssecResult dnssec_result_authenticated = _DNSSEC_RESULT_INVALID, dnssec_result_non_authenticated = _DNSSEC_RESULT_INVALID;
+         DnsTransaction *t;
+         Iterator i;
+         int r;
+@@ -1009,12 +1010,16 @@ static void dns_query_accept(DnsQuery *q, DnsQueryCandidate *c) {
+                                 dns_query_complete(q, DNS_TRANSACTION_RESOURCES);
+                                 return;
+                         }
++
+                         q->answer_rcode = t->answer_rcode;
+ 
+-                        if (t->answer_authenticated)
++                        if (t->answer_authenticated) {
+                                 has_authenticated = true;
+-                        else
++                                dnssec_result_authenticated = t->answer_dnssec_result;
++                        } else {
+                                 has_non_authenticated = true;
++                                dnssec_result_non_authenticated = t->answer_dnssec_result;
++                        }
+ 
+                         state = DNS_TRANSACTION_SUCCESS;
+                         break;
+@@ -1031,22 +1036,26 @@ static void dns_query_accept(DnsQuery *q, DnsQueryCandidate *c) {
+                         /* Any kind of failure? Store the data away,
+                          * if there's nothing stored yet. */
+ 
+-                        if (state != DNS_TRANSACTION_SUCCESS) {
+-
+-                                dns_answer_unref(q->answer);
+-                                q->answer = dns_answer_ref(t->answer);
+-                                q->answer_rcode = t->answer_rcode;
++                        if (state == DNS_TRANSACTION_SUCCESS)
++                                continue;
+ 
+-                                state = t->state;
+-                        }
++                        dns_answer_unref(q->answer);
++                        q->answer = dns_answer_ref(t->answer);
++                        q->answer_rcode = t->answer_rcode;
++                        q->answer_dnssec_result = t->answer_dnssec_result;
+ 
++                        state = t->state;
+                         break;
+                 }
+         }
+ 
++        if (state == DNS_TRANSACTION_SUCCESS) {
++                q->answer_authenticated = has_authenticated && !has_non_authenticated;
++                q->answer_dnssec_result = q->answer_authenticated ? dnssec_result_authenticated : dnssec_result_non_authenticated;
++        }
++
+         q->answer_protocol = c->scope->protocol;
+         q->answer_family = c->scope->family;
+-        q->answer_authenticated = has_authenticated && !has_non_authenticated;
+ 
+         dns_search_domain_unref(q->answer_search_domain);
+         q->answer_search_domain = dns_search_domain_ref(c->search_domain);
+diff --git a/src/resolve/resolved-dns-query.h b/src/resolve/resolved-dns-query.h
+index d7f96c3ca..44edd5bff 100644
+--- a/src/resolve/resolved-dns-query.h
++++ b/src/resolve/resolved-dns-query.h
+@@ -72,10 +72,11 @@ struct DnsQuery {
+         /* Discovered data */
+         DnsAnswer *answer;
+         int answer_rcode;
++        DnssecResult answer_dnssec_result;
++        bool answer_authenticated;
+         DnsProtocol answer_protocol;
+         int answer_family;
+         DnsSearchDomain *answer_search_domain;
+-        bool answer_authenticated;
+ 
+         /* Bus client information */
+         sd_bus_message *request;
+diff --git a/src/resolve/resolved-dns-transaction.c b/src/resolve/resolved-dns-transaction.c
+index 893ffa9ff..9a4dcfd74 100644
+--- a/src/resolve/resolved-dns-transaction.c
++++ b/src/resolve/resolved-dns-transaction.c
+@@ -129,7 +129,7 @@ int dns_transaction_new(DnsTransaction **ret, DnsScope *s, DnsResourceKey *key)
+ 
+         t->dns_udp_fd = -1;
+         t->answer_source = _DNS_TRANSACTION_SOURCE_INVALID;
+-        t->dnssec_result = _DNSSEC_RESULT_INVALID;
++        t->answer_dnssec_result = _DNSSEC_RESULT_INVALID;
+         t->key = dns_resource_key_ref(key);
+ 
+         /* Find a fresh, unused transaction id */
+@@ -463,7 +463,7 @@ static void dns_transaction_process_dnssec(DnsTransaction *t) {
+                 return;
+         }
+ 
+-        if (!IN_SET(t->dnssec_result,
++        if (!IN_SET(t->answer_dnssec_result,
+                     _DNSSEC_RESULT_INVALID, /* No DNSSEC validation enabled */
+                     DNSSEC_VALIDATED,       /* Answer is signed and validated successfully */
+                     DNSSEC_UNSIGNED)) {     /* Answer is right-fully unsigned */
+@@ -1611,7 +1611,7 @@ void dns_transaction_notify(DnsTransaction *t, DnsTransaction *source) {
+         return;
+ 
+ fail:
+-        t->dnssec_result = DNSSEC_FAILED_AUXILIARY;
++        t->answer_dnssec_result = DNSSEC_FAILED_AUXILIARY;
+         dns_transaction_complete(t, DNS_TRANSACTION_DNSSEC_FAILED);
+ }
+ 
+@@ -1852,12 +1852,12 @@ int dns_transaction_validate_dnssec(DnsTransaction *t) {
+                 return 0;
+ 
+         /* Already validated */
+-        if (t->dnssec_result != _DNSSEC_RESULT_INVALID)
++        if (t->answer_dnssec_result != _DNSSEC_RESULT_INVALID)
+                 return 0;
+ 
+         /* Our own stuff needs no validation */
+         if (IN_SET(t->answer_source, DNS_TRANSACTION_ZONE, DNS_TRANSACTION_TRUST_ANCHOR)) {
+-                t->dnssec_result = DNSSEC_VALIDATED;
++                t->answer_dnssec_result = DNSSEC_VALIDATED;
+                 t->answer_authenticated = true;
+                 return 0;
+         }
+@@ -1950,7 +1950,7 @@ int dns_transaction_validate_dnssec(DnsTransaction *t) {
+                                          * to our question, and it
+                                          * failed validation. That's
+                                          * fatal. */
+-                                        t->dnssec_result = result;
++                                        t->answer_dnssec_result = result;
+                                         return 0;
+                                 }
+ 
+@@ -1999,12 +1999,12 @@ int dns_transaction_validate_dnssec(DnsTransaction *t) {
+ 
+                 if (flags & DNS_ANSWER_AUTHENTICATED) {
+                         /* The answer is fully authenticated, yay. */
+-                        t->dnssec_result = DNSSEC_VALIDATED;
++                        t->answer_dnssec_result = DNSSEC_VALIDATED;
+                         t->answer_rcode = DNS_RCODE_SUCCESS;
+                         t->answer_authenticated = true;
+                 } else {
+                         /* The answer is not fully authenticated. */
+-                        t->dnssec_result = DNSSEC_UNSIGNED;
++                        t->answer_dnssec_result = DNSSEC_UNSIGNED;
+                         t->answer_authenticated = false;
+                 }
+ 
+@@ -2021,7 +2021,7 @@ int dns_transaction_validate_dnssec(DnsTransaction *t) {
+                 case DNSSEC_NSEC_NXDOMAIN:
+                         /* NSEC proves the domain doesn't exist. Very good. */
+                         log_debug("Proved NXDOMAIN via NSEC/NSEC3 for transaction %u (%s)", t->id, dns_transaction_key_string(t));
+-                        t->dnssec_result = DNSSEC_VALIDATED;
++                        t->answer_dnssec_result = DNSSEC_VALIDATED;
+                         t->answer_rcode = DNS_RCODE_NXDOMAIN;
+                         t->answer_authenticated = true;
+                         break;
+@@ -2029,7 +2029,7 @@ int dns_transaction_validate_dnssec(DnsTransaction *t) {
+                 case DNSSEC_NSEC_NODATA:
+                         /* NSEC proves that there's no data here, very good. */
+                         log_debug("Proved NODATA via NSEC/NSEC3 for transaction %u (%s)", t->id, dns_transaction_key_string(t));
+-                        t->dnssec_result = DNSSEC_VALIDATED;
++                        t->answer_dnssec_result = DNSSEC_VALIDATED;
+                         t->answer_rcode = DNS_RCODE_SUCCESS;
+                         t->answer_authenticated = true;
+                         break;
+@@ -2037,7 +2037,7 @@ int dns_transaction_validate_dnssec(DnsTransaction *t) {
+                 case DNSSEC_NSEC_OPTOUT:
+                         /* NSEC3 says the data might not be signed */
+                         log_debug("Data is NSEC3 opt-out via NSEC/NSEC3 for transaction %u (%s)", t->id, dns_transaction_key_string(t));
+-                        t->dnssec_result = DNSSEC_UNSIGNED;
++                        t->answer_dnssec_result = DNSSEC_UNSIGNED;
+                         t->answer_authenticated = false;
+                         break;
+ 
+@@ -2048,9 +2048,9 @@ int dns_transaction_validate_dnssec(DnsTransaction *t) {
+                         if (r < 0)
+                                 return r;
+                         if (r > 0)
+-                                t->dnssec_result = DNSSEC_NO_SIGNATURE;
++                                t->answer_dnssec_result = DNSSEC_NO_SIGNATURE;
+                         else {
+-                                t->dnssec_result = DNSSEC_UNSIGNED;
++                                t->answer_dnssec_result = DNSSEC_UNSIGNED;
+                                 t->answer_authenticated = false;
+                         }
+ 
+@@ -2058,12 +2058,12 @@ int dns_transaction_validate_dnssec(DnsTransaction *t) {
+ 
+                 case DNSSEC_NSEC_UNSUPPORTED_ALGORITHM:
+                         /* We don't know the NSEC3 algorithm used? */
+-                        t->dnssec_result = DNSSEC_UNSUPPORTED_ALGORITHM;
++                        t->answer_dnssec_result = DNSSEC_UNSUPPORTED_ALGORITHM;
+                         break;
+ 
+                 case DNSSEC_NSEC_FOUND:
+                         /* NSEC says it needs to be there, but we couldn't find it? Bummer! */
+-                        t->dnssec_result = DNSSEC_NSEC_MISMATCH;
++                        t->answer_dnssec_result = DNSSEC_NSEC_MISMATCH;
+                         break;
+ 
+                 default:
+diff --git a/src/resolve/resolved-dns-transaction.h b/src/resolve/resolved-dns-transaction.h
+index a1a6ffed9..fea25aab0 100644
+--- a/src/resolve/resolved-dns-transaction.h
++++ b/src/resolve/resolved-dns-transaction.h
+@@ -65,7 +65,6 @@ struct DnsTransaction {
+         char *key_string;
+ 
+         DnsTransactionState state;
+-        DnssecResult dnssec_result;
+ 
+         uint16_t id;
+ 
+@@ -76,6 +75,7 @@ struct DnsTransaction {
+ 
+         DnsAnswer *answer;
+         int answer_rcode;
++        DnssecResult answer_dnssec_result;
+         DnsTransactionSource answer_source;
+ 
+         /* Indicates whether the primary answer is authenticated,
+

@@ -1,0 +1,84 @@
+commit 9e3bd4e24e94d60d2e0762e919aab6c9a7fc0c5b
+Author: Weston Andros Adamson <dros@netapp.com>
+Date:   Tue May 31 21:46:50 2011 -0400
+
+    NFS: fix umount of pnfs filesystems
+    
+    Unmounting a pnfs filesystem hangs using filelayout and possibly others.
+    This fixes the use of the rcu protected node by making use of a new 'tmpnode'
+    for the temporary purge list. Also, the spinlock shouldn't be held when calling
+    synchronize_rcu().
+    
+    Signed-off-by: Weston Andros Adamson <dros@netapp.com>
+    Signed-off-by: Andy Adamson <andros@netapp.com>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/fs/nfs/pnfs.h b/fs/nfs/pnfs.h
+index 48d0a8e4d062..96bf4e6f45be 100644
+--- a/fs/nfs/pnfs.h
++++ b/fs/nfs/pnfs.h
+@@ -186,6 +186,7 @@ int pnfs_ld_read_done(struct nfs_read_data *);
+ /* pnfs_dev.c */
+ struct nfs4_deviceid_node {
+ 	struct hlist_node		node;
++	struct hlist_node		tmpnode;
+ 	const struct pnfs_layoutdriver_type *ld;
+ 	const struct nfs_client		*nfs_client;
+ 	struct nfs4_deviceid		deviceid;
+diff --git a/fs/nfs/pnfs_dev.c b/fs/nfs/pnfs_dev.c
+index c65e133ce9c0..5944d4b369a2 100644
+--- a/fs/nfs/pnfs_dev.c
++++ b/fs/nfs/pnfs_dev.c
+@@ -174,6 +174,7 @@ nfs4_init_deviceid_node(struct nfs4_deviceid_node *d,
+ 			const struct nfs4_deviceid *id)
+ {
+ 	INIT_HLIST_NODE(&d->node);
++	INIT_HLIST_NODE(&d->tmpnode);
+ 	d->ld = ld;
+ 	d->nfs_client = nfs_client;
+ 	d->deviceid = *id;
+@@ -238,24 +239,29 @@ static void
+ _deviceid_purge_client(const struct nfs_client *clp, long hash)
+ {
+ 	struct nfs4_deviceid_node *d;
+-	struct hlist_node *n, *next;
++	struct hlist_node *n;
+ 	HLIST_HEAD(tmp);
+ 
++	spin_lock(&nfs4_deviceid_lock);
+ 	rcu_read_lock();
+ 	hlist_for_each_entry_rcu(d, n, &nfs4_deviceid_cache[hash], node)
+ 		if (d->nfs_client == clp && atomic_read(&d->ref)) {
+ 			hlist_del_init_rcu(&d->node);
+-			hlist_add_head(&d->node, &tmp);
++			hlist_add_head(&d->tmpnode, &tmp);
+ 		}
+ 	rcu_read_unlock();
++	spin_unlock(&nfs4_deviceid_lock);
+ 
+ 	if (hlist_empty(&tmp))
+ 		return;
+ 
+ 	synchronize_rcu();
+-	hlist_for_each_entry_safe(d, n, next, &tmp, node)
++	while (!hlist_empty(&tmp)) {
++		d = hlist_entry(tmp.first, struct nfs4_deviceid_node, tmpnode);
++		hlist_del(&d->tmpnode);
+ 		if (atomic_dec_and_test(&d->ref))
+ 			d->ld->free_deviceid_node(d);
++	}
+ }
+ 
+ void
+@@ -263,8 +269,8 @@ nfs4_deviceid_purge_client(const struct nfs_client *clp)
+ {
+ 	long h;
+ 
+-	spin_lock(&nfs4_deviceid_lock);
++	if (!(clp->cl_exchange_flags & EXCHGID4_FLAG_USE_PNFS_MDS))
++		return;
+ 	for (h = 0; h < NFS4_DEVICE_ID_HASH_SIZE; h++)
+ 		_deviceid_purge_client(clp, h);
+-	spin_unlock(&nfs4_deviceid_lock);
+ }
+

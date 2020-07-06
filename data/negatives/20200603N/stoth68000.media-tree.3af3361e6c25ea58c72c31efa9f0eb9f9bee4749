@@ -1,0 +1,82 @@
+commit 3af3361e6c25ea58c72c31efa9f0eb9f9bee4749
+Author: Emil Tantilov <emil.s.tantilov@intel.com>
+Date:   Wed Oct 24 08:12:10 2012 +0000
+
+    ixgbe: fix default setting of TXDCTL.WTHRESH
+    
+    The q_vector->itr check in ixgbe_configure_tx_ring() was done prior to it
+    being set, which resulted in TXDCTL.WTHRESH always being set to 1 on driver
+    load, while consequent resets would set it to 8.
+    
+    This patch moves the setting of q_vector->itr in ixgbe_alloc_q_vector() to
+    make sure that TXDCTL.WTHRESH is set to 8 by default.
+    
+    Signed-off-by: Emil Tantilov <emil.s.tantilov@intel.com>
+    Tested-by: Phil Schmitt <phillip.j.schmitt@intel.com>
+    Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_lib.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_lib.c
+index 5e508b614dc3..8c74f739011d 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_lib.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_lib.c
+@@ -824,6 +824,21 @@ static int ixgbe_alloc_q_vector(struct ixgbe_adapter *adapter,
+ 	/* initialize pointer to rings */
+ 	ring = q_vector->ring;
+ 
++	/* intialize ITR */
++	if (txr_count && !rxr_count) {
++		/* tx only vector */
++		if (adapter->tx_itr_setting == 1)
++			q_vector->itr = IXGBE_10K_ITR;
++		else
++			q_vector->itr = adapter->tx_itr_setting;
++	} else {
++		/* rx or rx/tx vector */
++		if (adapter->rx_itr_setting == 1)
++			q_vector->itr = IXGBE_20K_ITR;
++		else
++			q_vector->itr = adapter->rx_itr_setting;
++	}
++
+ 	while (txr_count) {
+ 		/* assign generic ring traits */
+ 		ring->dev = &adapter->pdev->dev;
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
+index 26bfaaee9515..8b1a38bec237 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
+@@ -1976,20 +1976,6 @@ static void ixgbe_configure_msix(struct ixgbe_adapter *adapter)
+ 		ixgbe_for_each_ring(ring, q_vector->tx)
+ 			ixgbe_set_ivar(adapter, 1, ring->reg_idx, v_idx);
+ 
+-		if (q_vector->tx.ring && !q_vector->rx.ring) {
+-			/* tx only vector */
+-			if (adapter->tx_itr_setting == 1)
+-				q_vector->itr = IXGBE_10K_ITR;
+-			else
+-				q_vector->itr = adapter->tx_itr_setting;
+-		} else {
+-			/* rx or rx/tx vector */
+-			if (adapter->rx_itr_setting == 1)
+-				q_vector->itr = IXGBE_20K_ITR;
+-			else
+-				q_vector->itr = adapter->rx_itr_setting;
+-		}
+-
+ 		ixgbe_write_eitr(q_vector);
+ 	}
+ 
+@@ -2761,12 +2747,6 @@ static void ixgbe_configure_msi_and_legacy(struct ixgbe_adapter *adapter)
+ {
+ 	struct ixgbe_q_vector *q_vector = adapter->q_vector[0];
+ 
+-	/* rx/tx vector */
+-	if (adapter->rx_itr_setting == 1)
+-		q_vector->itr = IXGBE_20K_ITR;
+-	else
+-		q_vector->itr = adapter->rx_itr_setting;
+-
+ 	ixgbe_write_eitr(q_vector);
+ 
+ 	ixgbe_set_ivar(adapter, 0, 0, 0);
+

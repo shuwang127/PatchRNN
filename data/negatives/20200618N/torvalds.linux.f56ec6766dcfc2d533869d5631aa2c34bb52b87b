@@ -1,0 +1,261 @@
+commit f56ec6766dcfc2d533869d5631aa2c34bb52b87b
+Author: Arjun Vynipadath <arjun@chelsio.com>
+Date:   Wed Dec 13 01:04:05 2017 +0530
+
+    cxgb4: Add support for ethtool i2c dump
+    
+    Adds support for ethtool get_module_info() and get_module_eeprom()
+    callbacks that will dump necessary information for a SFP.
+    
+    Signed-off-by: Arjun Vynipadath <arjun@chelsio.com>
+    Signed-off-by: Casey Leedom <leedom@chelsio.com>
+    Signed-off-by: Ganesh Goudar <ganeshgr@chelsio.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/chelsio/cxgb4/cxgb4.h b/drivers/net/ethernet/chelsio/cxgb4/cxgb4.h
+index 97dc3efeb234..b1df2aa6be94 100644
+--- a/drivers/net/ethernet/chelsio/cxgb4/cxgb4.h
++++ b/drivers/net/ethernet/chelsio/cxgb4/cxgb4.h
+@@ -1424,6 +1424,21 @@ static inline void init_rspq(struct adapter *adap, struct sge_rspq *q,
+ 	q->size = size;
+ }
+ 
++/**
++ *     t4_is_inserted_mod_type - is a plugged in Firmware Module Type
++ *     @fw_mod_type: the Firmware Mofule Type
++ *
++ *     Return whether the Firmware Module Type represents a real Transceiver
++ *     Module/Cable Module Type which has been inserted.
++ */
++static inline bool t4_is_inserted_mod_type(unsigned int fw_mod_type)
++{
++	return (fw_mod_type != FW_PORT_MOD_TYPE_NONE &&
++		fw_mod_type != FW_PORT_MOD_TYPE_NOTSUPPORTED &&
++		fw_mod_type != FW_PORT_MOD_TYPE_UNKNOWN &&
++		fw_mod_type != FW_PORT_MOD_TYPE_ERROR);
++}
++
+ void t4_write_indirect(struct adapter *adap, unsigned int addr_reg,
+ 		       unsigned int data_reg, const u32 *vals,
+ 		       unsigned int nregs, unsigned int start_idx);
+@@ -1697,6 +1712,9 @@ void t4_uld_mem_free(struct adapter *adap);
+ int t4_uld_mem_alloc(struct adapter *adap);
+ void t4_uld_clean_up(struct adapter *adap);
+ void t4_register_netevent_notifier(void);
++int t4_i2c_rd(struct adapter *adap, unsigned int mbox, int port,
++	      unsigned int devid, unsigned int offset,
++	      unsigned int len, u8 *buf);
+ void free_rspq_fl(struct adapter *adap, struct sge_rspq *rq, struct sge_fl *fl);
+ void free_tx_desc(struct adapter *adap, struct sge_txq *q,
+ 		  unsigned int n, bool unmap);
+diff --git a/drivers/net/ethernet/chelsio/cxgb4/cxgb4_ethtool.c b/drivers/net/ethernet/chelsio/cxgb4/cxgb4_ethtool.c
+index eb338212f5af..541419b084ac 100644
+--- a/drivers/net/ethernet/chelsio/cxgb4/cxgb4_ethtool.c
++++ b/drivers/net/ethernet/chelsio/cxgb4/cxgb4_ethtool.c
+@@ -1396,6 +1396,101 @@ static int get_dump_data(struct net_device *dev, struct ethtool_dump *eth_dump,
+ 	return 0;
+ }
+ 
++static int cxgb4_get_module_info(struct net_device *dev,
++				 struct ethtool_modinfo *modinfo)
++{
++	struct port_info *pi = netdev_priv(dev);
++	u8 sff8472_comp, sff_diag_type, sff_rev;
++	struct adapter *adapter = pi->adapter;
++	int ret;
++
++	if (!t4_is_inserted_mod_type(pi->mod_type))
++		return -EINVAL;
++
++	switch (pi->port_type) {
++	case FW_PORT_TYPE_SFP:
++	case FW_PORT_TYPE_QSA:
++	case FW_PORT_TYPE_SFP28:
++		ret = t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan,
++				I2C_DEV_ADDR_A0, SFF_8472_COMP_ADDR,
++				SFF_8472_COMP_LEN, &sff8472_comp);
++		if (ret)
++			return ret;
++		ret = t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan,
++				I2C_DEV_ADDR_A0, SFP_DIAG_TYPE_ADDR,
++				SFP_DIAG_TYPE_LEN, &sff_diag_type);
++		if (ret)
++			return ret;
++
++		if (!sff8472_comp || (sff_diag_type & 4)) {
++			modinfo->type = ETH_MODULE_SFF_8079;
++			modinfo->eeprom_len = ETH_MODULE_SFF_8079_LEN;
++		} else {
++			modinfo->type = ETH_MODULE_SFF_8472;
++			modinfo->eeprom_len = ETH_MODULE_SFF_8472_LEN;
++		}
++		break;
++
++	case FW_PORT_TYPE_QSFP:
++	case FW_PORT_TYPE_QSFP_10G:
++	case FW_PORT_TYPE_CR_QSFP:
++	case FW_PORT_TYPE_CR2_QSFP:
++	case FW_PORT_TYPE_CR4_QSFP:
++		ret = t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan,
++				I2C_DEV_ADDR_A0, SFF_REV_ADDR,
++				SFF_REV_LEN, &sff_rev);
++		/* For QSFP type ports, revision value >= 3
++		 * means the SFP is 8636 compliant.
++		 */
++		if (ret)
++			return ret;
++		if (sff_rev >= 0x3) {
++			modinfo->type = ETH_MODULE_SFF_8636;
++			modinfo->eeprom_len = ETH_MODULE_SFF_8636_LEN;
++		} else {
++			modinfo->type = ETH_MODULE_SFF_8436;
++			modinfo->eeprom_len = ETH_MODULE_SFF_8436_LEN;
++		}
++		break;
++
++	default:
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int cxgb4_get_module_eeprom(struct net_device *dev,
++				   struct ethtool_eeprom *eprom, u8 *data)
++{
++	int ret = 0, offset = eprom->offset, len = eprom->len;
++	struct port_info *pi = netdev_priv(dev);
++	struct adapter *adapter = pi->adapter;
++
++	memset(data, 0, eprom->len);
++	if (offset + len <= I2C_PAGE_SIZE)
++		return t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan,
++				 I2C_DEV_ADDR_A0, offset, len, data);
++
++	/* offset + len spans 0xa0 and 0xa1 pages */
++	if (offset <= I2C_PAGE_SIZE) {
++		/* read 0xa0 page */
++		len = I2C_PAGE_SIZE - offset;
++		ret =  t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan,
++				 I2C_DEV_ADDR_A0, offset, len, data);
++		if (ret)
++			return ret;
++		offset = I2C_PAGE_SIZE;
++		/* Remaining bytes to be read from second page =
++		 * Total length - bytes read from first page
++		 */
++		len = eprom->len - len;
++	}
++	/* Read additional optical diagnostics from page 0xa2 if supported */
++	return t4_i2c_rd(adapter, adapter->mbox, pi->tx_chan, I2C_DEV_ADDR_A2,
++			 offset, len, &data[eprom->len - len]);
++}
++
+ static const struct ethtool_ops cxgb_ethtool_ops = {
+ 	.get_link_ksettings = get_link_ksettings,
+ 	.set_link_ksettings = set_link_ksettings,
+@@ -1430,6 +1525,8 @@ static const struct ethtool_ops cxgb_ethtool_ops = {
+ 	.set_dump          = set_dump,
+ 	.get_dump_flag     = get_dump_flag,
+ 	.get_dump_data     = get_dump_data,
++	.get_module_info   = cxgb4_get_module_info,
++	.get_module_eeprom = cxgb4_get_module_eeprom,
+ };
+ 
+ void cxgb4_set_ethtool_ops(struct net_device *netdev)
+diff --git a/drivers/net/ethernet/chelsio/cxgb4/t4_hw.c b/drivers/net/ethernet/chelsio/cxgb4/t4_hw.c
+index 112963defd0b..f044717aaa10 100644
+--- a/drivers/net/ethernet/chelsio/cxgb4/t4_hw.c
++++ b/drivers/net/ethernet/chelsio/cxgb4/t4_hw.c
+@@ -9743,3 +9743,59 @@ int t4_sched_params(struct adapter *adapter, int type, int level, int mode,
+ 	return t4_wr_mbox_meat(adapter, adapter->mbox, &cmd, sizeof(cmd),
+ 			       NULL, 1);
+ }
++
++/**
++ *	t4_i2c_rd - read I2C data from adapter
++ *	@adap: the adapter
++ *	@port: Port number if per-port device; <0 if not
++ *	@devid: per-port device ID or absolute device ID
++ *	@offset: byte offset into device I2C space
++ *	@len: byte length of I2C space data
++ *	@buf: buffer in which to return I2C data
++ *
++ *	Reads the I2C data from the indicated device and location.
++ */
++int t4_i2c_rd(struct adapter *adap, unsigned int mbox, int port,
++	      unsigned int devid, unsigned int offset,
++	      unsigned int len, u8 *buf)
++{
++	struct fw_ldst_cmd ldst_cmd, ldst_rpl;
++	unsigned int i2c_max = sizeof(ldst_cmd.u.i2c.data);
++	int ret = 0;
++
++	if (len > I2C_PAGE_SIZE)
++		return -EINVAL;
++
++	/* Dont allow reads that spans multiple pages */
++	if (offset < I2C_PAGE_SIZE && offset + len > I2C_PAGE_SIZE)
++		return -EINVAL;
++
++	memset(&ldst_cmd, 0, sizeof(ldst_cmd));
++	ldst_cmd.op_to_addrspace =
++		cpu_to_be32(FW_CMD_OP_V(FW_LDST_CMD) |
++			    FW_CMD_REQUEST_F |
++			    FW_CMD_READ_F |
++			    FW_LDST_CMD_ADDRSPACE_V(FW_LDST_ADDRSPC_I2C));
++	ldst_cmd.cycles_to_len16 = cpu_to_be32(FW_LEN16(ldst_cmd));
++	ldst_cmd.u.i2c.pid = (port < 0 ? 0xff : port);
++	ldst_cmd.u.i2c.did = devid;
++
++	while (len > 0) {
++		unsigned int i2c_len = (len < i2c_max) ? len : i2c_max;
++
++		ldst_cmd.u.i2c.boffset = offset;
++		ldst_cmd.u.i2c.blen = i2c_len;
++
++		ret = t4_wr_mbox(adap, mbox, &ldst_cmd, sizeof(ldst_cmd),
++				 &ldst_rpl);
++		if (ret)
++			break;
++
++		memcpy(buf, ldst_rpl.u.i2c.data, i2c_len);
++		offset += i2c_len;
++		buf += i2c_len;
++		len -= i2c_len;
++	}
++
++	return ret;
++}
+diff --git a/drivers/net/ethernet/chelsio/cxgb4/t4_hw.h b/drivers/net/ethernet/chelsio/cxgb4/t4_hw.h
+index 83afb32c8491..872a91b1930c 100644
+--- a/drivers/net/ethernet/chelsio/cxgb4/t4_hw.h
++++ b/drivers/net/ethernet/chelsio/cxgb4/t4_hw.h
+@@ -286,4 +286,14 @@ enum {
+ #define SGE_TIMESTAMP_V(x) ((__u64)(x) << SGE_TIMESTAMP_S)
+ #define SGE_TIMESTAMP_G(x) (((__u64)(x) >> SGE_TIMESTAMP_S) & SGE_TIMESTAMP_M)
+ 
++#define I2C_DEV_ADDR_A0		0xa0
++#define I2C_DEV_ADDR_A2		0xa2
++#define I2C_PAGE_SIZE		0x100
++#define SFP_DIAG_TYPE_ADDR	0x5c
++#define SFP_DIAG_TYPE_LEN	0x1
++#define SFF_8472_COMP_ADDR	0x5e
++#define SFF_8472_COMP_LEN	0x1
++#define SFF_REV_ADDR		0x1
++#define SFF_REV_LEN		0x1
++
+ #endif /* __T4_HW_H */
+diff --git a/drivers/net/ethernet/chelsio/cxgb4/t4fw_api.h b/drivers/net/ethernet/chelsio/cxgb4/t4fw_api.h
+index 57eb4ad3485d..01f5a5ec16fa 100644
+--- a/drivers/net/ethernet/chelsio/cxgb4/t4fw_api.h
++++ b/drivers/net/ethernet/chelsio/cxgb4/t4fw_api.h
+@@ -828,6 +828,7 @@ enum fw_ldst_addrspc {
+ 	FW_LDST_ADDRSPC_MPS       = 0x0020,
+ 	FW_LDST_ADDRSPC_FUNC      = 0x0028,
+ 	FW_LDST_ADDRSPC_FUNC_PCIE = 0x0029,
++	FW_LDST_ADDRSPC_I2C       = 0x0038,
+ };
+ 
+ enum fw_ldst_mps_fid {
+

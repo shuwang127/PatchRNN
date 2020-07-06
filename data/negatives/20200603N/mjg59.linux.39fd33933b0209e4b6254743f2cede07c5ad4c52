@@ -1,0 +1,83 @@
+commit 39fd33933b0209e4b6254743f2cede07c5ad4c52
+Author: Serge E. Hallyn <serge@hallyn.com>
+Date:   Wed Mar 23 16:43:19 2011 -0700
+
+    userns: allow killing tasks in your own or child userns
+    
+    Changelog:
+            Dec  8: Fixed bug in my check_kill_permission pointed out by
+                    Eric Biederman.
+            Dec 13: Apply Eric's suggestion to pass target task into kill_ok_by_cred()
+                    for clarity
+            Dec 31: address comment by Eric Biederman:
+                    don't need cred/tcred in check_kill_permission.
+            Jan  1: use const cred struct.
+            Jan 11: Per Bastian Blank's advice, clean up kill_ok_by_cred().
+            Feb 16: kill_ok_by_cred: fix bad parentheses
+            Feb 23: per akpm, let compiler inline kill_ok_by_cred
+    
+    Signed-off-by: Serge E. Hallyn <serge.hallyn@canonical.com>
+    Acked-by: "Eric W. Biederman" <ebiederm@xmission.com>
+    Acked-by: Daniel Lezcano <daniel.lezcano@free.fr>
+    Acked-by: David Howells <dhowells@redhat.com>
+    Cc: James Morris <jmorris@namei.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 31751868de88..324eff5468ad 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -635,6 +635,27 @@ static inline bool si_fromuser(const struct siginfo *info)
+ 		(!is_si_special(info) && SI_FROMUSER(info));
+ }
+ 
++/*
++ * called with RCU read lock from check_kill_permission()
++ */
++static int kill_ok_by_cred(struct task_struct *t)
++{
++	const struct cred *cred = current_cred();
++	const struct cred *tcred = __task_cred(t);
++
++	if (cred->user->user_ns == tcred->user->user_ns &&
++	    (cred->euid == tcred->suid ||
++	     cred->euid == tcred->uid ||
++	     cred->uid  == tcred->suid ||
++	     cred->uid  == tcred->uid))
++		return 1;
++
++	if (ns_capable(tcred->user->user_ns, CAP_KILL))
++		return 1;
++
++	return 0;
++}
++
+ /*
+  * Bad permissions for sending the signal
+  * - the caller must hold the RCU read lock
+@@ -642,7 +663,6 @@ static inline bool si_fromuser(const struct siginfo *info)
+ static int check_kill_permission(int sig, struct siginfo *info,
+ 				 struct task_struct *t)
+ {
+-	const struct cred *cred, *tcred;
+ 	struct pid *sid;
+ 	int error;
+ 
+@@ -656,14 +676,8 @@ static int check_kill_permission(int sig, struct siginfo *info,
+ 	if (error)
+ 		return error;
+ 
+-	cred = current_cred();
+-	tcred = __task_cred(t);
+ 	if (!same_thread_group(current, t) &&
+-	    (cred->euid ^ tcred->suid) &&
+-	    (cred->euid ^ tcred->uid) &&
+-	    (cred->uid  ^ tcred->suid) &&
+-	    (cred->uid  ^ tcred->uid) &&
+-	    !capable(CAP_KILL)) {
++	    !kill_ok_by_cred(t)) {
+ 		switch (sig) {
+ 		case SIGCONT:
+ 			sid = task_session(t);
+

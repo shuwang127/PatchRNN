@@ -1,0 +1,257 @@
+commit 4cb3760b447b0df4bc3c1c13532c92b3af3a54ab
+Author: bell@sanja.is.com.ua <>
+Date:   Thu May 9 15:23:57 2002 +0300
+
+    total table list managment is changed
+
+diff --git a/sql/sql_lex.cc b/sql/sql_lex.cc
+index bfa06353e30..dfa60918665 100644
+--- a/sql/sql_lex.cc
++++ b/sql/sql_lex.cc
+@@ -996,3 +996,79 @@ void st_select_lex_node::exclude()
+        master->slave= next;
+   */
+ }
++
++/*
++  This is used for UNION & subselect to create a new table list of all used 
++  tables.
++  The table_list->table entry in all used tables are set to point
++  to the entries in this list.
++*/
++
++// interface
++bool st_select_lex_unit::create_total_list(THD *thd, st_lex *lex,
++					   TABLE_LIST **result)
++{
++  *result= 0;
++  return create_total_list_n_last_return(thd, lex, &result);
++}
++
++// list creator
++bool st_select_lex_unit::create_total_list_n_last_return(THD *thd, st_lex *lex,
++							 TABLE_LIST ***result)
++{
++  TABLE_LIST *slave_list_first=0, **slave_list_last= &slave_list_first;
++  TABLE_LIST **new_table_list= *result, *aux;
++  SELECT_LEX *sl= (SELECT_LEX*)slave;
++  for (; sl; sl= (SELECT_LEX*)sl->next)
++  {
++    // check usage of ORDER BY in union
++    if (sl->order_list.first && sl->next && !sl->braces)
++    {
++      net_printf(&thd->net,ER_WRONG_USAGE,"UNION","ORDER BY");
++      return 1;
++    }
++    if (sl->slave)
++      if (((SELECT_LEX_UNIT *)
++	   sl->slave)->create_total_list_n_last_return(thd, lex,
++						       &slave_list_last))
++	return 1;
++    if ((aux= (TABLE_LIST*) sl->table_list.first))
++    {
++      TABLE_LIST *next;
++      for (; aux; aux= next)
++      {
++	TABLE_LIST *cursor;
++	next= aux->next;
++	for (cursor= **result; cursor; cursor= cursor->next)
++	  if (!strcmp(cursor->db, aux->db) &&
++	      !strcmp(cursor->real_name, aux->real_name) &&
++	      !strcmp(cursor->name, aux->name))
++	    break;
++	if (!cursor)
++	{
++	  /* Add not used table to the total table list */
++	  aux->lock_type= lex->lock_option;
++	  if (!(cursor= (TABLE_LIST *) thd->memdup((char*) aux,
++						   sizeof(*aux))))
++	  {
++	    send_error(&thd->net,0);
++	    return 1;
++	  }
++	  *new_table_list= cursor;
++	  new_table_list= &cursor->next;
++	  *new_table_list= 0;			// end result list
++	}
++	else
++	  aux->shared= 1;			// Mark that it's used twice
++	aux->table_list= cursor;
++      }
++    }
++  }
++  if (slave_list_first)
++  {
++    *new_table_list= slave_list_first;
++    new_table_list= slave_list_last;
++  }
++  *result= new_table_list;
++  return 0;
++}
+diff --git a/sql/sql_lex.h b/sql/sql_lex.h
+index 7603157f66d..876b9aa2743 100644
+--- a/sql/sql_lex.h
++++ b/sql/sql_lex.h
+@@ -207,6 +207,7 @@ private:
+    SELECT_LEX_UNIT - unit of selects (UNION, INTERSECT, ...) group 
+    SELECT_LEXs
+ */
++struct st_lex;
+ struct st_select_lex_unit: public st_select_lex_node {
+   /*
+     Pointer to 'last' select or pointer to unit where stored
+@@ -216,6 +217,10 @@ struct st_select_lex_unit: public st_select_lex_node {
+   /* LIMIT clause runtime counters */
+   ha_rows select_limit_cnt, offset_limit_cnt;
+   void init_query();
++  bool create_total_list(THD *thd, st_lex *lex, TABLE_LIST **result);
++private:
++  bool create_total_list_n_last_return(THD *thd, st_lex *lex,
++				       TABLE_LIST ***result);
+ };
+ typedef struct st_select_lex_unit SELECT_LEX_UNIT;
+ 
+diff --git a/sql/sql_parse.cc b/sql/sql_parse.cc
+index 4313259aaf3..e9a8ef2f449 100644
+--- a/sql/sql_parse.cc
++++ b/sql/sql_parse.cc
+@@ -70,7 +70,6 @@ static void remove_escape(char *name);
+ static void refresh_status(void);
+ static bool append_file_to_dir(THD *thd, char **filename_ptr,
+ 			       char *table_name);
+-static bool create_total_list(THD *thd, LEX *lex, TABLE_LIST **result);
+ 
+ const char *any_db="*any*";	// Special symbol for check_access
+ 
+@@ -1247,7 +1246,8 @@ mysql_execute_command(void)
+ 					   cursor))
+ 	DBUG_VOID_RETURN;
+   }
+-  if ((lex->select_lex.next && create_total_list(thd,lex,&tables)) ||
++  if ((lex->select_lex.link_next && 
++       lex->unit.create_total_list(thd, lex, &tables)) ||
+       (table_rules_on && tables && thd->slave_thread &&
+        !tables_ok(thd,tables)))
+     DBUG_VOID_RETURN;
+@@ -1942,7 +1942,7 @@ mysql_execute_command(void)
+ 	goto error;
+       }
+       auxi->lock_type=walk->lock_type=TL_WRITE;
+-      auxi->table= (TABLE *) walk;		// Remember corresponding table
++      auxi->table_list=  walk;		// Remember corresponding table
+     }
+     tables->grant.want_privilege=(SELECT_ACL & ~tables->grant.privilege);
+     if (add_item_to_list(new Item_null()))
+@@ -1955,7 +1955,7 @@ mysql_execute_command(void)
+       break;
+     /* Fix tables-to-be-deleted-from list to point at opened tables */
+     for (auxi=(TABLE_LIST*) aux_tables ; auxi ; auxi=auxi->next)
+-      auxi->table= ((TABLE_LIST*) auxi->table)->table;
++      auxi->table= auxi->table_list->table;
+     if (!thd->fatal_error && (result=new multi_delete(thd,aux_tables,
+ 						      lex->lock_option,table_count)))
+     {
+@@ -3193,68 +3193,6 @@ TABLE_LIST *add_table_to_list(Table_ident *table, LEX_STRING *alias,
+ }
+ 
+ 
+-/*
+-** This is used for UNION to create a new table list of all used tables
+-** The table_list->table entry in all used tables are set to point
+-** to the entries in this list.
+-*/
+-
+-static bool create_total_list(THD *thd, LEX *lex, TABLE_LIST **result)
+-{
+-  /* Handle the case when we are not using union */
+-  if (!lex->select_lex.next)
+-  {
+-    *result= (TABLE_LIST*) lex->select_lex.table_list.first;
+-    return 0;
+-  }
+-
+-  SELECT_LEX *sl;
+-  TABLE_LIST **new_table_list= result, *aux;
+-
+-  *new_table_list= 0;				// end result list
+-  for (sl= &lex->select_lex; sl; sl= (SELECT_LEX *) sl->next)
+-  {
+-    if (sl->order_list.first && sl->next && !sl->braces)
+-    {
+-      net_printf(&thd->net,ER_WRONG_USAGE,"UNION","ORDER BY");
+-      return 1;
+-    }
+-    if ((aux= (TABLE_LIST*) sl->table_list.first))
+-    {
+-      TABLE_LIST *next;
+-      for (; aux; aux=next)
+-      {
+-	TABLE_LIST *cursor;
+-	next= aux->next;
+-	for (cursor= *result; cursor; cursor=cursor->next)
+-	  if (!strcmp(cursor->db,aux->db) &&
+-	      !strcmp(cursor->real_name,aux->real_name) &&
+-	      !strcmp(cursor->name, aux->name))
+-	    break;
+-	if (!cursor)
+-	{
+-	  /* Add not used table to the total table list */
+-	  aux->lock_type= lex->lock_option;
+-	  if (!(cursor = (TABLE_LIST *) thd->memdup((char*) aux,
+-						    sizeof(*aux))))
+-	  {
+-	    send_error(&thd->net,0);
+-	    return 1;
+-	  }
+-	  *new_table_list= cursor;
+-	  new_table_list= &cursor->next;
+-	  *new_table_list=0;			// end result list
+-	}
+-	else
+-	  aux->shared=1;			// Mark that it's used twice
+-	aux->table=(TABLE *) cursor;
+-      }
+-    }
+-  }
+-  return 0;
+-}
+-
+-
+ void add_join_on(TABLE_LIST *b,Item *expr)
+ {
+   if (!b->on_expr)
+diff --git a/sql/sql_union.cc b/sql/sql_union.cc
+index d821c6f6641..ef34af6fe1e 100644
+--- a/sql/sql_union.cc
++++ b/sql/sql_union.cc
+@@ -48,7 +48,7 @@ int mysql_union(THD *thd, LEX *lex,select_result *result)
+     for (TABLE_LIST *cursor= (TABLE_LIST *)sl->table_list.first;
+ 	 cursor;
+ 	 cursor=cursor->next)
+-      cursor->table= ((TABLE_LIST*) cursor->table)->table;
++      cursor->table= cursor->table_list->table;
+   }
+ 
+   /* Global option */
+diff --git a/sql/table.h b/sql/table.h
+index e30e29ddd3f..1c65c2a7ce2 100644
+--- a/sql/table.h
++++ b/sql/table.h
+@@ -143,7 +143,15 @@ typedef struct st_table_list {
+   struct st_table_list *natural_join;	 /* natural join on this table*/
+   /* ... join ... USE INDEX ... IGNORE INDEX */
+   List<String>	*use_index, *ignore_index; 
+-  TABLE		*table;
++  /*
++    Usually hold reference on opened table, but may hold reference
++    to node of complete list of tables used in UNION & subselect.
++  */
++  union
++  {
++    TABLE          *table;      /* opened table */
++    st_table_list  *table_list; /* pointer to node of list of all tables */
++  };
+   GRANT_INFO	grant;
+   thr_lock_type lock_type;
+   uint		outer_join;		 /* Which join type */
+

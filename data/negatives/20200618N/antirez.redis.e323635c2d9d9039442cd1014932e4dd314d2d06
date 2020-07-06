@@ -1,0 +1,45 @@
+commit e323635c2d9d9039442cd1014932e4dd314d2d06
+Author: antirez <antirez@gmail.com>
+Date:   Fri Aug 31 11:08:53 2012 +0200
+
+    Scripting: Reset Lua fake client reply_bytes after command execution.
+    
+    Lua scripting uses a fake client in order to run commands in the context
+    of a client, accumulate the reply, and convert it into a Lua object
+    to return to the caller. This client is reused again and again, and is
+    referenced by the server.lua_client globally accessible pointer.
+    
+    However after every call to redis.call() or redis.pcall(), that is
+    handled by the luaRedisGenericCommand() function, the reply_bytes field
+    of the client was not set back to zero. This filed is used to estimate
+    the amount of memory currently used in the reply. Because of the lack of
+    reset, script after script executed, this value used to get bigger and
+    bigger, and in the end on 32 bit systems it triggered the following
+    assert:
+    
+        redisAssert(c->reply_bytes < ULONG_MAX-(1024*64));
+    
+    On 64 bit systems this does not happen because it takes too much time to
+    reach values near to 2^64 for users to see the practical effect of the
+    bug.
+    
+    Now in the cleanup stage of luaRedisGenericCommand() we reset the
+    reply_bytes counter to zero, avoiding the issue. It is not practical to
+    add a test for this bug, but the fix was manually tested using a
+    debugger.
+    
+    This commit fixes issue #656.
+
+diff --git a/src/scripting.c b/src/scripting.c
+index b1cbc6ff..be52a114 100644
+--- a/src/scripting.c
++++ b/src/scripting.c
+@@ -287,6 +287,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
+             luaSortArray(lua);
+     }
+     sdsfree(reply);
++    c->reply_bytes = 0;
+ 
+ cleanup:
+     /* Clean up. Command code may have changed argv/argc so we use the
+

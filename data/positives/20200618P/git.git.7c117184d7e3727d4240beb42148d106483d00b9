@@ -1,0 +1,45 @@
+commit 7c117184d7e3727d4240beb42148d106483d00b9
+Author: Martin Ågren <martin.agren@gmail.com>
+Date:   Sun Nov 5 21:24:30 2017 +0100
+
+    bisect: fix off-by-one error in `best_bisection_sorted()`
+    
+    After we have sorted the `cnt`-many commits that we have selected, we
+    place them into the commit list. We then set `p->next` to NULL, but as
+    we do so, `p` is already pointing one beyond item number `cnt`. Indeed,
+    we check whether `p` is NULL before dereferencing it.
+    
+    This only matters if there are TREESAME-commits. Since they should be
+    skipped, they are not included in `cnt` and we will hit the situation
+    where we set `p->next` to NULL. As a result, the list will be one longer
+    than it should be. The last commit in the list will be one which occurs
+    earlier, or which shouldn't be included.
+    
+    Do not update `p` the very last round in the loop. This ensures that
+    after the loop, `p->next` points to the remainder of the list, and we
+    can set it to NULL. While we're here, free that remainder to fix a
+    memory leak.
+    
+    Signed-off-by: Martin Ågren <martin.agren@gmail.com>
+    Signed-off-by: Junio C Hamano <gitster@pobox.com>
+
+diff --git a/bisect.c b/bisect.c
+index 2f4321767..b1941505b 100644
+--- a/bisect.c
++++ b/bisect.c
+@@ -226,10 +226,11 @@ static struct commit_list *best_bisection_sorted(struct commit_list *list, int n
+ 		add_name_decoration(DECORATION_NONE, buf.buf, obj);
+ 
+ 		p->item = array[i].commit;
+-		p = p->next;
++		if (i < cnt - 1)
++			p = p->next;
+ 	}
+-	if (p)
+-		p->next = NULL;
++	free_commit_list(p->next);
++	p->next = NULL;
+ 	strbuf_release(&buf);
+ 	free(array);
+ 	return list;
+

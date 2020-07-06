@@ -1,0 +1,83 @@
+commit b852a180d32e0c2f34add2fe2eeed9a965bc75c3
+Author: condret <condr3t@protonmail.com>
+Date:   Thu Aug 31 15:23:31 2017 +0000
+
+    bring resize to desc and fd api
+
+diff --git a/libr/include/r_io.h b/libr/include/r_io.h
+index 104029c08..b7f18d0d1 100644
+--- a/libr/include/r_io.h
++++ b/libr/include/r_io.h
+@@ -379,6 +379,7 @@ R_API bool r_io_desc_add (RIO *io, RIODesc *desc);
+ R_API bool r_io_desc_del (RIO *io, int fd);
+ R_API RIODesc *r_io_desc_get (RIO *io, int fd);
+ R_API ut64 r_io_desc_seek (RIODesc *desc, ut64 offset, int whence);
++R_API bool r_io_desc_resize (RIODesc *desc, ut64 newsize);
+ R_API ut64 r_io_desc_size (RIODesc *desc);
+ R_API bool r_io_desc_is_blockdevice (RIODesc *desc);
+ R_API bool r_io_desc_exchange (RIO *io, int fd, int fdx);	//this should get 2 descs
+@@ -448,6 +449,7 @@ R_API int r_io_fd_read (RIO *io, int fd, ut8 *buf, int len);
+ R_API int r_io_fd_write (RIO *io, int fd, const ut8 *buf, int len);
+ R_API ut64 r_io_fd_seek (RIO *io, int fd, ut64 addr, int whence);
+ R_API ut64 r_io_fd_size (RIO *io, int fd);
++R_API bool r_io_fd_resize (RIO *io, int fd, ut64 newsize);
+ R_API bool r_io_fd_is_blockdevice (RIO *io, int fd);
+ R_API int r_io_fd_read_at (RIO *io, int fd, ut64 addr, ut8 *buf, int len);
+ R_API int r_io_fd_write_at (RIO *io, int fd, ut64 addr, const ut8 *buf, int len);
+diff --git a/libr/io/desc.c b/libr/io/desc.c
+index a48a84da7..480acc3b0 100644
+--- a/libr/io/desc.c
++++ b/libr/io/desc.c
+@@ -198,6 +198,17 @@ R_API ut64 r_io_desc_size(RIODesc* desc) {
+ 	return ret;
+ }
+ 
++R_API bool r_io_desc_resize(RIODesc *desc, ut64 newsize) {
++	if (desc && desc->plugin && desc->plugin->resize) {
++		bool ret = desc->plugin->resize (desc->io, desc, newsize);
++		if (desc->io && desc->io->p_cache) {
++			r_io_desc_cache_cleanup (desc);
++		}
++		return ret;
++	}
++	return false;
++}
++
+ R_API bool r_io_desc_is_blockdevice (RIODesc *desc) {
+ 	if (!desc || !desc->plugin || !desc->plugin->is_blockdevice) {
+ 		return false;
+diff --git a/libr/io/fd.c b/libr/io/fd.c
+index efaafeec2..1ea4399e5 100644
+--- a/libr/io/fd.c
++++ b/libr/io/fd.c
+@@ -40,6 +40,10 @@ R_API ut64 r_io_fd_size(RIO *io, int fd) {
+ 	return r_io_desc_size (r_io_desc_get (io, fd));
+ }
+ 
++R_API bool r_io_fd_resize(RIO *io, int fd, ut64 newsize) {
++	return r_io_desc_resize (r_io_desc_get (io, fd), newsize);
++}
++
+ R_API bool r_io_fd_is_blockdevice(RIO *io, int fd) {
+ 	return r_io_desc_is_blockdevice (r_io_desc_get (io, fd));
+ }
+diff --git a/libr/io/io.c b/libr/io/io.c
+index 776ede2c5..f681f3b9d 100644
+--- a/libr/io/io.c
++++ b/libr/io/io.c
+@@ -484,12 +484,8 @@ R_API int r_io_system(RIO* io, const char* cmd) {
+ }
+ 
+ R_API bool r_io_resize(RIO* io, ut64 newsize) {
+-	if (io && io->desc && io->desc->plugin && io->desc->plugin->resize) {
+-		bool ret = io->desc->plugin->resize (io, io->desc, newsize);
+-		if (io->p_cache) {
+-			r_io_desc_cache_cleanup (io->desc);
+-		}
+-		return ret;
++	if (io) {
++		return r_io_desc_resize (io->desc, newsize);
+ 	}
+ 	return false;
+ }
+

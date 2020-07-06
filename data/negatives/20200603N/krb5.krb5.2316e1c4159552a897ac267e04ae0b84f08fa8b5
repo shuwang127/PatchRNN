@@ -1,0 +1,115 @@
+commit 2316e1c4159552a897ac267e04ae0b84f08fa8b5
+Author: Ken Raeburn <raeburn@mit.edu>
+Date:   Fri Jun 30 03:51:48 2006 +0000
+
+    New kdb backend operation promote_db, makes a temporary database become the
+    live database.  New function krb5_db_promote invokes it.
+    
+    ticket: 3964
+    status: open
+    
+    git-svn-id: svn://anonsvn.mit.edu/krb5/trunk@18282 dc483132-0cff-0310-8789-dd5450dbe970
+
+diff --git a/src/include/kdb.h b/src/include/kdb.h
+index 694c6f1c7..d9fb61886 100644
+--- a/src/include/kdb.h
++++ b/src/include/kdb.h
+@@ -238,6 +238,7 @@ krb5_error_code kdb5_db_create ( krb5_context kcontext, char **db_args );
+ krb5_error_code krb5_db_fini ( krb5_context kcontext );
+ const char * krb5_db_errcode2string ( krb5_context kcontext, long err_code );
+ krb5_error_code krb5_db_destroy ( krb5_context kcontext, char **db_args );
++krb5_error_code krb5_db_promote ( krb5_context kcontext, char **db_args );
+ krb5_error_code krb5_db_get_age ( krb5_context kcontext, char *db_name, time_t *t );
+ krb5_error_code krb5_db_set_option ( krb5_context kcontext, int option, void *value );
+ krb5_error_code krb5_db_lock ( krb5_context kcontext, int lock_mode );
+diff --git a/src/kadmin/dbutil/dump.c b/src/kadmin/dbutil/dump.c
+index f0d277c12..f491ae70f 100644
+--- a/src/kadmin/dbutil/dump.c
++++ b/src/kadmin/dbutil/dump.c
+@@ -2224,7 +2224,8 @@ load_db(argc, argv)
+ 
+     /*
+      * Cons up params for the new databases.  If we are not in update
+-     * mode, we dont create tmp file and then move it to final place. As it is dependent on DB type, this is not done
++     * mode, we create an alternate database and then promote it to
++     * be the live db.
+      */
+     newparams = global_params;
+     if (! update) {
+@@ -2238,6 +2239,11 @@ load_db(argc, argv)
+ 	      exit_status++;
+ 	      return;
+ 	 }
++
++	 if (!add_db_arg("temporary")) {
++	     com_err(progname, ENOMEM, "computing parameters for database");
++	     exit(1);
++	 }
+     }
+     
+     /*
+diff --git a/src/lib/kdb/kdb5.c b/src/lib/kdb/kdb5.c
+index 852fc85b7..46f0eeb8f 100644
+--- a/src/lib/kdb/kdb5.c
++++ b/src/lib/kdb/kdb5.c
+@@ -1890,3 +1890,43 @@ krb5_db_free_policy(krb5_context kcontext, osa_policy_ent_t policy)
+   clean_n_exit:
+     return;
+ }
++
++krb5_error_code
++krb5_db_promote(krb5_context kcontext, char **db_args)
++{
++    krb5_error_code status = 0;
++    char   *section = NULL;
++    kdb5_dal_handle *dal_handle;
++
++    section = kdb_get_conf_section(kcontext);
++    if (section == NULL) {
++	status = KRB5_KDB_SERVER_INTERNAL_ERR;
++	krb5_set_error_message (kcontext, status,
++		"unable to determine configuration section for realm %s\n",
++		kcontext->default_realm);
++	goto clean_n_exit;
++    }
++
++    if (kcontext->db_context == NULL) {
++	status = kdb_setup_lib_handle(kcontext);
++	if (status) {
++	    goto clean_n_exit;
++	}
++    }
++
++    dal_handle = (kdb5_dal_handle *) kcontext->db_context;
++    status = kdb_lock_lib_lock(dal_handle->lib_handle, FALSE);
++    if (status) {
++	goto clean_n_exit;
++    }
++
++    status =
++	dal_handle->lib_handle->vftabl.promote_db(kcontext, section, db_args);
++    kdb_unlock_lib_lock(dal_handle->lib_handle, FALSE);
++
++  clean_n_exit:
++    if (section)
++	free(section);
++    return status;
++}
++
+diff --git a/src/lib/kdb/kdb5.h b/src/lib/kdb/kdb5.h
+index 39253496d..ae4b1c8b2 100644
+--- a/src/lib/kdb/kdb5.h
++++ b/src/lib/kdb/kdb5.h
+@@ -170,6 +170,11 @@ typedef struct _kdb_vftabl{
+ 		       krb5_boolean	  keepold,
+ 		       krb5_db_entry	* db_entry);
+ 
++    /* Promote a temporary database to be the live one.  */
++    krb5_error_code (*promote_db) (krb5_context context,
++				   char *conf_section,
++				   char **db_args);
++
+ } kdb_vftabl;
+ 
+ typedef struct _db_library {
+

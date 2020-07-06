@@ -1,0 +1,92 @@
+commit 41815a4aa66c59070dc86aa99eebfa720e8a263e
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Mon Feb 15 21:25:33 2016 +0100
+
+    resolve: print a noisy warning if we show crypto keys that could not be authenticated
+    
+    Doing DNS retrieval on non-authenticated crypt keys is useless, hence warn
+    loudly about it.
+
+diff --git a/src/resolve/dns-type.c b/src/resolve/dns-type.c
+index b2f479cae..78d9d5733 100644
+--- a/src/resolve/dns-type.c
++++ b/src/resolve/dns-type.c
+@@ -193,6 +193,23 @@ bool dns_type_is_obsolete(uint16_t type) {
+                       DNS_TYPE_NULL);
+ }
+ 
++bool dns_type_needs_authentication(uint16_t type) {
++
++        /* Returns true for all (non-obsolete) RR types where records are not useful if they aren't
++         * authenticated. I.e. everything that contains crypto keys. */
++
++        return IN_SET(type,
++                      DNS_TYPE_CERT,
++                      DNS_TYPE_SSHFP,
++                      DNS_TYPE_IPSECKEY,
++                      DNS_TYPE_DS,
++                      DNS_TYPE_DNSKEY,
++                      DNS_TYPE_TLSA,
++                      DNS_TYPE_CDNSKEY,
++                      DNS_TYPE_OPENPGPKEY,
++                      DNS_TYPE_CAA);
++}
++
+ int dns_type_to_af(uint16_t t) {
+         switch (t) {
+ 
+diff --git a/src/resolve/dns-type.h b/src/resolve/dns-type.h
+index f18ac6eef..fb7babf12 100644
+--- a/src/resolve/dns-type.h
++++ b/src/resolve/dns-type.h
+@@ -132,6 +132,7 @@ bool dns_type_is_dnssec(uint16_t type);
+ bool dns_type_is_obsolete(uint16_t type);
+ bool dns_type_may_wildcard(uint16_t type);
+ bool dns_type_apex_only(uint16_t type);
++bool dns_type_needs_authentication(uint16_t type);
+ int dns_type_to_af(uint16_t t);
+ 
+ bool dns_class_is_pseudo(uint16_t class);
+diff --git a/src/resolve/resolve-tool.c b/src/resolve/resolve-tool.c
+index 9aade8e49..c1be03fbb 100644
+--- a/src/resolve/resolve-tool.c
++++ b/src/resolve/resolve-tool.c
+@@ -339,6 +339,7 @@ static int resolve_record(sd_bus *bus, const char *name, uint16_t class, uint16_
+         uint64_t flags;
+         int r;
+         usec_t ts;
++        bool needs_authentication = false;
+ 
+         assert(name);
+ 
+@@ -421,6 +422,10 @@ static int resolve_record(sd_bus *bus, const char *name, uint16_t class, uint16_
+                         log_warning_errno(errno, "Failed to resolve interface name for index %i: %m", ifindex);
+ 
+                 printf("%s%s%s\n", s, isempty(ifname) ? "" : " # interface ", ifname);
++
++                if (dns_type_needs_authentication(t))
++                        needs_authentication = true;
++
+                 n++;
+         }
+         if (r < 0)
+@@ -441,6 +446,18 @@ static int resolve_record(sd_bus *bus, const char *name, uint16_t class, uint16_
+ 
+         print_source(flags, ts);
+ 
++        if ((flags & SD_RESOLVED_AUTHENTICATED) == 0 && needs_authentication) {
++                fflush(stdout);
++
++                fprintf(stderr, "\n%s"
++                       "WARNING: The resources shown contain cryptographic key data which could not be\n"
++                       "         authenticated. It is not suitable to authenticate any communication.\n"
++                       "         This is usually indication that DNSSEC authentication was not enabled\n"
++                       "         or is not available for the selected protocol or DNS servers.%s\n",
++                       ansi_highlight_red(),
++                       ansi_normal());
++        }
++
+         return 0;
+ }
+ 
+

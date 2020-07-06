@@ -1,0 +1,76 @@
+commit 1401d909e8c95b75243712fb8aa14aa9ba2ecfef
+Author: Daniel Stenberg <daniel@haxx.se>
+Date:   Wed Apr 21 08:49:14 2004 +0000
+
+    Fix the "lingering close" problem when re-using a connection, as test case
+    160 shows.
+    
+    We got no data and we attempted to re-use a connection. This might happen if
+    the connection was left alive when we were done using it before, but that was
+    closed when we wanted to read from it again. Bad luck. Retry the same request
+    on a fresh connect!
+    
+    Deleted the sockerror variable again, it serves no purpose anymore.
+
+diff --git a/lib/sendf.c b/lib/sendf.c
+index 79f8d51fb..896e42c68 100644
+--- a/lib/sendf.c
++++ b/lib/sendf.c
+@@ -417,7 +417,6 @@ int Curl_read(struct connectdata *conn, /* connection data */
+ 
+     if(-1 == nread) {
+       int err = Curl_ourerrno();
+-      conn->sockerror = err;
+ #ifdef WIN32
+       if(WSAEWOULDBLOCK == err)
+ #else
+@@ -425,8 +424,6 @@ int Curl_read(struct connectdata *conn, /* connection data */
+ #endif
+         return -1;
+     }
+-    else
+-      conn->sockerror = 0; /* no error */
+ 
+ #ifdef USE_SSLEAY
+   }
+diff --git a/lib/transfer.c b/lib/transfer.c
+index cb24dd30f..2d0b4aa33 100644
+--- a/lib/transfer.c
++++ b/lib/transfer.c
+@@ -1946,15 +1946,14 @@ CURLcode Curl_perform(struct SessionHandle *data)
+         res = Transfer(conn); /* now fetch that URL please */
+         if(res == CURLE_OK) {
+ 
+-          if((conn->keep.bytecount == 0) &&
+-             (conn->sockerror == ECONNRESET) &&
++          if((conn->keep.bytecount+conn->headerbytecount == 0) &&
+              conn->bits.reuse) {
+-            /* We got no data, the connection was reset and we did attempt
+-               to re-use a connection. This smells like we were too fast to
+-               re-use a connection that was closed when we wanted to read
+-               from it. Bad luck. Let's simulate a redirect to the same URL
+-               to retry! */
+-            infof(data, "Connection reset, retrying a fresh connect\n");
++            /* We got no data and we attempted to re-use a connection. This
++               might happen if the connection was left alive when we were done
++               using it before, but that was closed when we wanted to read
++               from it again. Bad luck. Retry the same request on a fresh
++               connect! */
++            infof(data, "Connection died, retrying a fresh connect\n");
+             newurl = strdup(conn->data->change.url);
+ 
+             conn->bits.close = TRUE; /* close this connection */
+diff --git a/lib/urldata.h b/lib/urldata.h
+index a4040d15e..55070ccbf 100644
+--- a/lib/urldata.h
++++ b/lib/urldata.h
+@@ -577,8 +577,6 @@ struct connectdata {
+                                single requests! */
+   struct ntlmdata proxyntlm; /* NTLM data for proxy */
+ 
+-  int sockerror; /* errno stored by Curl_read() if the underlying layer returns
+-                    error */
+   char syserr_buf [256]; /* buffer for Curl_strerror() */
+ 
+ #if defined(USE_ARES) || defined(USE_THREADING_GETHOSTBYNAME)
+

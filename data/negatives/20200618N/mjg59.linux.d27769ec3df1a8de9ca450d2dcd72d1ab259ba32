@@ -1,0 +1,99 @@
+commit d27769ec3df1a8de9ca450d2dcd72d1ab259ba32
+Author: Tejun Heo <tj@kernel.org>
+Date:   Tue Aug 23 20:01:04 2011 +0200
+
+    block: add GENHD_FL_NO_PART_SCAN
+    
+    There are cases where suppressing partition scan is useful - e.g. for
+    lo devices and pseudo SATA devices which advertise to be a disk but
+    get upset on partition scan (some port multiplier control devices show
+    such behavior).
+    
+    This patch adds GENHD_FL_NO_PART_SCAN which suppresses partition scan
+    regardless of the number of possible partitions.  disk_partitionable()
+    is renamed to disk_part_scan_enabled() as suppressing partition scan
+    doesn't imply the device can't be partitioned using
+    BLKPG_ADD/DEL_PARTITION calls from userland.  show_partition() now
+    directly tests disk_max_parts() to maintain backward-compatibility.
+    
+    -v2: Updated to make it clear that only partition scan is suppressed
+         not partitioning itself as suggested by Kay Sievers.
+    
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Cc: Kay Sievers <kay.sievers@vrfy.org>
+    Signed-off-by: Jens Axboe <jaxboe@fusionio.com>
+
+diff --git a/block/genhd.c b/block/genhd.c
+index 5cb51c55f6d8..2429ecbbd97d 100644
+--- a/block/genhd.c
++++ b/block/genhd.c
+@@ -536,7 +536,7 @@ void register_disk(struct gendisk *disk)
+ 	disk->slave_dir = kobject_create_and_add("slaves", &ddev->kobj);
+ 
+ 	/* No minors to use for partitions */
+-	if (!disk_partitionable(disk))
++	if (!disk_part_scan_enabled(disk))
+ 		goto exit;
+ 
+ 	/* No such device (e.g., media were just removed) */
+@@ -841,7 +841,7 @@ static int show_partition(struct seq_file *seqf, void *v)
+ 	char buf[BDEVNAME_SIZE];
+ 
+ 	/* Don't show non-partitionable removeable devices or empty devices */
+-	if (!get_capacity(sgp) || (!disk_partitionable(sgp) &&
++	if (!get_capacity(sgp) || (!disk_max_parts(sgp) &&
+ 				   (sgp->flags & GENHD_FL_REMOVABLE)))
+ 		return 0;
+ 	if (sgp->flags & GENHD_FL_SUPPRESS_PARTITION_INFO)
+diff --git a/block/ioctl.c b/block/ioctl.c
+index 1124cd297263..5c74efc01903 100644
+--- a/block/ioctl.c
++++ b/block/ioctl.c
+@@ -101,7 +101,7 @@ static int blkdev_reread_part(struct block_device *bdev)
+ 	struct gendisk *disk = bdev->bd_disk;
+ 	int res;
+ 
+-	if (!disk_partitionable(disk) || bdev != bdev->bd_contains)
++	if (!disk_part_scan_enabled(disk) || bdev != bdev->bd_contains)
+ 		return -EINVAL;
+ 	if (!capable(CAP_SYS_ADMIN))
+ 		return -EACCES;
+diff --git a/fs/block_dev.c b/fs/block_dev.c
+index ff77262e887c..0bed0d4588dd 100644
+--- a/fs/block_dev.c
++++ b/fs/block_dev.c
+@@ -971,7 +971,7 @@ static void flush_disk(struct block_device *bdev, bool kill_dirty)
+ 
+ 	if (!bdev->bd_disk)
+ 		return;
+-	if (disk_partitionable(bdev->bd_disk))
++	if (disk_part_scan_enabled(bdev->bd_disk))
+ 		bdev->bd_invalidated = 1;
+ }
+ 
+diff --git a/include/linux/genhd.h b/include/linux/genhd.h
+index 02fa4697a0e5..6d18f3531f18 100644
+--- a/include/linux/genhd.h
++++ b/include/linux/genhd.h
+@@ -128,6 +128,7 @@ struct hd_struct {
+ #define GENHD_FL_EXT_DEVT			64 /* allow extended devt */
+ #define GENHD_FL_NATIVE_CAPACITY		128
+ #define GENHD_FL_BLOCK_EVENTS_ON_EXCL_WRITE	256
++#define GENHD_FL_NO_PART_SCAN			512
+ 
+ enum {
+ 	DISK_EVENT_MEDIA_CHANGE			= 1 << 0, /* media changed */
+@@ -234,9 +235,10 @@ static inline int disk_max_parts(struct gendisk *disk)
+ 	return disk->minors;
+ }
+ 
+-static inline bool disk_partitionable(struct gendisk *disk)
++static inline bool disk_part_scan_enabled(struct gendisk *disk)
+ {
+-	return disk_max_parts(disk) > 1;
++	return disk_max_parts(disk) > 1 &&
++		!(disk->flags & GENHD_FL_NO_PART_SCAN);
+ }
+ 
+ static inline dev_t disk_devt(struct gendisk *disk)
+

@@ -1,0 +1,80 @@
+commit 90d03cc66da8024906ca94e4ef8e0dcb1f154e0d
+Author: jeanlf <jeanlf@users.sourceforge.net>
+Date:   Wed Jun 22 14:10:27 2016 +0200
+
+    Fixed m3u8 parsing crash from previous commit
+
+diff --git a/src/media_tools/m3u8.c b/src/media_tools/m3u8.c
+index 0c2f858c7..98b089548 100644
+--- a/src/media_tools/m3u8.c
++++ b/src/media_tools/m3u8.c
+@@ -259,6 +259,7 @@ typedef struct _s_accumulated_attributes {
+ 	union {
+ 		char *audio;
+ 		char *video;
++		char *subtitle;
+ 	} group;
+ 	int target_duration_in_seconds;
+ 	int min_media_sequence;
+@@ -547,8 +548,10 @@ static char** parse_attributes(const char *line, s_accumulated_attributes *attri
+ 					attributes->type = MEDIA_TYPE_AUDIO;
+ 				} else if (!strncmp(ret[i]+5, "VIDEO", 5)) {
+ 					attributes->type = MEDIA_TYPE_VIDEO;
++				} else if (!strncmp(ret[i]+5, "SUBTITLES", 9)) {
++					attributes->type = MEDIA_TYPE_SUBTITLES;
+ 				} else {
+-					GF_LOG(GF_LOG_WARNING, GF_LOG_DASH,("[M3U8] Invalid #EXT-X-MEDIA:TYPE=%s\n", ret[i]+5));
++					GF_LOG(GF_LOG_WARNING, GF_LOG_DASH,("[M3U8] Unsupported #EXT-X-MEDIA:TYPE=%s\n", ret[i]+5));
+ 				}
+ 			} else if (safe_start_equals("URI=\"", ret[i])) {
+ 				size_t len;
+@@ -566,6 +569,9 @@ static char** parse_attributes(const char *line, s_accumulated_attributes *attri
+ 				} else if (attributes->type == MEDIA_TYPE_VIDEO) {
+ 					attributes->group.video = gf_strdup(ret[i]+9);
+ 					attributes->stream_id = GROUP_ID_TO_PROGRAM_ID(VIDEO, attributes->group.video);
++				} else if (attributes->type == MEDIA_TYPE_SUBTITLES) {
++					attributes->group.subtitle = gf_strdup(ret[i]+9);
++					attributes->stream_id = GROUP_ID_TO_PROGRAM_ID(VIDEO, attributes->group.subtitle);
+ 				} else if (attributes->type == MEDIA_TYPE_UNKNOWN) {
+ 					GF_LOG(GF_LOG_ERROR, GF_LOG_DASH,("[M3U8] Invalid #EXT-X-MEDIA:GROUP-ID=%s. Ignoring the line.\n", ret[i]+9));
+ 					return NULL;
+diff --git a/src/media_tools/mpd.c b/src/media_tools/mpd.c
+index d6d897359..6792b590d 100644
+--- a/src/media_tools/mpd.c
++++ b/src/media_tools/mpd.c
+@@ -1347,12 +1347,15 @@ static GF_Err gf_m3u8_fill_mpd_struct(MasterPlaylist *pl, const char *m3u8_file,
+ #ifndef GPAC_DISABLE_MEDIA_IMPORT
+ try_next_segment:
+ #endif
+-			k++;
+ 			elt = gf_list_get(pe->element.playlist.elements, k);
+ 			if (parse_sub_playlist && !elt)
+ 				break;
+ 
+-			base_url = gf_url_concatenate(pe->url, elt->url);
++			if (elt) {
++				base_url = gf_url_concatenate(pe->url, elt->url);
++			} else {
++				base_url = gf_strdup(pe->url);
++			}
+ 			sep = strrchr(base_url, '/');
+ 			if (!sep)
+ 				sep = strrchr(base_url, '\\');
+@@ -1387,6 +1390,7 @@ try_next_segment:
+ 				e = gf_media_import(&import);
+ 				if (e != GF_OK) {
+ //					GF_LOG(GF_LOG_WARNING, GF_LOG_DASH, ("[MPD] M3U8 missing Media Element %s< (Playlist %s) %s \n", import.in_name, base_url));
++					k++;
+ 					goto try_next_segment;
+ 				}
+ 
+@@ -1456,7 +1460,7 @@ try_next_segment:
+ 			if (!strcmp(M3U8_UNKNOWN_MIME_TYPE, mimeTypeForM3U8Segments)) {
+ 				GF_LOG(GF_LOG_WARNING, GF_LOG_DASH, ("[MPD] Unknown mime-type when converting from M3U8 HLS playlist, setting %s\n", mimeTypeForM3U8Segments));
+ 			}
+-			if (elt->init_segment_url && (strstr(elt->init_segment_url, ".mp4") || strstr(elt->init_segment_url, ".MP4")) ) {
++			if (elt && elt->init_segment_url && (strstr(elt->init_segment_url, ".mp4") || strstr(elt->init_segment_url, ".MP4")) ) {
+ 				rep->mime_type = gf_strdup(samplerate ? "audio/mp4" : "video/mp4");
+ 			} else {
+ 				rep->mime_type = gf_strdup(mimeTypeForM3U8Segments);
+

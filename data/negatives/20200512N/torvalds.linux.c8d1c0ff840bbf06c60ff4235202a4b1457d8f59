@@ -1,0 +1,80 @@
+commit c8d1c0ff840bbf06c60ff4235202a4b1457d8f59
+Author: Stefan Haberland <stefan.haberland@de.ibm.com>
+Date:   Sun Oct 30 15:17:09 2011 +0100
+
+    [S390] dasd: prevent path verification before resume
+    
+    Mark the device as suspended and delay execution of the path
+    verification worker to prevent mix-up.
+    
+    Signed-off-by: Stefan Haberland <stefan.haberland@de.ibm.com>
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+
+diff --git a/drivers/s390/block/dasd.c b/drivers/s390/block/dasd.c
+index ce2a780a9ea8..65894f05a801 100644
+--- a/drivers/s390/block/dasd.c
++++ b/drivers/s390/block/dasd.c
+@@ -3289,6 +3289,9 @@ int dasd_generic_pm_freeze(struct ccw_device *cdev)
+ 	if (IS_ERR(device))
+ 		return PTR_ERR(device);
+ 
++	/* mark device as suspended */
++	set_bit(DASD_FLAG_SUSPENDED, &device->flags);
++
+ 	if (device->discipline->freeze)
+ 		rc = device->discipline->freeze(device);
+ 
+@@ -3363,6 +3366,7 @@ int dasd_generic_restore_device(struct ccw_device *cdev)
+ 	if (device->block)
+ 		dasd_schedule_block_bh(device->block);
+ 
++	clear_bit(DASD_FLAG_SUSPENDED, &device->flags);
+ 	dasd_put_device(device);
+ 	return 0;
+ }
+diff --git a/drivers/s390/block/dasd_eckd.c b/drivers/s390/block/dasd_eckd.c
+index cb1bbc2947e3..cca25096efce 100644
+--- a/drivers/s390/block/dasd_eckd.c
++++ b/drivers/s390/block/dasd_eckd.c
+@@ -1101,6 +1101,12 @@ static void do_path_verification_work(struct work_struct *work)
+ 	data = container_of(work, struct path_verification_work_data, worker);
+ 	device = data->device;
+ 
++	/* delay path verification until device was resumed */
++	if (test_bit(DASD_FLAG_SUSPENDED, &device->flags)) {
++		schedule_work(work);
++		return;
++	}
++
+ 	opm = 0;
+ 	npm = 0;
+ 	ppm = 0;
+@@ -2047,9 +2053,13 @@ static void dasd_eckd_check_for_device_change(struct dasd_device *device,
+ 	/* first of all check for state change pending interrupt */
+ 	mask = DEV_STAT_ATTENTION | DEV_STAT_DEV_END | DEV_STAT_UNIT_EXCEP;
+ 	if ((scsw_dstat(&irb->scsw) & mask) == mask) {
+-		/* for alias only and not in offline processing*/
++		/*
++		 * for alias only, not in offline processing
++		 * and only if not suspended
++		 */
+ 		if (!device->block && private->lcu &&
+-		    !test_bit(DASD_FLAG_OFFLINE, &device->flags)) {
++		    !test_bit(DASD_FLAG_OFFLINE, &device->flags) &&
++		    !test_bit(DASD_FLAG_SUSPENDED, &device->flags)) {
+ 			/*
+ 			 * the state change could be caused by an alias
+ 			 * reassignment remove device from alias handling
+diff --git a/drivers/s390/block/dasd_int.h b/drivers/s390/block/dasd_int.h
+index 563bf8a25dc7..afe8c33422ed 100644
+--- a/drivers/s390/block/dasd_int.h
++++ b/drivers/s390/block/dasd_int.h
+@@ -516,6 +516,7 @@ struct dasd_block {
+ 					 */
+ #define DASD_FLAG_IS_RESERVED	7	/* The device is reserved */
+ #define DASD_FLAG_LOCK_STOLEN	8	/* The device lock was stolen */
++#define DASD_FLAG_SUSPENDED	9	/* The device was suspended */
+ 
+ 
+ void dasd_put_device_wake(struct dasd_device *);
+

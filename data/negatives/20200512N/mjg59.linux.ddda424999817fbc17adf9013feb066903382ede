@@ -1,0 +1,86 @@
+commit ddda424999817fbc17adf9013feb066903382ede
+Author: Andy Walls <awalls@md.metrocast.net>
+Date:   Sun Dec 19 21:59:56 2010 -0300
+
+    [media] ivtv: Return EFAULT when copy_from_user() fails in ivtv_write_vbi_from_user()
+    
+    If write() on a VBI device node fails due to a bad buffer pointer from
+    userspace, we should notify the application properly with EFAULT, per the
+    V4L2 API spec.
+    
+    Signed-off-by: Andy Walls <awalls@md.metrocast.net>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+
+diff --git a/drivers/media/video/ivtv/ivtv-fileops.c b/drivers/media/video/ivtv/ivtv-fileops.c
+index 4f46b0070806..c57a58523ca8 100644
+--- a/drivers/media/video/ivtv/ivtv-fileops.c
++++ b/drivers/media/video/ivtv/ivtv-fileops.c
+@@ -570,9 +570,8 @@ ssize_t ivtv_v4l2_write(struct file *filp, const char __user *user_buf, size_t c
+ 		int elems = count / sizeof(struct v4l2_sliced_vbi_data);
+ 
+ 		set_bit(IVTV_F_S_APPL_IO, &s->s_flags);
+-		ivtv_write_vbi_from_user(itv,
++		return ivtv_write_vbi_from_user(itv,
+ 		   (const struct v4l2_sliced_vbi_data __user *)user_buf, elems);
+-		return elems * sizeof(struct v4l2_sliced_vbi_data);
+ 	}
+ 
+ 	mode = s->type == IVTV_DEC_STREAM_TYPE_MPG ? OUT_MPG : OUT_YUV;
+diff --git a/drivers/media/video/ivtv/ivtv-vbi.c b/drivers/media/video/ivtv/ivtv-vbi.c
+index 7275f2d6597e..2dfa957b0fd5 100644
+--- a/drivers/media/video/ivtv/ivtv-vbi.c
++++ b/drivers/media/video/ivtv/ivtv-vbi.c
+@@ -157,24 +157,30 @@ static void ivtv_write_vbi(struct ivtv *itv,
+ 		ivtv_write_vbi_cc_lines(itv, &cc);
+ }
+ 
+-void ivtv_write_vbi_from_user(struct ivtv *itv,
+-			      const struct v4l2_sliced_vbi_data __user *sliced,
+-			      size_t cnt)
++ssize_t
++ivtv_write_vbi_from_user(struct ivtv *itv,
++			 const struct v4l2_sliced_vbi_data __user *sliced,
++			 size_t cnt)
+ {
+ 	struct vbi_cc cc = { .odd = { 0x80, 0x80 }, .even = { 0x80, 0x80 } };
+ 	int found_cc = 0;
+ 	size_t i;
+ 	struct v4l2_sliced_vbi_data d;
++	ssize_t ret = cnt * sizeof(struct v4l2_sliced_vbi_data);
+ 
+ 	for (i = 0; i < cnt; i++) {
+ 		if (copy_from_user(&d, sliced + i,
+-				   sizeof(struct v4l2_sliced_vbi_data)))
++				   sizeof(struct v4l2_sliced_vbi_data))) {
++			ret = -EFAULT;
+ 			break;
++		}
+ 		ivtv_write_vbi_line(itv, sliced + i, &cc, &found_cc);
+ 	}
+ 
+ 	if (found_cc)
+ 		ivtv_write_vbi_cc_lines(itv, &cc);
++
++	return ret;
+ }
+ 
+ static void copy_vbi_data(struct ivtv *itv, int lines, u32 pts_stamp)
+diff --git a/drivers/media/video/ivtv/ivtv-vbi.h b/drivers/media/video/ivtv/ivtv-vbi.h
+index eda38d0ad7ce..166dd0b75d0f 100644
+--- a/drivers/media/video/ivtv/ivtv-vbi.h
++++ b/drivers/media/video/ivtv/ivtv-vbi.h
+@@ -20,9 +20,10 @@
+ #ifndef IVTV_VBI_H
+ #define IVTV_VBI_H
+ 
+-void ivtv_write_vbi_from_user(struct ivtv *itv,
+-			      const struct v4l2_sliced_vbi_data __user *sliced,
+-			      size_t count);
++ssize_t
++ivtv_write_vbi_from_user(struct ivtv *itv,
++			 const struct v4l2_sliced_vbi_data __user *sliced,
++			 size_t count);
+ void ivtv_process_vbi_data(struct ivtv *itv, struct ivtv_buffer *buf,
+ 			   u64 pts_stamp, int streamtype);
+ int ivtv_used_line(struct ivtv *itv, int line, int field);
+

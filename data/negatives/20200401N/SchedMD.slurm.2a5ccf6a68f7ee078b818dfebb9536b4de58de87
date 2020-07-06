@@ -1,0 +1,239 @@
+commit 2a5ccf6a68f7ee078b818dfebb9536b4de58de87
+Author: Stephen Trofinoff <trofinoff@cscs.ch>
+Date:   Thu Aug 9 10:53:55 2012 -0700
+
+    Restore separate gres_req field
+
+diff --git a/src/common/slurmdbd_defs.c b/src/common/slurmdbd_defs.c
+index 9127a0c6c2..0ef00ef3a8 100644
+--- a/src/common/slurmdbd_defs.c
++++ b/src/common/slurmdbd_defs.c
+@@ -2592,8 +2592,9 @@ extern void slurmdbd_free_job_start_msg(void *in)
+ 	if (msg) {
+ 		xfree(msg->account);
+ 		xfree(msg->block_id);
+-		xfree(msg->gres);
+ 		xfree(msg->gres_alloc);
++		xfree(msg->gres_req);
++		xfree(msg->gres_used);
+ 		xfree(msg->name);
+ 		xfree(msg->nodes);
+ 		xfree(msg->node_inx);
+@@ -3177,8 +3178,9 @@ slurmdbd_pack_job_start_msg(void *in,
+ 		pack32(msg->db_index, buffer);
+ 		pack_time(msg->eligible_time, buffer);
+ 		pack32(msg->gid, buffer);
+-		packstr(msg->gres, buffer);
+ 		packstr(msg->gres_alloc, buffer);
++		packstr(msg->gres_req, buffer);
++		packstr(msg->gres_used, buffer);
+ 		pack32(msg->job_id, buffer);
+ 		pack16(msg->job_state, buffer);
+ 		packstr(msg->name, buffer);
+@@ -3238,9 +3240,12 @@ slurmdbd_unpack_job_start_msg(void **msg,
+ 		safe_unpack32(&msg_ptr->db_index, buffer);
+ 		safe_unpack_time(&msg_ptr->eligible_time, buffer);
+ 		safe_unpack32(&msg_ptr->gid, buffer);
+-		safe_unpackstr_xmalloc(&msg_ptr->gres, &uint32_tmp, buffer);
+ 		safe_unpackstr_xmalloc(&msg_ptr->gres_alloc, &uint32_tmp,
+ 				       buffer);
++		safe_unpackstr_xmalloc(&msg_ptr->gres_req, &uint32_tmp,
++				       buffer);
++		safe_unpackstr_xmalloc(&msg_ptr->gres_used, &uint32_tmp,
++				       buffer);
+ 		safe_unpack32(&msg_ptr->job_id, buffer);
+ 		safe_unpack16(&msg_ptr->job_state, buffer);
+ 		safe_unpackstr_xmalloc(&msg_ptr->name, &uint32_tmp, buffer);
+diff --git a/src/common/slurmdbd_defs.h b/src/common/slurmdbd_defs.h
+index 511c5cf94e..b228ec5a16 100644
+--- a/src/common/slurmdbd_defs.h
++++ b/src/common/slurmdbd_defs.h
+@@ -282,9 +282,12 @@ typedef struct dbd_job_start_msg {
+ 	time_t   submit_time;	/* job submit time */
+ 	uint32_t timelimit;	/* job timelimit */
+ 	uint32_t uid;	        /* user ID if associations are being used */
+-	char*    gres;          /* Original gres string requested by user. */
+-	char*    gres_alloc;    /* String depicting the allocated
+-				 * GRES by type for the entire job. */
++	char*    gres_alloc;    /* String depicting the allocated GRES by
++				 * type for the entire job on all nodes. */
++	char*    gres_req;      /* String depicting the requested GRES by
++				 * type for the entire job on all nodes. */
++	char*    gres_used;     /* String depicting the GRES actually used by
++				 * type for the entire job on all nodes. */
+ 	char *   wckey;		/* wckey name */
+ } dbd_job_start_msg_t;
+ 
+diff --git a/src/plugins/accounting_storage/mysql/as_mysql_job.c b/src/plugins/accounting_storage/mysql/as_mysql_job.c
+index 401a9c8129..267dd3aea2 100644
+--- a/src/plugins/accounting_storage/mysql/as_mysql_job.c
++++ b/src/plugins/accounting_storage/mysql/as_mysql_job.c
+@@ -441,7 +441,7 @@ no_rollup_change:
+ 			   begin_time, submit_time, start_time,
+ 			   jname, track_steps, job_state,
+ 			   job_ptr->priority, job_ptr->details->min_cpus,
+-			   job_ptr->total_cpus, node_cnt, job_ptr->gres,
++			   job_ptr->total_cpus, node_cnt, job_ptr->gres_req,
+ 			   job_ptr->gres_alloc);
+ 
+ 		if (job_ptr->account)
+@@ -470,7 +470,7 @@ no_rollup_change:
+ 			   submit_time, start_time,
+ 			   jname, track_steps, job_ptr->qos_id, job_state,
+ 			   job_ptr->priority, job_ptr->details->min_cpus,
+-			   job_ptr->total_cpus, node_cnt, job_ptr->gres,
++			   job_ptr->total_cpus, node_cnt, job_ptr->gres_req,
+ 			   job_ptr->gres_alloc);
+ 
+ 		if (job_ptr->account)
+@@ -528,7 +528,7 @@ no_rollup_change:
+ 			   job_ptr->total_cpus, node_cnt, job_ptr->qos_id,
+ 			   job_ptr->assoc_id, wckeyid,
+ 			   job_ptr->resv_id, job_ptr->time_limit,
+-			   job_ptr->gres, job_ptr->gres_alloc,
++			   job_ptr->gres_req, job_ptr->gres_alloc,
+ 			   job_ptr->db_index);
+ 
+ 		debug3("%d(%s:%d) query\n%s",
+diff --git a/src/plugins/accounting_storage/slurmdbd/accounting_storage_slurmdbd.c b/src/plugins/accounting_storage/slurmdbd/accounting_storage_slurmdbd.c
+index 5d52591d55..1de13dc4fa 100644
+--- a/src/plugins/accounting_storage/slurmdbd/accounting_storage_slurmdbd.c
++++ b/src/plugins/accounting_storage/slurmdbd/accounting_storage_slurmdbd.c
+@@ -199,8 +199,9 @@ static int _setup_job_start_msg(dbd_job_start_msg_t *req,
+ 	req->wckey         = xstrdup(job_ptr->wckey);
+ 	req->uid           = job_ptr->user_id;
+ 	req->qos_id        = job_ptr->qos_id;
+-	req->gres          = job_ptr->gres;
+ 	req->gres_alloc    = job_ptr->gres_alloc;
++	req->gres_req      = job_ptr->gres_req;
++	req->gres_used     = job_ptr->gres_used;
+ 
+ 	return SLURM_SUCCESS;
+ }
+diff --git a/src/slurmctld/job_mgr.c b/src/slurmctld/job_mgr.c
+index e0f7e80646..b1ee58d5e4 100644
+--- a/src/slurmctld/job_mgr.c
++++ b/src/slurmctld/job_mgr.c
+@@ -836,6 +836,8 @@ static void _dump_job_state(struct job_record *dump_job_ptr, Buf buffer)
+ 	packstr(dump_job_ptr->comment, buffer);
+ 	packstr(dump_job_ptr->gres, buffer);
+ 	packstr(dump_job_ptr->gres_alloc, buffer);
++	packstr(dump_job_ptr->gres_req, buffer);
++	packstr(dump_job_ptr->gres_used, buffer);
+ 	packstr(dump_job_ptr->network, buffer);
+ 	packstr(dump_job_ptr->licenses, buffer);
+ 	packstr(dump_job_ptr->mail_user, buffer);
+@@ -902,7 +904,7 @@ static int _load_job_state(Buf buffer, uint16_t protocol_version)
+ 	char *comment = NULL, *nodes_completing = NULL, *alloc_node = NULL;
+ 	char *licenses = NULL, *state_desc = NULL, *wckey = NULL;
+ 	char *resv_name = NULL, *gres = NULL, *batch_host = NULL;
+-	char *gres_alloc = NULL;
++	char *gres_alloc = NULL, *gres_req = NULL, *gres_used = NULL;
+ 	char **spank_job_env = (char **) NULL;
+ 	List gres_list = NULL, part_ptr_list = NULL;
+ 	struct job_record *job_ptr = NULL;
+@@ -1018,6 +1020,8 @@ static int _load_job_state(Buf buffer, uint16_t protocol_version)
+ 		safe_unpackstr_xmalloc(&comment, &name_len, buffer);
+ 		safe_unpackstr_xmalloc(&gres, &name_len, buffer);
+ 		safe_unpackstr_xmalloc(&gres_alloc, &name_len, buffer);
++		safe_unpackstr_xmalloc(&gres_req, &name_len, buffer);
++		safe_unpackstr_xmalloc(&gres_used, &name_len, buffer);
+ 		safe_unpackstr_xmalloc(&network, &name_len, buffer);
+ 		safe_unpackstr_xmalloc(&licenses, &name_len, buffer);
+ 		safe_unpackstr_xmalloc(&mail_user, &name_len, buffer);
+@@ -1419,6 +1423,12 @@ static int _load_job_state(Buf buffer, uint16_t protocol_version)
+ 	xfree(job_ptr->gres_alloc);
+ 	job_ptr->gres_alloc   = gres_alloc;
+ 	gres_alloc            = NULL;  /* reused, nothing left to free */
++	xfree(job_ptr->gres_req);
++	job_ptr->gres_req    = gres_req;
++	gres_req              = NULL;  /* reused, nothing left to free */
++	xfree(job_ptr->gres_used);
++	job_ptr->gres_used    = gres_used;
++	gres_used             = NULL;  /* reused, nothing left to free */
+ 	job_ptr->gres_list    = gres_list;
+ 	job_ptr->direct_set_prio = direct_set_prio;
+ 	job_ptr->db_index     = db_index;
+@@ -1585,6 +1595,8 @@ unpack_error:
+ 	xfree(comment);
+ 	xfree(gres);
+ 	xfree(gres_alloc);
++	xfree(gres_req);
++	xfree(gres_used);
+ 	xfree(resp_host);
+ 	xfree(licenses);
+ 	xfree(mail_user);
+@@ -5229,6 +5241,7 @@ static void _list_delete_job(void *job_entry)
+ 	xfree(job_ptr->comment);
+ 	xfree(job_ptr->gres);
+ 	xfree(job_ptr->gres_alloc);
++	xfree(job_ptr->gres_req);
+ 	xfree(job_ptr->gres_used);
+ 	FREE_NULL_LIST(job_ptr->gres_list);
+ 	xfree(job_ptr->licenses);
+diff --git a/src/slurmctld/node_scheduler.c b/src/slurmctld/node_scheduler.c
+index 080bbb5e3d..80e30d0f15 100644
+--- a/src/slurmctld/node_scheduler.c
++++ b/src/slurmctld/node_scheduler.c
+@@ -1695,12 +1695,13 @@ static int _fill_in_gres_fields(struct job_record *job_ptr)
+ 			      "was requested",
+ 			      THIS_FILE, __LINE__, job_ptr->job_id);
+ 
+-		xfree(job_ptr->gres);
+-		xstrcat(job_ptr->gres, "");
++		xfree(job_ptr->gres_req);
++		xstrcat(job_ptr->gres_req, "");
+ 	} else if ( job_ptr->node_cnt > 0 ) {
+-		/* job_ptr->gres is rebuilt/replaced here */
+-		tmp_str = req_config;
+-		job_ptr->gres = xstrdup("");
++		/* job_ptr->gres_req is rebuilt/replaced here */
++		tmp_str = xstrdup(req_config);
++		xfree(job_ptr->gres_req);
++		job_ptr->gres_req = xstrdup("");
+ 
+ 		tok = strtok_r(tmp_str, ",", &last);
+ 		while (tok) {
+@@ -1726,7 +1727,7 @@ static int _fill_in_gres_fields(struct job_record *job_ptr)
+ 				 prefix, subtok,
+ 				 ngres_req * job_ptr->node_cnt);
+ 
+-			xstrcat(job_ptr->gres_used, buf);
++			xstrcat(job_ptr->gres_req, buf);
+ 
+ 			if (prefix[0] == '\0')
+ 				prefix = ",";
+diff --git a/src/slurmctld/slurmctld.h b/src/slurmctld/slurmctld.h
+index dac990f717..538a01826f 100644
+--- a/src/slurmctld/slurmctld.h
++++ b/src/slurmctld/slurmctld.h
+@@ -505,9 +505,11 @@ struct job_record {
+ 					 * this job */
+ 	char *gres;			/* generic resources requested by job*/
+ 	List gres_list;			/* generic resource allocation detail */
+-	char *gres_alloc;		/* Allocated generic resources string
++	char *gres_alloc;		/* Allocated GRES added over all nodes
+ 					 * to be passed to slurmdbd */
+-	char *gres_used;		/* Used generic resources string
++	char *gres_req;			/* Requested GRES added over all nodes
++					 * to be passed to slurmdbd */
++	char *gres_used;		/* Actual GRES use added over all nodes
+ 					 * to be passed to slurmdbd */
+ 	uint32_t group_id;		/* group submitted under */
+ 	uint32_t job_id;		/* job ID */
+diff --git a/src/slurmdbd/proc_req.c b/src/slurmdbd/proc_req.c
+index be76bfa00e..7e0b45169f 100644
+--- a/src/slurmdbd/proc_req.c
++++ b/src/slurmdbd/proc_req.c
+@@ -2636,8 +2636,9 @@ static void _process_job_start(slurmdbd_conn_t *slurmdbd_conn,
+ 	job.priority = job_start_msg->priority;
+ 	job.start_time = job_start_msg->start_time;
+ 	job.time_limit = job_start_msg->timelimit;
+-	job.gres = job_start_msg->gres;
+ 	job.gres_alloc = job_start_msg->gres_alloc;
++	job.gres_req = job_start_msg->gres_req;
++	job.gres_used = job_start_msg->gres_used;
+ 	job.wckey = _replace_double_quotes(job_start_msg->wckey);
+ 	details.submit_time = job_start_msg->submit_time;
+ 
+

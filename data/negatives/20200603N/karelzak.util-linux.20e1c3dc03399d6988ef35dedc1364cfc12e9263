@@ -1,0 +1,271 @@
+commit 20e1c3dc03399d6988ef35dedc1364cfc12e9263
+Author: Karel Zak <kzak@redhat.com>
+Date:   Tue Jun 10 12:16:59 2014 +0200
+
+    libblkid: ignore private LVM devices
+    
+    The virtual private LVM devices do not contain any blkid relevant data
+    and it does not make any sense to scan for superblocks or partitions
+    on the devices, because we can interpret data from the devices in bad
+    way.
+    
+    Unfortunately, for LVM has "private" very special meaning. The private
+    LVM devices are accessible and readable (according to LVM guys it's
+    feature, because debugging etc.).
+    
+    The problem is pretty visible with LVM thin provisioning where a virtual
+    pool device contains segments from the top-level thin devices.
+    
+    Mountable top-level LVM-thin device:
+    
+            # blkid -o udev -p /dev/mapper/vg-thin1
+            ID_FS_UUID=57ed6490-903b-416c-91d2-6d06804ec60c
+            ID_FS_TYPE=ext4
+    
+    Virtual private LVM-pool device (contains data from all thin devices):
+    
+            # blkid -o udev -p /dev/mapper/vg-pool0
+            ID_FS_UUID=57ed6490-903b-416c-91d2-6d06804ec60c
+            ID_FS_TYPE=ext4
+    
+    ... this is incorrect, vg-pool0 is unmountable.
+    
+    LVM uses special UUID suffixes for private devices. All devices with
+    uuid in format "LVM-<uuid>-<type>" are private.
+    
+    This patch modifies libblkid to not scan such devices. The high-level
+    API ignores such devices at all now.
+    
+    The low-level API allows to assign the device to blkid_prober, but all
+    scan functions always return nothing and library does not read
+    anything from the device. The another functionality (get parental
+    device, topology, sector sizes, etc.) still works as expected. The
+    change affects only probing code.
+    
+    Addresses: https://bugzilla.redhat.com/show_bug.cgi?id=1101345
+    Signed-off-by: Karel Zak <kzak@redhat.com>
+
+diff --git a/libblkid/src/blkidP.h b/libblkid/src/blkidP.h
+index 0ac11737e..538a368b5 100644
+--- a/libblkid/src/blkidP.h
++++ b/libblkid/src/blkidP.h
+@@ -219,6 +219,7 @@ struct blkid_struct_probe
+ #define BLKID_FL_PRIVATE_FD	(1 << 1)	/* see blkid_new_probe_from_filename() */
+ #define BLKID_FL_TINY_DEV	(1 << 2)	/* <= 1.47MiB (floppy or so) */
+ #define BLKID_FL_CDROM_DEV	(1 << 3)	/* is a CD/DVD drive */
++#define BLKID_FL_NOSCAN_DEV	(1 << 4)	/* do not scan this device */
+ 
+ /* private per-probing flags */
+ #define BLKID_PROBE_FL_IGNORE_PT (1 << 1)	/* ignore partition table */
+@@ -347,6 +348,7 @@ extern void blkid__scan_dir(char *, dev_t, struct dir_list **, char **)
+ 			__attribute__((nonnull(1,4)));
+ extern int blkid_driver_has_major(const char *drvname, int major)
+ 			__attribute__((warn_unused_result));
++extern int blkid_lvm_private(dev_t devno);
+ 
+ /* lseek.c */
+ extern blkid_loff_t blkid_llseek(int fd, blkid_loff_t offset, int whence);
+diff --git a/libblkid/src/devno.c b/libblkid/src/devno.c
+index 2f250cc3b..de65dd4b4 100644
+--- a/libblkid/src/devno.c
++++ b/libblkid/src/devno.c
+@@ -326,6 +326,34 @@ int blkid_driver_has_major(const char *drvname, int major)
+ 	return match;
+ }
+ 
++/*
++ * Returns 1 if the device is private LVM device.
++ */
++int blkid_lvm_private(dev_t devno)
++{
++	struct sysfs_cxt cxt = UL_SYSFSCXT_EMPTY;
++	char *uuid = NULL;
++	int rc = 0;
++
++	if (sysfs_init(&cxt, devno, NULL) != 0)
++		return 0;
++
++	uuid = sysfs_strdup(&cxt, "dm/uuid");
++
++	/* Private LVM devices use "LVM-<uuid>-<name>" uuid format (important
++	 * is the "LVM" prefix and "-<name>" postfix).
++	 */
++	if (uuid && strncmp(uuid, "LVM-", 4) == 0) {
++		char *p = strrchr(uuid + 4, '-');
++
++		if (p && *(p + 1))
++			rc = 1;
++	}
++
++	sysfs_deinit(&cxt);
++	free(uuid);
++	return rc;
++}
+ 
+ #ifdef TEST_PROGRAM
+ int main(int argc, char** argv)
+diff --git a/libblkid/src/partitions/partitions.c b/libblkid/src/partitions/partitions.c
+index 43f0d3e33..cee963ff6 100644
+--- a/libblkid/src/partitions/partitions.c
++++ b/libblkid/src/partitions/partitions.c
+@@ -540,6 +540,8 @@ static int idinfo_probe(blkid_probe pr, const struct blkid_idinfo *id,
+ 
+ 	if (pr->size <= 0 || (id->minsz && id->minsz > pr->size))
+ 		goto nothing;	/* the device is too small */
++	if (pr->flags & BLKID_FL_NOSCAN_DEV)
++		goto nothing;
+ 
+ 	rc = blkid_probe_get_idmag(pr, id, &off, &mag);
+ 	if (rc != BLKID_PROBE_OK)
+@@ -579,6 +581,9 @@ static int partitions_probe(blkid_probe pr, struct blkid_chain *chn)
+ 
+ 	if (!pr || chn->idx < -1)
+ 		return -EINVAL;
++	if (pr->flags & BLKID_FL_NOSCAN_DEV)
++		goto done;			/* nothing */
++
+ 	blkid_probe_chain_reset_vals(pr, chn);
+ 
+ 	if (chn->binary)
+@@ -648,7 +653,7 @@ details_only:
+ 			rc = xrc;
+ 	}
+ 
+-
++done:
+ 	DBG(LOWPROBE, ul_debug("partitions probe done [rc=%d]",	rc));
+ 	return rc;
+ }
+@@ -668,6 +673,8 @@ int blkid_partitions_do_subprobe(blkid_probe pr, blkid_partition parent,
+ 
+ 	if (!pr || !parent || !parent->size)
+ 		return -EINVAL;
++	if (pr->flags & BLKID_FL_NOSCAN_DEV)
++		return BLKID_PROBE_NONE;
+ 
+ 	/* range defined by parent */
+ 	sz = ((blkid_loff_t) parent->size) << 9;
+@@ -724,6 +731,9 @@ static int blkid_partitions_probe_partition(blkid_probe pr)
+ 
+ 	DBG(LOWPROBE, ul_debug("parts: start probing for partition entry"));
+ 
++	if (pr->flags & BLKID_FL_NOSCAN_DEV)
++		goto nothing;
++
+ 	devno = blkid_probe_get_devno(pr);
+ 	if (!devno)
+ 		goto nothing;
+@@ -797,7 +807,7 @@ nothing:
+ int blkid_probe_is_covered_by_pt(blkid_probe pr,
+ 				 blkid_loff_t offset, blkid_loff_t size)
+ {
+-	blkid_probe prc;
++	blkid_probe prc = NULL;
+ 	blkid_partlist ls = NULL;
+ 	blkid_loff_t start, end;
+ 	int nparts, i, rc = 0;
+@@ -806,6 +816,9 @@ int blkid_probe_is_covered_by_pt(blkid_probe pr,
+ 		"=> checking if off=%jd size=%jd covered by PT",
+ 		offset, size));
+ 
++	if (pr->flags & BLKID_FL_NOSCAN_DEV)
++		goto done;
++
+ 	prc = blkid_clone_probe(pr);
+ 	if (!prc)
+ 		goto done;
+diff --git a/libblkid/src/probe.c b/libblkid/src/probe.c
+index 93035f93a..f2431dcf4 100644
+--- a/libblkid/src/probe.c
++++ b/libblkid/src/probe.c
+@@ -696,6 +696,7 @@ int blkid_probe_set_device(blkid_probe pr, int fd,
+ 	if (!S_ISBLK(sb.st_mode) && !S_ISCHR(sb.st_mode) && !S_ISREG(sb.st_mode))
+ 		goto err;
+ 
++
+ 	pr->mode = sb.st_mode;
+ 	if (S_ISBLK(sb.st_mode) || S_ISCHR(sb.st_mode))
+ 		pr->devno = sb.st_rdev;
+@@ -724,8 +725,13 @@ int blkid_probe_set_device(blkid_probe pr, int fd,
+ 	if (pr->size <= 1440 * 1024 && !S_ISCHR(sb.st_mode))
+ 		pr->flags |= BLKID_FL_TINY_DEV;
+ 
++	if (S_ISBLK(sb.st_mode) && blkid_lvm_private(sb.st_rdev)) {
++		DBG(LOWPROBE, ul_debug("ignore private LVM device"));
++		pr->flags |= BLKID_FL_NOSCAN_DEV;
++	}
++
+ #ifdef CDROM_GET_CAPABILITY
+-	if (S_ISBLK(sb.st_mode) &&
++	else if (S_ISBLK(sb.st_mode) &&
+ 	    !blkid_probe_is_tiny(pr) &&
+ 	    blkid_probe_is_wholedisk(pr) &&
+ 	    ioctl(fd, CDROM_GET_CAPABILITY, NULL) >= 0)
+@@ -896,6 +902,9 @@ int blkid_do_probe(blkid_probe pr)
+ 	if (!pr)
+ 		return -1;
+ 
++	if (pr->flags & BLKID_FL_NOSCAN_DEV)
++		return 1;
++
+ 	do {
+ 		struct blkid_chain *chn = pr->cur_chain;
+ 
+@@ -1147,6 +1156,8 @@ int blkid_do_safeprobe(blkid_probe pr)
+ 
+ 	if (!pr)
+ 		return -1;
++	if (pr->flags & BLKID_FL_NOSCAN_DEV)
++		return 1;
+ 
+ 	blkid_probe_start(pr);
+ 
+@@ -1201,6 +1212,8 @@ int blkid_do_fullprobe(blkid_probe pr)
+ 
+ 	if (!pr)
+ 		return -1;
++	if (pr->flags & BLKID_FL_NOSCAN_DEV)
++		return 1;
+ 
+ 	blkid_probe_start(pr);
+ 
+diff --git a/libblkid/src/superblocks/superblocks.c b/libblkid/src/superblocks/superblocks.c
+index 91ca2ea2e..bfe37b85d 100644
+--- a/libblkid/src/superblocks/superblocks.c
++++ b/libblkid/src/superblocks/superblocks.c
+@@ -340,6 +340,9 @@ static int superblocks_probe(blkid_probe pr, struct blkid_chain *chn)
+ 
+ 	if (!pr || chn->idx < -1)
+ 		return -EINVAL;
++	if (pr->flags & BLKID_FL_NOSCAN_DEV)
++		goto nothing;
++
+ 	blkid_probe_chain_reset_vals(pr, chn);
+ 
+ 	DBG(LOWPROBE, ul_debug("--> starting probing loop [SUBLKS idx=%d]",
+@@ -455,6 +458,9 @@ static int superblocks_safeprobe(blkid_probe pr, struct blkid_chain *chn)
+ 	int intol = 0;
+ 	int rc;
+ 
++	if (pr->flags & BLKID_FL_NOSCAN_DEV)
++		return 1;				/* nothing */
++
+ 	while ((rc = superblocks_probe(pr, chn)) == 0) {
+ 
+ 		if (blkid_probe_is_tiny(pr) && !count)
+diff --git a/libblkid/src/verify.c b/libblkid/src/verify.c
+index d8ad79d68..b245daa01 100644
+--- a/libblkid/src/verify.c
++++ b/libblkid/src/verify.c
+@@ -112,6 +112,10 @@ blkid_dev blkid_verify(blkid_cache cache, blkid_dev dev)
+ 		   (unsigned long)diff));
+ #endif
+ 
++	if (blkid_lvm_private(st.st_rdev)) {
++		blkid_free_dev(dev);
++		return NULL;
++	}
+ 	if (!cache->probe) {
+ 		cache->probe = blkid_new_probe();
+ 		if (!cache->probe) {
+

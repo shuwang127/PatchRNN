@@ -1,0 +1,108 @@
+commit edad04f9292aac722414651703ab50dcaef4f1d9
+Author: Poul-Henning Kamp <phk@phk.freebsd.dk>
+Date:   Wed Aug 11 20:52:20 2010 +0000
+
+    Add another per-backend variable to show the happy health-probe bitmap.
+    
+    Add cheesy display of same in varnishstat curses mode:
+    
+              16         0.00         1.00 uptime - Client uptime
+               1          .            .   VBE.fs(192.168.60.20,,80).vcls - VCL references
+      0000000000 <____VVVVVVVVVVVVVVVVVVVV VBE.fs(192.168.60.20,,80).happy - Happy health probes
+      top bits    bottom bits one-by-one
+    
+    We need to start thinking about how to structure varnishstat output...
+    
+    
+    git-svn-id: http://www.varnish-cache.org/svn/trunk/varnish-cache@5095 d4fa192b-c00b-0410-8231-f00ffab90ce4
+
+diff --git a/bin/varnishd/cache_backend.c b/bin/varnishd/cache_backend.c
+index 8bcf08821..b388633b9 100644
+--- a/bin/varnishd/cache_backend.c
++++ b/bin/varnishd/cache_backend.c
+@@ -430,7 +430,6 @@ VBE_UseHealth(struct director *vdi)
+ 
+ 	if (strcmp(vdi->name, "simple"))
+ 		return;
+-	printf("USE HEALTH %p\n", vdi);
+ 	CAST_OBJ_NOTNULL(vs, vdi->priv, VDI_SIMPLE_MAGIC);
+ 	if (vs->vrt->probe == NULL)
+ 		return;
+diff --git a/bin/varnishd/cache_backend_cfg.c b/bin/varnishd/cache_backend_cfg.c
+index 4acb62a66..c08464c71 100644
+--- a/bin/varnishd/cache_backend_cfg.c
++++ b/bin/varnishd/cache_backend_cfg.c
+@@ -102,7 +102,6 @@ VBE_DropRefLocked(struct backend *b)
+ 	int i;
+ 	struct vbc *vbe, *vbe2;
+ 
+-	ASSERT_CLI();
+ 	CHECK_OBJ_NOTNULL(b, BACKEND_MAGIC);
+ 	assert(b->refcount > 0);
+ 
+diff --git a/bin/varnishd/cache_backend_poll.c b/bin/varnishd/cache_backend_poll.c
+index 4715089b1..eef3a9825 100644
+--- a/bin/varnishd/cache_backend_poll.c
++++ b/bin/varnishd/cache_backend_poll.c
+@@ -101,11 +101,6 @@ static VTAILQ_HEAD(, vbp_target)	vbp_list =
+ 
+ static struct lock			vbp_mtx;
+ 
+-static const char default_request[] =
+-    "GET / HTTP/1.1\r\n"
+-    "Connection: close\r\n"
+-    "\r\n";
+-
+ /*--------------------------------------------------------------------
+  * Poke one backend, once, but possibly at both IPv4 and IPv6 addresses.
+  *
+@@ -303,6 +298,7 @@ vbp_has_poked(struct vbp_target *vt)
+ 	    vt->backend->vcl_name, logmsg, bits,
+ 	    vt->good, vt->probe.threshold, vt->probe.window,
+ 	    vt->last, vt->avg, vt->resp_buf);
++	vt->backend->vsc->happy = vt->happy;
+ }
+ 
+ /*--------------------------------------------------------------------
+@@ -451,8 +447,6 @@ vbp_new_vcl(const struct vrt_backend_probe *p, const char *hosthdr)
+ 	 * Sanitize and insert defaults
+ 	 * XXX: we could make these defaults parameters
+ 	 */
+-	if (vcl->probe.request == NULL)
+-		vcl->probe.request = default_request;
+ 	if (vcl->probe.timeout == 0.0)
+ 		vcl->probe.timeout = 2.0;
+ 	if (vcl->probe.interval == 0.0)
+diff --git a/bin/varnishstat/varnishstat_curses.c b/bin/varnishstat/varnishstat_curses.c
+index a082e6092..ef2d1bd15 100644
+--- a/bin/varnishstat/varnishstat_curses.c
++++ b/bin/varnishstat/varnishstat_curses.c
+@@ -215,6 +215,15 @@ do_curses(struct VSM_data *vd, const struct vsc_main *VSC_main,
+ 					    ju, (ju - (intmax_t)pt->ref)/lt,
+ 					    ju / up, pt->name));
+ 					pt->ref = ju;
++				} else if (pt->type == 'b') {
++					AC(mvprintw(line, 0, "  %010.10jx <",
++					    (ju >> 24) & 0xffffffffffLL));
++					for (ch = 0x800000; ch; ch >>= 1)
++						if (ju & ch)	
++							AC(printw("V"));
++						else
++							AC(printw("_"));
++					AC(printw(" %s", pt->name));
+ 				} else {
+ 					AC(mvprintw(line, 0,
+ 					    "%12ju %12s %12s %s\n",
+diff --git a/include/vsc_fields.h b/include/vsc_fields.h
+index 1c73aaafb..3f0d83501 100644
+--- a/include/vsc_fields.h
++++ b/include/vsc_fields.h
+@@ -193,6 +193,7 @@ VSC_F_SMA(sma_bfree,		uint64_t, 0, 'i', "Bytes free")
+ #endif
+ 
+ VSC_F_VBE(vcls,			uint64_t, 0, 'i', "VCL references")
++VSC_F_VBE(happy,		uint64_t, 0, 'b', "Happy health probes")
+ 
+ #ifdef __VSC_F_VBE
+ #undef VSC_F_VBE
+

@@ -1,0 +1,119 @@
+commit 2248bcfcd8fb622ec88b8587d0c1f139635ffd2e
+Author: Patrick McHardy <kaber@trash.net>
+Date:   Tue Sep 6 15:06:42 2005 -0700
+
+    [NETFILTER]: Add support for permanent expectations
+    
+    A permanent expectation exists until timeing out and can expect
+    multiple related connections.
+    
+    Signed-off-by: Patrick McHardy <kaber@trash.net>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/linux/netfilter_ipv4/ip_conntrack.h b/include/linux/netfilter_ipv4/ip_conntrack.h
+index 088742befe49..7e033e9271a8 100644
+--- a/include/linux/netfilter_ipv4/ip_conntrack.h
++++ b/include/linux/netfilter_ipv4/ip_conntrack.h
+@@ -263,6 +263,9 @@ struct ip_conntrack_expect
+ 	/* Unique ID */
+ 	unsigned int id;
+ 
++	/* Flags */
++	unsigned int flags;
++
+ #ifdef CONFIG_IP_NF_NAT_NEEDED
+ 	/* This is the original per-proto part, used to map the
+ 	 * expected connection the way the recipient expects. */
+@@ -272,6 +275,8 @@ struct ip_conntrack_expect
+ #endif
+ };
+ 
++#define IP_CT_EXPECT_PERMANENT	0x1
++
+ static inline struct ip_conntrack *
+ tuplehash_to_ctrack(const struct ip_conntrack_tuple_hash *hash)
+ {
+diff --git a/net/ipv4/netfilter/ip_conntrack_amanda.c b/net/ipv4/netfilter/ip_conntrack_amanda.c
+index be4c9eb3243f..dc20881004bc 100644
+--- a/net/ipv4/netfilter/ip_conntrack_amanda.c
++++ b/net/ipv4/netfilter/ip_conntrack_amanda.c
+@@ -108,6 +108,7 @@ static int help(struct sk_buff **pskb,
+ 		}
+ 
+ 		exp->expectfn = NULL;
++		exp->flags = 0;
+ 
+ 		exp->tuple.src.ip = ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.ip;
+ 		exp->tuple.src.u.tcp.port = 0;
+diff --git a/net/ipv4/netfilter/ip_conntrack_core.c b/net/ipv4/netfilter/ip_conntrack_core.c
+index a0648600190e..e23e8ca476c0 100644
+--- a/net/ipv4/netfilter/ip_conntrack_core.c
++++ b/net/ipv4/netfilter/ip_conntrack_core.c
+@@ -264,10 +264,14 @@ find_expectation(const struct ip_conntrack_tuple *tuple)
+ 		   master ct never got confirmed, we'd hold a reference to it
+ 		   and weird things would happen to future packets). */
+ 		if (ip_ct_tuple_mask_cmp(tuple, &i->tuple, &i->mask)
+-		    && is_confirmed(i->master)
+-		    && del_timer(&i->timeout)) {
+-			unlink_expect(i);
+-			return i;
++		    && is_confirmed(i->master)) {
++			if (i->flags & IP_CT_EXPECT_PERMANENT) {
++				atomic_inc(&i->use);
++				return i;
++			} else if (del_timer(&i->timeout)) {
++				unlink_expect(i);
++				return i;
++			}
+ 		}
+ 	}
+ 	return NULL;
+diff --git a/net/ipv4/netfilter/ip_conntrack_ftp.c b/net/ipv4/netfilter/ip_conntrack_ftp.c
+index 3a2627db1729..1b79ec36085f 100644
+--- a/net/ipv4/netfilter/ip_conntrack_ftp.c
++++ b/net/ipv4/netfilter/ip_conntrack_ftp.c
+@@ -421,6 +421,7 @@ static int help(struct sk_buff **pskb,
+ 		  { 0xFFFFFFFF, { .tcp = { 0xFFFF } }, 0xFF }});
+ 
+ 	exp->expectfn = NULL;
++	exp->flags = 0;
+ 
+ 	/* Now, NAT might want to mangle the packet, and register the
+ 	 * (possibly changed) expectation itself. */
+diff --git a/net/ipv4/netfilter/ip_conntrack_irc.c b/net/ipv4/netfilter/ip_conntrack_irc.c
+index 25438eec21a1..d7a8a98c05e1 100644
+--- a/net/ipv4/netfilter/ip_conntrack_irc.c
++++ b/net/ipv4/netfilter/ip_conntrack_irc.c
+@@ -221,6 +221,7 @@ static int help(struct sk_buff **pskb,
+ 				{ { 0, { 0 } },
+ 				  { 0xFFFFFFFF, { .tcp = { 0xFFFF } }, 0xFF }});
+ 			exp->expectfn = NULL;
++			exp->flags = 0;
+ 			if (ip_nat_irc_hook)
+ 				ret = ip_nat_irc_hook(pskb, ctinfo, 
+ 						      addr_beg_p - ib_ptr,
+diff --git a/net/ipv4/netfilter/ip_conntrack_netlink.c b/net/ipv4/netfilter/ip_conntrack_netlink.c
+index a4e9278db4ed..3dc3a7bab3b4 100644
+--- a/net/ipv4/netfilter/ip_conntrack_netlink.c
++++ b/net/ipv4/netfilter/ip_conntrack_netlink.c
+@@ -1413,6 +1413,7 @@ ctnetlink_create_expect(struct nfattr *cda[])
+ 	}
+ 	
+ 	exp->expectfn = NULL;
++	exp->flags = 0;
+ 	exp->master = ct;
+ 	memcpy(&exp->tuple, &tuple, sizeof(struct ip_conntrack_tuple));
+ 	memcpy(&exp->mask, &mask, sizeof(struct ip_conntrack_tuple));
+diff --git a/net/ipv4/netfilter/ip_conntrack_tftp.c b/net/ipv4/netfilter/ip_conntrack_tftp.c
+index f8ff170f390a..d2b590533452 100644
+--- a/net/ipv4/netfilter/ip_conntrack_tftp.c
++++ b/net/ipv4/netfilter/ip_conntrack_tftp.c
+@@ -75,6 +75,7 @@ static int tftp_help(struct sk_buff **pskb,
+ 		exp->mask.dst.u.udp.port = 0xffff;
+ 		exp->mask.dst.protonum = 0xff;
+ 		exp->expectfn = NULL;
++		exp->flags = 0;
+ 
+ 		DEBUGP("expect: ");
+ 		DUMP_TUPLE(&exp->tuple);
+

@@ -1,0 +1,61 @@
+commit d16b4b3e485526b39e7bdc36bf2d8041080a7201
+Author: Nick Mathewson <nickm@torproject.org>
+Date:   Fri Nov 4 14:27:45 2016 -0400
+
+    Fix memory leaks in hs_descriptor/decode_descriptor and in encode_enc_key()
+
+diff --git a/src/or/hs_descriptor.c b/src/or/hs_descriptor.c
+index 668862f90..92e523e37 100644
+--- a/src/or/hs_descriptor.c
++++ b/src/or/hs_descriptor.c
+@@ -270,7 +270,7 @@ encode_enc_key(const ed25519_keypair_t *sig_key,
+     char *key_str, b64_cert[256];
+     ssize_t cert_len;
+     size_t key_str_len;
+-    uint8_t *cert_data;
++    uint8_t *cert_data = NULL;
+ 
+     /* Create cross certification cert. */
+     cert_len = tor_make_rsa_ed25519_crosscert(&sig_key->pubkey,
+@@ -284,9 +284,11 @@ encode_enc_key(const ed25519_keypair_t *sig_key,
+     /* Encode cross cert. */
+     if (base64_encode(b64_cert, sizeof(b64_cert), (const char *) cert_data,
+                       cert_len, BASE64_ENCODE_MULTILINE) < 0) {
++      tor_free(cert_data);
+       log_warn(LD_REND, "Unable to encode legacy crosscert.");
+       goto err;
+     }
++    tor_free(cert_data);
+     /* Convert the encryption key to a string. */
+     if (crypto_pk_write_public_key_to_string(ip->enc_key.legacy, &key_str,
+                                              &key_str_len) < 0) {
+diff --git a/src/test/test_hs_descriptor.c b/src/test/test_hs_descriptor.c
+index 846732cb6..838d7cdb3 100644
+--- a/src/test/test_hs_descriptor.c
++++ b/src/test/test_hs_descriptor.c
+@@ -498,6 +498,7 @@ test_decode_descriptor(void *arg)
+   char *encoded = NULL;
+   hs_descriptor_t *desc = helper_build_hs_desc(0);
+   hs_descriptor_t *decoded = NULL;
++  hs_descriptor_t *desc_no_ip = NULL;
+ 
+   (void) arg;
+ 
+@@ -517,7 +518,7 @@ test_decode_descriptor(void *arg)
+ 
+   /* Decode a descriptor with _no_ introduction points. */
+   {
+-    hs_descriptor_t *desc_no_ip = helper_build_hs_desc(1);
++    desc_no_ip = helper_build_hs_desc(1);
+     tt_assert(desc_no_ip);
+     tor_free(encoded);
+     ret = hs_desc_encode_descriptor(desc_no_ip, &encoded);
+@@ -531,6 +532,7 @@ test_decode_descriptor(void *arg)
+ 
+  done:
+   hs_descriptor_free(desc);
++  hs_descriptor_free(desc_no_ip);
+   hs_descriptor_free(decoded);
+   tor_free(encoded);
+ }
+

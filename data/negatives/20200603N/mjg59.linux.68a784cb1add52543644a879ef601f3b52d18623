@@ -1,0 +1,60 @@
+commit 68a784cb1add52543644a879ef601f3b52d18623
+Author: Sonic Zhang <sonic.zhang@analog.com>
+Date:   Fri Jan 2 13:40:38 2009 +0000
+
+    Blackfin Serial Driver: Fix bug - BF527-EZKIT unable to receive large files over UART in DMA mode
+    
+    Add spin_lock_irqsave() when receive and transfer data.
+    
+    Signed-off-by: Sonic Zhang <sonic.zhang@analog.com>
+    Signed-off-by: Bryan Wu <cooloney@kernel.org>
+    Signed-off-by: Alan Cox <alan@redhat.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/serial/bfin_5xx.c b/drivers/serial/bfin_5xx.c
+index 88449d36a3f7..1c85039d021f 100644
+--- a/drivers/serial/bfin_5xx.c
++++ b/drivers/serial/bfin_5xx.c
+@@ -81,7 +81,9 @@ static void bfin_serial_reset_irda(struct uart_port *port);
+ static void bfin_serial_stop_tx(struct uart_port *port)
+ {
+ 	struct bfin_serial_port *uart = (struct bfin_serial_port *)port;
++#ifdef CONFIG_SERIAL_BFIN_DMA
+ 	struct circ_buf *xmit = &uart->port.info->xmit;
++#endif
+ 
+ 	while (!(UART_GET_LSR(uart) & TEMT))
+ 		cpu_relax();
+@@ -412,7 +414,9 @@ static void bfin_serial_dma_rx_chars(struct bfin_serial_port *uart)
+ 
+ void bfin_serial_rx_dma_timeout(struct bfin_serial_port *uart)
+ {
+-	int x_pos, pos;
++	int x_pos, pos, flags;
++
++	spin_lock_irqsave(&uart->port.lock, flags);
+ 
+ 	uart->rx_dma_nrows = get_dma_curr_ycount(uart->rx_dma_channel);
+ 	x_pos = get_dma_curr_xcount(uart->rx_dma_channel);
+@@ -430,6 +434,8 @@ void bfin_serial_rx_dma_timeout(struct bfin_serial_port *uart)
+ 		uart->rx_dma_buf.tail = uart->rx_dma_buf.head;
+ 	}
+ 
++	spin_unlock_irqrestore(&uart->port.lock, flags);
++
+ 	mod_timer(&(uart->rx_dma_timer), jiffies + DMA_RX_FLUSH_JIFFIES);
+ }
+ 
+@@ -464,10 +470,9 @@ static irqreturn_t bfin_serial_dma_rx_int(int irq, void *dev_id)
+ 	spin_lock(&uart->port.lock);
+ 	irqstat = get_dma_curr_irqstat(uart->rx_dma_channel);
+ 	clear_dma_irqstat(uart->rx_dma_channel);
++	bfin_serial_dma_rx_chars(uart);
+ 	spin_unlock(&uart->port.lock);
+ 
+-	mod_timer(&(uart->rx_dma_timer), jiffies);
+-
+ 	return IRQ_HANDLED;
+ }
+ #endif
+

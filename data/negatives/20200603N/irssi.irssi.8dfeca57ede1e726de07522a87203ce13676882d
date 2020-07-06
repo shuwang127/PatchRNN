@@ -1,0 +1,474 @@
+commit 8dfeca57ede1e726de07522a87203ce13676882d
+Author: ailin-nemui <ailin-nemui@users.noreply.github.com>
+Date:   Fri Sep 8 15:19:40 2017 +0200
+
+    hidden lines
+
+diff --git a/src/common.h b/src/common.h
+index 100d00cb..159f7124 100644
+--- a/src/common.h
++++ b/src/common.h
+@@ -6,7 +6,7 @@
+ #define IRSSI_GLOBAL_CONFIG "irssi.conf" /* config file name in /etc/ */
+ #define IRSSI_HOME_CONFIG "config" /* config file name in ~/.irssi/ */
+ 
+-#define IRSSI_ABI_VERSION 10
++#define IRSSI_ABI_VERSION 11
+ 
+ #define DEFAULT_SERVER_ADD_PORT 6667
+ #define DEFAULT_SERVER_ADD_TLS_PORT 6697
+diff --git a/src/core/levels.c b/src/core/levels.c
+index e623c4de..eb7efcf7 100644
+--- a/src/core/levels.c
++++ b/src/core/levels.c
+@@ -21,6 +21,7 @@
+ #include "module.h"
+ #include "levels.h"
+ 
++/* the order of these levels must match the bits in levels.h */
+ static const char *levels[] = {
+ 	"CRAP",
+ 	"MSGS",
+@@ -44,9 +45,6 @@ static const char *levels[] = {
+ 	"CLIENTCRAP",
+ 	"CLIENTERRORS",
+ 	"HILIGHTS",
+-
+-	"NOHILIGHT",
+-	"NO_ACT",
+ 	NULL
+ };
+ 
+@@ -63,6 +61,9 @@ int level_get(const char *level)
+ 	if (g_ascii_strcasecmp(level, "NO_ACT") == 0)
+ 		return MSGLEVEL_NO_ACT;
+ 
++	if (g_ascii_strcasecmp(level, "HIDDEN") == 0)
++		return MSGLEVEL_HIDDEN;
++
+ 	len = strlen(level);
+ 	if (len == 0) return 0;
+ 
+@@ -138,17 +139,13 @@ char *bits2level(int bits)
+ 
+ 
+ 	str = g_string_new(NULL);
+-	if (bits & MSGLEVEL_NEVER) {
++	if (bits & MSGLEVEL_NEVER)
+ 		g_string_append(str, "NEVER ");
+-		bits &= ~MSGLEVEL_NEVER;
+-	}
+ 
+-	if (bits & MSGLEVEL_NO_ACT) {
++	if (bits & MSGLEVEL_NO_ACT)
+ 		g_string_append(str, "NO_ACT ");
+-		bits &= ~MSGLEVEL_NO_ACT;
+-	}
+ 
+-	if (bits == MSGLEVEL_ALL) {
++	if ((bits & MSGLEVEL_ALL) == MSGLEVEL_ALL) {
+ 		g_string_append(str, "ALL ");
+ 	} else {
+ 		for (n = 0; levels[n] != NULL; n++) {
+@@ -156,6 +153,10 @@ char *bits2level(int bits)
+ 				g_string_append_printf(str, "%s ", levels[n]);
+ 		}
+ 	}
++
++	if (bits & MSGLEVEL_HIDDEN)
++		g_string_append(str, "HIDDEN ");
++
+         if (str->len > 0)
+ 		g_string_truncate(str, str->len-1);
+ 
+diff --git a/src/core/levels.h b/src/core/levels.h
+index 9f7e588f..b0ebafba 100644
+--- a/src/core/levels.h
++++ b/src/core/levels.h
+@@ -36,7 +36,9 @@ enum {
+ 	MSGLEVEL_NOHILIGHT    = 0x1000000, /* Don't highlight this message */
+ 	MSGLEVEL_NO_ACT       = 0x2000000, /* Don't trigger channel activity */
+ 	MSGLEVEL_NEVER        = 0x4000000, /* never ignore / never log */
+-	MSGLEVEL_LASTLOG      = 0x8000000 /* never ignore / never log */
++	MSGLEVEL_LASTLOG      = 0x8000000, /* used for /lastlog */
++
++	MSGLEVEL_HIDDEN       = 0x10000000 /* Hidden from view */
+ };
+ 
+ int level_get(const char *level);
+diff --git a/src/fe-text/gui-windows.c b/src/fe-text/gui-windows.c
+index c63c495c..34c55772 100644
+--- a/src/fe-text/gui-windows.c
++++ b/src/fe-text/gui-windows.c
+@@ -23,6 +23,7 @@
+ #include "misc.h"
+ #include "settings.h"
+ #include "special-vars.h"
++#include "levels.h"
+ 
+ #include "term.h"
+ #include "gui-entry.h"
+@@ -50,6 +51,7 @@ static GUI_WINDOW_REC *gui_window_init(WINDOW_REC *window,
+ 					   !settings_get_bool("indent_always"),
+ 					   get_default_indent_func());
+ 	textbuffer_view_set_break_wide(gui->view, settings_get_bool("break_wide"));
++	textbuffer_view_set_hidden_level(gui->view, MSGLEVEL_HIDDEN);
+ 	if (parent->active == window)
+ 		textbuffer_view_set_window(gui->view, parent->screen_win);
+ 	return gui;
+@@ -204,6 +206,8 @@ void gui_windows_reset_settings(void)
+ 		WINDOW_REC *rec = tmp->data;
+ 		GUI_WINDOW_REC *gui = WINDOW_GUI(rec);
+ 
++		textbuffer_view_set_hidden_level(gui->view, MSGLEVEL_HIDDEN);
++
+ 		textbuffer_view_set_break_wide(gui->view, settings_get_bool("break_wide"));
+ 
+ 		textbuffer_view_set_default_indent(gui->view,
+diff --git a/src/fe-text/mainwindows-layout.c b/src/fe-text/mainwindows-layout.c
+index fae02539..acbcb6b9 100644
+--- a/src/fe-text/mainwindows-layout.c
++++ b/src/fe-text/mainwindows-layout.c
+@@ -23,6 +23,7 @@
+ #include "misc.h"
+ #include "lib-config/iconfig.h"
+ #include "settings.h"
++#include "levels.h"
+ 
+ #include "mainwindows.h"
+ #include "gui-windows.h"
+@@ -41,6 +42,12 @@ static void sig_layout_window_save(WINDOW_REC *window, CONFIG_NODE *node)
+ 			iconfig_node_set_int(node, "parent", active->refnum);
+ 	}
+ 
++	if (gui->view->hidden_level != MSGLEVEL_HIDDEN) {
++		char *level = bits2level(gui->view->hidden_level);
++		iconfig_node_set_str(node, "hidelevel", level);
++		g_free(level);
++	}
++
+ 	if (gui->use_scroll)
+                 iconfig_node_set_bool(node, "scroll", gui->scroll);
+ }
+@@ -58,6 +65,9 @@ static void sig_layout_window_restore(WINDOW_REC *window, CONFIG_NODE *node)
+ 
+ 	if (config_node_get_bool(node, "sticky", FALSE))
+ 		gui_window_set_sticky(window);
++
++	textbuffer_view_set_hidden_level(gui->view, level2bits(config_node_get_str(node, "hidelevel", "HIDDEN"), NULL));
++
+ 	if (config_node_get_str(node, "scroll", NULL) != NULL) {
+ 		gui->use_scroll = TRUE;
+ 		gui->scroll = config_node_get_bool(node, "scroll", TRUE);
+diff --git a/src/fe-text/module-formats.c b/src/fe-text/module-formats.c
+index 899827c2..0cde9946 100644
+--- a/src/fe-text/module-formats.c
++++ b/src/fe-text/module-formats.c
+@@ -50,6 +50,7 @@ FORMAT_REC gui_text_formats[] =
+ 	{ "window_info_scroll", "%#Scroll  : $0", 1, { 0 } },
+ 	{ "window_scroll", "Window scroll mode is now $0", 1, { 0 } },
+ 	{ "window_scroll_unknown", "Unknown scroll mode $0, must be ON, OFF or DEFAULT", 1, { 0 } },
++	{ "window_hidelevel", "Window hidden level is now $0", 1, { 0 } },
+ 
+ 	/* ---- */
+ 	{ NULL, "Statusbars", 0 },
+diff --git a/src/fe-text/module-formats.h b/src/fe-text/module-formats.h
+index 3fa8c511..acc2627c 100644
+--- a/src/fe-text/module-formats.h
++++ b/src/fe-text/module-formats.h
+@@ -26,6 +26,7 @@ enum {
+         TXT_WINDOW_INFO_SCROLL,
+         TXT_WINDOW_SCROLL,
+         TXT_WINDOW_SCROLL_UNKNOWN,
++	TXT_WINDOW_HIDELEVEL,
+ 
+ 	TXT_FILL_3,
+ 
+diff --git a/src/fe-text/textbuffer-commands.c b/src/fe-text/textbuffer-commands.c
+index 648862e7..97d897f3 100644
+--- a/src/fe-text/textbuffer-commands.c
++++ b/src/fe-text/textbuffer-commands.c
+@@ -89,6 +89,25 @@ static void cmd_window_scroll(const char *data)
+ 				   gui->scroll : settings_get_bool("scroll"));
+ }
+ 
++/* SYNTAX: WINDOW HIDELEVEL [<level>] */
++static void cmd_window_hidelevel(const char *data)
++{
++	GUI_WINDOW_REC *gui;
++	char *level;
++
++	g_return_if_fail(data != NULL);
++
++	gui = WINDOW_GUI(active_win);
++	textbuffer_view_set_hidden_level(gui->view,
++					 combine_level(gui->view->hidden_level, data));
++	textbuffer_view_redraw(gui->view);
++	level = gui->view->hidden_level == 0 ? g_strdup("NONE") :
++		bits2level(gui->view->hidden_level);
++	printformat_window(active_win, MSGLEVEL_CLIENTNOTICE,
++			   TXT_WINDOW_HIDELEVEL, level);
++	g_free(level);
++}
++
+ static void cmd_scrollback(const char *data, SERVER_REC *server,
+ 			   WI_ITEM_REC *item)
+ {
+@@ -358,6 +377,7 @@ void textbuffer_commands_init(void)
+ {
+ 	command_bind("clear", NULL, (SIGNAL_FUNC) cmd_clear);
+ 	command_bind("window scroll", NULL, (SIGNAL_FUNC) cmd_window_scroll);
++	command_bind("window hidelevel", NULL, (SIGNAL_FUNC) cmd_window_hidelevel);
+ 	command_bind("scrollback", NULL, (SIGNAL_FUNC) cmd_scrollback);
+ 	command_bind("scrollback clear", NULL, (SIGNAL_FUNC) cmd_scrollback_clear);
+ 	command_bind("scrollback levelclear", NULL, (SIGNAL_FUNC) cmd_scrollback_levelclear);
+@@ -377,6 +397,7 @@ void textbuffer_commands_deinit(void)
+ {
+ 	command_unbind("clear", (SIGNAL_FUNC) cmd_clear);
+ 	command_unbind("window scroll", (SIGNAL_FUNC) cmd_window_scroll);
++	command_unbind("window hidelevel", (SIGNAL_FUNC) cmd_window_hidelevel);
+ 	command_unbind("scrollback", (SIGNAL_FUNC) cmd_scrollback);
+ 	command_unbind("scrollback clear", (SIGNAL_FUNC) cmd_scrollback_clear);
+ 	command_unbind("scrollback levelclear", (SIGNAL_FUNC) cmd_scrollback_levelclear);
+diff --git a/src/fe-text/textbuffer-view.c b/src/fe-text/textbuffer-view.c
+index cb066f5e..b54f1c8e 100644
+--- a/src/fe-text/textbuffer-view.c
++++ b/src/fe-text/textbuffer-view.c
+@@ -41,9 +41,15 @@ static GSList *views;
+ #define view_is_bottom(view) \
+         ((view)->ypos >= -1 && (view)->ypos < (view)->height)
+ 
+-#define view_get_linecount(view, line) \
++#define view_get_linecount_hidden(view, line) \
+         textbuffer_view_get_line_cache(view, line)->count
+ 
++#define view_line_is_hidden(view, line) \
++	(((line)->info.level & (view)->hidden_level) != 0)
++
++#define view_get_linecount(view, line) \
++	(view_line_is_hidden(view, line) ? 0 : view_get_linecount_hidden(view, line))
++
+ static GSList *textbuffer_get_views(TEXT_BUFFER_REC *buffer)
+ {
+ 	GSList *tmp, *list;
+@@ -552,6 +558,9 @@ static void textbuffer_view_init_bottom(TEXT_BUFFER_VIEW_REC *view)
+ 	total = 0;
+         line = textbuffer_line_last(view->buffer);
+ 	for (; line != NULL; line = line->prev) {
++		if (view_line_is_hidden(view, line))
++			continue;
++
+ 		linecount = view_get_linecount(view, line);
+ 		if (line == view->bottom_startline) {
+ 			/* keep the old one, make sure that subline is ok */
+@@ -614,6 +623,8 @@ TEXT_BUFFER_VIEW_REC *textbuffer_view_create(TEXT_BUFFER_REC *buffer,
+         view->subline = view->bottom_subline;
+ 	view->bottom = TRUE;
+ 
++	view->hidden_level = 0;
++
+ 	textbuffer_view_init_ypos(view);
+ 
+ 	view->bookmarks = g_hash_table_new((GHashFunc) g_str_hash,
+@@ -726,8 +737,10 @@ static void view_draw(TEXT_BUFFER_VIEW_REC *view, LINE_REC *line,
+                 return;
+ 
+ 	while (line != NULL && lines > 0) {
+-                linecount = view_line_draw(view, line, subline, ypos, lines);
+-		ypos += linecount; lines -= linecount;
++		if (!view_line_is_hidden(view, line)) {
++			linecount = view_line_draw(view, line, subline, ypos, lines);
++			ypos += linecount; lines -= linecount;
++		}
+ 
+ 		subline = 0;
+                 line = line->next;
+@@ -768,7 +781,12 @@ static void view_draw_bottom(TEXT_BUFFER_VIEW_REC *view, int lines)
+         view_draw(view, line, subline, maxline, lines, TRUE);
+ }
+ 
+-/* Returns number of lines actually scrolled */
++/* lines: this pointer is scrolled by scrollcount screen lines
++   subline: this pointer contains the subline position
++   scrollcount: the number of lines to scroll down (negative: up)
++   draw_nonclean: whether to redraw the screen now
++
++   Returns number of lines actually scrolled */
+ static int view_scroll(TEXT_BUFFER_VIEW_REC *view, LINE_REC **lines,
+ 		       int *subline, int scrollcount, int draw_nonclean)
+ {
+@@ -1027,7 +1045,7 @@ static void view_insert_line(TEXT_BUFFER_VIEW_REC *view, LINE_REC *line)
+ 			view->bottom = view_is_bottom(view);
+ 		}
+ 
+-		if (view->window != NULL) {
++		if (view->window != NULL && !view_line_is_hidden(view, line)) {
+ 			ypos = view->ypos+1 - view_get_linecount(view, line);
+ 			if (ypos >= 0)
+ 				subline = 0;
+@@ -1042,7 +1060,7 @@ static void view_insert_line(TEXT_BUFFER_VIEW_REC *view, LINE_REC *line)
+ 		}
+ 	}
+ 
+-        if (view->window != NULL)
++        if (view->window != NULL && !view_line_is_hidden(view, line))
+ 		term_refresh(view->window);
+ }
+ 
+@@ -1122,6 +1140,12 @@ static int view_get_lines_height(TEXT_BUFFER_VIEW_REC *view,
+ 	return height < view->height ? height : view->height;
+ }
+ 
++/* line: line to remove
++   linecount: linecount of that line, to be offset when the line was in/below view
++
++   scroll the window maintaining the startline while removing line
++   if startline is removed, make the previous line the new startline
++*/
+ static void view_remove_line_update_startline(TEXT_BUFFER_VIEW_REC *view,
+ 					      LINE_REC *line, int linecount)
+ {
+@@ -1318,6 +1342,37 @@ LINE_REC *textbuffer_view_get_bookmark(TEXT_BUFFER_VIEW_REC *view,
+         return g_hash_table_lookup(view->bookmarks, name);
+ }
+ 
++void textbuffer_view_set_hidden_level(TEXT_BUFFER_VIEW_REC *view, int level)
++{
++	g_return_if_fail(view != NULL);
++
++	if (view->hidden_level != level) {
++		if (view->empty_linecount > 0 && view->startline != NULL) {
++			int old_height, new_height;
++			LINE_REC *hidden_start;
++
++			hidden_start = view->startline;
++			while (hidden_start->prev != NULL && view_line_is_hidden(view, hidden_start->prev)) {
++				hidden_start = hidden_start->prev;
++			}
++
++			old_height = view_get_lines_height(view, hidden_start, view->subline, NULL);
++			view->hidden_level = level;
++			new_height = view_get_lines_height(view, hidden_start, view->subline, NULL);
++
++			view->empty_linecount -= new_height - old_height;
++
++			if (view->empty_linecount < 0)
++				view->empty_linecount = 0;
++			else if (view->empty_linecount > view->height)
++				view->empty_linecount = view->height;
++		} else {
++			view->hidden_level = level;
++		}
++		textbuffer_view_resize(view, view->width, view->height);
++	}
++}
++
+ /* Specify window where the changes in view should be drawn,
+    NULL disables it. */
+ void textbuffer_view_set_window(TEXT_BUFFER_VIEW_REC *view,
+diff --git a/src/fe-text/textbuffer-view.h b/src/fe-text/textbuffer-view.h
+index 5e7a9d0a..a670df2b 100644
+--- a/src/fe-text/textbuffer-view.h
++++ b/src/fe-text/textbuffer-view.h
+@@ -49,41 +49,51 @@ typedef struct {
+ 
+ struct _TEXT_BUFFER_VIEW_REC {
+ 	TEXT_BUFFER_REC *buffer;
+-	GSList *siblings; /* other views that use the same buffer */
++	/* other views that use the same buffer */
++	GSList *siblings;
+ 
+         TERM_WINDOW *window;
+ 	int width, height;
+ 
+ 	int default_indent;
+         INDENT_FUNC default_indent_func;
+-	unsigned int longword_noindent:1;
+-	unsigned int scroll:1; /* scroll down automatically when at bottom */
+-	unsigned int utf8:1; /* use UTF8 in this view */
+-	unsigned int break_wide:1; /* Break wide chars in this view */
+ 
+ 	TEXT_BUFFER_CACHE_REC *cache;
+-	int ypos; /* cursor position - visible area is 0..height-1 */
++	/* cursor position - visible area is 0..height-1 */
++	int ypos;
+ 
+-	LINE_REC *startline; /* line at the top of the screen */
+-	int subline; /* number of "real lines" to skip from `startline' */
++	 /* line at the top of the screen */
++	LINE_REC *startline;
++	/* number of "real lines" to skip from `startline' */
++	int subline;
+ 
+         /* marks the bottom of the text buffer */
+ 	LINE_REC *bottom_startline;
+ 	int bottom_subline;
+ 
++	/* Bookmarks to the lines in the buffer - removed automatically
++	   when the line gets removed from buffer */
++        GHashTable *bookmarks;
++
++	/* these levels should be hidden */
++	int hidden_level;
+ 	/* how many empty lines are in screen. a screenful when started
+ 	   or used /CLEAR */
+ 	int empty_linecount;
++
++	unsigned int longword_noindent:1;
++	/* scroll down automatically when at bottom */
++	unsigned int scroll:1;
++	/* use UTF8 in this view */
++	unsigned int utf8:1;
++	/* Break wide chars in this view */
++	unsigned int break_wide:1;
+         /* window is at the bottom of the text buffer */
+ 	unsigned int bottom:1;
+         /* if !bottom - new text has been printed since we were at bottom */
+ 	unsigned int more_text:1;
+         /* Window needs a redraw */
+ 	unsigned int dirty:1;
+-
+-	/* Bookmarks to the lines in the buffer - removed automatically
+-	   when the line gets removed from buffer */
+-        GHashTable *bookmarks;
+ };
+ 
+ /* Create new view. */
+@@ -143,6 +153,8 @@ void textbuffer_view_set_bookmark_bottom(TEXT_BUFFER_VIEW_REC *view,
+ /* Return the line for bookmark */
+ LINE_REC *textbuffer_view_get_bookmark(TEXT_BUFFER_VIEW_REC *view,
+ 				       const char *name);
++/* Set hidden level for view */
++void textbuffer_view_set_hidden_level(TEXT_BUFFER_VIEW_REC *view, int level);
+ 
+ /* Specify window where the changes in view should be drawn,
+    NULL disables it. */
+diff --git a/src/fe-text/textbuffer.c b/src/fe-text/textbuffer.c
+index a920fab2..01cdd118 100644
+--- a/src/fe-text/textbuffer.c
++++ b/src/fe-text/textbuffer.c
+@@ -230,6 +230,7 @@ LINE_REC *textbuffer_line_last(TEXT_BUFFER_REC *buffer)
+ 	return buffer->cur_line;
+ }
+ 
++/* returns TRUE if `search' comes on or after `line' in the buffer */
+ int textbuffer_line_exists_after(LINE_REC *line, LINE_REC *search)
+ {
+ 	while (line != NULL) {
+diff --git a/src/fe-text/textbuffer.h b/src/fe-text/textbuffer.h
+index 303789a3..2aa22f1a 100644
+--- a/src/fe-text/textbuffer.h
++++ b/src/fe-text/textbuffer.h
+@@ -65,10 +65,10 @@ typedef struct {
+ 	LINE_REC *cur_line;
+ 	TEXT_CHUNK_REC *cur_text;
+ 
+-	unsigned int last_eol:1;
+ 	int last_fg;
+ 	int last_bg;
+ 	int last_flags;
++	unsigned int last_eol:1;
+ } TEXT_BUFFER_REC;
+ 
+ /* Create new buffer */
+

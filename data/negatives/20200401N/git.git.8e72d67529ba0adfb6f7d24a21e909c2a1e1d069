@@ -1,0 +1,494 @@
+commit 8e72d67529ba0adfb6f7d24a21e909c2a1e1d069
+Author: Jameson Miller <jamill@microsoft.com>
+Date:   Mon Jul 2 19:49:37 2018 +0000
+
+    block alloc: allocate cache entries from mem_pool
+    
+    When reading large indexes from disk, a portion of the time is
+    dominated in malloc() calls. This can be mitigated by allocating a
+    large block of memory and manage it ourselves via memory pools.
+    
+    This change moves the cache entry allocation to be on top of memory
+    pools.
+    
+    Design:
+    
+    The index_state struct will gain a notion of an associated memory_pool
+    from which cache_entries will be allocated from. When reading in the
+    index from disk, we have information on the number of entries and
+    their size, which can guide us in deciding how large our initial
+    memory allocation should be. When an index is discarded, the
+    associated memory_pool will be discarded as well - so the lifetime of
+    a cache_entry is tied to the lifetime of the index_state that it was
+    allocated for.
+    
+    In the case of a Split Index, the following rules are followed. 1st,
+    some terminology is defined:
+    
+    Terminology:
+      - 'the_index': represents the logical view of the index
+    
+      - 'split_index': represents the "base" cache entries. Read from the
+        split index file.
+    
+    'the_index' can reference a single split_index, as well as
+    cache_entries from the split_index. `the_index` will be discarded
+    before the `split_index` is.  This means that when we are allocating
+    cache_entries in the presence of a split index, we need to allocate
+    the entries from the `split_index`'s memory pool.  This allows us to
+    follow the pattern that `the_index` can reference cache_entries from
+    the `split_index`, and that the cache_entries will not be freed while
+    they are still being referenced.
+    
+    Managing transient cache_entry structs:
+    Cache entries are usually allocated for an index, but this is not always
+    the case. Cache entries are sometimes allocated because this is the
+    type that the existing checkout_entry function works with. Because of
+    this, the existing code needs to handle cache entries associated with an
+    index / memory pool, and those that only exist transiently. Several
+    strategies were contemplated around how to handle this:
+    
+    Chosen approach:
+    An extra field was added to the cache_entry type to track whether the
+    cache_entry was allocated from a memory pool or not. This is currently
+    an int field, as there are no more available bits in the existing
+    ce_flags bit field. If / when more bits are needed, this new field can
+    be turned into a proper bit field.
+    
+    Alternatives:
+    
+    1) Do not include any information about how the cache_entry was
+    allocated. Calling code would be responsible for tracking whether the
+    cache_entry needed to be freed or not.
+      Pro: No extra memory overhead to track this state
+      Con: Extra complexity in callers to handle this correctly.
+    
+    The extra complexity and burden to not regress this behavior in the
+    future was more than we wanted.
+    
+    2) cache_entry would gain knowledge about which mem_pool allocated it
+      Pro: Could (potentially) do extra logic to know when a mem_pool no
+           longer had references to any cache_entry
+      Con: cache_entry would grow heavier by a pointer, instead of int
+    
+    We didn't see a tangible benefit to this approach
+    
+    3) Do not add any extra information to a cache_entry, but when freeing a
+       cache entry, check if the memory exists in a region managed by existing
+       mem_pools.
+      Pro: No extra memory overhead to track state
+      Con: Extra computation is performed when freeing cache entries
+    
+    We decided tracking and iterating over known memory pool regions was
+    less desirable than adding an extra field to track this stae.
+    
+    Signed-off-by: Jameson Miller <jamill@microsoft.com>
+    Signed-off-by: Junio C Hamano <gitster@pobox.com>
+
+diff --git a/cache.h b/cache.h
+index 5aadaebae..c1c7e9e65 100644
+--- a/cache.h
++++ b/cache.h
+@@ -15,6 +15,7 @@
+ #include "path.h"
+ #include "sha1-array.h"
+ #include "repository.h"
++#include "mem-pool.h"
+ 
+ #include <zlib.h>
+ typedef struct git_zstream {
+@@ -156,6 +157,7 @@ struct cache_entry {
+ 	struct stat_data ce_stat_data;
+ 	unsigned int ce_mode;
+ 	unsigned int ce_flags;
++	unsigned int mem_pool_allocated;
+ 	unsigned int ce_namelen;
+ 	unsigned int index;	/* for link extension */
+ 	struct object_id oid;
+@@ -227,6 +229,7 @@ static inline void copy_cache_entry(struct cache_entry *dst,
+ 				    const struct cache_entry *src)
+ {
+ 	unsigned int state = dst->ce_flags & CE_HASHED;
++	int mem_pool_allocated = dst->mem_pool_allocated;
+ 
+ 	/* Don't copy hash chain and name */
+ 	memcpy(&dst->ce_stat_data, &src->ce_stat_data,
+@@ -235,6 +238,9 @@ static inline void copy_cache_entry(struct cache_entry *dst,
+ 
+ 	/* Restore the hash state */
+ 	dst->ce_flags = (dst->ce_flags & ~CE_HASHED) | state;
++
++	/* Restore the mem_pool_allocated flag */
++	dst->mem_pool_allocated = mem_pool_allocated;
+ }
+ 
+ static inline unsigned create_ce_flags(unsigned stage)
+@@ -328,6 +334,7 @@ struct index_state {
+ 	struct untracked_cache *untracked;
+ 	uint64_t fsmonitor_last_update;
+ 	struct ewah_bitmap *fsmonitor_dirty;
++	struct mem_pool *ce_mem_pool;
+ };
+ 
+ extern struct index_state the_index;
+@@ -373,6 +380,20 @@ struct cache_entry *make_empty_transient_cache_entry(size_t name_len);
+  */
+ void discard_cache_entry(struct cache_entry *ce);
+ 
++/*
++ * Duplicate a cache_entry. Allocate memory for the new entry from a
++ * memory_pool. Takes into account cache_entry fields that are meant
++ * for managing the underlying memory allocation of the cache_entry.
++ */
++struct cache_entry *dup_cache_entry(const struct cache_entry *ce, struct index_state *istate);
++
++/*
++ * Validate the cache entries in the index.  This is an internal
++ * consistency check that the cache_entry structs are allocated from
++ * the expected memory pool.
++ */
++void validate_cache_entries(const struct index_state *istate);
++
+ #ifndef NO_THE_INDEX_COMPATIBILITY_MACROS
+ #define active_cache (the_index.cache)
+ #define active_nr (the_index.cache_nr)
+diff --git a/mem-pool.c b/mem-pool.c
+index b250a5fe4..139617cb2 100644
+--- a/mem-pool.c
++++ b/mem-pool.c
+@@ -54,7 +54,8 @@ void mem_pool_discard(struct mem_pool *mem_pool)
+ {
+ 	struct mp_block *block, *block_to_free;
+ 
+-	while ((block = mem_pool->mp_block))
++	block = mem_pool->mp_block;
++	while (block)
+ 	{
+ 		block_to_free = block;
+ 		block = block->next_block;
+diff --git a/read-cache.c b/read-cache.c
+index 41e4d0e67..b07369660 100644
+--- a/read-cache.c
++++ b/read-cache.c
+@@ -46,6 +46,48 @@
+ 		 CE_ENTRY_ADDED | CE_ENTRY_REMOVED | CE_ENTRY_CHANGED | \
+ 		 SPLIT_INDEX_ORDERED | UNTRACKED_CHANGED | FSMONITOR_CHANGED)
+ 
++
++/*
++ * This is an estimate of the pathname length in the index.  We use
++ * this for V4 index files to guess the un-deltafied size of the index
++ * in memory because of pathname deltafication.  This is not required
++ * for V2/V3 index formats because their pathnames are not compressed.
++ * If the initial amount of memory set aside is not sufficient, the
++ * mem pool will allocate extra memory.
++ */
++#define CACHE_ENTRY_PATH_LENGTH 80
++
++static inline struct cache_entry *mem_pool__ce_alloc(struct mem_pool *mem_pool, size_t len)
++{
++	struct cache_entry *ce;
++	ce = mem_pool_alloc(mem_pool, cache_entry_size(len));
++	ce->mem_pool_allocated = 1;
++	return ce;
++}
++
++static inline struct cache_entry *mem_pool__ce_calloc(struct mem_pool *mem_pool, size_t len)
++{
++	struct cache_entry * ce;
++	ce = mem_pool_calloc(mem_pool, 1, cache_entry_size(len));
++	ce->mem_pool_allocated = 1;
++	return ce;
++}
++
++static struct mem_pool *find_mem_pool(struct index_state *istate)
++{
++	struct mem_pool **pool_ptr;
++
++	if (istate->split_index && istate->split_index->base)
++		pool_ptr = &istate->split_index->base->ce_mem_pool;
++	else
++		pool_ptr = &istate->ce_mem_pool;
++
++	if (!*pool_ptr)
++		mem_pool_init(pool_ptr, 0);
++
++	return *pool_ptr;
++}
++
+ struct index_state the_index;
+ static const char *alternate_index_output;
+ 
+@@ -746,7 +788,7 @@ int add_file_to_index(struct index_state *istate, const char *path, int flags)
+ 
+ struct cache_entry *make_empty_cache_entry(struct index_state *istate, size_t len)
+ {
+-	return xcalloc(1, cache_entry_size(len));
++	return mem_pool__ce_calloc(find_mem_pool(istate), len);
+ }
+ 
+ struct cache_entry *make_empty_transient_cache_entry(size_t len)
+@@ -1668,13 +1710,13 @@ int read_index(struct index_state *istate)
+ 	return read_index_from(istate, get_index_file(), get_git_dir());
+ }
+ 
+-static struct cache_entry *cache_entry_from_ondisk(struct index_state *istate,
++static struct cache_entry *cache_entry_from_ondisk(struct mem_pool *mem_pool,
+ 						   struct ondisk_cache_entry *ondisk,
+ 						   unsigned int flags,
+ 						   const char *name,
+ 						   size_t len)
+ {
+-	struct cache_entry *ce = make_empty_cache_entry(istate, len);
++	struct cache_entry *ce = mem_pool__ce_alloc(mem_pool, len);
+ 
+ 	ce->ce_stat_data.sd_ctime.sec = get_be32(&ondisk->ctime.sec);
+ 	ce->ce_stat_data.sd_mtime.sec = get_be32(&ondisk->mtime.sec);
+@@ -1716,7 +1758,7 @@ static unsigned long expand_name_field(struct strbuf *name, const char *cp_)
+ 	return (const char *)ep + 1 - cp_;
+ }
+ 
+-static struct cache_entry *create_from_disk(struct index_state *istate,
++static struct cache_entry *create_from_disk(struct mem_pool *mem_pool,
+ 					    struct ondisk_cache_entry *ondisk,
+ 					    unsigned long *ent_size,
+ 					    struct strbuf *previous_name)
+@@ -1748,13 +1790,13 @@ static struct cache_entry *create_from_disk(struct index_state *istate,
+ 		/* v3 and earlier */
+ 		if (len == CE_NAMEMASK)
+ 			len = strlen(name);
+-		ce = cache_entry_from_ondisk(istate, ondisk, flags, name, len);
++		ce = cache_entry_from_ondisk(mem_pool, ondisk, flags, name, len);
+ 
+ 		*ent_size = ondisk_ce_size(ce);
+ 	} else {
+ 		unsigned long consumed;
+ 		consumed = expand_name_field(previous_name, name);
+-		ce = cache_entry_from_ondisk(istate, ondisk, flags,
++		ce = cache_entry_from_ondisk(mem_pool, ondisk, flags,
+ 					     previous_name->buf,
+ 					     previous_name->len);
+ 
+@@ -1828,6 +1870,22 @@ static void post_read_index_from(struct index_state *istate)
+ 	tweak_fsmonitor(istate);
+ }
+ 
++static size_t estimate_cache_size_from_compressed(unsigned int entries)
++{
++	return entries * (sizeof(struct cache_entry) + CACHE_ENTRY_PATH_LENGTH);
++}
++
++static size_t estimate_cache_size(size_t ondisk_size, unsigned int entries)
++{
++	long per_entry = sizeof(struct cache_entry) - sizeof(struct ondisk_cache_entry);
++
++	/*
++	 * Account for potential alignment differences.
++	 */
++	per_entry += align_padding_size(sizeof(struct cache_entry), -sizeof(struct ondisk_cache_entry));
++	return ondisk_size + entries * per_entry;
++}
++
+ /* remember to discard_cache() before reading a different cache! */
+ int do_read_index(struct index_state *istate, const char *path, int must_exist)
+ {
+@@ -1874,10 +1932,15 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
+ 	istate->cache = xcalloc(istate->cache_alloc, sizeof(*istate->cache));
+ 	istate->initialized = 1;
+ 
+-	if (istate->version == 4)
++	if (istate->version == 4) {
+ 		previous_name = &previous_name_buf;
+-	else
++		mem_pool_init(&istate->ce_mem_pool,
++			      estimate_cache_size_from_compressed(istate->cache_nr));
++	} else {
+ 		previous_name = NULL;
++		mem_pool_init(&istate->ce_mem_pool,
++			      estimate_cache_size(mmap_size, istate->cache_nr));
++	}
+ 
+ 	src_offset = sizeof(*hdr);
+ 	for (i = 0; i < istate->cache_nr; i++) {
+@@ -1886,7 +1949,7 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
+ 		unsigned long consumed;
+ 
+ 		disk_ce = (struct ondisk_cache_entry *)((char *)mmap + src_offset);
+-		ce = create_from_disk(istate, disk_ce, &consumed, previous_name);
++		ce = create_from_disk(istate->ce_mem_pool, disk_ce, &consumed, previous_name);
+ 		set_index_entry(istate, i, ce);
+ 
+ 		src_offset += consumed;
+@@ -1983,17 +2046,13 @@ int is_index_unborn(struct index_state *istate)
+ 
+ int discard_index(struct index_state *istate)
+ {
+-	int i;
++	/*
++	 * Cache entries in istate->cache[] should have been allocated
++	 * from the memory pool associated with this index, or from an
++	 * associated split_index. There is no need to free individual
++	 * cache entries.
++	 */
+ 
+-	for (i = 0; i < istate->cache_nr; i++) {
+-		if (istate->cache[i]->index &&
+-		    istate->split_index &&
+-		    istate->split_index->base &&
+-		    istate->cache[i]->index <= istate->split_index->base->cache_nr &&
+-		    istate->cache[i] == istate->split_index->base->cache[istate->cache[i]->index - 1])
+-			continue;
+-		discard_cache_entry(istate->cache[i]);
+-	}
+ 	resolve_undo_clear_index(istate);
+ 	istate->cache_nr = 0;
+ 	istate->cache_changed = 0;
+@@ -2007,6 +2066,12 @@ int discard_index(struct index_state *istate)
+ 	discard_split_index(istate);
+ 	free_untracked_cache(istate->untracked);
+ 	istate->untracked = NULL;
++
++	if (istate->ce_mem_pool) {
++		mem_pool_discard(istate->ce_mem_pool);
++		istate->ce_mem_pool = NULL;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -2798,7 +2863,23 @@ void move_index_extensions(struct index_state *dst, struct index_state *src)
+ 	src->untracked = NULL;
+ }
+ 
++struct cache_entry *dup_cache_entry(const struct cache_entry *ce,
++				    struct index_state *istate)
++{
++	unsigned int size = ce_size(ce);
++	int mem_pool_allocated;
++	struct cache_entry *new_entry = make_empty_cache_entry(istate, ce_namelen(ce));
++	mem_pool_allocated = new_entry->mem_pool_allocated;
++
++	memcpy(new_entry, ce, size);
++	new_entry->mem_pool_allocated = mem_pool_allocated;
++	return new_entry;
++}
++
+ void discard_cache_entry(struct cache_entry *ce)
+ {
++	if (ce && ce->mem_pool_allocated)
++		return;
++
+ 	free(ce);
+ }
+diff --git a/split-index.c b/split-index.c
+index 317900db8..84f067e10 100644
+--- a/split-index.c
++++ b/split-index.c
+@@ -73,16 +73,31 @@ void move_cache_to_base_index(struct index_state *istate)
+ 	int i;
+ 
+ 	/*
+-	 * do not delete old si->base, its index entries may be shared
+-	 * with istate->cache[]. Accept a bit of leaking here because
+-	 * this code is only used by short-lived update-index.
++	 * If there was a previous base index, then transfer ownership of allocated
++	 * entries to the parent index.
+ 	 */
++	if (si->base &&
++		si->base->ce_mem_pool) {
++
++		if (!istate->ce_mem_pool)
++			mem_pool_init(&istate->ce_mem_pool, 0);
++
++		mem_pool_combine(istate->ce_mem_pool, istate->split_index->base->ce_mem_pool);
++	}
++
+ 	si->base = xcalloc(1, sizeof(*si->base));
+ 	si->base->version = istate->version;
+ 	/* zero timestamp disables racy test in ce_write_index() */
+ 	si->base->timestamp = istate->timestamp;
+ 	ALLOC_GROW(si->base->cache, istate->cache_nr, si->base->cache_alloc);
+ 	si->base->cache_nr = istate->cache_nr;
++
++	/*
++	 * The mem_pool needs to move with the allocated entries.
++	 */
++	si->base->ce_mem_pool = istate->ce_mem_pool;
++	istate->ce_mem_pool = NULL;
++
+ 	COPY_ARRAY(si->base->cache, istate->cache, istate->cache_nr);
+ 	mark_base_index_entries(si->base);
+ 	for (i = 0; i < si->base->cache_nr; i++)
+@@ -331,12 +346,31 @@ void remove_split_index(struct index_state *istate)
+ {
+ 	if (istate->split_index) {
+ 		/*
+-		 * can't discard_split_index(&the_index); because that
+-		 * will destroy split_index->base->cache[], which may
+-		 * be shared with the_index.cache[]. So yeah we're
+-		 * leaking a bit here.
++		 * When removing the split index, we need to move
++		 * ownership of the mem_pool associated with the
++		 * base index to the main index. There may be cache entries
++		 * allocated from the base's memory pool that are shared with
++		 * the_index.cache[].
+ 		 */
+-		istate->split_index = NULL;
++		mem_pool_combine(istate->ce_mem_pool, istate->split_index->base->ce_mem_pool);
++
++		/*
++		 * The split index no longer owns the mem_pool backing
++		 * its cache array. As we are discarding this index,
++		 * mark the index as having no cache entries, so it
++		 * will not attempt to clean up the cache entries or
++		 * validate them.
++		 */
++		if (istate->split_index->base)
++			istate->split_index->base->cache_nr = 0;
++
++		/*
++		 * We can discard the split index because its
++		 * memory pool has been incorporated into the
++		 * memory pool associated with the the_index.
++		 */
++		discard_split_index(istate);
++
+ 		istate->cache_changed |= SOMETHING_CHANGED;
+ 	}
+ }
+diff --git a/unpack-trees.c b/unpack-trees.c
+index 33cba550b..a3b513173 100644
+--- a/unpack-trees.c
++++ b/unpack-trees.c
+@@ -203,20 +203,11 @@ static int do_add_entry(struct unpack_trees_options *o, struct cache_entry *ce,
+ 			       ADD_CACHE_OK_TO_ADD | ADD_CACHE_OK_TO_REPLACE);
+ }
+ 
+-static struct cache_entry *dup_entry(const struct cache_entry *ce, struct index_state *istate)
+-{
+-	unsigned int size = ce_size(ce);
+-	struct cache_entry *new_entry = make_empty_cache_entry(istate, ce_namelen(ce));
+-
+-	memcpy(new_entry, ce, size);
+-	return new_entry;
+-}
+-
+ static void add_entry(struct unpack_trees_options *o,
+ 		      const struct cache_entry *ce,
+ 		      unsigned int set, unsigned int clear)
+ {
+-	do_add_entry(o, dup_entry(ce, &o->result), set, clear);
++	do_add_entry(o, dup_cache_entry(ce, &o->result), set, clear);
+ }
+ 
+ /*
+@@ -1802,7 +1793,7 @@ static int merged_entry(const struct cache_entry *ce,
+ 			struct unpack_trees_options *o)
+ {
+ 	int update = CE_UPDATE;
+-	struct cache_entry *merge = dup_entry(ce, &o->result);
++	struct cache_entry *merge = dup_cache_entry(ce, &o->result);
+ 
+ 	if (!old) {
+ 		/*
+

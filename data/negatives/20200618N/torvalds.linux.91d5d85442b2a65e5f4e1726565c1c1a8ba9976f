@@ -1,0 +1,90 @@
+commit 91d5d85442b2a65e5f4e1726565c1c1a8ba9976f
+Author: Zhi Wang <zhi.a.wang@intel.com>
+Date:   Sun Sep 10 21:33:20 2017 +0800
+
+    drm/i915/gvt: Move tlb_handle_pending into intel_vgpu_submission
+    
+    Move tlb_handle_pending into intel_vgpu_submssion since it belongs to a
+    part of vGPU submission stuffs
+    
+    Signed-off-by: Zhi Wang <zhi.a.wang@intel.com>
+
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index c3f84f26090a..93ff530eee30 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -149,6 +149,7 @@ struct intel_vgpu_submission {
+ 	atomic_t running_workload_num;
+ 	struct i915_gem_context *shadow_ctx;
+ 	DECLARE_BITMAP(shadow_ctx_desc_updated, I915_NUM_ENGINES);
++	DECLARE_BITMAP(tlb_handle_pending, I915_NUM_ENGINES);
+ };
+ 
+ struct intel_vgpu {
+@@ -174,7 +175,6 @@ struct intel_vgpu {
+ 	/* 1/2K for each reserve ring buffer */
+ 	void *reserve_ring_buffer_va[I915_NUM_ENGINES];
+ 	int reserve_ring_buffer_size[I915_NUM_ENGINES];
+-	DECLARE_BITMAP(tlb_handle_pending, I915_NUM_ENGINES);
+ 
+ 
+ #if IS_ENABLED(CONFIG_DRM_I915_GVT_KVMGT)
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 00893532394a..c78e45058219 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -1526,7 +1526,7 @@ static int gvt_reg_tlb_control_handler(struct intel_vgpu *vgpu,
+ 	default:
+ 		return -EINVAL;
+ 	}
+-	set_bit(id, (void *)vgpu->tlb_handle_pending);
++	set_bit(id, (void *)vgpu->submission.tlb_handle_pending);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/i915/gvt/render.c b/drivers/gpu/drm/i915/gvt/render.c
+index db4d091be60b..e16c3551b4a3 100644
+--- a/drivers/gpu/drm/i915/gvt/render.c
++++ b/drivers/gpu/drm/i915/gvt/render.c
+@@ -147,6 +147,7 @@ static u32 gen9_render_mocs_L3[32];
+ static void handle_tlb_pending_event(struct intel_vgpu *vgpu, int ring_id)
+ {
+ 	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++	struct intel_vgpu_submission *s = &vgpu->submission;
+ 	enum forcewake_domains fw;
+ 	i915_reg_t reg;
+ 	u32 regs[] = {
+@@ -160,7 +161,7 @@ static void handle_tlb_pending_event(struct intel_vgpu *vgpu, int ring_id)
+ 	if (WARN_ON(ring_id >= ARRAY_SIZE(regs)))
+ 		return;
+ 
+-	if (!test_and_clear_bit(ring_id, (void *)vgpu->tlb_handle_pending))
++	if (!test_and_clear_bit(ring_id, (void *)s->tlb_handle_pending))
+ 		return;
+ 
+ 	reg = _MMIO(regs[ring_id]);
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 864a2bc06e45..7cb1cf4223ed 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -766,6 +766,7 @@ int intel_vgpu_setup_submission(struct intel_vgpu *vgpu)
+ 		INIT_LIST_HEAD(&s->workload_q_head[i]);
+ 
+ 	atomic_set(&s->running_workload_num, 0);
++	bitmap_zero(s->tlb_handle_pending, I915_NUM_ENGINES);
+ 
+ 	return 0;
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index 35a5ec201206..1c9818d9f1d8 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -346,7 +346,6 @@ static struct intel_vgpu *__intel_gvt_create_vgpu(struct intel_gvt *gvt,
+ 	vgpu->handle = param->handle;
+ 	vgpu->gvt = gvt;
+ 	vgpu->sched_ctl.weight = param->weight;
+-	bitmap_zero(vgpu->tlb_handle_pending, I915_NUM_ENGINES);
+ 
+ 	intel_vgpu_init_cfg_space(vgpu, param->primary);
+ 
+

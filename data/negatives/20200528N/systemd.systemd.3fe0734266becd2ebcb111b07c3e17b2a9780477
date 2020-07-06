@@ -1,0 +1,211 @@
+commit 3fe0734266becd2ebcb111b07c3e17b2a9780477
+Author: kay.sievers@vrfy.org <kay.sievers@vrfy.org>
+Date:   Thu Feb 26 19:40:40 2004 -0800
+
+    [PATCH] udev - safer string handling - part four
+    
+    Mainly a cleanup of the earlier patches with a few missing pieces
+    and some cosmetical changes.
+    
+    I've moved the udev_init_config() to very early init, otherwise we
+    don't get any logging for the processing of the input. What would I
+    do without gdb :)
+    
+    Greg, it's the 7th patch in your box to apply. I will stop now and
+    wait for you :)
+
+diff --git a/logging.h b/logging.h
+index 2ba2ac496..1c27917f6 100644
+--- a/logging.h
++++ b/logging.h
+@@ -37,14 +37,14 @@
+ #undef info
+ #define info(format, arg...)								\
+ 	do {										\
+-		log_message (LOG_INFO , format , ## arg);				\
++		log_message(LOG_INFO , format , ## arg);				\
+ 	} while (0)
+ 
+ #ifdef DEBUG
+ #undef dbg
+ #define dbg(format, arg...)								\
+ 	do {										\
+-		log_message (LOG_DEBUG , "%s: " format , __FUNCTION__ , ## arg);	\
++		log_message(LOG_DEBUG , "%s: " format , __FUNCTION__ , ## arg);	\
+ 	} while (0)
+ #endif
+ 
+@@ -53,11 +53,11 @@
+ #undef dbg_parse
+ #define dbg_parse(format, arg...)							\
+ 	do {										\
+-		log_message (LOG_DEBUG , "%s: " format , __FUNCTION__ , ## arg);	\
++		log_message(LOG_DEBUG , "%s: " format , __FUNCTION__ , ## arg);	\
+ 	} while (0)
+ #endif
+ 
+-extern void log_message (int level, const char *format, ...)
++extern void log_message(int level, const char *format, ...)
+ 	__attribute__ ((format (printf, 2, 3)));
+ 
+ /* each program that uses syslog must declare this variable somewhere */
+diff --git a/namedev.c b/namedev.c
+index bc407dd10..21f52d1f3 100644
+--- a/namedev.c
++++ b/namedev.c
+@@ -228,7 +228,7 @@ static void apply_format(struct udevice *udev, char *string, size_t maxsize,
+ 	pos = string;
+ 
+ 	while (1) {
+-		pos = strchr(pos, '%');
++		pos = strchr(string, '%');
+ 		if (pos != NULL) {
+ 			pos[0] = '\0';
+ 			tail = pos+1;
+@@ -247,19 +247,19 @@ static void apply_format(struct udevice *udev, char *string, size_t maxsize,
+ 		case 'b':
+ 			if (strlen(udev->bus_id) == 0)
+ 				break;
+-			strnfieldcat(pos, udev->bus_id, maxsize);
++			strnfieldcat(string, udev->bus_id, maxsize);
+ 			dbg("substitute bus_id '%s'", udev->bus_id);
+ 			break;
+ 		case 'k':
+ 			if (strlen(udev->kernel_name) == 0)
+ 				break;
+-			strnfieldcat(pos, udev->kernel_name, maxsize);
++			strnfieldcat(string, udev->kernel_name, maxsize);
+ 			dbg("substitute kernel name '%s'", udev->kernel_name);
+ 			break;
+ 		case 'n':
+ 			if (strlen(udev->kernel_number) == 0)
+ 				break;
+-			strnfieldcat(pos, udev->kernel_number, maxsize);
++			strnfieldcat(string, udev->kernel_number, maxsize);
+ 			dbg("substitute kernel number '%s'", udev->kernel_number);
+ 				break;
+ 		case 'm':
+@@ -289,11 +289,11 @@ static void apply_format(struct udevice *udev, char *string, size_t maxsize,
+ 					}
+ 				}
+ 				if (pos3) {
+-					strnfieldcat(pos, pos3, maxsize);
++					strnfieldcat(string, pos3, maxsize);
+ 					dbg("substitute part of result string '%s'", pos3);
+ 				}
+ 			} else {
+-				strnfieldcat(pos, udev->program_result, maxsize);
++				strnfieldcat(string, udev->program_result, maxsize);
+ 				dbg("substitute result string '%s'", udev->program_result);
+ 			}
+ 			break;
+@@ -304,20 +304,20 @@ static void apply_format(struct udevice *udev, char *string, size_t maxsize,
+ 					dbg("sysfa attribute '%s' not found", attr);
+ 					break;
+ 				}
+-				strnfieldcpy(pos, tmpattr->value, maxsize);
++				strnfieldcat(string, tmpattr->value, maxsize);
+ 				dbg("substitute sysfs value '%s'", tmpattr->value);
+ 			} else {
+ 				dbg("missing attribute");
+ 			}
+ 			break;
+ 		case '%':
+-			strnfieldcat(pos, "%", maxsize);
++			strnfieldcat(string, "%", maxsize);
+ 			break;
+ 		default:
+ 			dbg("unknown substitution type '%%%c'", c);
+ 			break;
+ 		}
+-		strnfieldcat(pos, tail, maxsize);
++		strnfieldcat(string, tail, maxsize);
+ 	}
+ }
+ 
+diff --git a/udev.c b/udev.c
+index 4486707f4..4ae468453 100644
+--- a/udev.c
++++ b/udev.c
+@@ -41,7 +41,7 @@ char **main_envp;
+ 
+ #ifdef LOG
+ unsigned char logname[42];
+-void log_message (int level, const char *format, ...)
++void log_message(int level, const char *format, ...)
+ {
+ 	va_list args;
+ 
+@@ -76,7 +76,7 @@ static char *subsystem_blacklist[] = {
+ 	"",
+ };
+ 
+-static int udev_hotplug(int argc, char **argv)
++static int udev_hotplug(void)
+ {
+ 	char *action;
+ 	char *devpath;
+@@ -106,7 +106,7 @@ static int udev_hotplug(int argc, char **argv)
+ 	}
+ 
+ 	/* skip blacklisted subsystems */
+-	subsystem = get_subsystem(argv[1]);
++	subsystem = get_subsystem(main_argv[1]);
+ 	if (!subsystem) {
+ 		dbg("no subsystem?");
+ 		goto exit;
+@@ -123,9 +123,6 @@ static int udev_hotplug(int argc, char **argv)
+ 	/* connect to the system message bus */
+ 	sysbus_connect();
+ 
+-	/* initialize our configuration */
+-	udev_init_config();
+-
+ 	/* initialize udev database */
+ 	retval = udevdb_init(UDEVDB_DEFAULT);
+ 	if (retval != 0) {
+@@ -172,7 +169,11 @@ int main(int argc, char **argv, char **envp)
+ 	main_envp = envp;
+ 
+ 	init_logging("udev");
++
++	/* initialize our configuration */
++	udev_init_config();
++
+ 	dbg("version %s", UDEV_VERSION);
+ 
+-	return udev_hotplug(argc, argv);
++	return udev_hotplug();
+ }
+diff --git a/udev.h b/udev.h
+index fa56c3669..3b676acf4 100644
+--- a/udev.h
++++ b/udev.h
+@@ -90,7 +90,7 @@ static inline char *get_action(void)
+ 	char *action;
+ 
+ 	action = getenv("ACTION");
+-	if (strlen(action) > ACTION_SIZE)
++	if (action != NULL && strlen(action) > ACTION_SIZE)
+ 		action[ACTION_SIZE-1] = '\0';
+ 
+ 	return action;
+@@ -101,7 +101,7 @@ static inline char *get_devpath(void)
+ 	char *devpath;
+ 
+ 	devpath = getenv("DEVPATH");
+-	if (strlen(devpath) > DEVPATH_SIZE)
++	if (devpath != NULL && strlen(devpath) > DEVPATH_SIZE)
+ 		devpath[DEVPATH_SIZE-1] = '\0';
+ 
+ 	return devpath;
+@@ -118,7 +118,7 @@ static inline char *get_seqnum(void)
+ 
+ static inline char *get_subsystem(char *subsystem)
+ {
+-	if (strlen(subsystem) > SUBSYSTEM_SIZE)
++	if (subsystem != NULL && strlen(subsystem) > SUBSYSTEM_SIZE)
+ 		subsystem[SUBSYSTEM_SIZE-1] = '\0';
+ 
+ 	return subsystem;
+

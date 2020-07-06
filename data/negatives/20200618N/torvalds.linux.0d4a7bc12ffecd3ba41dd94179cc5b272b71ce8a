@@ -1,0 +1,78 @@
+commit 0d4a7bc12ffecd3ba41dd94179cc5b272b71ce8a
+Author: Jonathan Corbet <corbet@lwn.net>
+Date:   Tue Aug 26 17:15:45 2008 -0600
+
+    UIO: BKL removal
+    
+    Fill in needed locking around idr accesses, then remove the big kernel lock
+    from the UIO driver.  Since there are no in-tree UIO drivers with open()
+    methods, no further BKL pushdown is required.
+    
+    Acked-by: Hans J. Koch <hjk@linutronix.de>
+    Acked-by: Greg Kroah-Hartman <gregkh@suse.de>
+    Signed-off-by: Jonathan Corbet <corbet@lwn.net>
+
+diff --git a/drivers/uio/uio.c b/drivers/uio/uio.c
+index 3a6934bf7131..4f28f4bf8366 100644
+--- a/drivers/uio/uio.c
++++ b/drivers/uio/uio.c
+@@ -47,6 +47,9 @@ static struct uio_class {
+ 	struct class *class;
+ } *uio_class;
+ 
++/* Protect idr accesses */
++static DEFINE_MUTEX(minor_lock);
++
+ /*
+  * attributes
+  */
+@@ -231,7 +234,6 @@ static void uio_dev_del_attributes(struct uio_device *idev)
+ 
+ static int uio_get_minor(struct uio_device *idev)
+ {
+-	static DEFINE_MUTEX(minor_lock);
+ 	int retval = -ENOMEM;
+ 	int id;
+ 
+@@ -253,7 +255,9 @@ static int uio_get_minor(struct uio_device *idev)
+ 
+ static void uio_free_minor(struct uio_device *idev)
+ {
++	mutex_lock(&minor_lock);
+ 	idr_remove(&uio_idr, idev->minor);
++	mutex_unlock(&minor_lock);
+ }
+ 
+ /**
+@@ -297,8 +301,9 @@ static int uio_open(struct inode *inode, struct file *filep)
+ 	struct uio_listener *listener;
+ 	int ret = 0;
+ 
+-	lock_kernel();
++	mutex_lock(&minor_lock);
+ 	idev = idr_find(&uio_idr, iminor(inode));
++	mutex_unlock(&minor_lock);
+ 	if (!idev) {
+ 		ret = -ENODEV;
+ 		goto out;
+@@ -324,18 +329,15 @@ static int uio_open(struct inode *inode, struct file *filep)
+ 		if (ret)
+ 			goto err_infoopen;
+ 	}
+-	unlock_kernel();
+ 	return 0;
+ 
+ err_infoopen:
+-
+ 	kfree(listener);
+-err_alloc_listener:
+ 
++err_alloc_listener:
+ 	module_put(idev->owner);
+ 
+ out:
+-	unlock_kernel();
+ 	return ret;
+ }
+ 
+

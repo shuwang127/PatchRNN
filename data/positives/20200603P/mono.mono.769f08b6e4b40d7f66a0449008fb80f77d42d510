@@ -1,0 +1,29 @@
+commit 769f08b6e4b40d7f66a0449008fb80f77d42d510
+Author: Zoltan Varga <vargaz@gmail.com>
+Date:   Thu Aug 20 16:46:22 2015 -0400
+
+    [coop] Avoid polling in the mono_thread_interruption_checkpoint () icall wrapper, it could lead to infinite recursion if the polling flag is not cleared fast enough.
+
+diff --git a/mono/mini/mini.c b/mono/mini/mini.c
+index 2df38aa943a..8bd3d9fd54b 100644
+--- a/mono/mini/mini.c
++++ b/mono/mini/mini.c
+@@ -3127,6 +3127,17 @@ mono_insert_safepoints (MonoCompile *cfg)
+ 		return;
+ 	}
+ 
++	if (cfg->method->wrapper_type == MONO_WRAPPER_MANAGED_TO_NATIVE) {
++		WrapperInfo *info = mono_marshal_get_wrapper_info (cfg->method);
++
++		if (info && info->subtype == WRAPPER_SUBTYPE_ICALL_WRAPPER && info->d.icall.func == mono_thread_interruption_checkpoint) {
++			/* These wrappers are called from the wrapper for the polling function, leading to potential stack overflow */
++			if (cfg->verbose_level > 1)
++				printf ("SKIPPING SAFEPOINTS for the interruption checkpoint icall\n");
++			return;
++		}
++	}
++
+ 	if (cfg->verbose_level > 1)
+ 		printf ("INSERTING SAFEPOINTS\n");
+ 	if (cfg->verbose_level > 2)
+

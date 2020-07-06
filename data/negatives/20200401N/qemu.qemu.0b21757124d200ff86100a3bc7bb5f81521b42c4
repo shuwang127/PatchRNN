@@ -1,0 +1,52 @@
+commit 0b21757124d200ff86100a3bc7bb5f81521b42c4
+Author: Greg Kurz <groug@kaod.org>
+Date:   Tue Jul 19 10:28:35 2016 +0200
+
+    numa: set the memory backend "is_mapped" field
+    
+    Commit 2aece63 "hostmem: detect host backend memory is being used properly"
+    added a way to know if a memory backend is busy or available for use. It
+    caused a slight regression if we pass the same backend to a NUMA node and
+    to a pc-dimm device:
+    
+    -m 1G,slots=2,maxmem=2G \
+    -object memory-backend-ram,size=1G,id=mem-mem1 \
+    -device pc-dimm,id=dimm-mem1,memdev=mem-mem1 \
+    -numa node,nodeid=0,memdev=mem-mem1
+    
+    Before commit 2aece63, this would cause QEMU to print an error message and
+    to exit gracefully:
+    
+    qemu-system-ppc64: -device pc-dimm,id=dimm-mem1,memdev=mem-mem1:
+        can't use already busy memdev: mem-mem1
+    
+    Since commit 2aece63, QEMU hits an assertion in the memory code:
+    
+    qemu-system-ppc64: memory.c:1934: memory_region_add_subregion_common:
+        Assertion `!subregion->container' failed.
+    Aborted
+    
+    This happens because pc-dimm devices don't use memory_region_is_mapped()
+    anymore and cannot guess the backend is already used by a NUMA node.
+    
+    Let's revert to the previous behavior by turning the NUMA code to also
+    call host_memory_backend_set_mapped() when it uses a backend.
+    
+    Fixes: 2aece63c8a9d2c3a8ff41d2febc4cdeff2633331
+    Signed-off-by: Greg Kurz <groug@kaod.org>
+    Message-Id: <146891691503.15642.9817215371777203794.stgit@bahia.lan>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/numa.c b/numa.c
+index cbae430e36..72861713e5 100644
+--- a/numa.c
++++ b/numa.c
+@@ -463,6 +463,7 @@ void memory_region_allocate_system_memory(MemoryRegion *mr, Object *owner,
+             exit(1);
+         }
+ 
++        host_memory_backend_set_mapped(backend, true);
+         memory_region_add_subregion(mr, addr, seg);
+         vmstate_register_ram_global(seg);
+         addr += size;
+

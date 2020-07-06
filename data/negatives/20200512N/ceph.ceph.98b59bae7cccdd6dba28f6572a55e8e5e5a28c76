@@ -1,0 +1,67 @@
+commit 98b59bae7cccdd6dba28f6572a55e8e5e5a28c76
+Author: Yehuda Sadeh <yehuda@redhat.com>
+Date:   Wed Apr 22 10:35:32 2015 -0700
+
+    rgw: fix s3 list buckets
+    
+    Fixes: #11451
+    Backport: hammer
+    Got broken in commit:7dd54fa3621c04c8ea5723fb1bc06b91d81a0c6c.
+    Resurrect the option to list unlimited number of buckets using the S3
+    api.
+    
+    Signed-off-by: Yehuda Sadeh <yehuda@redhat.com>
+
+diff --git a/src/rgw/rgw_op.cc b/src/rgw/rgw_op.cc
+index d6c916e19a..2319bbf132 100644
+--- a/src/rgw/rgw_op.cc
++++ b/src/rgw/rgw_op.cc
+@@ -999,7 +999,11 @@ void RGWListBuckets::execute()
+   do {
+     RGWUserBuckets buckets;
+     uint64_t read_count;
+-    read_count = min(limit - total_count, (uint64_t)max_buckets);
++    if (limit >= 0) {
++      read_count = min(limit - total_count, (uint64_t)max_buckets);
++    } else {
++      read_count = max_buckets;
++    }
+ 
+     ret = rgw_read_user_buckets(store, s->user.user_id, buckets,
+                                 marker, read_count, should_get_stats(), 0);
+@@ -1029,7 +1033,7 @@ void RGWListBuckets::execute()
+ 
+     total_count += m.size();
+ 
+-    done = (m.size() < read_count || total_count >= limit);
++    done = (m.size() < read_count || (limit >= 0 && total_count >= (uint64_t)limit));
+ 
+     if (!m.empty()) {
+       send_response_data(buckets);
+diff --git a/src/rgw/rgw_op.h b/src/rgw/rgw_op.h
+index 8838cf0f2c..7124825fef 100644
+--- a/src/rgw/rgw_op.h
++++ b/src/rgw/rgw_op.h
+@@ -185,7 +185,7 @@ protected:
+   int ret;
+   bool sent_data;
+   string marker;
+-  uint64_t limit;
++  int64_t limit;
+   uint64_t limit_max;
+   uint32_t buckets_count;
+   uint64_t buckets_objcount;
+diff --git a/src/rgw/rgw_rest_s3.h b/src/rgw/rgw_rest_s3.h
+index d32ba5dd94..1a92a8c225 100644
+--- a/src/rgw/rgw_rest_s3.h
++++ b/src/rgw/rgw_rest_s3.h
+@@ -30,7 +30,7 @@ public:
+   ~RGWListBuckets_ObjStore_S3() {}
+ 
+   int get_params() {
+-    limit = 0; /* no limit */
++    limit = -1; /* no limit */
+     return 0;
+   }
+   virtual void send_response_begin(bool has_buckets);
+

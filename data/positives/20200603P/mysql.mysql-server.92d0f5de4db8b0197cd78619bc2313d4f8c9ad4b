@@ -1,0 +1,36 @@
+commit 92d0f5de4db8b0197cd78619bc2313d4f8c9ad4b
+Author: Marko Mäkelä <marko.makela@oracle.com>
+Date:   Wed Jun 13 16:24:13 2012 +0300
+
+    WL#6255 race condition fix.
+    
+    rollback_inplace_alter_table(): Free the online log before
+    dropping the table that was being rebuilt. Otherwise, DML threads
+    could access the freed table object in row_log_table_get_pk()
+    and possibly elsewhere.
+
+diff --git a/storage/innobase/handler/handler0alter.cc b/storage/innobase/handler/handler0alter.cc
+index 1d82c503974..c23a67ec069 100644
+--- a/storage/innobase/handler/handler0alter.cc
++++ b/storage/innobase/handler/handler0alter.cc
+@@ -3720,6 +3720,10 @@ rollback_inplace_alter_table(
+ 	if (prebuilt->table != ctx->indexed_table) {
+ 		dberr_t	err;
+ 		ulint	flags	= ctx->indexed_table->flags;
++
++		/* DML threads can access ctx->indexed_table via the
++		online rebuild log. Free it first. */
++		innobase_online_rebuild_log_free(prebuilt->table);
+ 		/* Drop the table. */
+ 		dict_table_close(ctx->indexed_table, TRUE, FALSE);
+ 		err = row_merge_drop_table(ctx->trx, ctx->indexed_table);
+@@ -3732,8 +3736,6 @@ rollback_inplace_alter_table(
+ 					flags);
+ 			fail = true;
+ 		}
+-
+-		innobase_online_rebuild_log_free(prebuilt->table);
+ 	} else {
+ 		DBUG_ASSERT(!(ha_alter_info->handler_flags
+ 			      & Alter_inplace_info::ADD_PK_INDEX));
+

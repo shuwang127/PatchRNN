@@ -1,0 +1,177 @@
+commit f324b0ef9c0a59dcb691c51057ee9c2ce37460b3
+Author: Armin Novak <armin.novak@thincast.com>
+Date:   Tue Feb 14 12:12:24 2017 +0100
+
+    Use aligned malloc/free for GFX surfaces/buffers
+
+diff --git a/libfreerdp/codec/h264.c b/libfreerdp/codec/h264.c
+index 270cd3b9e..4b9d7c4a3 100644
+--- a/libfreerdp/codec/h264.c
++++ b/libfreerdp/codec/h264.c
+@@ -1600,17 +1600,17 @@ INT32 avc420_compress(H264_CONTEXT* h264, const BYTE* pSrcData, DWORD SrcFormat,
+ 	nWidth = (nSrcWidth + 1) & ~1;
+ 	nHeight = (nSrcHeight + 1) & ~1;
+ 
+-	if (!(pYUVData[0] = (BYTE*) malloc(nWidth * nHeight)))
++	if (!(pYUVData[0] = (BYTE*) _aligned_malloc(nWidth * nHeight, 16)))
+ 		return -1;
+ 
+ 	iStride[0] = nWidth;
+ 
+-	if (!(pYUVData[1] = (BYTE*) malloc(nWidth * nHeight)))
++	if (!(pYUVData[1] = (BYTE*) _aligned_malloc(nWidth * nHeight, 16)))
+ 		goto error_1;
+ 
+ 	iStride[1] = nWidth / 2;
+ 
+-	if (!(pYUVData[2] = (BYTE*) malloc(nWidth * nHeight)))
++	if (!(pYUVData[2] = (BYTE*) _aligned_malloc(nWidth * nHeight, 16)))
+ 		goto error_2;
+ 
+ 	iStride[2] = nWidth / 2;
+@@ -1619,13 +1619,13 @@ INT32 avc420_compress(H264_CONTEXT* h264, const BYTE* pSrcData, DWORD SrcFormat,
+ 	prims->RGBToYUV420_8u_P3AC4R(pSrcData, SrcFormat, nSrcStep, pYUVData, iStride,
+ 	                             &roi);
+ 	status = h264->subsystem->Compress(h264, ppDstData, pDstSize, 0);
+-	free(pYUVData[2]);
++	_aligned_free(pYUVData[2]);
+ 	pYUVData[2] = NULL;
+ error_2:
+-	free(pYUVData[1]);
++	_aligned_free(pYUVData[1]);
+ 	pYUVData[1] = NULL;
+ error_1:
+-	free(pYUVData[0]);
++	_aligned_free(pYUVData[0]);
+ 	pYUVData[0] = NULL;
+ 	return status;
+ }
+@@ -1737,15 +1737,14 @@ static BOOL avc444_combine_yuv(H264_CONTEXT* h264,
+ 	{
+ 		for (x = 0; x < 3; x++)
+ 		{
+-			BYTE* ppYUVTmpData;
+ 			piDstStride[x] = piMainStride[0];
+ 			piDstSize[x] = piDstStride[x] * padDstHeight;
+-			ppYUVTmpData = realloc(ppYUVDstData[x], piDstSize[x]);
++			_aligned_free(ppYUVDstData[x]);
++			ppYUVDstData[x] = _aligned_malloc(piDstSize[x], 16);
+ 
+-			if (!ppYUVTmpData)
++			if (!ppYUVDstData[x])
+ 				goto fail;
+ 
+-			ppYUVDstData[x] = ppYUVTmpData;
+ 			memset(ppYUVDstData[x], 0, piDstSize[x]);
+ 		}
+ 	}
+@@ -1766,9 +1765,9 @@ static BOOL avc444_combine_yuv(H264_CONTEXT* h264,
+ 
+ 	return TRUE;
+ fail:
+-	free(ppYUVDstData[0]);
+-	free(ppYUVDstData[1]);
+-	free(ppYUVDstData[2]);
++	_aligned_free(ppYUVDstData[0]);
++	_aligned_free(ppYUVDstData[1]);
++	_aligned_free(ppYUVDstData[2]);
+ 	ppYUVDstData[0] = NULL;
+ 	ppYUVDstData[1] = NULL;
+ 	ppYUVDstData[2] = NULL;
+@@ -1976,9 +1975,9 @@ void h264_context_free(H264_CONTEXT* h264)
+ 	if (h264)
+ 	{
+ 		h264->subsystem->Uninit(h264);
+-		free(h264->pYUV444Data[0]);
+-		free(h264->pYUV444Data[1]);
+-		free(h264->pYUV444Data[2]);
++		_aligned_free(h264->pYUV444Data[0]);
++		_aligned_free(h264->pYUV444Data[1]);
++		_aligned_free(h264->pYUV444Data[2]);
+ 		free(h264);
+ 	}
+ }
+diff --git a/libfreerdp/gdi/gfx.c b/libfreerdp/gdi/gfx.c
+index 97c723cc3..6ea833fbe 100644
+--- a/libfreerdp/gdi/gfx.c
++++ b/libfreerdp/gdi/gfx.c
+@@ -700,7 +700,7 @@ static UINT gdi_CreateSurface(RdpgfxClientContext* context,
+ 	}
+ 
+ 	surface->scanline = gfx_align_scanline(surface->width * 4, 16);
+-	surface->data = (BYTE*) calloc(1, surface->scanline * surface->height);
++	surface->data = (BYTE*) _aligned_malloc(surface->scanline * surface->height, 16);
+ 
+ 	if (!surface->data)
+ 	{
+@@ -731,7 +731,7 @@ static UINT gdi_DeleteSurface(RdpgfxClientContext* context,
+ 	{
+ 		region16_uninit(&surface->invalidRegion);
+ 		codecs = surface->codecs;
+-		free(surface->data);
++		_aligned_free(surface->data);
+ 		free(surface);
+ 	}
+ 
+diff --git a/libfreerdp/primitives/test/TestPrimitivesYUV.c b/libfreerdp/primitives/test/TestPrimitivesYUV.c
+index 67599362d..1b798935a 100644
+--- a/libfreerdp/primitives/test/TestPrimitivesYUV.c
++++ b/libfreerdp/primitives/test/TestPrimitivesYUV.c
+@@ -140,18 +140,19 @@ static void* set_padding(size_t size, size_t padding)
+ {
+ 	size_t halfPad = (padding + 1) / 2;
+ 	BYTE* psrc;
+-	BYTE* src = calloc(1, size + 2 * halfPad);
++	BYTE* src = _aligned_malloc(size + 2 * halfPad, 16);
+ 
+ 	if (!src)
+ 		return NULL;
+ 
+ 	memset(&src[0], 'A', halfPad);
++	memset(&src[halfPad], 0, size);
+ 	memset(&src[halfPad + size], 'A', halfPad);
+ 	psrc = &src[halfPad];
+ 
+ 	if (!check_padding(psrc, size, padding, "init"))
+ 	{
+-		free(src);
++		_aligned_free(src);
+ 		return NULL;
+ 	}
+ 
+@@ -166,7 +167,7 @@ static void free_padding(void* src, size_t padding)
+ 		return;
+ 
+ 	ptr = ((BYTE*)src) - (padding + 1) / 2;
+-	free(ptr);
++	_aligned_free(ptr);
+ }
+ 
+ /* Create 2 pseudo YUV420 frames of same size.
+@@ -369,7 +370,7 @@ static BOOL TestPrimitiveYUV(primitives_t* prims, prim_size_t roi, BOOL use444)
+ 	BYTE* rgb_dst = NULL;
+ 	size_t size;
+ 	size_t uvsize, uvwidth;
+-	size_t padding = 10000;
++	size_t padding = 100 * 16;
+ 	size_t stride;
+ 	const UINT32 formats[] =
+ 	{
+@@ -567,7 +568,15 @@ int TestPrimitivesYUV(int argc, char* argv[])
+ 	for (x = 0; x < 10; x++)
+ 	{
+ 		prim_size_t roi;
+-		get_size(large, &roi.width, &roi.height);
++
++		if (argc > 1)
++		{
++			roi.width = 1920;
++			roi.height = 1080;
++		}
++		else
++			get_size(large, &roi.width, &roi.height);
++
+ 		printf("-------------------- GENERIC ------------------------\n");
+ 
+ 		if (!TestPrimitiveYUV(generic, roi, TRUE))
+

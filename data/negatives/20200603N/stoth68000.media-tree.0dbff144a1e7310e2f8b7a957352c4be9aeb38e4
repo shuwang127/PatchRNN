@@ -1,0 +1,40 @@
+commit 0dbff144a1e7310e2f8b7a957352c4be9aeb38e4
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+Date:   Mon Aug 15 17:48:43 2016 +0200
+
+    hv_netvsc: fix bonding devices check in netvsc_netdev_event()
+    
+    Bonding driver sets IFF_BONDING on both master (the bonding device) and
+    slave (the real NIC) devices and in netvsc_netdev_event() we want to skip
+    master devices only. Currently, there is an uncertainty when a slave
+    interface is removed: if bonding module comes first in netdev_chain it
+    clears IFF_BONDING flag on the netdev and netvsc_netdev_event() correctly
+    handles NETDEV_UNREGISTER event, but in case netvsc comes first on the
+    chain it sees the device with IFF_BONDING still attached and skips it. As
+    we still hold vf_netdev pointer to the device we crash on the next inject.
+    
+    Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Acked-by: Haiyang Zhang <haiyangz@microsoft.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/hyperv/netvsc_drv.c b/drivers/net/hyperv/netvsc_drv.c
+index 62a4e6e3c63e..3ba29fc80d05 100644
+--- a/drivers/net/hyperv/netvsc_drv.c
++++ b/drivers/net/hyperv/netvsc_drv.c
+@@ -1482,8 +1482,13 @@ static int netvsc_netdev_event(struct notifier_block *this,
+ {
+ 	struct net_device *event_dev = netdev_notifier_info_to_dev(ptr);
+ 
+-	/* Avoid Vlan, Bonding dev with same MAC registering as VF */
+-	if (event_dev->priv_flags & (IFF_802_1Q_VLAN | IFF_BONDING))
++	/* Avoid Vlan dev with same MAC registering as VF */
++	if (event_dev->priv_flags & IFF_802_1Q_VLAN)
++		return NOTIFY_DONE;
++
++	/* Avoid Bonding master dev with same MAC registering as VF */
++	if (event_dev->priv_flags & IFF_BONDING &&
++	    event_dev->flags & IFF_MASTER)
+ 		return NOTIFY_DONE;
+ 
+ 	switch (event) {
+

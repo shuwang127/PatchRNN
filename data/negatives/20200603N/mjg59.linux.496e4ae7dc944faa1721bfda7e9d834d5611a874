@@ -1,0 +1,89 @@
+commit 496e4ae7dc944faa1721bfda7e9d834d5611a874
+Author: Florian Westphal <fw@strlen.de>
+Date:   Sat Jun 29 14:15:47 2013 +0200
+
+    netfilter: nf_queue: add NFQA_SKB_CSUM_NOTVERIFIED info flag
+    
+    The common case is that TCP/IP checksums have already been
+    verified, e.g. by hardware (rx checksum offload), or conntrack.
+    
+    Userspace can use this flag to determine when the checksum
+    has not been validated yet.
+    
+    If the flag is set, this doesn't necessarily mean that the packet has
+    an invalid checksum, e.g. if NIC doesn't support rx checksum.
+    
+    Userspace that sucessfully enabled NFQA_CFG_F_GSO queue feature flag can
+    infer that IP/TCP checksum has already been validated if either the
+    SKB_INFO attribute is not present or the NFQA_SKB_CSUM_NOTVERIFIED
+    flag is unset.
+    
+    Signed-off-by: Florian Westphal <fw@strlen.de>
+    Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+diff --git a/include/uapi/linux/netfilter/nfnetlink_queue.h b/include/uapi/linux/netfilter/nfnetlink_queue.h
+index a2308ae5a73d..3a9b92147339 100644
+--- a/include/uapi/linux/netfilter/nfnetlink_queue.h
++++ b/include/uapi/linux/netfilter/nfnetlink_queue.h
+@@ -105,5 +105,7 @@ enum nfqnl_attr_config {
+ #define NFQA_SKB_CSUMNOTREADY (1 << 0)
+ /* packet is GSO (i.e., exceeds device mtu) */
+ #define NFQA_SKB_GSO (1 << 1)
++/* csum not validated (incoming device doesn't support hw checksum, etc.) */
++#define NFQA_SKB_CSUM_NOTVERIFIED (1 << 2)
+ 
+ #endif /* _NFNETLINK_QUEUE_H */
+diff --git a/net/netfilter/nfnetlink_queue_core.c b/net/netfilter/nfnetlink_queue_core.c
+index 299a48ae5dc9..971ea145ab3e 100644
+--- a/net/netfilter/nfnetlink_queue_core.c
++++ b/net/netfilter/nfnetlink_queue_core.c
+@@ -280,12 +280,17 @@ nfqnl_zcopy(struct sk_buff *to, const struct sk_buff *from, int len, int hlen)
+ 	skb_shinfo(to)->nr_frags = j;
+ }
+ 
+-static int nfqnl_put_packet_info(struct sk_buff *nlskb, struct sk_buff *packet)
++static int
++nfqnl_put_packet_info(struct sk_buff *nlskb, struct sk_buff *packet,
++		      bool csum_verify)
+ {
+ 	__u32 flags = 0;
+ 
+ 	if (packet->ip_summed == CHECKSUM_PARTIAL)
+ 		flags = NFQA_SKB_CSUMNOTREADY;
++	else if (csum_verify)
++		flags = NFQA_SKB_CSUM_NOTVERIFIED;
++
+ 	if (skb_is_gso(packet))
+ 		flags |= NFQA_SKB_GSO;
+ 
+@@ -310,6 +315,7 @@ nfqnl_build_packet_message(struct nfqnl_instance *queue,
+ 	struct net_device *outdev;
+ 	struct nf_conn *ct = NULL;
+ 	enum ip_conntrack_info uninitialized_var(ctinfo);
++	bool csum_verify;
+ 
+ 	size =    nlmsg_total_size(sizeof(struct nfgenmsg))
+ 		+ nla_total_size(sizeof(struct nfqnl_msg_packet_hdr))
+@@ -327,6 +333,12 @@ nfqnl_build_packet_message(struct nfqnl_instance *queue,
+ 	if (entskb->tstamp.tv64)
+ 		size += nla_total_size(sizeof(struct nfqnl_msg_packet_timestamp));
+ 
++	if (entry->hook <= NF_INET_FORWARD ||
++	   (entry->hook == NF_INET_POST_ROUTING && entskb->sk == NULL))
++		csum_verify = !skb_csum_unnecessary(entskb);
++	else
++		csum_verify = false;
++
+ 	outdev = entry->outdev;
+ 
+ 	switch ((enum nfqnl_config_mode)ACCESS_ONCE(queue->copy_mode)) {
+@@ -476,7 +488,7 @@ nfqnl_build_packet_message(struct nfqnl_instance *queue,
+ 	    nla_put_be32(skb, NFQA_CAP_LEN, htonl(cap_len)))
+ 		goto nla_put_failure;
+ 
+-	if (nfqnl_put_packet_info(skb, entskb))
++	if (nfqnl_put_packet_info(skb, entskb, csum_verify))
+ 		goto nla_put_failure;
+ 
+ 	if (data_len) {
+

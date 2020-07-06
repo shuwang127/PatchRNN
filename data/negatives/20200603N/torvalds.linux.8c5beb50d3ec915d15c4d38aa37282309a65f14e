@@ -1,0 +1,144 @@
+commit 8c5beb50d3ec915d15c4d38aa37282309a65f14e
+Author: Huang, Ying <ying.huang@intel.com>
+Date:   Wed Jun 11 11:33:39 2008 +0800
+
+    x86 boot: pass E820 memory map entries more than 128 via linked list of setup data
+    
+    Because of the size limits of struct boot_params (zero page), the
+    maximum number of E820 memory map entries can be passed to kernel is
+    128. As pointed by Paul Jackson, there is some machine produced by SGI
+    with so many nodes that the number of E820 memory map entries is more
+    than 128. To enabling Linux kernel on these system, a new setup data
+    type named SETUP_E820_EXT is defined to pass additional memory map
+    entries to Linux kernel.
+    
+    This patch is based on x86/auto-latest branch of git-x86 tree and has
+    been tested on x86_64 and i386 platform.
+    
+    Signed-off-by: Huang Ying <ying.huang@intel.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/arch/x86/kernel/e820.c b/arch/x86/kernel/e820.c
+index ed46b7a6bc13..544dd12c70f4 100644
+--- a/arch/x86/kernel/e820.c
++++ b/arch/x86/kernel/e820.c
+@@ -359,6 +359,26 @@ static struct e820entry new_bios[E820_X_MAX] __initdata;
+ 	return 0;
+ }
+ 
++static int __init __copy_e820_map(struct e820entry *biosmap, int nr_map)
++{
++	while (nr_map) {
++		u64 start = biosmap->addr;
++		u64 size = biosmap->size;
++		u64 end = start + size;
++		u32 type = biosmap->type;
++
++		/* Overflow in 64 bits? Ignore the memory map. */
++		if (start > end)
++			return -1;
++
++		e820_add_region(start, size, type);
++
++		biosmap++;
++		nr_map--;
++	}
++	return 0;
++}
++
+ /*
+  * Copy the BIOS e820 map into a safe place.
+  *
+@@ -374,19 +394,7 @@ int __init copy_e820_map(struct e820entry *biosmap, int nr_map)
+ 	if (nr_map < 2)
+ 		return -1;
+ 
+-	do {
+-		u64 start = biosmap->addr;
+-		u64 size = biosmap->size;
+-		u64 end = start + size;
+-		u32 type = biosmap->type;
+-
+-		/* Overflow in 64 bits? Ignore the memory map. */
+-		if (start > end)
+-			return -1;
+-
+-		e820_add_region(start, size, type);
+-	} while (biosmap++, --nr_map);
+-	return 0;
++	return __copy_e820_map(biosmap, nr_map);
+ }
+ 
+ u64 __init e820_update_range(u64 start, u64 size, unsigned old_type,
+@@ -496,6 +504,31 @@ __init void e820_setup_gap(void)
+ 	       pci_mem_start, gapstart, gapsize);
+ }
+ 
++/**
++ * Because of the size limitation of struct boot_params, only first
++ * 128 E820 memory entries are passed to kernel via
++ * boot_params.e820_map, others are passed via SETUP_E820_EXT node of
++ * linked list of struct setup_data, which is parsed here.
++ */
++void __init parse_e820_ext(struct setup_data *sdata, unsigned long pa_data)
++{
++	u32 map_len;
++	int entries;
++	struct e820entry *extmap;
++
++	entries = sdata->len / sizeof(struct e820entry);
++	map_len = sdata->len + sizeof(struct setup_data);
++	if (map_len > PAGE_SIZE)
++		sdata = early_ioremap(pa_data, map_len);
++	extmap = (struct e820entry *)(sdata->data);
++	__copy_e820_map(extmap, entries);
++	sanitize_e820_map(e820.map, ARRAY_SIZE(e820.map), &e820.nr_map);
++	if (map_len > PAGE_SIZE)
++		early_iounmap(sdata, map_len);
++	printk(KERN_INFO "extended physical RAM map:\n");
++	e820_print_map("extended");
++}
++
+ #if defined(CONFIG_X86_64) || \
+ 	(defined(CONFIG_X86_32) && defined(CONFIG_HIBERNATION))
+ /**
+diff --git a/arch/x86/kernel/setup.c b/arch/x86/kernel/setup.c
+index 45a5e247d450..5b0de38cde48 100644
+--- a/arch/x86/kernel/setup.c
++++ b/arch/x86/kernel/setup.c
+@@ -150,6 +150,9 @@ void __init parse_setup_data(void)
+ 	while (pa_data) {
+ 		data = early_ioremap(pa_data, PAGE_SIZE);
+ 		switch (data->type) {
++		case SETUP_E820_EXT:
++			parse_e820_ext(data, pa_data);
++			break;
+ 		default:
+ 			break;
+ 		}
+diff --git a/include/asm-x86/bootparam.h b/include/asm-x86/bootparam.h
+index 0a073904168b..876f21136660 100644
+--- a/include/asm-x86/bootparam.h
++++ b/include/asm-x86/bootparam.h
+@@ -11,6 +11,7 @@
+ 
+ /* setup data types */
+ #define SETUP_NONE			0
++#define SETUP_E820_EXT			1
+ 
+ /* extensible setup data list node */
+ struct setup_data {
+diff --git a/include/asm-x86/e820.h b/include/asm-x86/e820.h
+index 55d310596907..77fc24d89163 100644
+--- a/include/asm-x86/e820.h
++++ b/include/asm-x86/e820.h
+@@ -69,6 +69,8 @@ extern u64 e820_update_range(u64 start, u64 size, unsigned old_type,
+ 			       unsigned new_type);
+ extern void update_e820(void);
+ extern void e820_setup_gap(void);
++struct setup_data;
++extern void parse_e820_ext(struct setup_data *data, unsigned long pa_data);
+ 
+ #if defined(CONFIG_X86_64) || \
+ 	(defined(CONFIG_X86_32) && defined(CONFIG_HIBERNATION))
+

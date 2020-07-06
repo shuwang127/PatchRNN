@@ -1,0 +1,126 @@
+commit 211d022c43cac3aecbe967fcaf9b10156bfa63ad
+Author: Jan Kara <jack@suse.cz>
+Date:   Thu Apr 11 22:09:56 2013 +0200
+
+    xfs: Avoid pathological backwards allocation
+    
+    Writing a large file using direct IO in 16 MB chunks sometimes results
+    in a pathological allocation pattern where 16 MB chunks of large free
+    extent are allocated to a file in a reversed order. So extents of a file
+    look for example as:
+    
+     ext logical physical expected length flags
+       0        0        13          4550656
+       1  4550656 188136807   4550668 12562432
+       2 17113088 200699240 200699238 622592
+       3 17735680 182046055 201321831   4096
+       4 17739776 182041959 182050150   4096
+       5 17743872 182037863 182046054   4096
+       6 17747968 182033767 182041958   4096
+       7 17752064 182029671 182037862   4096
+    ...
+    6757 45400064 154381644 154389835   4096
+    6758 45404160 154377548 154385739   4096
+    6759 45408256 252951571 154381643  73728 eof
+    
+    This happens because XFS_ALLOCTYPE_THIS_BNO allocation fails (the last
+    extent in the file cannot be further extended) so we fall back to
+    XFS_ALLOCTYPE_NEAR_BNO allocation which picks end of a large free
+    extent as the best place to continue the file. Since the chunk at the
+    end of the free extent again cannot be further extended, this behavior
+    repeats until the whole free extent is consumed in a reversed order.
+    
+    For data allocations this backward allocation isn't beneficial so make
+    xfs_alloc_compute_diff() pick start of a free extent instead of its end
+    for them. That avoids the backward allocation pattern.
+    
+    See thread at http://oss.sgi.com/archives/xfs/2013-03/msg00144.html for
+    more details about the reproduction case and why this solution was
+    chosen.
+    
+    Based on idea by Dave Chinner <dchinner@redhat.com>.
+    
+    CC: Dave Chinner <dchinner@redhat.com>
+    Signed-off-by: Jan Kara <jack@suse.cz>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+    Reviewed-by: Mark Tinguely <tinguely@sgi.com>
+    Signed-off-by: Ben Myers <bpm@sgi.com>
+
+diff --git a/fs/xfs/xfs_alloc.c b/fs/xfs/xfs_alloc.c
+index 5673bcfda2f0..71596e57283a 100644
+--- a/fs/xfs/xfs_alloc.c
++++ b/fs/xfs/xfs_alloc.c
+@@ -175,6 +175,7 @@ xfs_alloc_compute_diff(
+ 	xfs_agblock_t	wantbno,	/* target starting block */
+ 	xfs_extlen_t	wantlen,	/* target length */
+ 	xfs_extlen_t	alignment,	/* target alignment */
++	char		userdata,	/* are we allocating data? */
+ 	xfs_agblock_t	freebno,	/* freespace's starting block */
+ 	xfs_extlen_t	freelen,	/* freespace's length */
+ 	xfs_agblock_t	*newbnop)	/* result: best start block from free */
+@@ -189,7 +190,14 @@ xfs_alloc_compute_diff(
+ 	ASSERT(freelen >= wantlen);
+ 	freeend = freebno + freelen;
+ 	wantend = wantbno + wantlen;
+-	if (freebno >= wantbno) {
++	/*
++	 * We want to allocate from the start of a free extent if it is past
++	 * the desired block or if we are allocating user data and the free
++	 * extent is before desired block. The second case is there to allow
++	 * for contiguous allocation from the remaining free space if the file
++	 * grows in the short term.
++	 */
++	if (freebno >= wantbno || (userdata && freeend < wantend)) {
+ 		if ((newbno1 = roundup(freebno, alignment)) >= freeend)
+ 			newbno1 = NULLAGBLOCK;
+ 	} else if (freeend >= wantend && alignment > 1) {
+@@ -805,7 +813,8 @@ xfs_alloc_find_best_extent(
+ 			xfs_alloc_fix_len(args);
+ 
+ 			sdiff = xfs_alloc_compute_diff(args->agbno, args->len,
+-						       args->alignment, *sbnoa,
++						       args->alignment,
++						       args->userdata, *sbnoa,
+ 						       *slena, &new);
+ 
+ 			/*
+@@ -976,7 +985,8 @@ restart:
+ 			if (args->len < blen)
+ 				continue;
+ 			ltdiff = xfs_alloc_compute_diff(args->agbno, args->len,
+-				args->alignment, ltbnoa, ltlena, &ltnew);
++				args->alignment, args->userdata, ltbnoa,
++				ltlena, &ltnew);
+ 			if (ltnew != NULLAGBLOCK &&
+ 			    (args->len > blen || ltdiff < bdiff)) {
+ 				bdiff = ltdiff;
+@@ -1128,7 +1138,8 @@ restart:
+ 			args->len = XFS_EXTLEN_MIN(ltlena, args->maxlen);
+ 			xfs_alloc_fix_len(args);
+ 			ltdiff = xfs_alloc_compute_diff(args->agbno, args->len,
+-				args->alignment, ltbnoa, ltlena, &ltnew);
++				args->alignment, args->userdata, ltbnoa,
++				ltlena, &ltnew);
+ 
+ 			error = xfs_alloc_find_best_extent(args,
+ 						&bno_cur_lt, &bno_cur_gt,
+@@ -1144,7 +1155,8 @@ restart:
+ 			args->len = XFS_EXTLEN_MIN(gtlena, args->maxlen);
+ 			xfs_alloc_fix_len(args);
+ 			gtdiff = xfs_alloc_compute_diff(args->agbno, args->len,
+-				args->alignment, gtbnoa, gtlena, &gtnew);
++				args->alignment, args->userdata, gtbnoa,
++				gtlena, &gtnew);
+ 
+ 			error = xfs_alloc_find_best_extent(args,
+ 						&bno_cur_gt, &bno_cur_lt,
+@@ -1203,7 +1215,7 @@ restart:
+ 	}
+ 	rlen = args->len;
+ 	(void)xfs_alloc_compute_diff(args->agbno, rlen, args->alignment,
+-				     ltbnoa, ltlena, &ltnew);
++				     args->userdata, ltbnoa, ltlena, &ltnew);
+ 	ASSERT(ltnew >= ltbno);
+ 	ASSERT(ltnew + rlen <= ltbnoa + ltlena);
+ 	ASSERT(ltnew + rlen <= be32_to_cpu(XFS_BUF_TO_AGF(args->agbp)->agf_length));
+

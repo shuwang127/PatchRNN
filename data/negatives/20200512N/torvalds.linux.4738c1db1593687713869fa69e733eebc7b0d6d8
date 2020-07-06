@@ -1,0 +1,127 @@
+commit 4738c1db1593687713869fa69e733eebc7b0d6d8
+Author: Patrick McHardy <kaber@trash.net>
+Date:   Thu Apr 10 02:02:28 2008 -0700
+
+    [SKFILTER]: Add SKF_ADF_NLATTR instruction
+    
+    SKF_ADF_NLATTR searches for a netlink attribute, which avoids manually
+    parsing and walking attributes. It takes the offset at which to start
+    searching in the 'A' register and the attribute type in the 'X' register
+    and returns the offset in the 'A' register. When the attribute is not
+    found it returns zero.
+    
+    A top-level attribute can be located using a filter like this
+    (example for nfnetlink, using struct nfgenmsg):
+    
+            ...
+            {
+                    /* A = offset of first attribute */
+                    .code   = BPF_LD | BPF_IMM,
+                    .k      = sizeof(struct nlmsghdr) + sizeof(struct nfgenmsg)
+            },
+            {
+                    /* X = CTA_PROTOINFO */
+                    .code   = BPF_LDX | BPF_IMM,
+                    .k      = CTA_PROTOINFO,
+            },
+            {
+                    /* A = netlink attribute offset */
+                    .code   = BPF_LD | BPF_B | BPF_ABS,
+                    .k      = SKF_AD_OFF + SKF_AD_NLATTR
+            },
+            {
+                    /* Exit if not found */
+                    .code   = BPF_JMP | BPF_JEQ | BPF_K,
+                    .k      = 0,
+                    .jt     = <error>
+            },
+            ...
+    
+    A nested attribute below the CTA_PROTOINFO attribute would then
+    be parsed like this:
+    
+            ...
+            {
+                    /* A += sizeof(struct nlattr) */
+                    .code   = BPF_ALU | BPF_ADD | BPF_K,
+                    .k      = sizeof(struct nlattr),
+            },
+            {
+                    /* X = CTA_PROTOINFO_TCP */
+                    .code   = BPF_LDX | BPF_IMM,
+                    .k      = CTA_PROTOINFO_TCP,
+            },
+            {
+                    /* A = netlink attribute offset */
+                    .code   = BPF_LD | BPF_B | BPF_ABS,
+                    .k      = SKF_AD_OFF + SKF_AD_NLATTR
+            },
+            ...
+    
+    The data of an attribute can be loaded into 'A' like this:
+    
+            ...
+            {
+                    /* X = A (attribute offset) */
+                    .code   = BPF_MISC | BPF_TAX,
+            },
+            {
+                    /* A = skb->data[X + k] */
+                    .code   = BPF_LD | BPF_B | BPF_IND,
+                    .k      = sizeof(struct nlattr),
+            },
+            ...
+    
+    Signed-off-by: Patrick McHardy <kaber@trash.net>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/linux/filter.h b/include/linux/filter.h
+index 673e5677ebcc..b6ea9aa9e853 100644
+--- a/include/linux/filter.h
++++ b/include/linux/filter.h
+@@ -121,7 +121,8 @@ struct sock_fprog	/* Required for SO_ATTACH_FILTER. */
+ #define SKF_AD_PROTOCOL 0
+ #define SKF_AD_PKTTYPE 	4
+ #define SKF_AD_IFINDEX 	8
+-#define SKF_AD_MAX 	12
++#define SKF_AD_NLATTR	12
++#define SKF_AD_MAX 	16
+ #define SKF_NET_OFF   (-0x100000)
+ #define SKF_LL_OFF    (-0x200000)
+ 
+diff --git a/net/core/filter.c b/net/core/filter.c
+index bbb53c69857c..f5f3cf603064 100644
+--- a/net/core/filter.c
++++ b/net/core/filter.c
+@@ -27,6 +27,7 @@
+ #include <linux/if_packet.h>
+ #include <net/ip.h>
+ #include <net/protocol.h>
++#include <net/netlink.h>
+ #include <linux/skbuff.h>
+ #include <net/sock.h>
+ #include <linux/errno.h>
+@@ -303,6 +304,22 @@ unsigned int sk_run_filter(struct sk_buff *skb, struct sock_filter *filter, int
+ 		case SKF_AD_IFINDEX:
+ 			A = skb->dev->ifindex;
+ 			continue;
++		case SKF_AD_NLATTR: {
++			struct nlattr *nla;
++
++			if (skb_is_nonlinear(skb))
++				return 0;
++			if (A > skb->len - sizeof(struct nlattr))
++				return 0;
++
++			nla = nla_find((struct nlattr *)&skb->data[A],
++				       skb->len - A, X);
++			if (nla)
++				A = (void *)nla - (void *)skb->data;
++			else
++				A = 0;
++			continue;
++		}
+ 		default:
+ 			return 0;
+ 		}
+

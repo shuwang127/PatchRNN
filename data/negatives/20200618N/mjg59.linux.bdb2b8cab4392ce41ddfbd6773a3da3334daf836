@@ -1,0 +1,40 @@
+commit bdb2b8cab4392ce41ddfbd6773a3da3334daf836
+Author: Alan Stern <stern@rowland.harvard.edu>
+Date:   Tue Jun 24 14:03:14 2008 -0400
+
+    [SCSI] erase invalid data returned by device
+    
+    This patch (as1108) fixes a problem that can occur with certain USB
+    mass-storage devices: They return invalid data together with a residue
+    indicating that the data should be ignored.  Rather than leave the
+    invalid data in a transfer buffer, where it can get misinterpreted,
+    the patch clears the invalid portion of the buffer.
+    
+    This solves a problem (wrong write-protect setting detected) reported
+    by Maciej Rutecki and Peter Teoh.
+    
+    Signed-off-by: Alan Stern <stern@rowland.harvard.edu>
+    Tested-by: Peter Teoh <htmldeveloper@gmail.com>
+    Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+
+diff --git a/drivers/scsi/scsi_lib.c b/drivers/scsi/scsi_lib.c
+index a82d2fe80fb5..cbf55d59a54c 100644
+--- a/drivers/scsi/scsi_lib.c
++++ b/drivers/scsi/scsi_lib.c
+@@ -207,6 +207,15 @@ int scsi_execute(struct scsi_device *sdev, const unsigned char *cmd,
+ 	 */
+ 	blk_execute_rq(req->q, NULL, req, 1);
+ 
++	/*
++	 * Some devices (USB mass-storage in particular) may transfer
++	 * garbage data together with a residue indicating that the data
++	 * is invalid.  Prevent the garbage from being misinterpreted
++	 * and prevent security leaks by zeroing out the excess data.
++	 */
++	if (unlikely(req->data_len > 0 && req->data_len <= bufflen))
++		memset(buffer + (bufflen - req->data_len), 0, req->data_len);
++
+ 	ret = req->errors;
+  out:
+ 	blk_put_request(req);
+

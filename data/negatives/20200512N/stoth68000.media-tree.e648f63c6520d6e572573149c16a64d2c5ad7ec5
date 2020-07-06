@@ -1,0 +1,49 @@
+commit e648f63c6520d6e572573149c16a64d2c5ad7ec5
+Author: Mike Christie <michaelc@cs.wisc.edu>
+Date:   Thu Aug 31 18:09:34 2006 -0400
+
+    [SCSI] libiscsi: don't call into lld to cleanup task
+    
+    In the normal IO path we should not be calling back
+    into the LLD since the LLD will have cleaned up the
+    task before or after calling complete pdu.
+    
+    For the fail_command path we still need to do this
+    to force the cleanup.
+    
+    Signed-off-by: Mike Christie <michaelc@cs.wisc.edu>
+    Signed-off-by: James Bottomley <James.Bottomley@SteelEye.com>
+
+diff --git a/drivers/scsi/libiscsi.c b/drivers/scsi/libiscsi.c
+index 12b5c1800740..c542d0e95e68 100644
+--- a/drivers/scsi/libiscsi.c
++++ b/drivers/scsi/libiscsi.c
+@@ -213,12 +213,8 @@ static void iscsi_get_ctask(struct iscsi_cmd_task *ctask)
+ 
+ static void __iscsi_put_ctask(struct iscsi_cmd_task *ctask)
+ {
+-	struct iscsi_conn *conn = ctask->conn;
+-
+-	if (atomic_dec_and_test(&ctask->refcount)) {
+-		conn->session->tt->cleanup_cmd_task(conn, ctask);
++	if (atomic_dec_and_test(&ctask->refcount))
+ 		iscsi_complete_command(ctask);
+-	}
+ }
+ 
+ static void iscsi_put_ctask(struct iscsi_cmd_task *ctask)
+@@ -1129,10 +1125,13 @@ static void fail_command(struct iscsi_conn *conn, struct iscsi_cmd_task *ctask,
+ 	sc = ctask->sc;
+ 	if (!sc)
+ 		return;
++
++	conn->session->tt->cleanup_cmd_task(conn, ctask);
+ 	iscsi_ctask_mtask_cleanup(ctask);
+ 
+ 	sc->result = err;
+ 	sc->resid = sc->request_bufflen;
++	/* release ref from queuecommand */
+ 	__iscsi_put_ctask(ctask);
+ }
+ 
+

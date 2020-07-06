@@ -1,0 +1,142 @@
+commit 3563ff88e65e544f09569195b07841dd48d60e57
+Author: Eli Sennesh <esennesh@leaflabs.com>
+Date:   Tue Dec 22 17:26:57 2015 -0500
+
+    greybus: firmware and svc: detect the difference between ES2 and ES3 chips
+    
+    The Greybus SVC code needs to read and clear the module boot status upon
+    hotplug; this requires reading two different attributes depending on whether
+    we're running on ES2 or ES3.  On Marti Bolivar's (mbolivar@leaflabs.com)
+    advice, we detect ES2 using the unique ES2_DDBL1_MFR_ID and ES2_DDBL1_PROD_ID
+    for ES2 hardware, and treat all other chips as ES3 appropriately.  This patch
+    detects the difference and adds the appropriate definitions for ES3 hardware.
+    
+    Signed-off-by: Eli Sennesh <esennesh@leaflabs.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@google.com>
+
+diff --git a/drivers/staging/greybus/firmware.c b/drivers/staging/greybus/firmware.c
+index 5ec3efdd8f01..c65f2948be02 100644
+--- a/drivers/staging/greybus/firmware.c
++++ b/drivers/staging/greybus/firmware.c
+@@ -11,9 +11,6 @@
+ 
+ #include "greybus.h"
+ 
+-#define ES2_DDBL1_MFR_ID	0x00000126
+-#define ES2_DDBL1_PROD_ID	0x00001000
+-
+ struct gb_firmware {
+ 	struct gb_connection	*connection;
+ 	const struct firmware	*fw;
+diff --git a/drivers/staging/greybus/greybus_protocols.h b/drivers/staging/greybus/greybus_protocols.h
+index 76416b5ad848..53c1dea6b16d 100644
+--- a/drivers/staging/greybus/greybus_protocols.h
++++ b/drivers/staging/greybus/greybus_protocols.h
+@@ -160,6 +160,10 @@ struct gb_control_disconnected_request {
+ #define GB_FIRMWARE_TYPE_AP_READY		0x05	/* Request with no-payload */
+ #define GB_FIRMWARE_TYPE_GET_VID_PID		0x06	/* Request with no-payload */
+ 
++/* FIXME: remove all ES2-specific identifiers from the kernel */
++#define ES2_DDBL1_MFR_ID	0x00000126
++#define ES2_DDBL1_PROD_ID	0x00001000
++
+ /* Greybus firmware boot stages */
+ #define GB_FIRMWARE_BOOT_STAGE_ONE		0x01 /* Reserved for the boot ROM */
+ #define GB_FIRMWARE_BOOT_STAGE_TWO		0x02 /* Firmware package to be loaded by the boot ROM */
+@@ -823,14 +827,16 @@ struct gb_svc_link_config_request {
+ 
+ /* Attributes for peer get/set operations */
+ #define DME_ATTR_SELECTOR_INDEX		0
++/* FIXME: remove ES2 support and DME_ATTR_T_TST_SRC_INCREMENT */
+ #define DME_ATTR_T_TST_SRC_INCREMENT	0x4083
+-
+-/* Return value from TST_SRC_INCREMENT */
+-#define DME_TSI_SPI_BOOT_STARTED		0x02
+-#define DME_TSI_TRUSTED_SPI_BOOT_FINISHED	0x03
+-#define DME_TSI_UNTRUSTED_SPI_BOOT_FINISHED	0x04
+-#define DME_TSI_UNIPRO_BOOT_STARTED		0x06
+-#define DME_TSI_FALLBACK_UNIPRO_BOOT_STARTED	0x09
++#define DME_ATTR_ES3_INIT_STATUS		0x6101
++
++/* Return value from init-status attributes listed above */
++#define DME_DIS_SPI_BOOT_STARTED		0x02
++#define DME_DIS_TRUSTED_SPI_BOOT_FINISHED	0x03
++#define DME_DIS_UNTRUSTED_SPI_BOOT_FINISHED	0x04
++#define DME_DIS_UNIPRO_BOOT_STARTED		0x06
++#define DME_DIS_FALLBACK_UNIPRO_BOOT_STARTED	0x09
+ 
+ struct gb_svc_route_create_request {
+ 	__u8	intf1_id;
+diff --git a/drivers/staging/greybus/svc.c b/drivers/staging/greybus/svc.c
+index 864051b95376..3e760e604b37 100644
+--- a/drivers/staging/greybus/svc.c
++++ b/drivers/staging/greybus/svc.c
+@@ -139,8 +139,8 @@ EXPORT_SYMBOL_GPL(gb_svc_dme_peer_set);
+ 
+ /*
+  * T_TstSrcIncrement is written by the module on ES2 as a stand-in for boot
+- * status attribute. AP needs to read and clear it, after reading a non-zero
+- * value from it.
++ * status attribute ES3_INIT_STATUS. AP needs to read and clear it, after
++ * reading a non-zero value from it.
+  *
+  * FIXME: This is module-hardware dependent and needs to be extended for every
+  * type of module we want to support.
+@@ -150,10 +150,22 @@ static int gb_svc_read_and_clear_module_boot_status(struct gb_interface *intf)
+ 	struct gb_host_device *hd = intf->hd;
+ 	int ret;
+ 	u32 value;
++	u16 attr;
++	u8 init_status;
+ 
+-	/* Read and clear boot status in T_TstSrcIncrement */
+-	ret = gb_svc_dme_peer_get(hd->svc, intf->interface_id,
+-				  DME_ATTR_T_TST_SRC_INCREMENT,
++	/*
++	 * Check if the module is ES2 or ES3, and choose attr number
++	 * appropriately.
++	 * FIXME: Remove ES2 support from the kernel entirely.
++	 */
++	if (intf->ddbl1_manufacturer_id == ES2_DDBL1_MFR_ID &&
++				intf->ddbl1_product_id == ES2_DDBL1_PROD_ID)
++		attr = DME_ATTR_T_TST_SRC_INCREMENT;
++	else
++		attr = DME_ATTR_ES3_INIT_STATUS;
++
++	/* Read and clear boot status in ES3_INIT_STATUS */
++	ret = gb_svc_dme_peer_get(hd->svc, intf->interface_id, attr,
+ 				  DME_ATTR_SELECTOR_INDEX, &value);
+ 
+ 	if (ret)
+@@ -169,19 +181,22 @@ static int gb_svc_read_and_clear_module_boot_status(struct gb_interface *intf)
+ 	}
+ 
+ 	/*
+-	 * Check if the module needs to boot from unipro.
++	 * Check if the module needs to boot from UniPro.
+ 	 * For ES2: We need to check lowest 8 bits of 'value'.
+ 	 * For ES3: We need to check highest 8 bits out of 32 of 'value'.
+-	 *
+-	 * FIXME: Add code to find if we are on ES2 or ES3 to have separate
+-	 * checks.
++	 * FIXME: Remove ES2 support from the kernel entirely.
+ 	 */
+-	if (value == DME_TSI_UNIPRO_BOOT_STARTED ||
+-	    value == DME_TSI_FALLBACK_UNIPRO_BOOT_STARTED)
++	if (intf->ddbl1_manufacturer_id == ES2_DDBL1_MFR_ID &&
++				intf->ddbl1_product_id == ES2_DDBL1_PROD_ID)
++		init_status = value;
++	else
++		init_status = value >> 24;
++
++	if (init_status == DME_DIS_UNIPRO_BOOT_STARTED ||
++				init_status == DME_DIS_FALLBACK_UNIPRO_BOOT_STARTED)
+ 		intf->boot_over_unipro = true;
+ 
+-	return gb_svc_dme_peer_set(hd->svc, intf->interface_id,
+-				   DME_ATTR_T_TST_SRC_INCREMENT,
++	return gb_svc_dme_peer_set(hd->svc, intf->interface_id, attr,
+ 				   DME_ATTR_SELECTOR_INDEX, 0);
+ }
+ 
+

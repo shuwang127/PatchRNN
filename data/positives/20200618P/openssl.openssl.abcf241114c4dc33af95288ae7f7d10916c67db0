@@ -1,0 +1,49 @@
+commit abcf241114c4dc33af95288ae7f7d10916c67db0
+Author: Pavel Kopyl <p.kopyl@samsung.com>
+Date:   Tue Nov 7 15:28:18 2017 +0300
+
+    X509V3_EXT_add_nconf_sk, X509v3_add_ext: fix errors handling
+    
+    X509v3_add_ext: free 'sk' if the memory pointed to by it
+    was malloc-ed inside this function.
+    X509V3_EXT_add_nconf_sk: return an error if X509v3_add_ext() fails.
+    This prevents use of a freed memory in do_body:sk_X509_EXTENSION_num().
+    
+    Reviewed-by: Rich Salz <rsalz@openssl.org>
+    Reviewed-by: Matt Caswell <matt@openssl.org>
+    (Merged from https://github.com/openssl/openssl/pull/4698)
+
+diff --git a/crypto/x509/x509_v3.c b/crypto/x509/x509_v3.c
+index a09b0cef69..b439030cfe 100644
+--- a/crypto/x509/x509_v3.c
++++ b/crypto/x509/x509_v3.c
+@@ -128,7 +128,8 @@ STACK_OF(X509_EXTENSION) *X509v3_add_ext(STACK_OF(X509_EXTENSION) **x,
+     X509err(X509_F_X509V3_ADD_EXT, ERR_R_MALLOC_FAILURE);
+  err2:
+     X509_EXTENSION_free(new_ex);
+-    sk_X509_EXTENSION_free(sk);
++    if (x != NULL && *x == NULL)
++        sk_X509_EXTENSION_free(sk);
+     return NULL;
+ }
+ 
+diff --git a/crypto/x509v3/v3_conf.c b/crypto/x509v3/v3_conf.c
+index 711ff02fb0..59caa31580 100644
+--- a/crypto/x509v3/v3_conf.c
++++ b/crypto/x509v3/v3_conf.c
+@@ -313,8 +313,12 @@ int X509V3_EXT_add_nconf_sk(CONF *conf, X509V3_CTX *ctx, const char *section,
+             return 0;
+         if (ctx->flags == X509V3_CTX_REPLACE)
+             delete_ext(*sk, ext);
+-        if (sk)
+-            X509v3_add_ext(sk, ext, -1);
++        if (sk != NULL) {
++            if (X509v3_add_ext(sk, ext, -1) == NULL) {
++                X509_EXTENSION_free(ext);
++                return 0;
++            }
++        }
+         X509_EXTENSION_free(ext);
+     }
+     return 1;
+

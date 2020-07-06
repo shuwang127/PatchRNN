@@ -1,0 +1,928 @@
+commit 1f67078ea324d492a366a24abb2ac313c629314f
+Author: Heikki Linnakangas <heikki.linnakangas@iki.fi>
+Date:   Tue Nov 27 10:25:50 2012 +0200
+
+    Add OpenTransientFile, with automatic cleanup at end-of-xact.
+    
+    Files opened with BasicOpenFile or PathNameOpenFile are not automatically
+    cleaned up on error. That puts unnecessary burden on callers that only want
+    to keep the file open for a short time. There is AllocateFile, but that
+    returns a buffered FILE * stream, which in many cases is not the nicest API
+    to work with. So add function called OpenTransientFile, which returns a
+    unbuffered fd that's cleaned up like the FILE* returned by AllocateFile().
+    
+    This plugs a few rare fd leaks in error cases:
+    
+    1. copy_file() - fixed by by using OpenTransientFile instead of BasicOpenFile
+    2. XLogFileInit() - fixed by adding close() calls to the error cases. Can't
+       use OpenTransientFile here because the fd is supposed to persist over
+       transaction boundaries.
+    3. lo_import/lo_export - fixed by using OpenTransientFile instead of
+       PathNameOpenFile.
+    
+    In addition to plugging those leaks, this replaces many BasicOpenFile() calls
+    with OpenTransientFile() that were not leaking, because the code meticulously
+    closed the file on error. That wasn't strictly necessary, but IMHO it's good
+    for robustness.
+    
+    The same leaks exist in older versions, but given the rarity of the issues,
+    I'm not backpatching this. Not yet, anyway - it might be good to backpatch
+    later, after this mechanism has had some more testing in master branch.
+
+diff --git a/src/backend/access/transam/slru.c b/src/backend/access/transam/slru.c
+index dd69c232eb..b8f60d693f 100644
+--- a/src/backend/access/transam/slru.c
++++ b/src/backend/access/transam/slru.c
+@@ -531,7 +531,7 @@ SlruInternalWritePage(SlruCtl ctl, int slotno, SlruFlush fdata)
+ 		int			i;
+ 
+ 		for (i = 0; i < fdata->num_files; i++)
+-			close(fdata->fd[i]);
++			CloseTransientFile(fdata->fd[i]);
+ 	}
+ 
+ 	/* Re-acquire control lock and update page state */
+@@ -593,7 +593,7 @@ SlruPhysicalReadPage(SlruCtl ctl, int pageno, int slotno)
+ 	 * SlruPhysicalWritePage).	Hence, if we are InRecovery, allow the case
+ 	 * where the file doesn't exist, and return zeroes instead.
+ 	 */
+-	fd = BasicOpenFile(path, O_RDWR | PG_BINARY, S_IRUSR | S_IWUSR);
++	fd = OpenTransientFile(path, O_RDWR | PG_BINARY, S_IRUSR | S_IWUSR);
+ 	if (fd < 0)
+ 	{
+ 		if (errno != ENOENT || !InRecovery)
+@@ -614,7 +614,7 @@ SlruPhysicalReadPage(SlruCtl ctl, int pageno, int slotno)
+ 	{
+ 		slru_errcause = SLRU_SEEK_FAILED;
+ 		slru_errno = errno;
+-		close(fd);
++		CloseTransientFile(fd);
+ 		return false;
+ 	}
+ 
+@@ -623,11 +623,11 @@ SlruPhysicalReadPage(SlruCtl ctl, int pageno, int slotno)
+ 	{
+ 		slru_errcause = SLRU_READ_FAILED;
+ 		slru_errno = errno;
+-		close(fd);
++		CloseTransientFile(fd);
+ 		return false;
+ 	}
+ 
+-	if (close(fd))
++	if (CloseTransientFile(fd))
+ 	{
+ 		slru_errcause = SLRU_CLOSE_FAILED;
+ 		slru_errno = errno;
+@@ -740,8 +740,8 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
+ 		 * don't use O_EXCL or O_TRUNC or anything like that.
+ 		 */
+ 		SlruFileName(ctl, path, segno);
+-		fd = BasicOpenFile(path, O_RDWR | O_CREAT | PG_BINARY,
+-						   S_IRUSR | S_IWUSR);
++		fd = OpenTransientFile(path, O_RDWR | O_CREAT | PG_BINARY,
++							   S_IRUSR | S_IWUSR);
+ 		if (fd < 0)
+ 		{
+ 			slru_errcause = SLRU_OPEN_FAILED;
+@@ -773,7 +773,7 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
+ 		slru_errcause = SLRU_SEEK_FAILED;
+ 		slru_errno = errno;
+ 		if (!fdata)
+-			close(fd);
++			CloseTransientFile(fd);
+ 		return false;
+ 	}
+ 
+@@ -786,7 +786,7 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
+ 		slru_errcause = SLRU_WRITE_FAILED;
+ 		slru_errno = errno;
+ 		if (!fdata)
+-			close(fd);
++			CloseTransientFile(fd);
+ 		return false;
+ 	}
+ 
+@@ -800,11 +800,11 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
+ 		{
+ 			slru_errcause = SLRU_FSYNC_FAILED;
+ 			slru_errno = errno;
+-			close(fd);
++			CloseTransientFile(fd);
+ 			return false;
+ 		}
+ 
+-		if (close(fd))
++		if (CloseTransientFile(fd))
+ 		{
+ 			slru_errcause = SLRU_CLOSE_FAILED;
+ 			slru_errno = errno;
+@@ -1078,7 +1078,7 @@ SimpleLruFlush(SlruCtl ctl, bool checkpoint)
+ 			ok = false;
+ 		}
+ 
+-		if (close(fdata.fd[i]))
++		if (CloseTransientFile(fdata.fd[i]))
+ 		{
+ 			slru_errcause = SLRU_CLOSE_FAILED;
+ 			slru_errno = errno;
+diff --git a/src/backend/access/transam/timeline.c b/src/backend/access/transam/timeline.c
+index 6006d3d98d..225ce465f7 100644
+--- a/src/backend/access/transam/timeline.c
++++ b/src/backend/access/transam/timeline.c
+@@ -244,8 +244,8 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+ 	unlink(tmppath);
+ 
+ 	/* do not use get_sync_bit() here --- want to fsync only at end of fill */
+-	fd = BasicOpenFile(tmppath, O_RDWR | O_CREAT | O_EXCL,
+-					   S_IRUSR | S_IWUSR);
++	fd = OpenTransientFile(tmppath, O_RDWR | O_CREAT | O_EXCL,
++						   S_IRUSR | S_IWUSR);
+ 	if (fd < 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+@@ -262,7 +262,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+ 	else
+ 		TLHistoryFilePath(path, parentTLI);
+ 
+-	srcfd = BasicOpenFile(path, O_RDONLY, 0);
++	srcfd = OpenTransientFile(path, O_RDONLY, 0);
+ 	if (srcfd < 0)
+ 	{
+ 		if (errno != ENOENT)
+@@ -304,7 +304,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+ 					 errmsg("could not write to file \"%s\": %m", tmppath)));
+ 			}
+ 		}
+-		close(srcfd);
++		CloseTransientFile(srcfd);
+ 	}
+ 
+ 	/*
+@@ -345,7 +345,7 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
+ 
+-	if (close(fd))
++	if (CloseTransientFile(fd))
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not close file \"%s\": %m", tmppath)));
+diff --git a/src/backend/access/transam/twophase.c b/src/backend/access/transam/twophase.c
+index 29a2ee6d39..5139af69bb 100644
+--- a/src/backend/access/transam/twophase.c
++++ b/src/backend/access/transam/twophase.c
+@@ -970,17 +970,12 @@ EndPrepare(GlobalTransaction gxact)
+ 
+ 	/*
+ 	 * Create the 2PC state file.
+-	 *
+-	 * Note: because we use BasicOpenFile(), we are responsible for ensuring
+-	 * the FD gets closed in any error exit path.  Once we get into the
+-	 * critical section, though, it doesn't matter since any failure causes
+-	 * PANIC anyway.
+ 	 */
+ 	TwoPhaseFilePath(path, xid);
+ 
+-	fd = BasicOpenFile(path,
+-					   O_CREAT | O_EXCL | O_WRONLY | PG_BINARY,
+-					   S_IRUSR | S_IWUSR);
++	fd = OpenTransientFile(path,
++						   O_CREAT | O_EXCL | O_WRONLY | PG_BINARY,
++						   S_IRUSR | S_IWUSR);
+ 	if (fd < 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+@@ -995,7 +990,7 @@ EndPrepare(GlobalTransaction gxact)
+ 		COMP_CRC32(statefile_crc, record->data, record->len);
+ 		if ((write(fd, record->data, record->len)) != record->len)
+ 		{
+-			close(fd);
++			CloseTransientFile(fd);
+ 			ereport(ERROR,
+ 					(errcode_for_file_access(),
+ 					 errmsg("could not write two-phase state file: %m")));
+@@ -1012,7 +1007,7 @@ EndPrepare(GlobalTransaction gxact)
+ 
+ 	if ((write(fd, &bogus_crc, sizeof(pg_crc32))) != sizeof(pg_crc32))
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write two-phase state file: %m")));
+@@ -1021,7 +1016,7 @@ EndPrepare(GlobalTransaction gxact)
+ 	/* Back up to prepare for rewriting the CRC */
+ 	if (lseek(fd, -((off_t) sizeof(pg_crc32)), SEEK_CUR) < 0)
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not seek in two-phase state file: %m")));
+@@ -1061,13 +1056,13 @@ EndPrepare(GlobalTransaction gxact)
+ 	/* write correct CRC and close file */
+ 	if ((write(fd, &statefile_crc, sizeof(pg_crc32))) != sizeof(pg_crc32))
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write two-phase state file: %m")));
+ 	}
+ 
+-	if (close(fd) != 0)
++	if (CloseTransientFile(fd) != 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not close two-phase state file: %m")));
+@@ -1144,7 +1139,7 @@ ReadTwoPhaseFile(TransactionId xid, bool give_warnings)
+ 
+ 	TwoPhaseFilePath(path, xid);
+ 
+-	fd = BasicOpenFile(path, O_RDONLY | PG_BINARY, 0);
++	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY, 0);
+ 	if (fd < 0)
+ 	{
+ 		if (give_warnings)
+@@ -1163,7 +1158,7 @@ ReadTwoPhaseFile(TransactionId xid, bool give_warnings)
+ 	 */
+ 	if (fstat(fd, &stat))
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		if (give_warnings)
+ 			ereport(WARNING,
+ 					(errcode_for_file_access(),
+@@ -1177,14 +1172,14 @@ ReadTwoPhaseFile(TransactionId xid, bool give_warnings)
+ 						sizeof(pg_crc32)) ||
+ 		stat.st_size > MaxAllocSize)
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		return NULL;
+ 	}
+ 
+ 	crc_offset = stat.st_size - sizeof(pg_crc32);
+ 	if (crc_offset != MAXALIGN(crc_offset))
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		return NULL;
+ 	}
+ 
+@@ -1195,7 +1190,7 @@ ReadTwoPhaseFile(TransactionId xid, bool give_warnings)
+ 
+ 	if (read(fd, buf, stat.st_size) != stat.st_size)
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		if (give_warnings)
+ 			ereport(WARNING,
+ 					(errcode_for_file_access(),
+@@ -1205,7 +1200,7 @@ ReadTwoPhaseFile(TransactionId xid, bool give_warnings)
+ 		return NULL;
+ 	}
+ 
+-	close(fd);
++	CloseTransientFile(fd);
+ 
+ 	hdr = (TwoPhaseFileHeader *) buf;
+ 	if (hdr->magic != TWOPHASE_MAGIC || hdr->total_len != stat.st_size)
+@@ -1469,9 +1464,9 @@ RecreateTwoPhaseFile(TransactionId xid, void *content, int len)
+ 
+ 	TwoPhaseFilePath(path, xid);
+ 
+-	fd = BasicOpenFile(path,
+-					   O_CREAT | O_TRUNC | O_WRONLY | PG_BINARY,
+-					   S_IRUSR | S_IWUSR);
++	fd = OpenTransientFile(path,
++						   O_CREAT | O_TRUNC | O_WRONLY | PG_BINARY,
++						   S_IRUSR | S_IWUSR);
+ 	if (fd < 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+@@ -1481,14 +1476,14 @@ RecreateTwoPhaseFile(TransactionId xid, void *content, int len)
+ 	/* Write content and CRC */
+ 	if (write(fd, content, len) != len)
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write two-phase state file: %m")));
+ 	}
+ 	if (write(fd, &statefile_crc, sizeof(pg_crc32)) != sizeof(pg_crc32))
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not write two-phase state file: %m")));
+@@ -1500,13 +1495,13 @@ RecreateTwoPhaseFile(TransactionId xid, void *content, int len)
+ 	 */
+ 	if (pg_fsync(fd) != 0)
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync two-phase state file: %m")));
+ 	}
+ 
+-	if (close(fd) != 0)
++	if (CloseTransientFile(fd) != 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not close two-phase state file: %m")));
+@@ -1577,7 +1572,7 @@ CheckPointTwoPhase(XLogRecPtr redo_horizon)
+ 
+ 		TwoPhaseFilePath(path, xid);
+ 
+-		fd = BasicOpenFile(path, O_RDWR | PG_BINARY, 0);
++		fd = OpenTransientFile(path, O_RDWR | PG_BINARY, 0);
+ 		if (fd < 0)
+ 		{
+ 			if (errno == ENOENT)
+@@ -1596,14 +1591,14 @@ CheckPointTwoPhase(XLogRecPtr redo_horizon)
+ 
+ 		if (pg_fsync(fd) != 0)
+ 		{
+-			close(fd);
++			CloseTransientFile(fd);
+ 			ereport(ERROR,
+ 					(errcode_for_file_access(),
+ 					 errmsg("could not fsync two-phase state file \"%s\": %m",
+ 							path)));
+ 		}
+ 
+-		if (close(fd) != 0)
++		if (CloseTransientFile(fd) != 0)
+ 			ereport(ERROR,
+ 					(errcode_for_file_access(),
+ 					 errmsg("could not close two-phase state file \"%s\": %m",
+diff --git a/src/backend/access/transam/xlog.c b/src/backend/access/transam/xlog.c
+index 0d2540c3c2..623704965f 100644
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -2246,6 +2246,16 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
+ 
+ 	unlink(tmppath);
+ 
++	/*
++	 * Allocate a buffer full of zeros. This is done before opening the file
++	 * so that we don't leak the file descriptor if palloc fails.
++	 *
++	 * Note: palloc zbuffer, instead of just using a local char array, to
++	 * ensure it is reasonably well-aligned; this may save a few cycles
++	 * transferring data to the kernel.
++	 */
++	zbuffer = (char *) palloc0(XLOG_BLCKSZ);
++
+ 	/* do not use get_sync_bit() here --- want to fsync only at end of fill */
+ 	fd = BasicOpenFile(tmppath, O_RDWR | O_CREAT | O_EXCL | PG_BINARY,
+ 					   S_IRUSR | S_IWUSR);
+@@ -2262,12 +2272,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
+ 	 * fsync below) that all the indirect blocks are down on disk.	Therefore,
+ 	 * fdatasync(2) or O_DSYNC will be sufficient to sync future writes to the
+ 	 * log file.
+-	 *
+-	 * Note: palloc zbuffer, instead of just using a local char array, to
+-	 * ensure it is reasonably well-aligned; this may save a few cycles
+-	 * transferring data to the kernel.
+ 	 */
+-	zbuffer = (char *) palloc0(XLOG_BLCKSZ);
+ 	for (nbytes = 0; nbytes < XLogSegSize; nbytes += XLOG_BLCKSZ)
+ 	{
+ 		errno = 0;
+@@ -2279,6 +2284,9 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
+ 			 * If we fail to make the file, delete it to release disk space
+ 			 */
+ 			unlink(tmppath);
++
++			close(fd);
++
+ 			/* if write didn't set errno, assume problem is no disk space */
+ 			errno = save_errno ? save_errno : ENOSPC;
+ 
+@@ -2290,9 +2298,12 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
+ 	pfree(zbuffer);
+ 
+ 	if (pg_fsync(fd) != 0)
++	{
++		close(fd);
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
++	}
+ 
+ 	if (close(fd))
+ 		ereport(ERROR,
+@@ -2363,7 +2374,7 @@ XLogFileCopy(XLogSegNo destsegno, TimeLineID srcTLI, XLogSegNo srcsegno)
+ 	 * Open the source file
+ 	 */
+ 	XLogFilePath(path, srcTLI, srcsegno);
+-	srcfd = BasicOpenFile(path, O_RDONLY | PG_BINARY, 0);
++	srcfd = OpenTransientFile(path, O_RDONLY | PG_BINARY, 0);
+ 	if (srcfd < 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+@@ -2377,8 +2388,8 @@ XLogFileCopy(XLogSegNo destsegno, TimeLineID srcTLI, XLogSegNo srcsegno)
+ 	unlink(tmppath);
+ 
+ 	/* do not use get_sync_bit() here --- want to fsync only at end of fill */
+-	fd = BasicOpenFile(tmppath, O_RDWR | O_CREAT | O_EXCL | PG_BINARY,
+-					   S_IRUSR | S_IWUSR);
++	fd = OpenTransientFile(tmppath, O_RDWR | O_CREAT | O_EXCL | PG_BINARY,
++						   S_IRUSR | S_IWUSR);
+ 	if (fd < 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+@@ -2423,12 +2434,12 @@ XLogFileCopy(XLogSegNo destsegno, TimeLineID srcTLI, XLogSegNo srcsegno)
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
+ 
+-	if (close(fd))
++	if (CloseTransientFile(fd))
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not close file \"%s\": %m", tmppath)));
+ 
+-	close(srcfd);
++	CloseTransientFile(srcfd);
+ 
+ 	/*
+ 	 * Now move the segment into place with its final name.
+diff --git a/src/backend/libpq/be-fsstubs.c b/src/backend/libpq/be-fsstubs.c
+index dbc00b450d..a28ab9b815 100644
+--- a/src/backend/libpq/be-fsstubs.c
++++ b/src/backend/libpq/be-fsstubs.c
+@@ -442,7 +442,7 @@ lo_import_with_oid(PG_FUNCTION_ARGS)
+ static Oid
+ lo_import_internal(text *filename, Oid lobjOid)
+ {
+-	File		fd;
++	int			fd;
+ 	int			nbytes,
+ 				tmp PG_USED_FOR_ASSERTS_ONLY;
+ 	char		buf[BUFSIZE];
+@@ -464,7 +464,7 @@ lo_import_internal(text *filename, Oid lobjOid)
+ 	 * open the file to be read in
+ 	 */
+ 	text_to_cstring_buffer(filename, fnamebuf, sizeof(fnamebuf));
+-	fd = PathNameOpenFile(fnamebuf, O_RDONLY | PG_BINARY, S_IRWXU);
++	fd = OpenTransientFile(fnamebuf, O_RDONLY | PG_BINARY, S_IRWXU);
+ 	if (fd < 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+@@ -481,7 +481,7 @@ lo_import_internal(text *filename, Oid lobjOid)
+ 	 */
+ 	lobj = inv_open(oid, INV_WRITE, fscxt);
+ 
+-	while ((nbytes = FileRead(fd, buf, BUFSIZE)) > 0)
++	while ((nbytes = read(fd, buf, BUFSIZE)) > 0)
+ 	{
+ 		tmp = inv_write(lobj, buf, nbytes);
+ 		Assert(tmp == nbytes);
+@@ -494,7 +494,7 @@ lo_import_internal(text *filename, Oid lobjOid)
+ 						fnamebuf)));
+ 
+ 	inv_close(lobj);
+-	FileClose(fd);
++	CloseTransientFile(fd);
+ 
+ 	return oid;
+ }
+@@ -508,7 +508,7 @@ lo_export(PG_FUNCTION_ARGS)
+ {
+ 	Oid			lobjId = PG_GETARG_OID(0);
+ 	text	   *filename = PG_GETARG_TEXT_PP(1);
+-	File		fd;
++	int			fd;
+ 	int			nbytes,
+ 				tmp;
+ 	char		buf[BUFSIZE];
+@@ -540,8 +540,8 @@ lo_export(PG_FUNCTION_ARGS)
+ 	 */
+ 	text_to_cstring_buffer(filename, fnamebuf, sizeof(fnamebuf));
+ 	oumask = umask(S_IWGRP | S_IWOTH);
+-	fd = PathNameOpenFile(fnamebuf, O_CREAT | O_WRONLY | O_TRUNC | PG_BINARY,
+-						  S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
++	fd = OpenTransientFile(fnamebuf, O_CREAT | O_WRONLY | O_TRUNC | PG_BINARY,
++						   S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+ 	umask(oumask);
+ 	if (fd < 0)
+ 		ereport(ERROR,
+@@ -554,7 +554,7 @@ lo_export(PG_FUNCTION_ARGS)
+ 	 */
+ 	while ((nbytes = inv_read(lobj, buf, BUFSIZE)) > 0)
+ 	{
+-		tmp = FileWrite(fd, buf, nbytes);
++		tmp = write(fd, buf, nbytes);
+ 		if (tmp != nbytes)
+ 			ereport(ERROR,
+ 					(errcode_for_file_access(),
+@@ -562,7 +562,7 @@ lo_export(PG_FUNCTION_ARGS)
+ 							fnamebuf)));
+ 	}
+ 
+-	FileClose(fd);
++	CloseTransientFile(fd);
+ 	inv_close(lobj);
+ 
+ 	PG_RETURN_INT32(1);
+diff --git a/src/backend/storage/file/copydir.c b/src/backend/storage/file/copydir.c
+index cf47708a79..973894d9c5 100644
+--- a/src/backend/storage/file/copydir.c
++++ b/src/backend/storage/file/copydir.c
+@@ -162,14 +162,14 @@ copy_file(char *fromfile, char *tofile)
+ 	/*
+ 	 * Open the files
+ 	 */
+-	srcfd = BasicOpenFile(fromfile, O_RDONLY | PG_BINARY, 0);
++	srcfd = OpenTransientFile(fromfile, O_RDONLY | PG_BINARY, 0);
+ 	if (srcfd < 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not open file \"%s\": %m", fromfile)));
+ 
+-	dstfd = BasicOpenFile(tofile, O_RDWR | O_CREAT | O_EXCL | PG_BINARY,
+-						  S_IRUSR | S_IWUSR);
++	dstfd = OpenTransientFile(tofile, O_RDWR | O_CREAT | O_EXCL | PG_BINARY,
++							  S_IRUSR | S_IWUSR);
+ 	if (dstfd < 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+@@ -209,12 +209,12 @@ copy_file(char *fromfile, char *tofile)
+ 		(void) pg_flush_data(dstfd, offset, nbytes);
+ 	}
+ 
+-	if (close(dstfd))
++	if (CloseTransientFile(dstfd))
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not close file \"%s\": %m", tofile)));
+ 
+-	close(srcfd);
++	CloseTransientFile(srcfd);
+ 
+ 	pfree(buffer);
+ }
+@@ -238,13 +238,13 @@ fsync_fname(char *fname, bool isdir)
+ 	 * cases here
+ 	 */
+ 	if (!isdir)
+-		fd = BasicOpenFile(fname,
+-						   O_RDWR | PG_BINARY,
+-						   S_IRUSR | S_IWUSR);
++		fd = OpenTransientFile(fname,
++							   O_RDWR | PG_BINARY,
++							   S_IRUSR | S_IWUSR);
+ 	else
+-		fd = BasicOpenFile(fname,
+-						   O_RDONLY | PG_BINARY,
+-						   S_IRUSR | S_IWUSR);
++		fd = OpenTransientFile(fname,
++							   O_RDONLY | PG_BINARY,
++							   S_IRUSR | S_IWUSR);
+ 
+ 	/*
+ 	 * Some OSs don't allow us to open directories at all (Windows returns
+@@ -263,7 +263,7 @@ fsync_fname(char *fname, bool isdir)
+ 	/* Some OSs don't allow us to fsync directories at all */
+ 	if (returncode != 0 && isdir && errno == EBADF)
+ 	{
+-		close(fd);
++		CloseTransientFile(fd);
+ 		return;
+ 	}
+ 
+@@ -272,5 +272,5 @@ fsync_fname(char *fname, bool isdir)
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not fsync file \"%s\": %m", fname)));
+ 
+-	close(fd);
++	CloseTransientFile(fd);
+ }
+diff --git a/src/backend/storage/file/fd.c b/src/backend/storage/file/fd.c
+index ecb62ba01a..07ee51cf5a 100644
+--- a/src/backend/storage/file/fd.c
++++ b/src/backend/storage/file/fd.c
+@@ -30,11 +30,29 @@
+  * routines (e.g., open(2) and fopen(3)) themselves.  Otherwise, we
+  * may find ourselves short of real file descriptors anyway.
+  *
+- * This file used to contain a bunch of stuff to support RAID levels 0
+- * (jbod), 1 (duplex) and 5 (xor parity).  That stuff is all gone
+- * because the parallel query processing code that called it is all
+- * gone.  If you really need it you could get it from the original
+- * POSTGRES source.
++ * INTERFACE ROUTINES
++ *
++ * PathNameOpenFile and OpenTemporaryFile are used to open virtual files.
++ * A File opened with OpenTemporaryFile is automatically deleted when the
++ * File is closed, either explicitly or implicitly at end of transaction or
++ * process exit. PathNameOpenFile is intended for files that are held open
++ * for a long time, like relation files. It is the caller's responsibility
++ * to close them, there is no automatic mechanism in fd.c for that.
++ *
++ * AllocateFile, AllocateDir and OpenTransientFile are wrappers around
++ * fopen(3), opendir(3), and open(2), respectively. They behave like the
++ * corresponding native functions, except that the handle is registered with
++ * the current subtransaction, and will be automatically closed at abort.
++ * These are intended for short operations like reading a configuration file.
++ * and there is a fixed limit on the number files that can be open using these
++ * functions at any one time.
++ *
++ * Finally, BasicOpenFile is a just thin wrapper around open() that can
++ * release file descriptors in use by the virtual file descriptors if
++ * necessary. There is no automatic cleanup of file descriptors returned by
++ * BasicOpenFile, it is solely the caller's responsibility to close the file
++ * descriptor by calling close(2).
++ *
+  *-------------------------------------------------------------------------
+  */
+ 
+@@ -94,11 +112,11 @@ int			max_files_per_process = 1000;
+ 
+ /*
+  * Maximum number of file descriptors to open for either VFD entries or
+- * AllocateFile/AllocateDir operations.  This is initialized to a conservative
+- * value, and remains that way indefinitely in bootstrap or standalone-backend
+- * cases.  In normal postmaster operation, the postmaster calls
+- * set_max_safe_fds() late in initialization to update the value, and that
+- * value is then inherited by forked subprocesses.
++ * AllocateFile/AllocateDir/OpenTransientFile operations.  This is initialized
++ * to a conservative value, and remains that way indefinitely in bootstrap or
++ * standalone-backend cases.  In normal postmaster operation, the postmaster
++ * calls set_max_safe_fds() late in initialization to update the value, and
++ * that value is then inherited by forked subprocesses.
+  *
+  * Note: the value of max_files_per_process is taken into account while
+  * setting this variable, and so need not be tested separately.
+@@ -171,10 +189,10 @@ static bool have_xact_temporary_files = false;
+ static uint64 temporary_files_size = 0;
+ 
+ /*
+- * List of stdio FILEs and <dirent.h> DIRs opened with AllocateFile
+- * and AllocateDir.
++ * List of OS handles opened with AllocateFile, AllocateDir and
++ * OpenTransientFile.
+  *
+- * Since we don't want to encourage heavy use of AllocateFile or AllocateDir,
++ * Since we don't want to encourage heavy use of those functions,
+  * it seems OK to put a pretty small maximum limit on the number of
+  * simultaneously allocated descs.
+  */
+@@ -183,7 +201,8 @@ static uint64 temporary_files_size = 0;
+ typedef enum
+ {
+ 	AllocateDescFile,
+-	AllocateDescDir
++	AllocateDescDir,
++	AllocateDescRawFD
+ } AllocateDescKind;
+ 
+ typedef struct
+@@ -193,6 +212,7 @@ typedef struct
+ 	{
+ 		FILE	   *file;
+ 		DIR		   *dir;
++		int			fd;
+ 	}			desc;
+ 	SubTransactionId create_subid;
+ } AllocateDesc;
+@@ -1523,8 +1543,49 @@ TryAgain:
+ 	return NULL;
+ }
+ 
++
+ /*
+- * Free an AllocateDesc of either type.
++ * Like AllocateFile, but returns an unbuffered fd like open(2)
++ */
++int
++OpenTransientFile(FileName fileName, int fileFlags, int fileMode)
++{
++	int			fd;
++
++
++	DO_DB(elog(LOG, "OpenTransientFile: Allocated %d (%s)",
++			   numAllocatedDescs, fileName));
++
++	/*
++	 * The test against MAX_ALLOCATED_DESCS prevents us from overflowing
++	 * allocatedFiles[]; the test against max_safe_fds prevents BasicOpenFile
++	 * from hogging every one of the available FDs, which'd lead to infinite
++	 * looping.
++	 */
++	if (numAllocatedDescs >= MAX_ALLOCATED_DESCS ||
++		numAllocatedDescs >= max_safe_fds - 1)
++		elog(ERROR, "exceeded MAX_ALLOCATED_DESCS while trying to open file \"%s\"",
++			 fileName);
++
++	fd = BasicOpenFile(fileName, fileFlags, fileMode);
++
++	if (fd >= 0)
++	{
++		AllocateDesc *desc = &allocatedDescs[numAllocatedDescs];
++
++		desc->kind = AllocateDescRawFD;
++		desc->desc.fd = fd;
++		desc->create_subid = GetCurrentSubTransactionId();
++		numAllocatedDescs++;
++
++		return fd;
++	}
++
++	return -1;					/* failure */
++}
++
++/*
++ * Free an AllocateDesc of any type.
+  *
+  * The argument *must* point into the allocatedDescs[] array.
+  */
+@@ -1542,6 +1603,9 @@ FreeDesc(AllocateDesc *desc)
+ 		case AllocateDescDir:
+ 			result = closedir(desc->desc.dir);
+ 			break;
++		case AllocateDescRawFD:
++			result = close(desc->desc.fd);
++			break;
+ 		default:
+ 			elog(ERROR, "AllocateDesc kind not recognized");
+ 			result = 0;			/* keep compiler quiet */
+@@ -1583,6 +1647,33 @@ FreeFile(FILE *file)
+ 	return fclose(file);
+ }
+ 
++/*
++ * Close a file returned by OpenTransientFile.
++ *
++ * Note we do not check close's return value --- it is up to the caller
++ * to handle close errors.
++ */
++int
++CloseTransientFile(int fd)
++{
++	int			i;
++
++	DO_DB(elog(LOG, "CloseTransientFile: Allocated %d", numAllocatedDescs));
++
++	/* Remove fd from list of allocated files, if it's present */
++	for (i = numAllocatedDescs; --i >= 0;)
++	{
++		AllocateDesc *desc = &allocatedDescs[i];
++
++		if (desc->kind == AllocateDescRawFD && desc->desc.fd == fd)
++			return FreeDesc(desc);
++	}
++
++	/* Only get here if someone passes us a file not in allocatedDescs */
++	elog(WARNING, "fd passed to CloseTransientFile was not obtained from OpenTransientFile");
++
++	return close(fd);
++}
+ 
+ /*
+  * Routines that want to use <dirent.h> (ie, DIR*) should use AllocateDir
+@@ -1874,7 +1965,7 @@ AtProcExit_Files(int code, Datum arg)
+  * exiting. If that's the case, we should remove all temporary files; if
+  * that's not the case, we are being called for transaction commit/abort
+  * and should only remove transaction-local temp files.  In either case,
+- * also clean up "allocated" stdio files and dirs.
++ * also clean up "allocated" stdio files, dirs and fds.
+  */
+ static void
+ CleanupTempFiles(bool isProcExit)
+@@ -1916,7 +2007,7 @@ CleanupTempFiles(bool isProcExit)
+ 		have_xact_temporary_files = false;
+ 	}
+ 
+-	/* Clean up "allocated" stdio files and dirs. */
++	/* Clean up "allocated" stdio files, dirs and fds. */
+ 	while (numAllocatedDescs > 0)
+ 		FreeDesc(&allocatedDescs[0]);
+ }
+diff --git a/src/backend/storage/smgr/md.c b/src/backend/storage/smgr/md.c
+index 3f4ab49dab..384acaeae7 100644
+--- a/src/backend/storage/smgr/md.c
++++ b/src/backend/storage/smgr/md.c
+@@ -401,14 +401,14 @@ mdunlinkfork(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
+ 		/* truncate(2) would be easier here, but Windows hasn't got it */
+ 		int			fd;
+ 
+-		fd = BasicOpenFile(path, O_RDWR | PG_BINARY, 0);
++		fd = OpenTransientFile(path, O_RDWR | PG_BINARY, 0);
+ 		if (fd >= 0)
+ 		{
+ 			int			save_errno;
+ 
+ 			ret = ftruncate(fd, 0);
+ 			save_errno = errno;
+-			close(fd);
++			CloseTransientFile(fd);
+ 			errno = save_errno;
+ 		}
+ 		else
+diff --git a/src/backend/utils/cache/relmapper.c b/src/backend/utils/cache/relmapper.c
+index 6f214957bf..18bf9daf8b 100644
+--- a/src/backend/utils/cache/relmapper.c
++++ b/src/backend/utils/cache/relmapper.c
+@@ -588,7 +588,8 @@ load_relmap_file(bool shared)
+ 	}
+ 
+ 	/* Read data ... */
+-	fd = BasicOpenFile(mapfilename, O_RDONLY | PG_BINARY, S_IRUSR | S_IWUSR);
++	fd = OpenTransientFile(mapfilename,
++						   O_RDONLY | PG_BINARY, S_IRUSR | S_IWUSR);
+ 	if (fd < 0)
+ 		ereport(FATAL,
+ 				(errcode_for_file_access(),
+@@ -608,7 +609,7 @@ load_relmap_file(bool shared)
+ 				 errmsg("could not read relation mapping file \"%s\": %m",
+ 						mapfilename)));
+ 
+-	close(fd);
++	CloseTransientFile(fd);
+ 
+ 	/* check for correct magic number, etc */
+ 	if (map->magic != RELMAPPER_FILEMAGIC ||
+@@ -672,12 +673,6 @@ write_relmap_file(bool shared, RelMapFile *newmap,
+ 	/*
+ 	 * Open the target file.  We prefer to do this before entering the
+ 	 * critical section, so that an open() failure need not force PANIC.
+-	 *
+-	 * Note: since we use BasicOpenFile, we are nominally responsible for
+-	 * ensuring the fd is closed on error.	In practice, this isn't important
+-	 * because either an error happens inside the critical section, or we are
+-	 * in bootstrap or WAL replay; so an error past this point is always fatal
+-	 * anyway.
+ 	 */
+ 	if (shared)
+ 	{
+@@ -692,9 +687,9 @@ write_relmap_file(bool shared, RelMapFile *newmap,
+ 		realmap = &local_map;
+ 	}
+ 
+-	fd = BasicOpenFile(mapfilename,
+-					   O_WRONLY | O_CREAT | PG_BINARY,
+-					   S_IRUSR | S_IWUSR);
++	fd = OpenTransientFile(mapfilename,
++						   O_WRONLY | O_CREAT | PG_BINARY,
++						   S_IRUSR | S_IWUSR);
+ 	if (fd < 0)
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+@@ -753,7 +748,7 @@ write_relmap_file(bool shared, RelMapFile *newmap,
+ 				 errmsg("could not fsync relation mapping file \"%s\": %m",
+ 						mapfilename)));
+ 
+-	if (close(fd))
++	if (CloseTransientFile(fd))
+ 		ereport(ERROR,
+ 				(errcode_for_file_access(),
+ 				 errmsg("could not close relation mapping file \"%s\": %m",
+diff --git a/src/include/storage/fd.h b/src/include/storage/fd.h
+index 849bb1025d..940d9d4751 100644
+--- a/src/include/storage/fd.h
++++ b/src/include/storage/fd.h
+@@ -16,13 +16,13 @@
+  * calls:
+  *
+  *	File {Close, Read, Write, Seek, Tell, Sync}
+- *	{File Name Open, Allocate, Free} File
++ *	{Path Name Open, Allocate, Free} File
+  *
+  * These are NOT JUST RENAMINGS OF THE UNIX ROUTINES.
+  * Use them for all file activity...
+  *
+  *	File fd;
+- *	fd = FilePathOpenFile("foo", O_RDONLY, 0600);
++ *	fd = PathNameOpenFile("foo", O_RDONLY, 0600);
+  *
+  *	AllocateFile();
+  *	FreeFile();
+@@ -33,7 +33,8 @@
+  * no way for them to share kernel file descriptors with other files.
+  *
+  * Likewise, use AllocateDir/FreeDir, not opendir/closedir, to allocate
+- * open directories (DIR*).
++ * open directories (DIR*), and OpenTransientFile/CloseTransient File for an
++ * unbuffered file descriptor.
+  */
+ #ifndef FD_H
+ #define FD_H
+@@ -84,6 +85,10 @@ extern DIR *AllocateDir(const char *dirname);
+ extern struct dirent *ReadDir(DIR *dir, const char *dirname);
+ extern int	FreeDir(DIR *dir);
+ 
++/* Operations to allow use of a plain kernel FD, with automatic cleanup */
++extern int	OpenTransientFile(FileName fileName, int fileFlags, int fileMode);
++extern int	CloseTransientFile(int fd);
++
+ /* If you've really really gotta have a plain kernel FD, use this */
+ extern int	BasicOpenFile(FileName fileName, int fileFlags, int fileMode);
+ 
+

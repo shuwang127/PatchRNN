@@ -1,0 +1,115 @@
+commit c8909e5a275bfb57dc525d6551ed572e118e2eea
+Author: David Gnedt <david.gnedt@davizone.at>
+Date:   Tue Jan 7 13:10:14 2014 +0100
+
+    wl1251: enable tx path in monitor mode if necessary for packet injection
+    
+    If necessary enable the tx path in monitor mode for packet injection using
+    the JOIN command with BSS_TYPE_STA_BSS and zero BSSID.
+    
+    Signed-off-by: David Gnedt <david.gnedt@davizone.at>
+    Signed-off-by: Pali Rohár <pali.rohar@gmail.com>
+    Signed-off-by: Pavel Machek <pavel@ucw.cz>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/ti/wl1251/main.c b/drivers/net/wireless/ti/wl1251/main.c
+index 855026a34e45..5a265a24f1fe 100644
+--- a/drivers/net/wireless/ti/wl1251/main.c
++++ b/drivers/net/wireless/ti/wl1251/main.c
+@@ -486,6 +486,7 @@ static void wl1251_op_stop(struct ieee80211_hw *hw)
+ 	wl->rssi_thold = 0;
+ 	wl->channel = WL1251_DEFAULT_CHANNEL;
+ 	wl->monitor_present = false;
++	wl->joined = false;
+ 
+ 	wl1251_debugfs_reset(wl);
+ 
+@@ -545,6 +546,7 @@ static void wl1251_op_remove_interface(struct ieee80211_hw *hw,
+ 	mutex_lock(&wl->mutex);
+ 	wl1251_debug(DEBUG_MAC80211, "mac80211 remove interface");
+ 	wl->vif = NULL;
++	memset(wl->bssid, 0, ETH_ALEN);
+ 	mutex_unlock(&wl->mutex);
+ }
+ 
+@@ -623,6 +625,7 @@ static int wl1251_op_config(struct ieee80211_hw *hw, u32 changed)
+ 		 * at firmware level.
+ 		 */
+ 		if (wl->vif == NULL) {
++			wl->joined = false;
+ 			ret = wl1251_cmd_data_path_rx(wl, wl->channel, 1);
+ 		} else {
+ 			ret = wl1251_join(wl, wl->bss_type, wl->channel,
+@@ -1507,7 +1510,9 @@ struct ieee80211_hw *wl1251_alloc_hw(void)
+ 	INIT_DELAYED_WORK(&wl->elp_work, wl1251_elp_work);
+ 	wl->channel = WL1251_DEFAULT_CHANNEL;
+ 	wl->monitor_present = false;
++	wl->joined = false;
+ 	wl->scanning = false;
++	wl->bss_type = MAX_BSS_TYPE;
+ 	wl->default_key = 0;
+ 	wl->listen_int = 1;
+ 	wl->rx_counter = 0;
+diff --git a/drivers/net/wireless/ti/wl1251/tx.c b/drivers/net/wireless/ti/wl1251/tx.c
+index 466cd25c022b..b91ea24bcedb 100644
+--- a/drivers/net/wireless/ti/wl1251/tx.c
++++ b/drivers/net/wireless/ti/wl1251/tx.c
+@@ -28,6 +28,7 @@
+ #include "tx.h"
+ #include "ps.h"
+ #include "io.h"
++#include "event.h"
+ 
+ static bool wl1251_tx_double_buffer_busy(struct wl1251 *wl, u32 data_out_count)
+ {
+@@ -277,6 +278,26 @@ static void wl1251_tx_trigger(struct wl1251 *wl)
+ 		TX_STATUS_DATA_OUT_COUNT_MASK;
+ }
+ 
++static void enable_tx_for_packet_injection(struct wl1251 *wl)
++{
++	int ret;
++
++	ret = wl1251_cmd_join(wl, BSS_TYPE_STA_BSS, wl->channel,
++			      wl->beacon_int, wl->dtim_period);
++	if (ret < 0) {
++		wl1251_warning("join failed");
++		return;
++	}
++
++	ret = wl1251_event_wait(wl, JOIN_EVENT_COMPLETE_ID, 100);
++	if (ret < 0) {
++		wl1251_warning("join timeout");
++		return;
++	}
++
++	wl->joined = true;
++}
++
+ /* caller must hold wl->mutex */
+ static int wl1251_tx_frame(struct wl1251 *wl, struct sk_buff *skb)
+ {
+@@ -298,6 +319,10 @@ static int wl1251_tx_frame(struct wl1251 *wl, struct sk_buff *skb)
+ 		}
+ 	}
+ 
++	/* Enable tx path in monitor mode for packet injection */
++	if ((wl->vif == NULL) && !wl->joined)
++		enable_tx_for_packet_injection(wl);
++
+ 	ret = wl1251_tx_path_status(wl);
+ 	if (ret < 0)
+ 		return ret;
+diff --git a/drivers/net/wireless/ti/wl1251/wl1251.h b/drivers/net/wireless/ti/wl1251/wl1251.h
+index e231cdc44fc5..235617a7716d 100644
+--- a/drivers/net/wireless/ti/wl1251/wl1251.h
++++ b/drivers/net/wireless/ti/wl1251/wl1251.h
+@@ -305,6 +305,7 @@ struct wl1251 {
+ 	u8 listen_int;
+ 	int channel;
+ 	bool monitor_present;
++	bool joined;
+ 
+ 	void *target_mem_map;
+ 	struct acx_data_path_params_resp *data_path;
+

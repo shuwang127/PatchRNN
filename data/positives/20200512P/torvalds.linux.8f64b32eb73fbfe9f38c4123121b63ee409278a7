@@ -1,0 +1,44 @@
+commit 8f64b32eb73fbfe9f38c4123121b63ee409278a7
+Author: Eric Sandeen <sandeen@redhat.com>
+Date:   Thu Feb 26 00:57:35 2009 -0500
+
+    ext4: don't call jbd2_journal_force_commit_nested without journal
+    
+    Running without a journal, I oopsed when I ran out of space,
+    because we called jbd2_journal_force_commit_nested() from
+    ext4_should_retry_alloc() without a journal.
+    
+    This should take care of it, I think.
+    
+    Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+diff --git a/fs/ext4/balloc.c b/fs/ext4/balloc.c
+index 9a50b8052dcf..de9459b4cb94 100644
+--- a/fs/ext4/balloc.c
++++ b/fs/ext4/balloc.c
+@@ -609,7 +609,9 @@ int ext4_claim_free_blocks(struct ext4_sb_info *sbi,
+  */
+ int ext4_should_retry_alloc(struct super_block *sb, int *retries)
+ {
+-	if (!ext4_has_free_blocks(EXT4_SB(sb), 1) || (*retries)++ > 3)
++	if (!ext4_has_free_blocks(EXT4_SB(sb), 1) ||
++	    (*retries)++ > 3 ||
++	    !EXT4_SB(sb)->s_journal)
+ 		return 0;
+ 
+ 	jbd_debug(1, "%s: retrying operation after ENOSPC\n", sb->s_id);
+diff --git a/fs/ext4/inode.c b/fs/ext4/inode.c
+index 51cdd13e1c31..c7fed5b18745 100644
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@ -2544,7 +2544,7 @@ static int ext4_da_writepages(struct address_space *mapping,
+ 
+ 		ext4_journal_stop(handle);
+ 
+-		if (mpd.retval == -ENOSPC) {
++		if ((mpd.retval == -ENOSPC) && sbi->s_journal) {
+ 			/* commit the transaction which would
+ 			 * free blocks released in the transaction
+ 			 * and try again
+

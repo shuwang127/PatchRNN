@@ -1,0 +1,123 @@
+commit a1300e50529795cd605da6a015d4944a18921db0
+Author: Aravind Gopalakrishnan <Aravind.Gopalakrishnan@amd.com>
+Date:   Mon Oct 12 11:22:39 2015 +0200
+
+    x86/ras/mce_amd_inj: Trigger deferred and thresholding errors interrupts
+    
+    Add the capability to trigger deferred error interrupts and
+    threshold interrupts in order to test the APIC interrupt handler
+    functionality for these type of errors.
+    
+    Update README section about the same too.
+    
+    Reported by: kbuild test robot <fengguang.wu@intel.com>
+    Signed-off-by: Aravind Gopalakrishnan <Aravind.Gopalakrishnan@amd.com>
+    [ Cleanup comments. ]
+    [ Include asm/irq_vectors.h directly so that misc randbuilds don't fail. ]
+    Signed-off-by: Borislav Petkov <bp@suse.de>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: H. Peter Anvin <hpa@zytor.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Tony Luck <tony.luck@intel.com>
+    Link: http://lkml.kernel.org/r/1443190851-2172-3-git-send-email-Aravind.Gopalakrishnan@amd.com
+    Link: http://lkml.kernel.org/r/1444641762-9437-4-git-send-email-bp@alien8.de
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/ras/mce_amd_inj.c b/arch/x86/ras/mce_amd_inj.c
+index 4fd8bb9b90b9..4d3bafb540c2 100644
+--- a/arch/x86/ras/mce_amd_inj.c
++++ b/arch/x86/ras/mce_amd_inj.c
+@@ -17,7 +17,9 @@
+ #include <linux/cpu.h>
+ #include <linux/string.h>
+ #include <linux/uaccess.h>
++
+ #include <asm/mce.h>
++#include <asm/irq_vectors.h>
+ 
+ #include "../kernel/cpu/mcheck/mce-internal.h"
+ 
+@@ -34,12 +36,16 @@ static u8 n_banks;
+ enum injection_type {
+ 	SW_INJ = 0,	/* SW injection, simply decode the error */
+ 	HW_INJ,		/* Trigger a #MC */
++	DFR_INT_INJ,    /* Trigger Deferred error interrupt */
++	THR_INT_INJ,    /* Trigger threshold interrupt */
+ 	N_INJ_TYPES,
+ };
+ 
+ static const char * const flags_options[] = {
+ 	[SW_INJ] = "sw",
+ 	[HW_INJ] = "hw",
++	[DFR_INT_INJ] = "df",
++	[THR_INT_INJ] = "th",
+ 	NULL
+ };
+ 
+@@ -182,6 +188,16 @@ static void trigger_mce(void *info)
+ 	asm volatile("int $18");
+ }
+ 
++static void trigger_dfr_int(void *info)
++{
++	asm volatile("int %0" :: "i" (DEFERRED_ERROR_VECTOR));
++}
++
++static void trigger_thr_int(void *info)
++{
++	asm volatile("int %0" :: "i" (THRESHOLD_APIC_VECTOR));
++}
++
+ static void do_inject(void)
+ {
+ 	u64 mcg_status = 0;
+@@ -202,6 +218,16 @@ static void do_inject(void)
+ 	if (!(i_mce.status & MCI_STATUS_PCC))
+ 		mcg_status |= MCG_STATUS_RIPV;
+ 
++	/*
++	 * Ensure necessary status bits for deferred errors:
++	 * - MCx_STATUS[Deferred]: make sure it is a deferred error
++	 * - MCx_STATUS[UC] cleared: deferred errors are _not_ UC
++	 */
++	if (inj_type == DFR_INT_INJ) {
++		i_mce.status |= MCI_STATUS_DEFERRED;
++		i_mce.status |= (i_mce.status & ~MCI_STATUS_UC);
++	}
++
+ 	get_online_cpus();
+ 	if (!cpu_online(cpu))
+ 		goto err;
+@@ -222,7 +248,16 @@ static void do_inject(void)
+ 
+ 	toggle_hw_mce_inject(cpu, false);
+ 
+-	smp_call_function_single(cpu, trigger_mce, NULL, 0);
++	switch (inj_type) {
++	case DFR_INT_INJ:
++		smp_call_function_single(cpu, trigger_dfr_int, NULL, 0);
++		break;
++	case THR_INT_INJ:
++		smp_call_function_single(cpu, trigger_thr_int, NULL, 0);
++		break;
++	default:
++		smp_call_function_single(cpu, trigger_mce, NULL, 0);
++	}
+ 
+ err:
+ 	put_online_cpus();
+@@ -287,6 +322,11 @@ static const char readme_msg[] =
+ "\t    handle the error. Be warned: might cause system panic if MCi_STATUS[PCC] \n"
+ "\t    is set. Therefore, consider setting (debugfs_mountpoint)/mce/fake_panic \n"
+ "\t    before injecting.\n"
++"\t  - \"df\": Trigger APIC interrupt for Deferred error. Causes deferred \n"
++"\t    error APIC interrupt handler to handle the error if the feature is \n"
++"\t    is present in hardware. \n"
++"\t  - \"th\": Trigger APIC interrupt for Threshold errors. Causes threshold \n"
++"\t    APIC interrupt handler to handle the error. \n"
+ "\n";
+ 
+ static ssize_t
+

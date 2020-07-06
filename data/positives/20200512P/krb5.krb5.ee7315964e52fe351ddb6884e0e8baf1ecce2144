@@ -1,0 +1,44 @@
+commit ee7315964e52fe351ddb6884e0e8baf1ecce2144
+Author: Greg Hudson <ghudson@mit.edu>
+Date:   Mon Jun 27 17:49:57 2016 -0400
+
+    Fix leaks on error in krb5 gss_acquire_cred()
+    
+    In acquire_cred_context(), when releasing the partially constructed
+    cred on error, make sure to free the password and impersonator fields,
+    and to destroy the ccache if we created it.
+    
+    ticket: 8437 (new)
+    target_version: 1.14-next
+    target_version: 1.13-next
+    tags: pullup
+
+diff --git a/src/lib/gssapi/krb5/acquire_cred.c b/src/lib/gssapi/krb5/acquire_cred.c
+index 2247c497f..03ee25ec1 100644
+--- a/src/lib/gssapi/krb5/acquire_cred.c
++++ b/src/lib/gssapi/krb5/acquire_cred.c
+@@ -864,8 +864,12 @@ krb_error_out:
+ 
+ error_out:
+     if (cred != NULL) {
+-        if (cred->ccache)
+-            krb5_cc_close(context, cred->ccache);
++        if (cred->ccache) {
++            if (cred->destroy_ccache)
++                krb5_cc_destroy(context, cred->ccache);
++            else
++                krb5_cc_close(context, cred->ccache);
++        }
+         if (cred->client_keytab)
+             krb5_kt_close(context, cred->client_keytab);
+ #ifndef LEAN_CLIENT
+@@ -876,6 +880,8 @@ error_out:
+             krb5_rc_close(context, cred->rcache);
+         if (cred->name)
+             kg_release_name(context, &cred->name);
++        krb5_free_principal(context, cred->impersonator);
++        zapfreestr(cred->password);
+         k5_mutex_destroy(&cred->lock);
+         xfree(cred);
+     }
+

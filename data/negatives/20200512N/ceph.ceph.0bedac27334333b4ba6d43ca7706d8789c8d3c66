@@ -1,0 +1,77 @@
+commit 0bedac27334333b4ba6d43ca7706d8789c8d3c66
+Author: Neha Ojha <nojha@redhat.com>
+Date:   Thu Jul 13 14:22:14 2017 -0700
+
+    osd: Add recovery sleep configuration option for HDDs and SSDs
+    
+    Signed-off-by: Neha Ojha <nojha@redhat.com>
+
+diff --git a/src/common/config_opts.h b/src/common/config_opts.h
+index 8d95edd09d..a1edbe9640 100644
+--- a/src/common/config_opts.h
++++ b/src/common/config_opts.h
+@@ -815,7 +815,9 @@ OPTION(osd_op_thread_timeout, OPT_INT, 15)
+ OPTION(osd_op_thread_suicide_timeout, OPT_INT, 150)
+ OPTION(osd_recovery_thread_timeout, OPT_INT, 30)
+ OPTION(osd_recovery_thread_suicide_timeout, OPT_INT, 300)
+-OPTION(osd_recovery_sleep, OPT_FLOAT, 0.01)         // seconds to sleep between recovery ops
++OPTION(osd_recovery_sleep, OPT_FLOAT, 0)         // seconds to sleep between recovery ops
++OPTION(osd_recovery_sleep_hdd, OPT_FLOAT, 0.1)
++OPTION(osd_recovery_sleep_ssd, OPT_FLOAT, 0)
+ OPTION(osd_snap_trim_sleep, OPT_DOUBLE, 0)
+ OPTION(osd_scrub_invalid_stats, OPT_BOOL, true)
+ OPTION(osd_remove_thread_timeout, OPT_INT, 60*60)
+diff --git a/src/osd/OSD.cc b/src/osd/OSD.cc
+index 90b11fe484..41e14b7f00 100644
+--- a/src/osd/OSD.cc
++++ b/src/osd/OSD.cc
+@@ -2314,6 +2314,16 @@ int OSD::get_num_op_threads()
+     return get_num_op_shards() * cct->_conf->osd_op_num_threads_per_shard_ssd;
+ }
+ 
++float OSD::get_osd_recovery_sleep()
++{
++  if (cct->_conf->osd_recovery_sleep)
++    return cct->_conf->osd_recovery_sleep;
++  if (store_is_rotational)
++    return cct->_conf->osd_recovery_sleep_hdd;
++  else
++    return cct->_conf->osd_recovery_sleep_ssd;
++}
++
+ int OSD::init()
+ {
+   CompatSet initial, diff;
+@@ -9060,7 +9070,8 @@ void OSD::do_recovery(
+    * recovery_requeue_callback event, which re-queues the recovery op using
+    * queue_recovery_after_sleep.
+    */
+-  if (cct->_conf->osd_recovery_sleep > 0 && service.recovery_needs_sleep) {
++  float recovery_sleep = get_osd_recovery_sleep();
++  if (recovery_sleep > 0 && service.recovery_needs_sleep) {
+     PGRef pgref(pg);
+     auto recovery_requeue_callback = new FunctionContext([this, pgref, queued, reserved_pushes](int r) {
+       dout(20) << "do_recovery wake up at "
+@@ -9077,7 +9088,7 @@ void OSD::do_recovery(
+     if (service.recovery_schedule_time < ceph_clock_now()) {
+       service.recovery_schedule_time = ceph_clock_now();
+     }
+-    service.recovery_schedule_time += cct->_conf->osd_recovery_sleep;
++    service.recovery_schedule_time += recovery_sleep;
+     service.recovery_sleep_timer.add_event_at(service.recovery_schedule_time,
+ 	                                      recovery_requeue_callback);
+     dout(20) << "Recovery event scheduled at "
+diff --git a/src/osd/OSD.h b/src/osd/OSD.h
+index c34e247e44..2973a6c8ba 100644
+--- a/src/osd/OSD.h
++++ b/src/osd/OSD.h
+@@ -2398,6 +2398,8 @@ private:
+   int get_num_op_shards();
+   int get_num_op_threads();
+ 
++  float get_osd_recovery_sleep();
++
+ public:
+   static int peek_meta(ObjectStore *store, string& magic,
+ 		       uuid_d& cluster_fsid, uuid_d& osd_fsid, int& whoami);
+

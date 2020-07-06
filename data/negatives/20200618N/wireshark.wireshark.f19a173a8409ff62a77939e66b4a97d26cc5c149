@@ -1,0 +1,530 @@
+commit f19a173a8409ff62a77939e66b4a97d26cc5c149
+Author: Gerald Combs <gerald@wireshark.org>
+Date:   Wed Aug 26 17:14:39 2015 -0700
+
+    Speed up column sorting.
+    
+    The GTK+ UI sequentially dissects and caches column strings for all rows
+    before sorting a column. Do the same in the Qt UI, which can improve
+    performance considerably.
+    
+    Don't colorize packets when sorting in the Qt UI unless it's necessary.
+    
+    When sorting in the Qt UI, let the user cancel the initial packet
+    dissection.  Note that we'll need to replace std::sort in order to
+    cancel out of sorting.
+    
+    Use a pre-allocated and pre-compiled GRexex when we prime columns. Note
+    that we probably shouldn't parse a regular expression there.
+    
+    Cache the last result of proto_registrar_get_byname.
+    
+    Note performance hot spots elsewhere in the code.
+    
+    To do:
+    
+    GeoIP in packet-ip.c is pretty slow.
+    
+    Bug: 11467
+    Change-Id: Ib34038fee08ef0319261faeffc4eca01e52f4bd3
+    Reviewed-on: https://code.wireshark.org/review/10275
+    Petri-Dish: Gerald Combs <gerald@wireshark.org>
+    Tested-by: Petri Dish Buildbot <buildbot-no-reply@wireshark.org>
+    Reviewed-by: Gerald Combs <gerald@wireshark.org>
+
+diff --git a/epan/column-info.h b/epan/column-info.h
+index 5d2a242918..e78ef3a575 100644
+--- a/epan/column-info.h
++++ b/epan/column-info.h
+@@ -66,6 +66,7 @@ struct epan_column_info {
+   gint               *col_last;             /**< Last column number with a given format */
+   col_expr_t          col_expr;             /**< Column expressions and values */
+   gboolean            writable;             /**< writable or not @todo Are we still writing to the columns? */
++  GRegex             *prime_regex;          /**< Used to prime custom columns */
+ };
+ 
+ #ifdef __cplusplus
+diff --git a/epan/column-utils.c b/epan/column-utils.c
+index 4dd0336623..d9e8b1bc0b 100644
+--- a/epan/column-utils.c
++++ b/epan/column-utils.c
+@@ -63,6 +63,8 @@ col_setup(column_info *cinfo, const gint num_cols)
+     cinfo->col_first[i] = -1;
+     cinfo->col_last[i] = -1;
+   }
++  cinfo->prime_regex = g_regex_new(" *([^ \\|]+) *(?:(?:\\|\\|)|(?:or))? *",
++    G_REGEX_ANCHORED, G_REGEX_MATCH_ANCHORED, NULL);
+ }
+ 
+ static void
+@@ -113,6 +115,7 @@ col_cleanup(column_info *cinfo)
+    */
+   g_free((gchar **)cinfo->col_expr.col_expr);
+   g_free(cinfo->col_expr.col_expr_val);
++  g_regex_unref(cinfo->prime_regex);
+ }
+ 
+ /* Initialize the data structures for constructing column data. */
+@@ -336,8 +339,9 @@ col_custom_prime_edt(epan_dissect_t *edt, column_info *cinfo)
+         gchar  **fields;
+         guint    i_field = 0;
+ 
+-        fields = g_regex_split_simple(" *([^ \\|]+) *(?:(?:\\|\\|)|(?:or))? *",
+-                col_item->col_custom_field, G_REGEX_ANCHORED, G_REGEX_MATCH_ANCHORED);
++        /* Not using a GRegex here would improve performance. */
++        fields = g_regex_split(cinfo->prime_regex, col_item->col_custom_field,
++                G_REGEX_MATCH_ANCHORED);
+ 
+         for (i_field =0; i_field < g_strv_length(fields); i_field += 1) {
+             if (fields[i_field] && *fields[i_field]) {
+diff --git a/epan/proto.c b/epan/proto.c
+index 961a6a0bb3..f27bc79b4e 100644
+--- a/epan/proto.c
++++ b/epan/proto.c
+@@ -339,6 +339,12 @@ static gpa_hfinfo_t gpa_hfinfo;
+ /* Hash table of abbreviations and IDs */
+ static GHashTable *gpa_name_map = NULL;
+ static header_field_info *same_name_hfinfo;
++/*
++ * We're called repeatedly with the same field name when sorting a column.
++ * Cache our last gpa_name_map hit for faster lookups.
++ */
++static char *last_field_name = NULL;
++static header_field_info *last_hfinfo;
+ 
+ static void save_same_name_hfinfo(gpointer data)
+ {
+@@ -528,6 +534,8 @@ proto_cleanup(void)
+ 		g_hash_table_destroy(gpa_name_map);
+ 		gpa_name_map = NULL;
+ 	}
++	g_free(last_field_name);
++	last_field_name = NULL;
+ 
+ 	while (protocols) {
+ 		protocol_t        *protocol = (protocol_t *)protocols->data;
+@@ -870,6 +878,7 @@ proto_initialize_all_prefixes(void) {
+  * it tries to find and call an initializer in the prefixes
+  * table and if so it looks again.
+  */
++
+ header_field_info *
+ proto_registrar_get_byname(const char *field_name)
+ {
+@@ -879,10 +888,18 @@ proto_registrar_get_byname(const char *field_name)
+ 	if (!field_name)
+ 		return NULL;
+ 
++	if (g_strcmp0(field_name, last_field_name) == 0) {
++		return last_hfinfo;
++	}
++
+ 	hfinfo = (header_field_info *)g_hash_table_lookup(gpa_name_map, field_name);
+ 
+-	if (hfinfo)
++	if (hfinfo) {
++		g_free(last_field_name);
++		last_field_name = g_strdup(field_name);
++		last_hfinfo = hfinfo;
+ 		return hfinfo;
++	}
+ 
+ 	if (!prefixes)
+ 		return NULL;
+@@ -894,7 +911,14 @@ proto_registrar_get_byname(const char *field_name)
+ 		return NULL;
+ 	}
+ 
+-	return (header_field_info *)g_hash_table_lookup(gpa_name_map, field_name);
++	hfinfo = (header_field_info *)g_hash_table_lookup(gpa_name_map, field_name);
++
++	if (hfinfo) {
++		g_free(last_field_name);
++		last_field_name = g_strdup(field_name);
++		last_hfinfo = hfinfo;
++	}
++	return hfinfo;
+ }
+ 
+ int
+@@ -4365,6 +4389,9 @@ hfinfo_same_name_get_prev(const header_field_info *hfinfo)
+ static void
+ hfinfo_remove_from_gpa_name_map(const header_field_info *hfinfo)
+ {
++    g_free(last_field_name);
++    last_field_name = NULL;
++
+     if (!hfinfo->same_name_next && hfinfo->same_name_prev_id == -1) {
+         /* No hfinfo with the same name */
+         g_hash_table_steal(gpa_name_map, hfinfo->abbrev);
+@@ -5301,6 +5328,9 @@ proto_deregister_protocol(const char *short_name)
+     g_ptr_array_add(deregistered_fields, gpa_hfinfo.hfi[proto_id]);
+     g_hash_table_steal(gpa_name_map, protocol->filter_name);
+ 
++    g_free(last_field_name);
++    last_field_name = NULL;
++
+     return TRUE;
+ }
+ 
+@@ -5713,6 +5743,9 @@ proto_deregister_field (const int parent, gint hf_id)
+ 	protocol_t       *proto;
+ 	guint             i;
+ 
++	g_free(last_field_name);
++	last_field_name = NULL;
++
+ 	if (hf_id == -1 || hf_id == 0)
+ 		return;
+ 
+diff --git a/ui/qt/main_status_bar.cpp b/ui/qt/main_status_bar.cpp
+index 1a43712805..9802294be7 100644
+--- a/ui/qt/main_status_bar.cpp
++++ b/ui/qt/main_status_bar.cpp
+@@ -52,7 +52,7 @@ enum StatusContext {
+     STATUS_CTX_FIELD,
+     STATUS_CTX_BYTE,
+     STATUS_CTX_FILTER,
+-    STATUS_CTX_BUSY,
++    STATUS_CTX_PROGRESS,
+     STATUS_CTX_TEMPORARY
+ };
+ 
+@@ -339,14 +339,14 @@ void MainStatusBar::pushProfileName()
+ 
+ void MainStatusBar::pushBusyStatus(const QString &message, const QString &messagetip)
+ {
+-    info_status_.pushText(message, STATUS_CTX_BUSY);
++    info_status_.pushText(message, STATUS_CTX_PROGRESS);
+     info_status_.setToolTip(messagetip);
+     progress_frame_.showBusy(true, false, NULL);
+ }
+ 
+ void MainStatusBar::popBusyStatus()
+ {
+-    info_status_.popText(STATUS_CTX_BUSY);
++    info_status_.popText(STATUS_CTX_PROGRESS);
+     info_status_.setToolTip(QString());
+     progress_frame_.hide();
+ }
+@@ -355,6 +355,23 @@ void MainStatusBar::popProfileStatus() {
+     profile_status_.popText(STATUS_CTX_MAIN);
+ }
+ 
++void MainStatusBar::pushProgressStatus(const QString &message, bool animate, bool terminate_is_stop, gboolean *stop_flag)
++{
++    info_status_.pushText(message, STATUS_CTX_PROGRESS);
++    progress_frame_.showProgress(animate, terminate_is_stop, stop_flag);
++}
++
++void MainStatusBar::updateProgressStatus(int value)
++{
++    progress_frame_.setValue(value);
++}
++
++void MainStatusBar::popProgressStatus()
++{
++    info_status_.popText(STATUS_CTX_PROGRESS);
++    progress_frame_.hide();
++}
++
+ void MainStatusBar::updateCaptureStatistics(capture_session *cap_session)
+ {
+     QString packets_str;
+diff --git a/ui/qt/main_status_bar.h b/ui/qt/main_status_bar.h
+index ede9522442..e547196f70 100644
+--- a/ui/qt/main_status_bar.h
++++ b/ui/qt/main_status_bar.h
+@@ -81,6 +81,10 @@ public slots:
+     void pushProfileName();
+     void pushBusyStatus(const QString &message, const QString &messagetip = QString());
+     void popBusyStatus();
++    void pushProgressStatus(const QString &message, bool animate, bool terminate_is_stop = false, gboolean *stop_flag = NULL);
++    void updateProgressStatus(int value);
++    void popProgressStatus();
++
+     void updateCaptureStatistics(capture_session * cap_session);
+     void updateCaptureFixedStatistics(capture_session * cap_session);
+ 
+diff --git a/ui/qt/main_window.cpp b/ui/qt/main_window.cpp
+index 905cffe833..42ffbd377e 100644
+--- a/ui/qt/main_window.cpp
++++ b/ui/qt/main_window.cpp
+@@ -503,6 +503,12 @@ MainWindow::MainWindow(QWidget *parent) :
+             main_ui_->statusBar, SLOT(pushBusyStatus(QString)));
+     connect(packet_list_->packetListModel(), SIGNAL(popBusyStatus()),
+             main_ui_->statusBar, SLOT(popBusyStatus()));
++    connect(packet_list_->packetListModel(), SIGNAL(pushProgressStatus(QString,bool,bool,gboolean*)),
++            main_ui_->statusBar, SLOT(pushProgressStatus(QString,bool,bool,gboolean*)));
++    connect(packet_list_->packetListModel(), SIGNAL(updateProgressStatus(int)),
++            main_ui_->statusBar, SLOT(updateProgressStatus(int)));
++    connect(packet_list_->packetListModel(), SIGNAL(popProgressStatus()),
++            main_ui_->statusBar, SLOT(popProgressStatus()));
+ 
+     connect(proto_tree_, SIGNAL(protoItemSelected(const QString&)),
+             main_ui_->statusBar, SLOT(pushFieldStatus(const QString&)));
+diff --git a/ui/qt/packet_list.cpp b/ui/qt/packet_list.cpp
+index c11afdf76d..fa3483db80 100644
+--- a/ui/qt/packet_list.cpp
++++ b/ui/qt/packet_list.cpp
+@@ -765,10 +765,6 @@ void PacketList::clear() {
+     create_near_overlay_ = true;
+     create_far_overlay_ = true;
+ 
+-    /* XXX is this correct in all cases?
+-     * Reset the sort column, use packetlist as model in case the list is frozen.
+-     */
+-    sortByColumn(-1, Qt::AscendingOrder);
+     setColumnVisibility();
+ }
+ 
+diff --git a/ui/qt/packet_list_model.cpp b/ui/qt/packet_list_model.cpp
+index e82c181712..4e20462ab8 100644
+--- a/ui/qt/packet_list_model.cpp
++++ b/ui/qt/packet_list_model.cpp
+@@ -48,7 +48,8 @@ PacketListModel::PacketListModel(QObject *parent, capture_file *cf) :
+     QAbstractItemModel(parent),
+     size_hint_enabled_(true),
+     row_height_(-1),
+-    line_spacing_(0)
++    line_spacing_(0),
++    last_sort_column_(-1)
+ {
+     setCaptureFile(cf);
+     connect(this, SIGNAL(itemHeightChanged(QModelIndex)),
+@@ -122,6 +123,7 @@ void PacketListModel::resetColumns()
+     }
+     dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1));
+     headerDataChanged(Qt::Horizontal, 0, columnCount() - 1);
++    last_sort_column_ = -1;
+ }
+ 
+ void PacketListModel::resetColorized()
+@@ -254,33 +256,67 @@ QElapsedTimer busy_timer_;
+ const int busy_timeout_ = 65; // ms, approximately 15 fps
+ void PacketListModel::sort(int column, Qt::SortOrder order)
+ {
++    // packet_list_store.c:packet_list_dissect_and_cache_all
+     if (!cap_file_ || visible_rows_.count() < 1) return;
+-    if (column < 0) return;
++    if (column < 0 || column == last_sort_column_) return;
+ 
+     sort_column_ = column;
+     text_sort_column_ = PacketListRecord::textColumn(column);
+     sort_order_ = order;
+     sort_cap_file_ = cap_file_;
+ 
+-    beginResetModel();
++    gboolean stop_flag = FALSE;
+     QString col_title = get_column_title(column);
++
++    busy_timer_.start();
++    emit pushProgressStatus(tr("Dissecting"), true, true, &stop_flag);
++    int row_num = 0;
++    foreach (PacketListRecord *row, physical_rows_) {
++        row->columnString(sort_cap_file_, column);
++        row_num++;
++        if (busy_timer_.elapsed() > busy_timeout_) {
++            if (stop_flag) {
++                emit popProgressStatus();
++                return;
++            }
++            emit updateProgressStatus(row_num * 100 / physical_rows_.count());
++            // What's the least amount of processing that we can do which will draw
++            // the progress indicator?
++            wsApp->processEvents(QEventLoop::AllEvents, 1);
++            busy_timer_.restart();
++        }
++    }
++    emit popProgressStatus();
++
++    // XXX Use updateProgress instead. We'd have to switch from std::sort to
++    // something we can interrupt.
+     if (!col_title.isEmpty()) {
+         QString busy_msg = tr("Sorting \"%1\"").arg(col_title);
+         emit pushBusyStatus(busy_msg);
+-        busy_timer_.start();
+     }
+-    std::sort(visible_rows_.begin(), visible_rows_.end(), recordLessThan);
+-    for (int i = 0; i < visible_rows_.count(); i++) {
+-        number_to_row_[visible_rows_[i]->frameData()->num] = i;
++
++    busy_timer_.restart();
++    std::sort(physical_rows_.begin(), physical_rows_.end(), recordLessThan);
++
++    beginResetModel();
++    visible_rows_.clear();
++    number_to_row_.clear();
++    foreach (PacketListRecord *record, physical_rows_) {
++        if (record->frameData()->flags.passed_dfilter || record->frameData()->flags.ref_time) {
++            visible_rows_ << record;
++            number_to_row_[record->frameData()->num] = visible_rows_.count() - 1;
++        }
+     }
++    endResetModel();
++
+     if (!col_title.isEmpty()) {
+         emit popBusyStatus();
+     }
+-    endResetModel();
+ 
+     if (cap_file_->current_frame) {
+         emit goToPacket(cap_file_->current_frame->num);
+     }
++    last_sort_column_ = column;
+ }
+ 
+ bool PacketListModel::recordLessThan(PacketListRecord *r1, PacketListRecord *r2)
+@@ -291,11 +327,11 @@ bool PacketListModel::recordLessThan(PacketListRecord *r1, PacketListRecord *r2)
+     // _packet_list_compare_records, and packet_list_compare_custom from
+     // gtk/packet_list_store.c into one function
+ 
+-    // What's the least amount of processing that we can do which will draw
+-    // the busy indicator?
+     if (busy_timer_.elapsed() > busy_timeout_) {
+-        busy_timer_.restart();
++        // What's the least amount of processing that we can do which will draw
++        // the busy indicator?
+         wsApp->processEvents(QEventLoop::ExcludeUserInputEvents | QEventLoop::ExcludeSocketNotifiers, 1);
++        busy_timer_.restart();
+     }
+     if (sort_column_ < 0) {
+         // No column.
+@@ -304,7 +340,7 @@ bool PacketListModel::recordLessThan(PacketListRecord *r1, PacketListRecord *r2)
+         // Column comes directly from frame data
+         cmp_val = frame_data_compare(sort_cap_file_->epan, r1->frameData(), r2->frameData(), sort_cap_file_->cinfo.columns[sort_column_].col_fmt);
+     } else  {
+-        if (r1->columnString(sort_cap_file_, sort_column_).toByteArray().constData() == r2->columnString(sort_cap_file_, sort_column_).toByteArray().constData()) {
++        if (r1->columnString(sort_cap_file_, sort_column_).constData() == r2->columnString(sort_cap_file_, sort_column_).constData()) {
+             cmp_val = 0;
+         } else if (sort_cap_file_->cinfo.columns[sort_column_].col_fmt == COL_CUSTOM) {
+             header_field_info *hfi;
+@@ -322,7 +358,8 @@ bool PacketListModel::recordLessThan(PacketListRecord *r1, PacketListRecord *r2)
+                         (hfi->type == FT_BOOLEAN) || (hfi->type == FT_FRAMENUM) ||
+                         (hfi->type == FT_RELATIVE_TIME)))
+             {
+-                /* Attempt to convert to numbers */
++                // Attempt to convert to numbers.
++                // XXX This is slow. Can we avoid doing this?
+                 bool ok_r1, ok_r2;
+                 double num_r1 = r1->columnString(sort_cap_file_, sort_column_).toDouble(&ok_r1);
+                 double num_r2 = r2->columnString(sort_cap_file_, sort_column_).toDouble(&ok_r2);
+@@ -335,14 +372,14 @@ bool PacketListModel::recordLessThan(PacketListRecord *r1, PacketListRecord *r2)
+                     cmp_val = 1;
+                 }
+             } else {
+-                cmp_val = strcmp(r1->columnString(sort_cap_file_, sort_column_).toByteArray().constData(), r2->columnString(sort_cap_file_, sort_column_).toByteArray().constData());
++                cmp_val = strcmp(r1->columnString(sort_cap_file_, sort_column_).constData(), r2->columnString(sort_cap_file_, sort_column_).constData());
+             }
+         } else {
+-            cmp_val = strcmp(r1->columnString(sort_cap_file_, sort_column_).toByteArray().constData(), r2->columnString(sort_cap_file_, sort_column_).toByteArray().constData());
++            cmp_val = strcmp(r1->columnString(sort_cap_file_, sort_column_).constData(), r2->columnString(sort_cap_file_, sort_column_).constData());
+         }
+ 
+         if (cmp_val == 0) {
+-            // Last resort. Compare column numbers.
++            // All else being equal, compare column numbers.
+             cmp_val = frame_data_compare(sort_cap_file_->epan, r1->frameData(), r2->frameData(), COL_NUMBER);
+         }
+     }
+@@ -435,7 +472,7 @@ QVariant PacketListModel::data(const QModelIndex &d_index, int role) const
+     case Qt::DisplayRole:
+     {
+         int column = d_index.column();
+-        QVariant column_string = record->columnString(cap_file_, column);
++        QByteArray column_string = record->columnString(cap_file_, column, true);
+         // We don't know an item's sizeHint until we fetch its text here.
+         // Assume each line count is 1. If the line count changes, emit
+         // itemHeightChanged which triggers another redraw (including a
+@@ -514,7 +551,7 @@ void PacketListModel::ensureRowColorized(int row)
+     if (!record)
+         return;
+     if (!record->colorized()) {
+-        record->columnString(cap_file_, 1);
++        record->columnString(cap_file_, 1, true);
+     }
+ }
+ 
+diff --git a/ui/qt/packet_list_model.h b/ui/qt/packet_list_model.h
+index 4fdbbaa419..6e78a11a5d 100644
+--- a/ui/qt/packet_list_model.h
++++ b/ui/qt/packet_list_model.h
+@@ -77,6 +77,10 @@ signals:
+     void pushBusyStatus(const QString &status);
+     void popBusyStatus();
+ 
++    void pushProgressStatus(const QString &status, bool animate, bool terminate_is_stop, gboolean *stop_flag);
++    void updateProgressStatus(int value);
++    void popProgressStatus();
++
+ public slots:
+     void setMonospaceFont(const QFont &mono_font, int row_height);
+     void sort(int column, Qt::SortOrder order = Qt::AscendingOrder);
+@@ -93,6 +97,7 @@ private:
+     int row_height_;
+     int line_spacing_;
+ 
++    int last_sort_column_;
+     static int sort_column_;
+     static int text_sort_column_;
+     static Qt::SortOrder sort_order_;
+diff --git a/ui/qt/packet_list_record.cpp b/ui/qt/packet_list_record.cpp
+index cd94014a25..cdf61bec12 100644
+--- a/ui/qt/packet_list_record.cpp
++++ b/ui/qt/packet_list_record.cpp
+@@ -47,17 +47,18 @@ PacketListRecord::PacketListRecord(frame_data *frameData) :
+ {
+ }
+ 
+-const QVariant PacketListRecord::columnString(capture_file *cap_file, int column)
++const QByteArray PacketListRecord::columnString(capture_file *cap_file, int column, bool colorized)
+ {
+     // packet_list_store.c:packet_list_get_value
+     g_assert(fdata_);
+ 
+     if (!cap_file || column < 0 || column > cap_file->cinfo.num_cols) {
+-        return QVariant();
++        return QByteArray();
+     }
+ 
+-    if (column >= col_text_.size() || col_text_[column].isNull() || data_ver_ != col_data_ver_ || !colorized_) {
+-        dissect(cap_file, !colorized_);
++    bool dissect_color = colorized && !colorized_;
++    if (column >= col_text_.size() || col_text_[column].isNull() || data_ver_ != col_data_ver_ || dissect_color) {
++        dissect(cap_file, dissect_color);
+     }
+ 
+     return col_text_.value(column, QByteArray());
+@@ -243,7 +244,9 @@ void PacketListRecord::cacheColumnStrings(column_info *cinfo)
+             break;
+         }
+ #else // MINIMIZE_STRING_COPYING
+-        // XXX Use QContiguousCache?
++        // XXX The GTK+ code uses GStringChunk for string storage. It
++        // doesn't appear to be that much faster, but it probably uses
++        // less memory.
+         QByteArray col_text;
+         if (!get_column_resolved(column) && cinfo->col_expr.col_expr_val[column]) {
+             /* Use the unresolved value in col_expr_val */
+diff --git a/ui/qt/packet_list_record.h b/ui/qt/packet_list_record.h
+index 17d7c6ae82..c8d2e90a28 100644
+--- a/ui/qt/packet_list_record.h
++++ b/ui/qt/packet_list_record.h
+@@ -42,7 +42,7 @@ class PacketListRecord
+ public:
+     PacketListRecord(frame_data *frameData);
+     // Return the string value for a column. Data is cached if possible.
+-    const QVariant columnString(capture_file *cap_file, int column);
++    const QByteArray columnString(capture_file *cap_file, int column, bool colorized = false);
+     frame_data *frameData() const { return fdata_; }
+     // packet_list->col_to_text in gtk/packet_list_store.c
+     static int textColumn(int column) { return cinfo_column_.value(column, -1); }
+@@ -75,7 +75,6 @@ private:
+ 
+     void dissect(capture_file *cap_file, bool dissect_color = false);
+     void cacheColumnStrings(column_info *cinfo);
+-
+ };
+ 
+ #endif // PACKET_LIST_RECORD_H
+

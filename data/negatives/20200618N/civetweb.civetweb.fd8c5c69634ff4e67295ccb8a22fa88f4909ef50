@@ -1,0 +1,98 @@
+commit fd8c5c69634ff4e67295ccb8a22fa88f4909ef50
+Author: bel2125 <bel2125@gmail.com>
+Date:   Wed Aug 9 22:55:04 2017 +0200
+
+    Add interface for http authentication (see #426)
+
+diff --git a/include/civetweb.h b/include/civetweb.h
+index 51a946d2..e8c97a44 100644
+--- a/include/civetweb.h
++++ b/include/civetweb.h
+@@ -782,6 +782,13 @@ mg_send_digest_access_authentication_request(struct mg_connection *conn,
+                                              const char *realm);
+ 
+ 
++/* TODO: Test and document */
++CIVETWEB_API int
++mg_check_digest_access_authentication(struct mg_connection *conn,
++                                      const char *realm,
++                                      const char *filename);
++
++
+ /* Send contents of the entire file together with HTTP headers.
+  * Parameters:
+  *   conn: Current connection handle.
+diff --git a/src/civetweb.c b/src/civetweb.c
+index 90786a62..445bad10 100644
+--- a/src/civetweb.c
++++ b/src/civetweb.c
+@@ -7613,7 +7613,7 @@ read_auth_file(struct mg_file *filep,
+ 
+ /* Authorize against the opened passwords file. Return 1 if authorized. */
+ static int
+-authorize(struct mg_connection *conn, struct mg_file *filep)
++authorize(struct mg_connection *conn, struct mg_file *filep, const char *realm)
+ {
+ 	struct read_auth_file_struct workdata;
+ 	char buf[MG_BUF_LEN];
+@@ -7628,12 +7628,40 @@ authorize(struct mg_connection *conn, struct mg_file *filep)
+ 	if (!parse_auth_header(conn, buf, sizeof(buf), &workdata.ah)) {
+ 		return 0;
+ 	}
+-	workdata.domain = conn->ctx->config[AUTHENTICATION_DOMAIN];
++
++	if (realm) {
++		workdata.domain = realm;
++	} else {
++		workdata.domain = conn->ctx->config[AUTHENTICATION_DOMAIN];
++	}
+ 
+ 	return read_auth_file(filep, &workdata, INITIAL_DEPTH);
+ }
+ 
+ 
++int
++mg_check_digest_access_authentication(struct mg_connection *conn,
++                                      const char *realm,
++                                      const char *filename)
++{
++	struct mg_file file = STRUCT_FILE_INITIALIZER;
++	int auth;
++
++	if (!conn || !filename) {
++		return -1;
++	}
++	if (!mg_fopen(conn, filename, MG_FOPEN_MODE_READ, &file)) {
++		return -2;
++	}
++
++	auth = authorize(conn, &file, realm);
++
++	mg_fclose(&file.access);
++
++	return auth;
++}
++
++
+ /* Return 1 if request is authorised, 0 otherwise. */
+ static int
+ check_authorization(struct mg_connection *conn, const char *path)
+@@ -7676,7 +7704,7 @@ check_authorization(struct mg_connection *conn, const char *path)
+ 	}
+ 
+ 	if (is_file_opened(&file.access)) {
+-		authorized = authorize(conn, &file);
++		authorized = authorize(conn, &file, NULL);
+ 		(void)mg_fclose(&file.access); /* ignore error on read only file */
+ 	}
+ 
+@@ -7749,7 +7777,7 @@ is_authorized_for_put(struct mg_connection *conn)
+ 
+ 		if (passfile != NULL
+ 		    && mg_fopen(conn, passfile, MG_FOPEN_MODE_READ, &file)) {
+-			ret = authorize(conn, &file);
++			ret = authorize(conn, &file, NULL);
+ 			(void)mg_fclose(&file.access); /* ignore error on read only file */
+ 		}
+ 
+

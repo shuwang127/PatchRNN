@@ -1,0 +1,1058 @@
+commit 469eb89117e199a450aec3411183ed2e9f10f893
+Author: William Jon McCann <jmccann@redhat.com>
+Date:   Fri Jul 13 19:04:29 2012 -0400
+
+    Enable "just type" searching
+    
+    https://bugzilla.gnome.org/show_bug.cgi?id=679900
+
+diff --git a/libnautilus-private/nautilus-icon-container.c b/libnautilus-private/nautilus-icon-container.c
+index 3abffe7fd..c82b4af74 100644
+--- a/libnautilus-private/nautilus-icon-container.c
++++ b/libnautilus-private/nautilus-icon-container.c
+@@ -198,7 +198,6 @@ static int compare_icons_vertical (NautilusIconContainer *container,
+ 				   NautilusIcon *icon_b);
+ 
+ static void store_layout_timestamps_now (NautilusIconContainer *container);
+-static void remove_search_entry_timeout (NautilusIconContainer *container);
+ 
+ static const char *nautilus_icon_container_accessible_action_names[] = {
+ 	"activate",
+@@ -3911,8 +3910,6 @@ destroy (GtkWidget *object)
+ 		container->details->search_entry = NULL;
+ 	}
+ 
+-	remove_search_entry_timeout (container);
+-
+ 	GTK_WIDGET_CLASS (nautilus_icon_container_parent_class)->destroy (object);
+ }
+ 
+@@ -4115,7 +4112,6 @@ unrealize (GtkWidget *widget)
+ 	container = NAUTILUS_ICON_CONTAINER (widget);
+ 
+ 	nautilus_icon_dnd_fini (container);
+-	remove_search_entry_timeout (container);
+ 
+ 	GTK_WIDGET_CLASS (nautilus_icon_container_parent_class)->unrealize (widget);
+ }
+@@ -4680,198 +4676,6 @@ motion_notify_event (GtkWidget *widget,
+ 	return GTK_WIDGET_CLASS (nautilus_icon_container_parent_class)->motion_notify_event (widget, event);
+ }
+ 
+-static void
+-nautilus_icon_container_search_position_func (NautilusIconContainer *container,
+-					      GtkWidget *search_dialog)
+-{
+-	gint x, y;
+-	gint cont_x, cont_y;
+-	gint cont_width, cont_height;
+-	GdkWindow *cont_window;
+-	GdkScreen *screen;
+-	GtkRequisition requisition;
+-	gint monitor_num;
+-	GdkRectangle monitor;
+-
+-
+-	cont_window = gtk_widget_get_window (GTK_WIDGET (container));
+-	screen = gdk_window_get_screen (cont_window);
+-
+-	monitor_num = gdk_screen_get_monitor_at_window (screen, cont_window);
+-	gdk_screen_get_monitor_geometry (screen, monitor_num, &monitor);
+-
+-	gtk_widget_realize (search_dialog);
+-
+-	gdk_window_get_origin (cont_window, &cont_x, &cont_y);
+-        cont_width = gdk_window_get_width (cont_window);
+-        cont_height = gdk_window_get_height (cont_window);
+-
+-	gtk_widget_get_preferred_size (search_dialog, &requisition, NULL);
+-
+-	if (cont_x + cont_width > gdk_screen_get_width (screen)) {
+-		x = gdk_screen_get_width (screen) - requisition.width;
+-	} else if (cont_x + cont_width - requisition.width < 0) {
+-		x = 0;
+-	} else {
+-		x = cont_x + cont_width - requisition.width;
+-	}
+-
+-	if (cont_y + cont_height + requisition.height > gdk_screen_get_height (screen)) {
+-		y = gdk_screen_get_height (screen) - requisition.height;
+-	} else if (cont_y + cont_height < 0) { /* isn't really possible ... */
+-		y = 0;
+-	} else {
+-		y = cont_y + cont_height;
+-	}
+-
+-	gdk_window_move (gtk_widget_get_window (search_dialog), x, y);
+-}
+-
+-/* Cut and paste from gtkwindow.c */
+-static void
+-send_focus_change (GtkWidget *widget, gboolean in)
+-{
+-	GdkEvent *fevent;
+-	
+-	fevent = gdk_event_new (GDK_FOCUS_CHANGE);
+-
+-	g_object_ref (widget);
+-	((GdkEventFocus *) fevent)->in = in;
+-
+-	gtk_widget_send_focus_change (widget, fevent);
+-
+-	fevent->focus_change.type = GDK_FOCUS_CHANGE;
+-	fevent->focus_change.window = g_object_ref (gtk_widget_get_window (widget));
+-	fevent->focus_change.in = in;
+-
+-	gtk_widget_event (widget, fevent);
+-
+-	g_object_notify (G_OBJECT (widget), "has-focus");
+-
+-	g_object_unref (widget);
+-	gdk_event_free (fevent);
+-}
+-
+-static void
+-nautilus_icon_container_search_dialog_hide (GtkWidget *search_dialog,
+-					    NautilusIconContainer *container)
+-{
+-	if (container->details->search_entry_changed_id) {
+-		g_signal_handler_disconnect (container->details->search_entry,
+-					     container->details->search_entry_changed_id);
+-		container->details->search_entry_changed_id = 0;
+-	}
+-
+-	remove_search_entry_timeout (container);
+-
+-	/* send focus-in event */
+-	send_focus_change (GTK_WIDGET (container->details->search_entry), FALSE);
+-	gtk_widget_hide (search_dialog);
+-	gtk_entry_set_text (GTK_ENTRY (container->details->search_entry), "");
+-}
+-
+-static gboolean
+-nautilus_icon_container_search_entry_flush_timeout (gpointer data)
+-{
+-	NautilusIconContainer *container = data;
+-
+-	container->details->typeselect_flush_timeout = 0;
+-	nautilus_icon_container_search_dialog_hide (container->details->search_window, container);
+-
+-	return FALSE;
+-}
+-
+-static void
+-add_search_entry_timeout (NautilusIconContainer *container)
+-{
+-	container->details->typeselect_flush_timeout =
+-		g_timeout_add_seconds (NAUTILUS_ICON_CONTAINER_SEARCH_DIALOG_TIMEOUT,
+-				       nautilus_icon_container_search_entry_flush_timeout,
+-				       container);
+-}
+-
+-static void
+-remove_search_entry_timeout (NautilusIconContainer *container)
+-{
+-	if (container->details->typeselect_flush_timeout) {
+-		g_source_remove (container->details->typeselect_flush_timeout);
+-		container->details->typeselect_flush_timeout = 0;
+-	}
+-}
+-
+-static void
+-reset_search_entry_timeout (NautilusIconContainer *container)
+-{
+-	remove_search_entry_timeout (container);
+-	add_search_entry_timeout (container);
+-}
+-
+-/* Because we're visible but offscreen, we just set a flag in the preedit
+- * callback.
+- */
+-static void
+-nautilus_icon_container_search_preedit_changed (GtkEntry *entry,
+-						gchar *preedit,
+-						NautilusIconContainer *container)
+-{
+-	container->details->imcontext_changed = 1;
+-	reset_search_entry_timeout (container);
+-}
+-
+-static void
+-nautilus_icon_container_search_activate (GtkEntry *entry,
+-					 NautilusIconContainer *container)
+-{
+-	nautilus_icon_container_search_dialog_hide (container->details->search_window,
+-						    container);
+-
+-	activate_selected_items (container);
+-}
+-
+-static gboolean
+-nautilus_icon_container_search_delete_event (GtkWidget *widget,
+-					     GdkEventAny *event,
+-					     NautilusIconContainer *container)
+-{
+-	nautilus_icon_container_search_dialog_hide (widget, container);
+-
+-	return TRUE;
+-}
+-
+-static gboolean
+-nautilus_icon_container_search_button_press_event (GtkWidget *widget,
+-						   GdkEventButton *event,
+-						   NautilusIconContainer *container)
+-{
+-	nautilus_icon_container_search_dialog_hide (widget, container);
+-
+-	if (event->window == gtk_layout_get_bin_window (GTK_LAYOUT (container))) {
+-		button_press_event (GTK_WIDGET (container), event);
+-	}
+-
+-	return TRUE;
+-}
+-
+-static gboolean
+-nautilus_icon_container_search_entry_button_press_event (GtkWidget *widget,
+-							 GdkEventButton *event,
+-							 NautilusIconContainer *container)
+-{
+-	reset_search_entry_timeout (container);
+-
+-	return FALSE;
+-}
+-
+-static void
+-nautilus_icon_container_search_populate_popup (GtkEntry *entry,
+-					       GtkMenu *menu,
+-					       NautilusIconContainer *container)
+-{
+-	remove_search_entry_timeout (container);
+-	g_signal_connect_swapped (menu, "hide",
+-				  G_CALLBACK (add_search_entry_timeout), container);
+-}
+-
+ static void
+ nautilus_icon_container_get_icon_text (NautilusIconContainer *container,
+ 				       NautilusIconData      *data,
+@@ -4887,331 +4691,6 @@ nautilus_icon_container_get_icon_text (NautilusIconContainer *container,
+ 	klass->get_icon_text (container, data, editable_text, additional_text, include_invisible);
+ }
+ 
+-static gboolean
+-nautilus_icon_container_search_iter (NautilusIconContainer *container,
+-				     const char *key, gint n)
+-{
+-	GList *p;
+-	NautilusIcon *icon;
+-	char *name;
+-	int count;
+-	char *normalized_key, *case_normalized_key;
+-	char *normalized_name, *case_normalized_name;
+-	
+-	g_assert (key != NULL);
+-	g_assert (n >= 1);
+-	
+-	normalized_key = g_utf8_normalize (key, -1, G_NORMALIZE_ALL);
+-	if (!normalized_key) {
+-		return FALSE;
+-	}
+-	case_normalized_key = g_utf8_casefold (normalized_key, -1);
+-	g_free (normalized_key);
+-	if (!case_normalized_key) {
+-		return FALSE;
+-	}
+-	
+-	icon = NULL;
+-	name = NULL;
+-	count = 0;
+-	for (p = container->details->icons; p != NULL && count != n; p = p->next) {
+-		icon = p->data;
+-		nautilus_icon_container_get_icon_text (container, icon->data, &name,
+-						       NULL, TRUE);
+-		
+-		/* This can happen if a key event is handled really early while
+-		 * loading the icon container, before the items have all been
+-		 * updated once.
+-		 */
+-		if (!name) {
+-			continue;
+-		}
+-			
+-		normalized_name = g_utf8_normalize (name, -1, G_NORMALIZE_ALL);
+-		if (!normalized_name) {
+-			continue;
+-		}
+-		case_normalized_name = g_utf8_casefold (normalized_name, -1);
+-		g_free (normalized_name);
+-		if (!case_normalized_name) {
+-			continue;
+-		}
+-		
+-		if (strncmp (case_normalized_key, case_normalized_name,
+-			     strlen (case_normalized_key)) == 0) {
+-			count++;
+-		}
+-
+-		g_free (case_normalized_name);
+-		g_free (name);
+-		name = NULL;
+-	}
+-
+-	g_free (case_normalized_key);
+-
+-	if (count == n) {
+-		if (select_one_unselect_others (container, icon)) {
+-			g_signal_emit (container, signals[SELECTION_CHANGED], 0);
+-		}
+-		schedule_keyboard_icon_reveal (container, icon);
+-		
+-		return TRUE;
+-	}
+-	
+-	return FALSE;
+-}
+-
+-static void
+-nautilus_icon_container_search_move (GtkWidget *window,
+-				     NautilusIconContainer *container,
+-				     gboolean up)
+-{
+-	gboolean ret;
+-	gint len;
+-	const gchar *text;
+-
+-	text = gtk_entry_get_text (GTK_ENTRY (container->details->search_entry));
+-
+-	g_assert (text != NULL);
+-
+-	if (container->details->selected_iter == 0) {
+-		return;
+-	}
+-	
+-	if (up && container->details->selected_iter == 1) {
+-		return;
+-	}
+-
+-	len = strlen (text);
+-
+-	if (len < 1) {
+-		return;
+-	}
+-
+-	/* search */
+-	unselect_all (container);
+-
+-	ret = nautilus_icon_container_search_iter (container, text,
+-		up?((container->details->selected_iter) - 1):((container->details->selected_iter + 1)));
+-
+-	if (ret) {
+-		/* found */
+-		container->details->selected_iter += up?(-1):(1);
+-	} else {
+-		/* return to old iter */
+-		nautilus_icon_container_search_iter (container, text,
+-					container->details->selected_iter);
+-	}
+-}
+-
+-static gboolean
+-nautilus_icon_container_search_scroll_event (GtkWidget *widget,
+-					     GdkEventScroll *event,
+-					     NautilusIconContainer *container)
+-{
+-	gboolean retval = FALSE;
+-
+-	if (event->direction == GDK_SCROLL_UP) {
+-		nautilus_icon_container_search_move (widget, container, TRUE);
+-		retval = TRUE;
+-	} else if (event->direction == GDK_SCROLL_DOWN) {
+-		nautilus_icon_container_search_move (widget, container, FALSE);
+-		retval = TRUE;
+-	}
+-
+-	reset_search_entry_timeout (container);
+-
+-	return retval;
+-}
+-
+-static gboolean
+-nautilus_icon_container_search_key_press_event (GtkWidget *widget,
+-						GdkEventKey *event,
+-						NautilusIconContainer *container)
+-{
+-	gboolean retval = FALSE;
+-
+-	g_assert (GTK_IS_WIDGET (widget));
+-	g_assert (NAUTILUS_IS_ICON_CONTAINER (container));
+-
+-	/* close window and cancel the search */
+-	if (event->keyval == GDK_KEY_Escape || event->keyval == GDK_KEY_Tab) {
+-		nautilus_icon_container_search_dialog_hide (widget, container);
+-		return TRUE;
+-	}
+-
+-	/* close window and activate alternate */
+-	if (event->keyval == GDK_KEY_Return && event->state & GDK_SHIFT_MASK) {
+-		nautilus_icon_container_search_dialog_hide (widget,
+-							    container);
+-
+-		activate_selected_items_alternate (container, NULL);
+-		return TRUE;
+-	}
+-
+-	/* select previous matching iter */
+-	if (event->keyval == GDK_KEY_Up || event->keyval == GDK_KEY_KP_Up) {
+-		nautilus_icon_container_search_move (widget, container, TRUE);
+-		retval = TRUE;
+-	}
+-
+-	if (((event->state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK))
+-	    && (event->keyval == GDK_KEY_g || event->keyval == GDK_KEY_G)) {
+-		nautilus_icon_container_search_move (widget, container, TRUE);
+-		retval = TRUE;
+-	}
+-
+-	/* select next matching iter */
+-	if (event->keyval == GDK_KEY_Down || event->keyval == GDK_KEY_KP_Down) {
+-		nautilus_icon_container_search_move (widget, container, FALSE);
+-		retval = TRUE;
+-	}
+-
+-	if (((event->state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == GDK_CONTROL_MASK)
+-	    && (event->keyval == GDK_KEY_g || event->keyval == GDK_KEY_G)) {
+-		nautilus_icon_container_search_move (widget, container, FALSE);
+-		retval = TRUE;
+-	}
+-
+-	reset_search_entry_timeout (container);
+-
+-	return retval;
+-}
+-
+-static void
+-nautilus_icon_container_search_init (GtkWidget   *entry,
+-				     NautilusIconContainer *container)
+-{
+-	gint ret;
+-	gint len;
+-	const gchar *text;
+-
+-	g_assert (GTK_IS_ENTRY (entry));
+-	g_assert (NAUTILUS_IS_ICON_CONTAINER (container));
+-
+-	text = gtk_entry_get_text (GTK_ENTRY (entry));
+-	len = strlen (text);
+-
+-	/* search */
+-	unselect_all (container);
+-	reset_search_entry_timeout (container);
+-
+-	if (len < 1) {
+-		return;
+-	}
+-
+-	ret = nautilus_icon_container_search_iter (container, text, 1);
+-
+-	if (ret) {
+-		container->details->selected_iter = 1;
+-	}
+-}
+-
+-static void
+-nautilus_icon_container_ensure_interactive_directory (NautilusIconContainer *container)
+-{
+-	GtkWidget *frame, *vbox;
+-
+-	if (container->details->search_window != NULL) {
+-		return;
+-	}
+-
+-	container->details->search_window = gtk_window_new (GTK_WINDOW_POPUP);
+-
+-	gtk_window_set_modal (GTK_WINDOW (container->details->search_window), TRUE);
+-	gtk_window_set_type_hint (GTK_WINDOW (container->details->search_window),
+-				  GDK_WINDOW_TYPE_HINT_COMBO);
+-
+-	g_signal_connect (container->details->search_window, "delete_event",
+-			  G_CALLBACK (nautilus_icon_container_search_delete_event),
+-			  container);
+-	g_signal_connect (container->details->search_window, "key_press_event",
+-			  G_CALLBACK (nautilus_icon_container_search_key_press_event),
+-			  container);
+-	g_signal_connect (container->details->search_window, "button_press_event",
+-			  G_CALLBACK (nautilus_icon_container_search_button_press_event),
+-			  container);
+-	g_signal_connect (container->details->search_window, "scroll_event",
+-			  G_CALLBACK (nautilus_icon_container_search_scroll_event),
+-			  container);
+-
+-	frame = gtk_frame_new (NULL);
+-	gtk_frame_set_shadow_type (GTK_FRAME (frame), GTK_SHADOW_ETCHED_IN);
+-	gtk_widget_show (frame);
+-	gtk_container_add (GTK_CONTAINER (container->details->search_window), frame);
+-
+-	vbox = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+-	gtk_widget_show (vbox);
+-	gtk_container_add (GTK_CONTAINER (frame), vbox);
+-	gtk_container_set_border_width (GTK_CONTAINER (vbox), 3);
+-
+-	/* add entry */
+-	container->details->search_entry = gtk_entry_new ();
+-	gtk_widget_show (container->details->search_entry);
+-	g_signal_connect (container->details->search_entry, "populate-popup",
+-			  G_CALLBACK (nautilus_icon_container_search_populate_popup),
+-			  container);
+-	g_signal_connect (container->details->search_entry, "activate",
+-			  G_CALLBACK (nautilus_icon_container_search_activate),
+-			  container);
+-	g_signal_connect (container->details->search_entry, "preedit-changed",
+-			  G_CALLBACK (nautilus_icon_container_search_preedit_changed),
+-			  container);
+-	g_signal_connect (container->details->search_entry, "button-press-event",
+-			  G_CALLBACK (nautilus_icon_container_search_entry_button_press_event),
+-			  container);
+-	gtk_container_add (GTK_CONTAINER (vbox), container->details->search_entry);
+-
+-	gtk_widget_realize (container->details->search_entry);
+-}
+-
+-/* Pops up the interactive search entry.  If keybinding is TRUE then the user
+- * started this by typing the start_interactive_search keybinding.  Otherwise, it came from 
+- */
+-static gboolean
+-nautilus_icon_container_start_interactive_search (NautilusIconContainer *container)
+-{
+-	/* We only start interactive search if we have focus.  If one of our
+-	 * children have focus, we don't want to start the search.
+-	 */
+-	GtkWidgetClass *entry_parent_class;
+-
+-	if (container->details->search_window != NULL &&
+-	    gtk_widget_get_visible (container->details->search_window)) {
+-		return TRUE;
+-	}
+-
+-	if (!gtk_widget_has_focus (GTK_WIDGET (container))) {
+-		return FALSE;
+-	}
+-
+-	nautilus_icon_container_ensure_interactive_directory (container);
+-
+-	/* done, show it */
+-	nautilus_icon_container_search_position_func (container, container->details->search_window);
+-	gtk_widget_show (container->details->search_window);
+-	if (container->details->search_entry_changed_id == 0) {
+-		container->details->search_entry_changed_id =
+-			g_signal_connect (container->details->search_entry, "changed",
+-				G_CALLBACK (nautilus_icon_container_search_init),
+-				container);
+-	}
+-
+-	/* Grab focus will select all the text.  We don't want that to happen, so we
+-	* call the parent instance and bypass the selection change.  This is probably
+-	* really non-kosher. */
+-	entry_parent_class = g_type_class_peek_parent (GTK_ENTRY_GET_CLASS (container->details->search_entry));
+-	(entry_parent_class->grab_focus) (container->details->search_entry);
+-
+-	/* send focus-in event */
+-	send_focus_change (container->details->search_entry, TRUE);
+-
+-	/* search first matching iter */
+-	nautilus_icon_container_search_init (container->details->search_entry, container);
+-
+-	return TRUE;
+-}
+-
+ static gboolean
+ handle_popups (NautilusIconContainer *container,
+ 	       GdkEventKey           *event,
+@@ -5355,70 +4834,6 @@ key_press_event (GtkWidget *widget,
+ 	if (!handled) {
+ 		handled = GTK_WIDGET_CLASS (nautilus_icon_container_parent_class)->key_press_event (widget, event);
+ 	}
+-	
+-	/* We pass the event to the search_entry.  If its text changes, then we
+-	 * start the typeahead find capabilities.
+-	 * Copied from NautilusIconContainer */
+-	if (!handled &&
+-	    event->keyval != GDK_KEY_slash /* don't steal slash key event, used for "go to" */ &&
+-	    event->keyval != GDK_KEY_BackSpace &&
+-	    event->keyval != GDK_KEY_Delete) {
+-		GdkEvent *new_event;
+-		GdkWindow *window;
+-		char *old_text;
+-		const char *new_text;
+-		gboolean retval;
+-		GdkScreen *screen;
+-		gboolean text_modified;
+-		gulong popup_menu_id;
+-
+-		nautilus_icon_container_ensure_interactive_directory (container);
+-
+-		/* Make a copy of the current text */
+-		old_text = g_strdup (gtk_entry_get_text (GTK_ENTRY (container->details->search_entry)));
+-		new_event = gdk_event_copy ((GdkEvent *) event);
+-		window = ((GdkEventKey *) new_event)->window;
+-		((GdkEventKey *) new_event)->window = gtk_widget_get_window (container->details->search_entry);
+-		gtk_widget_realize (container->details->search_window);
+-
+-		popup_menu_id = g_signal_connect (container->details->search_entry, 
+-						  "popup_menu", G_CALLBACK (gtk_true), NULL);
+-
+-		/* Move the entry off screen */
+-		screen = gtk_widget_get_screen (GTK_WIDGET (container));
+-		gtk_window_move (GTK_WINDOW (container->details->search_window),
+-		gdk_screen_get_width (screen) + 1,
+-		gdk_screen_get_height (screen) + 1);
+-		gtk_widget_show (container->details->search_window);
+-
+-		/* Send the event to the window.  If the preedit_changed signal is emitted
+-		 * during this event, we will set priv->imcontext_changed  */
+-		container->details->imcontext_changed = FALSE;
+-		retval = gtk_widget_event (container->details->search_entry, new_event);
+-		gtk_widget_hide (container->details->search_window);
+-
+-		g_signal_handler_disconnect (container->details->search_entry, 
+-					     popup_menu_id);
+-
+-		/* We check to make sure that the entry tried to handle the text, and that
+-		 * the text has changed. */
+-		new_text = gtk_entry_get_text (GTK_ENTRY (container->details->search_entry));
+-		text_modified = strcmp (old_text, new_text) != 0;
+-		g_free (old_text);
+-		if (container->details->imcontext_changed ||    /* we're in a preedit */
+-		    (retval && text_modified)) {                /* ...or the text was modified */
+-			if (nautilus_icon_container_start_interactive_search (container)) {
+-				gtk_widget_grab_focus (GTK_WIDGET (container));
+-				return TRUE;
+-			} else {
+-				gtk_entry_set_text (GTK_ENTRY (container->details->search_entry), "");
+-				return FALSE;
+-			}
+-		}
+-
+-		((GdkEventKey *) new_event)->window = window;
+-		gdk_event_free (new_event);
+-	}
+ 
+ 	return handled;
+ }
+diff --git a/src/nautilus-list-view.c b/src/nautilus-list-view.c
+index e482eedd0..7fceecbc4 100644
+--- a/src/nautilus-list-view.c
++++ b/src/nautilus-list-view.c
+@@ -1547,7 +1547,7 @@ create_and_set_up_tree_view (NautilusListView *view)
+ 							g_str_equal,
+ 							(GDestroyNotify)g_free,
+ 							(GDestroyNotify) g_object_unref);
+-	gtk_tree_view_set_enable_search (view->details->tree_view, TRUE);
++	gtk_tree_view_set_enable_search (view->details->tree_view, FALSE);
+ 
+ 	/* Don't handle backspace key. It's used to open the parent folder. */
+ 	binding_set = gtk_binding_set_by_class (GTK_WIDGET_GET_CLASS (view->details->tree_view));
+diff --git a/src/nautilus-query-editor.c b/src/nautilus-query-editor.c
+index 0fb4bd9bf..b993830be 100644
+--- a/src/nautilus-query-editor.c
++++ b/src/nautilus-query-editor.c
+@@ -74,6 +74,7 @@ struct NautilusQueryEditorDetails {
+ 
+ 	GList *rows;
+ 	char *last_set_query_text;
++	gboolean got_preedit;
+ };
+ 
+ enum {
+@@ -112,6 +113,118 @@ static NautilusQueryEditorRowOps row_type[] = {
+ 
+ G_DEFINE_TYPE (NautilusQueryEditor, nautilus_query_editor, GTK_TYPE_BOX);
+ 
++/* taken from gtk/gtktreeview.c */
++static void
++send_focus_change (GtkWidget *widget,
++                   GdkDevice *device,
++		   gboolean   in)
++{
++	GdkDeviceManager *device_manager;
++	GList *devices, *d;
++
++	device_manager = gdk_display_get_device_manager (gtk_widget_get_display (widget));
++	devices = gdk_device_manager_list_devices (device_manager, GDK_DEVICE_TYPE_MASTER);
++	devices = g_list_concat (devices, gdk_device_manager_list_devices (device_manager, GDK_DEVICE_TYPE_SLAVE));
++	devices = g_list_concat (devices, gdk_device_manager_list_devices (device_manager, GDK_DEVICE_TYPE_FLOATING));
++
++	for (d = devices; d; d = d->next) {
++		GdkDevice *dev = d->data;
++		GdkEvent *fevent;
++		GdkWindow *window;
++
++		if (gdk_device_get_source (dev) != GDK_SOURCE_KEYBOARD)
++			continue;
++
++		window = gtk_widget_get_window (widget);
++
++		/* Skip non-master keyboards that haven't
++		 * selected for events from this window
++		 */
++		if (gdk_device_get_device_type (dev) != GDK_DEVICE_TYPE_MASTER &&
++		    !gdk_window_get_device_events (window, dev))
++			continue;
++
++		fevent = gdk_event_new (GDK_FOCUS_CHANGE);
++
++		fevent->focus_change.type = GDK_FOCUS_CHANGE;
++		fevent->focus_change.window = g_object_ref (window);
++		fevent->focus_change.in = in;
++		gdk_event_set_device (fevent, device);
++
++		gtk_widget_send_focus_change (widget, fevent);
++
++		gdk_event_free (fevent);
++	}
++
++	g_list_free (devices);
++}
++
++static void
++entry_focus_hack (GtkWidget *entry,
++		  GdkDevice *device)
++{
++	GtkEntryClass *entry_class;
++	GtkWidgetClass *entry_parent_class;
++
++	/* Grab focus will select all the text.  We don't want that to happen, so we
++	 * call the parent instance and bypass the selection change.  This is probably
++	 * really non-kosher. */
++	entry_class = g_type_class_peek (GTK_TYPE_ENTRY);
++	entry_parent_class = g_type_class_peek_parent (entry_class);
++	(entry_parent_class->grab_focus) (entry);
++
++	/* send focus-in event */
++	send_focus_change (entry, device, TRUE);
++}
++
++static void
++entry_preedit_changed_cb (GtkEntry            *entry,
++			  gchar               *preedit,
++			  NautilusQueryEditor *editor)
++{
++	editor->details->got_preedit = TRUE;
++}
++
++gboolean
++nautilus_query_editor_handle_event (NautilusQueryEditor *editor,
++				    GdkEventKey         *event)
++{
++	GdkEvent *new_event;
++	gboolean handled = FALSE;
++	gulong id;
++	gboolean retval;
++	gboolean text_changed;
++	char *old_text;
++	const char *new_text;
++
++	editor->details->got_preedit = FALSE;
++
++	old_text = g_strdup (gtk_entry_get_text (GTK_ENTRY (editor->details->entry)));
++
++	id = g_signal_connect (editor->details->entry, "preedit-changed",
++			       G_CALLBACK (entry_preedit_changed_cb), editor);
++
++	new_event = gdk_event_copy ((GdkEvent *) event);
++	((GdkEventKey *) new_event)->window = gtk_widget_get_window (editor->details->entry);
++
++	gtk_widget_realize (editor->details->entry);
++	retval = gtk_widget_event (editor->details->entry, new_event);
++	gdk_event_free (new_event);
++
++	g_signal_handler_disconnect (editor->details->entry, id);
++
++	new_text = gtk_entry_get_text (GTK_ENTRY (editor->details->entry));
++	text_changed = strcmp (old_text, new_text) != 0;
++	g_free (old_text);
++
++	handled = (editor->details->got_preedit
++		   || (retval && text_changed));
++
++	editor->details->got_preedit = FALSE;
++
++	return handled;
++}
++
+ static void
+ nautilus_query_editor_dispose (GObject *object)
+ {
+@@ -995,7 +1108,7 @@ void
+ nautilus_query_editor_grab_focus (NautilusQueryEditor *editor)
+ {
+ 	if (editor->details->is_visible) {
+-		gtk_widget_grab_focus (editor->details->entry);
++		entry_focus_hack (editor->details->entry, gtk_get_current_event_device ());
+ 	}
+ }
+ 
+@@ -1072,19 +1185,11 @@ nautilus_query_editor_new (void)
+ }
+ 
+ static void
+-update_location (NautilusQueryEditor *editor,
+-		 NautilusQuery       *query)
++update_location (NautilusQueryEditor *editor)
+ {
+-	char *uri;
+ 	NautilusFile *file;
+ 
+-	uri = nautilus_query_get_location (query);
+-	if (uri == NULL) {
+-		return;
+-	}
+-	g_free (editor->details->current_uri);
+-	editor->details->current_uri = uri;
+-	file = nautilus_file_get_by_uri (uri);
++	file = nautilus_file_get_by_uri (editor->details->current_uri);
+ 
+ 	if (file != NULL) {
+ 		char *name;
+@@ -1104,6 +1209,15 @@ update_location (NautilusQueryEditor *editor,
+ 	}
+ }
+ 
++void
++nautilus_query_editor_set_location (NautilusQueryEditor *editor,
++				    GFile               *location)
++{
++	g_free (editor->details->current_uri);
++	editor->details->current_uri = g_file_get_uri (location);
++	update_location (editor);
++}
++
+ void
+ nautilus_query_editor_set_query (NautilusQueryEditor *editor, NautilusQuery *query)
+ {
+@@ -1122,9 +1236,13 @@ nautilus_query_editor_set_query (NautilusQueryEditor *editor, NautilusQuery *que
+ 	}
+ 
+ 	editor->details->change_frozen = TRUE;
++
+ 	gtk_entry_set_text (GTK_ENTRY (editor->details->entry), text);
+ 
+-	update_location (editor, query);
++	g_free (editor->details->current_uri);
++	editor->details->current_uri = nautilus_query_get_location (query);
++
++	update_location (editor);
+ 
+ 	for (type = 0; type < NAUTILUS_QUERY_EDITOR_ROW_LAST; type++) {
+ 		row_type[type].add_rows_from_query (editor, query);
+diff --git a/src/nautilus-query-editor.h b/src/nautilus-query-editor.h
+index 7cdbaa68a..cc3bf1f15 100644
+--- a/src/nautilus-query-editor.h
++++ b/src/nautilus-query-editor.h
+@@ -64,11 +64,15 @@ void       nautilus_query_editor_set_default_query (NautilusQueryEditor *editor)
+ 
+ void	   nautilus_query_editor_grab_focus (NautilusQueryEditor *editor);
+ void       nautilus_query_editor_clear_query (NautilusQueryEditor *editor);
++gboolean       nautilus_query_editor_handle_event (NautilusQueryEditor *editor,
++						   GdkEventKey         *event);
+ 
+ NautilusQuery *nautilus_query_editor_get_query   (NautilusQueryEditor *editor);
+ void           nautilus_query_editor_set_query   (NautilusQueryEditor *editor,
+ 						  NautilusQuery       *query);
+ GFile *        nautilus_query_editor_get_location (NautilusQueryEditor *editor);
++void           nautilus_query_editor_set_location (NautilusQueryEditor *editor,
++						   GFile               *location);
+ void           nautilus_query_editor_set_visible (NautilusQueryEditor *editor,
+ 						  gboolean             visible);
+ 
+diff --git a/src/nautilus-window-slot.c b/src/nautilus-window-slot.c
+index 407c49b80..0fbfb9d3d 100644
+--- a/src/nautilus-window-slot.c
++++ b/src/nautilus-window-slot.c
+@@ -52,6 +52,13 @@ enum {
+ 
+ static guint signals[LAST_SIGNAL] = { 0 };
+ 
++gboolean
++nautilus_window_slot_handle_event (NautilusWindowSlot *slot,
++				   GdkEventKey        *event)
++{
++	return nautilus_query_editor_handle_event (slot->query_editor, event);
++}
++
+ static void
+ sync_search_directory (NautilusWindowSlot *slot)
+ {
+@@ -143,56 +150,34 @@ update_query_editor (NautilusWindowSlot *slot)
+ {
+ 	NautilusDirectory *directory;
+ 	NautilusSearchDirectory *search_directory;
+-	NautilusQuery *query;
+ 
+ 	directory = nautilus_directory_get (slot->location);
+ 
+-	query = NULL;
+-
+ 	if (NAUTILUS_IS_SEARCH_DIRECTORY (directory)) {
++		NautilusQuery *query;
+ 		search_directory = NAUTILUS_SEARCH_DIRECTORY (directory);
+ 		query = nautilus_search_directory_get_query (search_directory);
++		if (query != NULL) {
++			nautilus_query_editor_set_query (slot->query_editor,
++							 query);
++			g_object_unref (query);
++		}
++	} else {
++		nautilus_query_editor_set_location (slot->query_editor, slot->location);
+ 	}
+ 
+-	if (query == NULL) {
+-		char *uri;
+-		uri = g_file_get_uri (slot->location);
+-		query = nautilus_query_new ();
+-		nautilus_query_set_location (query, uri);
+-		g_free (uri);
+-	}
+-	nautilus_query_editor_set_query (slot->query_editor,
+-					 query);
+-	g_object_unref (query);
+-
+ 	nautilus_directory_unref (directory);
+ }
+ 
+ static void
+ ensure_query_editor (NautilusWindowSlot *slot)
+ {
+-	GtkWidget *query_editor;
++	g_assert (slot->query_editor != NULL);
+ 
+-	if (slot->query_editor != NULL) {
+-		return;
+-	}
+-
+-	query_editor = nautilus_query_editor_new ();
+-	slot->query_editor = NAUTILUS_QUERY_EDITOR (query_editor);
+-
+-	nautilus_window_slot_add_extra_location_widget (slot, query_editor);
+-	gtk_widget_show (query_editor);
++	gtk_widget_show (GTK_WIDGET (slot->query_editor));
+ 	nautilus_query_editor_grab_focus (slot->query_editor);
+ 
+ 	update_query_editor (slot);
+-
+-	g_signal_connect_object (slot->query_editor, "changed",
+-				 G_CALLBACK (query_editor_changed_callback), slot, 0);
+-	g_signal_connect_object (slot->query_editor, "cancel",
+-				 G_CALLBACK (query_editor_cancel_callback), slot, 0);
+-
+-	g_object_add_weak_pointer (G_OBJECT (slot->query_editor),
+-				   (gpointer *) &slot->query_editor);
+ }
+ 
+ void
+@@ -201,13 +186,24 @@ nautilus_window_slot_set_query_editor_visible (NautilusWindowSlot *slot,
+ {
+ 	if (visible) {
+ 		ensure_query_editor (slot);
++		gtk_widget_show (GTK_WIDGET (slot->query_editor));
+ 		nautilus_query_editor_set_visible (slot->query_editor, TRUE);
+ 		nautilus_query_editor_grab_focus (slot->query_editor);
++
++		if (slot->qe_changed_id == 0)
++			slot->qe_changed_id = g_signal_connect (slot->query_editor, "changed",
++								G_CALLBACK (query_editor_changed_callback), slot);
++		if (slot->qe_cancel_id == 0)
++			slot->qe_cancel_id = g_signal_connect (slot->query_editor, "cancel",
++							       G_CALLBACK (query_editor_cancel_callback), slot);
++
+ 	} else {
+-		if (slot->query_editor != NULL) {
+-			gtk_widget_destroy (GTK_WIDGET (slot->query_editor));
+-			g_assert (slot->query_editor == NULL);
+-		}
++		gtk_widget_hide (GTK_WIDGET (slot->query_editor));
++		g_signal_handler_disconnect (slot->query_editor, slot->qe_changed_id);
++		slot->qe_changed_id = 0;
++		g_signal_handler_disconnect (slot->query_editor, slot->qe_cancel_id);
++		slot->qe_cancel_id = 0;
++		nautilus_query_editor_clear_query (slot->query_editor);
+ 	}
+ }
+ 
+@@ -270,6 +266,11 @@ nautilus_window_slot_init (NautilusWindowSlot *slot)
+ 	gtk_box_pack_start (GTK_BOX (slot), extras_vbox, FALSE, FALSE, 0);
+ 	gtk_widget_show (extras_vbox);
+ 
++	slot->query_editor = NAUTILUS_QUERY_EDITOR (nautilus_query_editor_new ());
++	nautilus_window_slot_add_extra_location_widget (slot, GTK_WIDGET (slot->query_editor));
++	g_object_add_weak_pointer (G_OBJECT (slot->query_editor),
++				   (gpointer *) &slot->query_editor);
++
+ 	slot->view_overlay = gtk_overlay_new ();
+ 	gtk_widget_add_events (slot->view_overlay,
+ 			       GDK_ENTER_NOTIFY_MASK |
+@@ -666,8 +667,7 @@ remove_all_extra_location_widgets (GtkWidget *widget,
+ 	NautilusDirectory *directory;
+ 
+ 	directory = nautilus_directory_get (slot->location);
+-	if (!NAUTILUS_IS_SEARCH_DIRECTORY (directory)
+-	    || (widget != GTK_WIDGET (slot->query_editor))) {
++	if (widget != GTK_WIDGET (slot->query_editor)) {
+ 		gtk_container_remove (GTK_CONTAINER (slot->extra_location_widgets), widget);
+ 	}
+ 
+diff --git a/src/nautilus-window-slot.h b/src/nautilus-window-slot.h
+index 42586f1ba..c925c4ec0 100644
+--- a/src/nautilus-window-slot.h
++++ b/src/nautilus-window-slot.h
+@@ -90,6 +90,8 @@ struct NautilusWindowSlot {
+ 	gboolean allow_stop;
+ 
+ 	NautilusQueryEditor *query_editor;
++	gulong qe_changed_id;
++	gulong qe_cancel_id;
+ 
+ 	/* New location. */
+ 	NautilusLocationChangeType location_change_type;
+@@ -122,6 +124,8 @@ void    nautilus_window_slot_update_title		   (NautilusWindowSlot *slot);
+ void    nautilus_window_slot_update_icon		   (NautilusWindowSlot *slot);
+ void    nautilus_window_slot_set_query_editor_visible	   (NautilusWindowSlot *slot,
+ 							    gboolean            visible);
++gboolean nautilus_window_slot_handle_event       	   (NautilusWindowSlot *slot,
++							    GdkEventKey        *event);
+ 
+ GFile * nautilus_window_slot_get_location		   (NautilusWindowSlot *slot);
+ char *  nautilus_window_slot_get_location_uri		   (NautilusWindowSlot *slot);
+diff --git a/src/nautilus-window.c b/src/nautilus-window.c
+index 7ee9a82cc..7d5b71295 100644
+--- a/src/nautilus-window.c
++++ b/src/nautilus-window.c
+@@ -1449,6 +1449,7 @@ nautilus_window_key_press_event (GtkWidget *widget,
+ 	NautilusView *view;
+ 	GtkWidget *focus_widget;
+ 	int i;
++	gboolean handled = FALSE;
+ 
+ 	window = NAUTILUS_WINDOW (widget);
+ 
+@@ -1500,7 +1501,20 @@ nautilus_window_key_press_event (GtkWidget *widget,
+ 		}
+ 	}
+ 
+-	return GTK_WIDGET_CLASS (nautilus_window_parent_class)->key_press_event (widget, event);
++	if (!handled &&
++	    event->keyval != GDK_KEY_slash /* don't steal slash key event, used for "go to" */ &&
++	    event->keyval != GDK_KEY_BackSpace &&
++	    event->keyval != GDK_KEY_Delete) {
++		if (nautilus_window_slot_handle_event (window->details->active_slot, event)) {
++			toggle_toolbar_search_button (window, TRUE);
++			return TRUE;
++		}
++	}
++
++	if (!handled)
++		handled = GTK_WIDGET_CLASS (nautilus_window_parent_class)->key_press_event (widget, event);
++
++	return handled;
+ }
+ 
+ /*
+

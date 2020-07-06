@@ -1,0 +1,50 @@
+commit c3af664adbe06803931dbc7a3c8588982d72fac1
+Author: Ralph Campbell <ralphc@pathscale.com>
+Date:   Fri Apr 27 11:08:40 2007 -0700
+
+    IB/ipath: Don't put QP in timeout queue if waiting to send
+    
+    This fixes a problem which causes too many RC timeouts and
+    retransmits.
+    
+    Signed-off-by: Ralph Campbell <ralph.campbell@qlogic.com>
+    Signed-off-by: Roland Dreier <rolandd@cisco.com>
+
+diff --git a/drivers/infiniband/hw/ipath/ipath_rc.c b/drivers/infiniband/hw/ipath/ipath_rc.c
+index e3e533276356..9e68c91130dd 100644
+--- a/drivers/infiniband/hw/ipath/ipath_rc.c
++++ b/drivers/infiniband/hw/ipath/ipath_rc.c
+@@ -228,18 +228,13 @@ int ipath_make_rc_req(struct ipath_qp *qp,
+ 		goto done;
+ 
+ 	if (!(ib_ipath_state_ops[qp->state] & IPATH_PROCESS_SEND_OK) ||
+-	    qp->s_rnr_timeout)
++	    qp->s_rnr_timeout || qp->s_wait_credit)
+ 		goto bail;
+ 
+ 	/* Limit the number of packets sent without an ACK. */
+ 	if (ipath_cmp24(qp->s_psn, qp->s_last_psn + IPATH_PSN_CREDIT) > 0) {
+ 		qp->s_wait_credit = 1;
+ 		dev->n_rc_stalls++;
+-		spin_lock(&dev->pending_lock);
+-		if (list_empty(&qp->timerwait))
+-			list_add_tail(&qp->timerwait,
+-				      &dev->pending[dev->pending_index]);
+-		spin_unlock(&dev->pending_lock);
+ 		goto bail;
+ 	}
+ 
+diff --git a/drivers/infiniband/hw/ipath/ipath_verbs.h b/drivers/infiniband/hw/ipath/ipath_verbs.h
+index 7c4929f1cb5b..c62f9c5854f6 100644
+--- a/drivers/infiniband/hw/ipath/ipath_verbs.h
++++ b/drivers/infiniband/hw/ipath/ipath_verbs.h
+@@ -422,7 +422,7 @@ struct ipath_qp {
+ #define IPATH_S_RDMAR_PENDING	0x04
+ #define IPATH_S_ACK_PENDING	0x08
+ 
+-#define IPATH_PSN_CREDIT	2048
++#define IPATH_PSN_CREDIT	512
+ 
+ /*
+  * Since struct ipath_swqe is not a fixed size, we can't simply index into
+

@@ -1,0 +1,132 @@
+commit a1655100ddfa10829b7d3b055611f268a82e335a
+Author: Heiko Stübner <heiko@sntech.de>
+Date:   Fri Mar 22 15:13:02 2013 +0100
+
+    AUO-K190x: Use correct line length
+    
+    Previously all functions that used the line length used xres directly,
+    thus hardcoding a 8bits per pixel value.
+    
+    This patch calculates the correct line length according to the actual
+    bits per pixel value and changes all line length users to use the
+    calculated line length value.
+    
+    Signed-off-by: Heiko Stübner <heiko@sntech.de>
+    Signed-off-by: Tomi Valkeinen <tomi.valkeinen@ti.com>
+
+diff --git a/drivers/video/auo_k1900fb.c b/drivers/video/auo_k1900fb.c
+index 1a9ac6e1f4b3..d572d3e9c502 100644
+--- a/drivers/video/auo_k1900fb.c
++++ b/drivers/video/auo_k1900fb.c
+@@ -82,6 +82,7 @@ static void auok1900_update_region(struct auok190xfb_par *par, int mode,
+ 	struct device *dev = par->info->device;
+ 	unsigned char *buf = (unsigned char *)par->info->screen_base;
+ 	int xres = par->info->var.xres;
++	int line_length = par->info->fix.line_length;
+ 	u16 args[4];
+ 
+ 	pm_runtime_get_sync(dev);
+@@ -100,9 +101,9 @@ static void auok1900_update_region(struct auok190xfb_par *par, int mode,
+ 	args[1] = y1 + 1;
+ 	args[2] = xres;
+ 	args[3] = y2 - y1;
+-	buf += y1 * xres;
++	buf += y1 * line_length;
+ 	auok190x_send_cmdargs_pixels(par, AUOK1900_CMD_PARTIALDISP, 4, args,
+-				     ((y2 - y1) * xres)/2, (u16 *) buf);
++				     ((y2 - y1) * line_length)/2, (u16 *) buf);
+ 	auok190x_send_command(par, AUOK190X_CMD_DATA_STOP);
+ 
+ 	par->update_cnt++;
+diff --git a/drivers/video/auo_k1901fb.c b/drivers/video/auo_k1901fb.c
+index d1db1653cd88..9efbe2763447 100644
+--- a/drivers/video/auo_k1901fb.c
++++ b/drivers/video/auo_k1901fb.c
+@@ -121,6 +121,7 @@ static void auok1901_update_region(struct auok190xfb_par *par, int mode,
+ 	struct device *dev = par->info->device;
+ 	unsigned char *buf = (unsigned char *)par->info->screen_base;
+ 	int xres = par->info->var.xres;
++	int line_length = par->info->fix.line_length;
+ 	u16 args[5];
+ 
+ 	pm_runtime_get_sync(dev);
+@@ -139,9 +140,9 @@ static void auok1901_update_region(struct auok190xfb_par *par, int mode,
+ 	args[1] = y1 + 1;
+ 	args[2] = xres;
+ 	args[3] = y2 - y1;
+-	buf += y1 * xres;
++	buf += y1 * line_length;
+ 	auok190x_send_cmdargs_pixels_nowait(par, AUOK1901_CMD_DMA_START, 4,
+-					    args, ((y2 - y1) * xres)/2,
++					    args, ((y2 - y1) * line_length)/2,
+ 					    (u16 *) buf);
+ 	auok190x_send_command_nowait(par, AUOK190X_CMD_DATA_STOP);
+ 
+diff --git a/drivers/video/auo_k190x.c b/drivers/video/auo_k190x.c
+index 53846cb534d4..bc0b6433eae6 100644
+--- a/drivers/video/auo_k190x.c
++++ b/drivers/video/auo_k190x.c
+@@ -224,8 +224,8 @@ static void auok190xfb_dpy_deferred_io(struct fb_info *info,
+ {
+ 	struct fb_deferred_io *fbdefio = info->fbdefio;
+ 	struct auok190xfb_par *par = info->par;
++	u16 line_length = info->fix.line_length;
+ 	u16 yres = info->var.yres;
+-	u16 xres = info->var.xres;
+ 	u16 y1 = 0, h = 0;
+ 	int prev_index = -1;
+ 	struct page *cur;
+@@ -254,7 +254,7 @@ static void auok190xfb_dpy_deferred_io(struct fb_info *info,
+ 	}
+ 
+ 	/* height increment is fixed per page */
+-	h_inc = DIV_ROUND_UP(PAGE_SIZE , xres);
++	h_inc = DIV_ROUND_UP(PAGE_SIZE , line_length);
+ 
+ 	/* calculate number of pages from pixel height */
+ 	threshold = par->consecutive_threshold / h_inc;
+@@ -265,7 +265,7 @@ static void auok190xfb_dpy_deferred_io(struct fb_info *info,
+ 	list_for_each_entry(cur, &fbdefio->pagelist, lru) {
+ 		if (prev_index < 0) {
+ 			/* just starting so assign first page */
+-			y1 = (cur->index << PAGE_SHIFT) / xres;
++			y1 = (cur->index << PAGE_SHIFT) / line_length;
+ 			h = h_inc;
+ 		} else if ((cur->index - prev_index) <= threshold) {
+ 			/* page is within our threshold for single updates */
+@@ -275,7 +275,7 @@ static void auok190xfb_dpy_deferred_io(struct fb_info *info,
+ 			par->update_partial(par, y1, y1 + h);
+ 
+ 			/* start over with our non consecutive page */
+-			y1 = (cur->index << PAGE_SHIFT) / xres;
++			y1 = (cur->index << PAGE_SHIFT) / line_length;
+ 			h = h_inc;
+ 		}
+ 		prev_index = cur->index;
+@@ -896,13 +896,13 @@ int auok190x_common_probe(struct platform_device *pdev,
+ 		info->var.yres = panel->w;
+ 		info->var.xres_virtual = panel->h;
+ 		info->var.yres_virtual = panel->w;
+-		info->fix.line_length = panel->h;
++		info->fix.line_length = panel->h * info->var.bits_per_pixel / 8;
+ 	} else {
+ 		info->var.xres = panel->w;
+ 		info->var.yres = panel->h;
+ 		info->var.xres_virtual = panel->w;
+ 		info->var.yres_virtual = panel->h;
+-		info->fix.line_length = panel->w;
++		info->fix.line_length = panel->w * info->var.bits_per_pixel / 8;
+ 	}
+ 
+ 	par->resolution = board->resolution;
+@@ -910,7 +910,8 @@ int auok190x_common_probe(struct platform_device *pdev,
+ 
+ 	/* videomemory handling */
+ 
+-	videomemorysize = roundup((panel->w * panel->h), PAGE_SIZE);
++	videomemorysize = roundup((panel->w * panel->h) *
++				info->var.bits_per_pixel / 8, PAGE_SIZE);
+ 	videomemory = vmalloc(videomemorysize);
+ 	if (!videomemory) {
+ 		ret = -ENOMEM;
+

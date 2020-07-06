@@ -1,0 +1,112 @@
+commit b9543dac5bbc4aef0a598965b6b34f6259ab9a9b
+Author: Jan Kara <jack@suse.cz>
+Date:   Thu Jan 13 15:45:48 2011 -0800
+
+    writeback: avoid livelocking WB_SYNC_ALL writeback
+    
+    When wb_writeback() is called in WB_SYNC_ALL mode, work->nr_to_write is
+    usually set to LONG_MAX.  The logic in wb_writeback() then calls
+    __writeback_inodes_sb() with nr_to_write == MAX_WRITEBACK_PAGES and we
+    easily end up with non-positive nr_to_write after the function returns, if
+    the inode has more than MAX_WRITEBACK_PAGES dirty pages at the moment.
+    
+    When nr_to_write is <= 0 wb_writeback() decides we need another round of
+    writeback but this is wrong in some cases!  For example when a single
+    large file is continuously dirtied, we would never finish syncing it
+    because each pass would be able to write MAX_WRITEBACK_PAGES and inode
+    dirty timestamp never gets updated (as inode is never completely clean).
+    Thus __writeback_inodes_sb() would write the redirtied inode again and
+    again.
+    
+    Fix the issue by setting nr_to_write to LONG_MAX in WB_SYNC_ALL mode.  We
+    do not need nr_to_write in WB_SYNC_ALL mode anyway since
+    write_cache_pages() does livelock avoidance using page tagging in
+    WB_SYNC_ALL mode.
+    
+    This makes wb_writeback() call __writeback_inodes_sb() only once on
+    WB_SYNC_ALL.  The latter function won't livelock because it works on
+    
+    - a finite set of files by doing queue_io() once at the beginning
+    - a finite set of pages by PAGECACHE_TAG_TOWRITE page tagging
+    
+    After this patch, program from http://lkml.org/lkml/2010/10/24/154 is no
+    longer able to stall sync forever.
+    
+    [fengguang.wu@intel.com: fix locking comment]
+    Signed-off-by: Jan Kara <jack@suse.cz>
+    Signed-off-by: Wu Fengguang <fengguang.wu@intel.com>
+    Cc: Johannes Weiner <hannes@cmpxchg.org>
+    Cc: Dave Chinner <david@fromorbit.com>
+    Cc: Christoph Hellwig <hch@lst.de>
+    Cc: Jan Engelhardt <jengelh@medozas.de>
+    Cc: Jens Axboe <axboe@kernel.dk>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/fs-writeback.c b/fs/fs-writeback.c
+index 9e72d04e706e..e8063c938dd2 100644
+--- a/fs/fs-writeback.c
++++ b/fs/fs-writeback.c
+@@ -630,6 +630,7 @@ static long wb_writeback(struct bdi_writeback *wb,
+ 	};
+ 	unsigned long oldest_jif;
+ 	long wrote = 0;
++	long write_chunk;
+ 	struct inode *inode;
+ 
+ 	if (wbc.for_kupdate) {
+@@ -642,6 +643,24 @@ static long wb_writeback(struct bdi_writeback *wb,
+ 		wbc.range_end = LLONG_MAX;
+ 	}
+ 
++	/*
++	 * WB_SYNC_ALL mode does livelock avoidance by syncing dirty
++	 * inodes/pages in one big loop. Setting wbc.nr_to_write=LONG_MAX
++	 * here avoids calling into writeback_inodes_wb() more than once.
++	 *
++	 * The intended call sequence for WB_SYNC_ALL writeback is:
++	 *
++	 *      wb_writeback()
++	 *          __writeback_inodes_sb()     <== called only once
++	 *              write_cache_pages()     <== called once for each inode
++	 *                   (quickly) tag currently dirty pages
++	 *                   (maybe slowly) sync all tagged pages
++	 */
++	if (wbc.sync_mode == WB_SYNC_NONE)
++		write_chunk = MAX_WRITEBACK_PAGES;
++	else
++		write_chunk = LONG_MAX;
++
+ 	wbc.wb_start = jiffies; /* livelock avoidance */
+ 	for (;;) {
+ 		/*
+@@ -668,7 +687,7 @@ static long wb_writeback(struct bdi_writeback *wb,
+ 			break;
+ 
+ 		wbc.more_io = 0;
+-		wbc.nr_to_write = MAX_WRITEBACK_PAGES;
++		wbc.nr_to_write = write_chunk;
+ 		wbc.pages_skipped = 0;
+ 
+ 		trace_wbc_writeback_start(&wbc, wb->bdi);
+@@ -678,8 +697,8 @@ static long wb_writeback(struct bdi_writeback *wb,
+ 			writeback_inodes_wb(wb, &wbc);
+ 		trace_wbc_writeback_written(&wbc, wb->bdi);
+ 
+-		work->nr_pages -= MAX_WRITEBACK_PAGES - wbc.nr_to_write;
+-		wrote += MAX_WRITEBACK_PAGES - wbc.nr_to_write;
++		work->nr_pages -= write_chunk - wbc.nr_to_write;
++		wrote += write_chunk - wbc.nr_to_write;
+ 
+ 		/*
+ 		 * If we consumed everything, see if we have more
+@@ -694,7 +713,7 @@ static long wb_writeback(struct bdi_writeback *wb,
+ 		/*
+ 		 * Did we write something? Try for more
+ 		 */
+-		if (wbc.nr_to_write < MAX_WRITEBACK_PAGES)
++		if (wbc.nr_to_write < write_chunk)
+ 			continue;
+ 		/*
+ 		 * Nothing written. Wait for some inode to
+

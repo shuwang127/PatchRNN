@@ -1,0 +1,55 @@
+commit 7c5371c403abb29f01bc6cff6c5096abdf2dc524
+Author: Yinghai Lu <yinghai@kernel.org>
+Date:   Wed Jul 1 12:32:18 2009 -0700
+
+    x86: add boundary check for 32bit res before expand e820 resource to alignment
+    
+    fix hang with HIGHMEM_64G and 32bit resource.  According to hpa and
+    Linus, use (resource_size_t)-1 to fend off big ranges.
+    
+    Analyzed by hpa
+    
+    Reported-and-tested-by: Mikael Pettersson <mikpe@it.uu.se>
+    Signed-off-by: Yinghai Lu <yinghai@kernel.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/arch/x86/kernel/e820.c b/arch/x86/kernel/e820.c
+index 7271fa33d791..c4ca89d9aaf4 100644
+--- a/arch/x86/kernel/e820.c
++++ b/arch/x86/kernel/e820.c
+@@ -1383,6 +1383,8 @@ static unsigned long ram_alignment(resource_size_t pos)
+ 	return 32*1024*1024;
+ }
+ 
++#define MAX_RESOURCE_SIZE ((resource_size_t)-1)
++
+ void __init e820_reserve_resources_late(void)
+ {
+ 	int i;
+@@ -1400,17 +1402,19 @@ void __init e820_reserve_resources_late(void)
+ 	 * avoid stolen RAM:
+ 	 */
+ 	for (i = 0; i < e820.nr_map; i++) {
+-		struct e820entry *entry = &e820_saved.map[i];
+-		resource_size_t start, end;
++		struct e820entry *entry = &e820.map[i];
++		u64 start, end;
+ 
+ 		if (entry->type != E820_RAM)
+ 			continue;
+ 		start = entry->addr + entry->size;
+-		end = round_up(start, ram_alignment(start));
+-		if (start == end)
++		end = round_up(start, ram_alignment(start)) - 1;
++		if (end > MAX_RESOURCE_SIZE)
++			end = MAX_RESOURCE_SIZE;
++		if (start >= end)
+ 			continue;
+-		reserve_region_with_split(&iomem_resource, start,
+-						  end - 1, "RAM buffer");
++		reserve_region_with_split(&iomem_resource, start, end,
++					  "RAM buffer");
+ 	}
+ }
+ 
+

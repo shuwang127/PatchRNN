@@ -1,0 +1,867 @@
+commit 385470574fb49e32c324af06c01d697a16cc3c4b
+Author: ying tian - Beijing China <Ying.Tian@Sun.COM>
+Date:   Wed Nov 5 12:39:50 2008 +0800
+
+    6703522 ahci driver needs to support SATA tape
+
+diff --git a/usr/src/lib/cfgadm_plugins/sata/common/cfga_sata.c b/usr/src/lib/cfgadm_plugins/sata/common/cfga_sata.c
+index a6332ef354..77e47f1076 100644
+--- a/usr/src/lib/cfgadm_plugins/sata/common/cfga_sata.c
++++ b/usr/src/lib/cfgadm_plugins/sata/common/cfga_sata.c
+@@ -20,12 +20,10 @@
+  */
+ 
+ /*
+- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
++ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
+  */
+ 
+-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+-
+ #include <sys/param.h>
+ #include <sys/stat.h>
+ #include <errno.h>
+@@ -1207,7 +1205,7 @@ is_devinfo_blk(char *minor_path)
+  * The dynamic component buffer returned by this function has to be freed!
+  */
+ int
+-sata_make_dyncomp(const char *ap_id, char **dyncomp)
++sata_make_dyncomp(const char *ap_id, char **dyncomp, const char *type)
+ {
+ 	char	*devpath = NULL;
+ 	char	*cp = NULL;
+@@ -1283,6 +1281,12 @@ sata_make_dyncomp(const char *ap_id, char **dyncomp)
+ 			(void) snprintf(minor_path, MAXPATHLEN,
+ 			    "%s/%s", devpath, dep->d_name);
+ 
++			/*
++			 * Break directly for tape device
++			 */
++			if (strcmp(type, "tape") == 0)
++				break;
++
+ 			/*
+ 			 * If stat() fails, the device *may* be retired.
+ 			 * Check via libdevinfo if the device has a BLK minor.
+@@ -1318,8 +1322,10 @@ sata_make_dyncomp(const char *ap_id, char **dyncomp)
+ 			goto bailout;
+ 
+ 		/*
+-		 * Look for links to the physical path in /dev/dsk,
+-		 * since we ONLY looked for BLOCK devices above.
++		 * Look for links to the physical path in /dev/dsk
++		 * and /dev/rmt. So far, sata modue supports disk,
++		 * dvd and tape devices, so we will first look for
++		 * BLOCK devices, and then look for tape devices.
+ 		 */
+ 		(void) physpath_to_devlink("/dev/dsk",
+ 		    minor_path, &devlink, &l_errno);
+@@ -1341,6 +1347,22 @@ sata_make_dyncomp(const char *ap_id, char **dyncomp)
+ 			}
+ 
+ 			free(devlink);
++		} else if (strcmp(type, "tape") == 0) {
++
++			/*
++			 * For tape device, logical name looks like
++			 * rmt/X
++			 */
++			(void) physpath_to_devlink("/dev/rmt",
++			    minor_path, &devlink, &l_errno);
++
++			if (devlink != NULL) {
++				if ((cp = strstr(devlink, "rmt/")) != NULL) {
++					*dyncomp = strdup(cp);
++				}
++
++				free(devlink);
++			}
+ 		}
+ 
+ 		return (SATA_CFGA_OK);
+@@ -1619,7 +1641,8 @@ cfga_list_ext(
+ 			 * This is the case where we need to generate
+ 			 * a dynamic component of the ap_id, i.e. device.
+ 			 */
+-			rv = sata_make_dyncomp(ap_id, &dyncomp);
++			rv = sata_make_dyncomp(ap_id, &dyncomp,
++			    (*ap_id_list)->ap_type);
+ 			if (rv != CFGA_SATA_OK)
+ 				goto bailout;
+ 			if (dyncomp != NULL) {
+diff --git a/usr/src/uts/common/io/sata/adapters/ahci/ahci.c b/usr/src/uts/common/io/sata/adapters/ahci/ahci.c
+index 8178b824f7..2adbd65761 100644
+--- a/usr/src/uts/common/io/sata/adapters/ahci/ahci.c
++++ b/usr/src/uts/common/io/sata/adapters/ahci/ahci.c
+@@ -1177,8 +1177,13 @@ ahci_tran_probe_port(dev_info_t *dip, sata_device_t *sd)
+ 		    "ahci_tran_probe_port: port %d DISK found", port);
+ 		break;
+ 
+-	case SATA_DTYPE_ATAPICD:
+-		sd->satadev_type = SATA_DTYPE_ATAPICD;
++	case SATA_DTYPE_ATAPI:
++		/*
++		 * HBA driver only knows it's an ATAPI device, and don't know
++		 * it's CD/DVD or tape because the ATAPI device type need to
++		 * be determined by checking IDENTIFY PACKET DEVICE data
++		 */
++		sd->satadev_type = SATA_DTYPE_ATAPI;
+ 		AHCIDBG1(AHCIDBG_INFO, ahci_ctlp,
+ 		    "ahci_tran_probe_port: port %d ATAPI found", port);
+ 		break;
+@@ -1775,11 +1780,12 @@ ahci_deliver_satapkt(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
+ 	}
+ 
+ 	ncookies = scmd->satacmd_num_dma_cookies;
+-	AHCIDBG2(AHCIDBG_INFO, ahci_ctlp,
++	AHCIDBG2(AHCIDBG_PRDT, ahci_ctlp,
+ 	    "ncookies = 0x%x, ahci_dma_prdt_number = 0x%x",
+ 	    ncookies, ahci_dma_prdt_number);
+ 
+ 	ASSERT(ncookies <= ahci_dma_prdt_number);
++	ahci_portp->ahciport_prd_bytecounts[cmd_slot] = 0;
+ 
+ 	/* *** now fill the scatter gather list ******* */
+ 	for (i = 0; i < ncookies; i++) {
+@@ -1789,8 +1795,14 @@ ahci_deliver_satapkt(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
+ 		    scmd->satacmd_dma_cookie_list[i]._dmu._dmac_la[1];
+ 		cmd_table->ahcict_prdt[i].ahcipi_descr_info =
+ 		    scmd->satacmd_dma_cookie_list[i].dmac_size - 1;
++		ahci_portp->ahciport_prd_bytecounts[cmd_slot] +=
++		    scmd->satacmd_dma_cookie_list[i].dmac_size;
+ 	}
+ 
++	AHCIDBG2(AHCIDBG_PRDT, ahci_ctlp,
++	    "ahciport_prd_bytecounts 0x%x for cmd_slot 0x%x",
++	    ahci_portp->ahciport_prd_bytecounts[cmd_slot], cmd_slot);
++
+ 	/* The ACMD field is filled in for ATAPI command */
+ 	if (scmd->satacmd_cmd_reg == SATAC_PACKET) {
+ 		bcopy(scmd->satacmd_acdb, cmd_table->ahcict_atapi_cmd,
+@@ -1841,40 +1853,46 @@ ahci_deliver_satapkt(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
+ 	spkt->satapkt_hba_driver_private = (void *)(intptr_t)0;
+ 
+ #if AHCI_DEBUG
+-	/* Dump the command header and table */
+-	AHCIDBG0(AHCIDBG_COMMAND, ahci_ctlp, "\n");
+-	AHCIDBG3(AHCIDBG_COMMAND, ahci_ctlp,
+-	    "Command header&table for spkt 0x%p cmd_reg 0x%x port %d",
+-	    spkt, scmd->satacmd_cmd_reg, port);
+-	ptr = (uint32_t *)cmd_header;
+-	AHCIDBG4(AHCIDBG_COMMAND, ahci_ctlp,
+-	    "  Command Header:%8x %8x %8x %8x",
+-	    ptr[0], ptr[1], ptr[2], ptr[3]);
+-
+-	/* Dump the H2D register FIS */
+-	ptr = (uint32_t *)h2d_register_fisp;
+-	AHCIDBG4(AHCIDBG_COMMAND, ahci_ctlp,
+-	    "  Command FIS:   %8x %8x %8x %8x",
+-	    ptr[0], ptr[1], ptr[2], ptr[3]);
+-
+-	/* Dump the ACMD register FIS */
+-	ptr2 = (uint8_t *)&(cmd_table->ahcict_atapi_cmd);
+-	for (i = 0; i < SATA_ATAPI_MAX_CDB_LEN/8; i++)
+-		if (ahci_debug_flags & AHCIDBG_COMMAND)
++	if (ahci_debug_flags & AHCIDBG_ATACMD &&
++	    scmd->satacmd_cmd_reg != SATAC_PACKET ||
++	    ahci_debug_flags & AHCIDBG_ATAPICMD &&
++	    scmd->satacmd_cmd_reg == SATAC_PACKET) {
++
++		/* Dump the command header and table */
++		ahci_log(ahci_ctlp, CE_WARN, "\n");
++		ahci_log(ahci_ctlp, CE_WARN, "Command header&table for spkt "
++		    "0x%p cmd_reg 0x%x port %d", spkt,
++		    scmd->satacmd_cmd_reg, port);
++		ptr = (uint32_t *)cmd_header;
++		ahci_log(ahci_ctlp, CE_WARN,
++		    "  Command Header:%8x %8x %8x %8x",
++		    ptr[0], ptr[1], ptr[2], ptr[3]);
++
++		/* Dump the H2D register FIS */
++		ptr = (uint32_t *)h2d_register_fisp;
++		ahci_log(ahci_ctlp, CE_WARN,
++		    "  Command FIS:   %8x %8x %8x %8x",
++		    ptr[0], ptr[1], ptr[2], ptr[3]);
++
++		/* Dump the ACMD register FIS */
++		ptr2 = (uint8_t *)&(cmd_table->ahcict_atapi_cmd);
++		for (i = 0; i < SATA_ATAPI_MAX_CDB_LEN/8; i++)
++			if (ahci_debug_flags & AHCIDBG_ATAPICMD)
++				ahci_log(ahci_ctlp, CE_WARN,
++				    "  ATAPI command: %2x %2x %2x %2x "
++				    "%2x %2x %2x %2x",
++				    ptr2[8 * i], ptr2[8 * i + 1],
++				    ptr2[8 * i + 2], ptr2[8 * i + 3],
++				    ptr2[8 * i + 4], ptr2[8 * i + 5],
++				    ptr2[8 * i + 6], ptr2[8 * i + 7]);
++
++		/* Dump the PRDT */
++		for (i = 0; i < ncookies; i++) {
++			ptr = (uint32_t *)&(cmd_table->ahcict_prdt[i]);
+ 			ahci_log(ahci_ctlp, CE_WARN,
+-			    "  ATAPI command: %2x %2x %2x %2x "
+-			    "%2x %2x %2x %2x",
+-			    ptr2[8 * i], ptr2[8 * i + 1],
+-			    ptr2[8 * i + 2], ptr2[8 * i + 3],
+-			    ptr2[8 * i + 4], ptr2[8 * i + 5],
+-			    ptr2[8 * i + 6], ptr2[8 * i + 7]);
+-
+-	/* Dump the PRDT */
+-	for (i = 0; i < ncookies; i++) {
+-		ptr = (uint32_t *)&(cmd_table->ahcict_prdt[i]);
+-		AHCIDBG5(AHCIDBG_COMMAND, ahci_ctlp,
+-		    "  Cookie %d:      %8x %8x %8x %8x",
+-		    i, ptr[0], ptr[1], ptr[2], ptr[3]);
++			    "  Cookie %d:      %8x %8x %8x %8x",
++			    i, ptr[0], ptr[1], ptr[2], ptr[3]);
++		}
+ 	}
+ #endif
+ 
+@@ -3727,7 +3745,7 @@ ahci_find_dev_signature(ahci_ctl_t *ahci_ctlp,
+ 		break;
+ 
+ 	case AHCI_SIGNATURE_ATAPI:
+-		ahci_portp->ahciport_device_type = SATA_DTYPE_ATAPICD;
++		ahci_portp->ahciport_device_type = SATA_DTYPE_ATAPI;
+ 		AHCIDBG1(AHCIDBG_INFO, ahci_ctlp,
+ 		    "ATAPI device is found at port: %d", port);
+ 		break;
+@@ -4534,6 +4552,10 @@ ahci_intr_cmd_cmplt(ahci_ctl_t *ahci_ctlp,
+ 	int finished_slot;
+ 	sata_pkt_t *satapkt;
+ 	ahci_fis_d2h_register_t *rcvd_fisp;
++#if AHCI_DEBUG
++	ahci_cmd_header_t *cmd_header;
++	uint32_t cmd_dmacount;
++#endif
+ 
+ 	mutex_enter(&ahci_portp->ahciport_mutex);
+ 
+@@ -4588,6 +4610,49 @@ ahci_intr_cmd_cmplt(ahci_ctl_t *ahci_ctlp,
+ 
+ 		satapkt = ahci_portp->ahciport_slot_pkts[finished_slot];
+ 		ASSERT(satapkt != NULL);
++#if AHCI_DEBUG
++		/*
++		 * For non-native queued commands, the PRD byte count field
++		 * shall contain an accurate count of the number of bytes
++		 * transferred for the command before the PxCI bit is cleared
++		 * to '0' for the command.
++		 *
++		 * The purpose of this field is to let software know how many
++		 * bytes transferred for a given operation in order to
++		 * determine if underflow occurred. When issuing native command
++		 * queuing commands, this field should not be used and is not
++		 * required to be valid since in this case underflow is always
++		 * illegal.
++		 *
++		 * For data reads, the HBA will update its PRD byte count with
++		 * the total number of bytes received from the last FIS, and
++		 * may be able to continue normally. For data writes, the
++		 * device will detect an error, and HBA most likely will get
++		 * a fatal error.
++		 *
++		 * Therefore, here just put code to debug part. And please
++		 * refer to the comment above ahci_intr_fatal_error for the
++		 * definition of underflow error.
++		 */
++		cmd_dmacount =
++		    ahci_portp->ahciport_prd_bytecounts[finished_slot];
++		if (cmd_dmacount) {
++			cmd_header =
++			    &ahci_portp->ahciport_cmd_list[finished_slot];
++			AHCIDBG3(AHCIDBG_INTR|AHCIDBG_PRDT, ahci_ctlp,
++			    "ahci_intr_cmd_cmplt: port %d, "
++			    "PRD Byte Count = 0x%x, "
++			    "ahciport_prd_bytecounts = 0x%x", port,
++			    cmd_header->ahcich_prd_byte_count,
++			    cmd_dmacount);
++
++			if (cmd_header->ahcich_prd_byte_count != cmd_dmacount) {
++				AHCIDBG1(AHCIDBG_UNDERFLOW, ahci_ctlp,
++				    "ahci_intr_cmd_cmplt: port %d, "
++				    "an underflow occurred", port);
++			}
++		}
++#endif
+ 
+ 		/*
+ 		 * For SATAC_SMART command with SATA_SMART_RETURN_STATUS
+@@ -5059,6 +5124,8 @@ ahci_intr_non_fatal_error(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
+ 	int current_slot;
+ 	uint32_t current_tags;
+ 	sata_pkt_t *satapkt;
++	ahci_cmd_header_t *cmd_header;
++	uint32_t cmd_dmacount;
+ #endif
+ 
+ 	mutex_enter(&ahci_portp->ahciport_mutex);
+@@ -5122,6 +5189,25 @@ ahci_intr_non_fatal_error(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
+ 			    "ahci_intr_non_fatal_error: port %d, "
+ 			    "satapkt 0x%p is being processed when error occurs",
+ 			    port, (void *)satapkt);
++
++			/*
++			 * PRD Byte Count field of command header is not
++			 * required to reflect the total number of bytes
++			 * transferred when an overflow occurs, so here
++			 * just log the value.
++			 */
++			cmd_dmacount =
++			    ahci_portp->ahciport_prd_bytecounts[current_slot];
++			if (cmd_dmacount) {
++				cmd_header = &ahci_portp->
++				    ahciport_cmd_list[current_slot];
++				AHCIDBG3(AHCIDBG_INTR|AHCIDBG_ERRS, ahci_ctlp,
++				    "ahci_intr_non_fatal_error: port %d, "
++				    "PRD Byte Count = 0x%x, "
++				    "ahciport_prd_bytecounts = 0x%x", port,
++				    cmd_header->ahcich_prd_byte_count,
++				    cmd_dmacount);
++			}
+ 		}
+ 	} else if (NCQ_CMD_IN_PROGRESS(ahci_portp)) {
+ 		/*
+@@ -6549,9 +6635,9 @@ loop:
+  * to higher level software.
+  *
+  * Fatal errors include the following:
+- * 	PxIS.IFS - Interface Fatal Error Status
+- * 	PxIS.HBDS - Host Bus Data Error Status
+- * 	PxIS.HBFS - Host Bus Fatal Error Status
++ *	PxIS.IFS - Interface Fatal Error Status
++ *	PxIS.HBDS - Host Bus Data Error Status
++ *	PxIS.HBFS - Host Bus Fatal Error Status
+  *	PxIS.TFES - Task File Error Status
+  *
+  * WARNING!!! ahciport_mutex should be acquired before the function is called.
+@@ -6568,6 +6654,9 @@ ahci_fatal_error_recovery_handler(ahci_ctl_t *ahci_ctlp,
+ 	ahci_fis_d2h_register_t	*ahci_rcvd_fisp;
+ 	sata_cmd_t	*sata_cmd = NULL;
+ 	sata_pkt_t	*spkt = NULL;
++#if AHCI_DEBUG
++	ahci_cmd_header_t *cmd_header;
++#endif
+ 
+ 	AHCIDBG1(AHCIDBG_ENTRY, ahci_ctlp,
+ 	    "ahci_fatal_error_recovery_handler enter: port %d", port);
+@@ -6599,6 +6688,22 @@ ahci_fatal_error_recovery_handler(ahci_ctl_t *ahci_ctlp,
+ 			}
+ 		}
+ 
++#if AHCI_DEBUG
++		/*
++		 * Debugging purpose...
++		 */
++		if (ahci_portp->ahciport_prd_bytecounts[failed_slot]) {
++			cmd_header =
++			    &ahci_portp->ahciport_cmd_list[failed_slot];
++			AHCIDBG3(AHCIDBG_INTR|AHCIDBG_ERRS, ahci_ctlp,
++			    "ahci_fatal_error_recovery_handler: port %d, "
++			    "PRD Byte Count = 0x%x, "
++			    "ahciport_prd_bytecounts = 0x%x", port,
++			    cmd_header->ahcich_prd_byte_count,
++			    ahci_portp->ahciport_prd_bytecounts[failed_slot]);
++		}
++#endif
++
+ 		sata_cmd = &spkt->satapkt_cmd;
+ 
+ 		/* Fill out the status and error registers for PxIS.TFES */
+@@ -6682,11 +6787,11 @@ next:
+ 	 * the error when a COMRESET has not been performed as part of the
+ 	 * error recovery.
+ 	 */
+-	if (spkt && ahci_portp->ahciport_device_type == SATA_DTYPE_ATAPICD)
++	if (spkt && ahci_portp->ahciport_device_type == SATA_DTYPE_ATAPI)
+ 		ahci_get_rqsense_data(ahci_ctlp, ahci_portp, port, spkt);
+ out:
+ 	AHCIDBG5(AHCIDBG_ERRS, ahci_ctlp,
+-	    "ahci_fatal_error_recovery_handler: port %d interface error "
++	    "ahci_fatal_error_recovery_handler: port %d fatal error "
+ 	    "occurred slot_status = 0x%x, pending_tags = 0x%x, "
+ 	    "pending_ncq_tags = 0x%x failed_tags = 0x%x",
+ 	    port, slot_status, ahci_portp->ahciport_pending_tags,
+diff --git a/usr/src/uts/common/io/sata/impl/sata.c b/usr/src/uts/common/io/sata/impl/sata.c
+index 593921e4c8..5b5f06fc08 100644
+--- a/usr/src/uts/common/io/sata/impl/sata.c
++++ b/usr/src/uts/common/io/sata/impl/sata.c
+@@ -129,7 +129,7 @@ static	void sata_inject_pkt_fault(sata_pkt_t *, int *, int);
+ 
+ #define	LEGACY_HWID_LEN	64	/* Model (40) + Serial (20) + pad */
+ 
+-static char sata_rev_tag[] = {"1.39"};
++static char sata_rev_tag[] = {"1.40"};
+ 
+ /*
+  * SATA cb_ops functions
+@@ -417,6 +417,9 @@ int	sata_write_cache = 1;		/* enabled */
+ /* Default write cache setting for SATA ATAPI CD/DVD */
+ int 	sata_atapicdvd_write_cache = 1; /* enabled */
+ 
++/* Default write cache setting for SATA ATAPI tape */
++int	sata_atapitape_write_cache = 1; /* enabled */
++
+ /*
+  * Linked list of HBA instances
+  */
+@@ -2133,7 +2136,7 @@ sata_scsi_start(struct scsi_address *ap, struct scsi_pkt *pkt)
+ 		return (TRAN_FATAL_ERROR);
+ 	}
+ 
+-	if (sdinfo->satadrv_type == SATA_DTYPE_ATAPICD) {
++	if (sdinfo->satadrv_type & SATA_DTYPE_ATAPI) {
+ 		mutex_exit(&(SATA_CPORT_MUTEX(sata_hba_inst, cport)));
+ 		rval = sata_txlt_atapi(spx);
+ 		SATADBG1(SATA_DBG_SCSI_IF, sata_hba_inst,
+@@ -2412,12 +2415,18 @@ sata_scsi_reset(struct scsi_address *ap, int level)
+  * dma_max
+  * interconnect-type	(INTERCONNECT_SATA)
+  *
+- * Supported capabilities for ATAPI devices (CD/DVD):
++ * Supported capabilities for ATAPI CD/DVD devices:
+  * auto-rqsense		(always supported)
+  * sector_size
+  * dma_max
++ * max-cdb-length
+  * interconnect-type	(INTERCONNECT_SATA)
+  *
++ * Supported capabilities for ATAPI TAPE devices:
++ * auto-rqsense		(always supported)
++ * dma_max
++ * max-cdb-length
++ *
+  * Request for other capabilities is rejected as unsupported.
+  *
+  * Returns supported capability value, or -1 if capability is unsuppported or
+@@ -2507,6 +2516,13 @@ sata_scsi_getcap(struct scsi_address *ap, char *cap, int whom)
+ 		rval = INTERCONNECT_SATA;	/* SATA interconnect type */
+ 		break;
+ 
++	case SCSI_CAP_CDB_LEN:
++		if (sdinfo->satadrv_type & SATA_DTYPE_ATAPI)
++			rval = sdinfo->satadrv_atapi_cdb_len;
++		else
++			rval = -1;
++		break;
++
+ 	default:
+ 		rval = -1;
+ 		break;
+@@ -6985,7 +7001,7 @@ sata_build_lsense_page_30(
+ /*
+  * Start command for ATAPI device.
+  * This function processes scsi_pkt requests.
+- * Only CD/DVD devices are supported.
++ * Now only CD/DVD and tape devices are supported.
+  * Most commands are packet without any translation into Packet Command.
+  * Some may be trapped and executed as SATA commands (not clear which one).
+  *
+@@ -7026,11 +7042,15 @@ sata_txlt_atapi(sata_pkt_txlate_t *spx)
+ 	}
+ 
+ 	/*
+-	 * ATAPI device executes some ATA commands in addition to MMC command
+-	 * set. These ATA commands may be executed by the regular SATA
+-	 * translation functions. None needs to be captured now.
+-	 * Other commands belong to MMC command set and are delivered
+-	 * to ATAPI device via Packet Command.
++	 * ATAPI device executes some ATA commands in addition to those
++	 * commands sent via PACKET command. These ATA commands may be
++	 * executed by the regular SATA translation functions. None needs
++	 * to be captured now.
++	 *
++	 * Commands sent via PACKET command include:
++	 *	MMC command set for ATAPI CD/DVD device
++	 *	SSC command set for ATAPI TAPE device
++	 *
+ 	 */
+ 
+ 	/* Check the size of cdb */
+@@ -7204,7 +7224,16 @@ sata_txlt_atapi_completion(sata_pkt_t *sata_pkt)
+ 		sense = sata_arq_sense(spx);
+ 
+ 		if (sata_pkt->satapkt_reason == SATA_PKT_DEV_ERROR) {
+-			scsipkt->pkt_reason = CMD_INCOMPLETE;
++			/*
++			 * pkt_reason should be CMD_CMPLT for DEVICE ERROR.
++			 * Under this condition ERR bit is set for ATA command,
++			 * and CHK bit set for ATAPI command.
++			 *
++			 * Please check st_intr & sdintr about how pkt_reason
++			 * is used.
++			 */
++			scsipkt->pkt_reason = CMD_CMPLT;
++
+ 			/*
+ 			 * We may not have ARQ data if there was a double
+ 			 * error. But sense data in sata packet was pre-set
+@@ -8921,12 +8950,15 @@ sata_initialize_device(sata_hba_inst_t *sata_hba_inst,
+  * The default write cache setting for SATA HDD is provided by sata_write_cache
+  * static variable. ATAPI CD/DVDs devices have write cache default is
+  * determined by sata_atapicdvd_write_cache static variable.
++ * ATAPI tape devices have write cache default is determined by
++ * sata_atapitape_write_cache static variable.
+  * 1 - enable
+  * 0 - disable
+  * any other value - current drive setting
+  *
+- * Although there is not reason to disable write cache on CD/DVD devices,
+- * the default setting control is provided for the maximun flexibility.
++ * Although there is not reason to disable write cache on CD/DVD devices
++ * and tape devices, the default setting control is provided for the maximun
++ * flexibility.
+  *
+  * In the future, it may be overridden by the
+  * disk-write-cache-enable property setting, if it is defined.
+@@ -8936,7 +8968,8 @@ sata_initialize_device(sata_hba_inst_t *sata_hba_inst,
+ static void
+ sata_init_write_cache_mode(sata_drive_info_t *sdinfo)
+ {
+-	if (sdinfo->satadrv_type == SATA_DTYPE_ATADISK) {
++	switch (sdinfo->satadrv_type) {
++	case SATA_DTYPE_ATADISK:
+ 		if (sata_write_cache == 1)
+ 			sdinfo->satadrv_settings |= SATA_DEV_WRITE_CACHE;
+ 		else if (sata_write_cache == 0)
+@@ -8945,7 +8978,8 @@ sata_init_write_cache_mode(sata_drive_info_t *sdinfo)
+ 		 * When sata_write_cache value is not 0 or 1,
+ 		 * a current setting of the drive's write cache is used.
+ 		 */
+-	} else { /* Assume ATAPI CD/DVD device */
++		break;
++	case SATA_DTYPE_ATAPICD:
+ 		if (sata_atapicdvd_write_cache == 1)
+ 			sdinfo->satadrv_settings |= SATA_DEV_WRITE_CACHE;
+ 		else if (sata_atapicdvd_write_cache == 0)
+@@ -8954,6 +8988,17 @@ sata_init_write_cache_mode(sata_drive_info_t *sdinfo)
+ 		 * When sata_write_cache value is not 0 or 1,
+ 		 * a current setting of the drive's write cache is used.
+ 		 */
++		break;
++	case SATA_DTYPE_ATAPITAPE:
++		if (sata_atapitape_write_cache == 1)
++			sdinfo->satadrv_settings |= SATA_DEV_WRITE_CACHE;
++		else if (sata_atapitape_write_cache == 0)
++			sdinfo->satadrv_settings &= ~SATA_DEV_WRITE_CACHE;
++		/*
++		 * When sata_write_cache value is not 0 or 1,
++		 * a current setting of the drive's write cache is used.
++		 */
++		break;
+ 	}
+ }
+ 
+@@ -9179,7 +9224,7 @@ sata_probe_device(sata_hba_inst_t *sata_hba_inst, sata_device_t *sata_device)
+ 			 * HBA supports ATAPI - try to issue Identify Packet
+ 			 * Device command.
+ 			 */
+-			new_sdinfo.satadrv_type = SATA_DTYPE_ATAPICD;
++			new_sdinfo.satadrv_type = SATA_DTYPE_ATAPI;
+ 			rval = sata_identify_device(sata_hba_inst, &new_sdinfo);
+ 		}
+ 	}
+@@ -9333,32 +9378,29 @@ sata_identify_device(sata_hba_inst_t *sata_hba_inst,
+ 
+ 	/* fetch device identify data */
+ 	if ((rval = sata_fetch_device_identify_data(sata_hba_inst,
+-	    sdinfo)) != 0)
++	    sdinfo)) != SATA_SUCCESS)
+ 		goto fail_unknown;
+ 
+ 	cfg_word = sdinfo->satadrv_id.ai_config;
+-	if (sdinfo->satadrv_type == SATA_DTYPE_ATADISK &&
+-	    (cfg_word & SATA_ATA_TYPE_MASK) != SATA_ATA_TYPE) {
+-		/* Change device type to reflect Identify Device data */
+-		if (((cfg_word & SATA_ATAPI_TYPE_MASK) ==
+-		    SATA_ATAPI_TYPE) &&
+-		    ((cfg_word & SATA_ATAPI_ID_DEV_TYPE) ==
+-		    SATA_ATAPI_CDROM_DEV)) {
++
++	/* Set the correct device type */
++	if ((cfg_word & SATA_ATA_TYPE_MASK) == SATA_ATA_TYPE) {
++		sdinfo->satadrv_type = SATA_DTYPE_ATADISK;
++	} else if ((cfg_word & SATA_ATAPI_TYPE_MASK) == SATA_ATAPI_TYPE) {
++		switch (cfg_word & SATA_ATAPI_ID_DEV_TYPE) {
++		case SATA_ATAPI_CDROM_DEV:
+ 			sdinfo->satadrv_type = SATA_DTYPE_ATAPICD;
+-		} else {
++			break;
++		case SATA_ATAPI_SQACC_DEV:
++			sdinfo->satadrv_type = SATA_DTYPE_ATAPITAPE;
++			break;
++		default:
+ 			sdinfo->satadrv_type = SATA_DTYPE_UNKNOWN;
+ 		}
+-	} else if (sdinfo->satadrv_type == SATA_DTYPE_ATAPICD &&
+-	    (((cfg_word & SATA_ATAPI_TYPE_MASK) != SATA_ATAPI_TYPE) ||
+-	    ((cfg_word & SATA_ATAPI_ID_DEV_TYPE) != SATA_ATAPI_CDROM_DEV))) {
+-		/* Change device type to reflect Identify Device data ! */
+-		if ((sdinfo->satadrv_id.ai_config & SATA_ATA_TYPE_MASK) ==
+-		    SATA_ATA_TYPE) {
+-			sdinfo->satadrv_type = SATA_DTYPE_ATADISK;
+-		} else {
++	} else {
+ 			sdinfo->satadrv_type = SATA_DTYPE_UNKNOWN;
+-		}
+ 	}
++
+ 	if (sdinfo->satadrv_type == SATA_DTYPE_ATADISK) {
+ 		if (sdinfo->satadrv_capacity == 0) {
+ 			/* Non-LBA disk. Too bad... */
+@@ -9424,15 +9466,26 @@ sata_show_drive_info(sata_hba_inst_t *sata_hba_inst,
+ 
+ 	cmn_err(CE_CONT, "?%s :\n", msg_buf);
+ 
+-	if (sdinfo->satadrv_type == SATA_DTYPE_UNKNOWN) {
++	switch (sdinfo->satadrv_type) {
++	case SATA_DTYPE_ATADISK:
++		(void) sprintf(msg_buf, "SATA disk device at");
++		break;
++
++	case SATA_DTYPE_ATAPICD:
++		(void) sprintf(msg_buf, "SATA CD/DVD (ATAPI) device at");
++		break;
++
++	case SATA_DTYPE_ATAPITAPE:
++		(void) sprintf(msg_buf, "SATA tape (ATAPI) device at");
++		break;
++
++	case SATA_DTYPE_UNKNOWN:
+ 		(void) sprintf(msg_buf,
+ 		    "Unsupported SATA device type (cfg 0x%x) at ",
+ 		    sdinfo->satadrv_id.ai_config);
+-	} else {
+-		(void) sprintf(msg_buf, "SATA %s device at",
+-		    sdinfo->satadrv_type == SATA_DTYPE_ATADISK ?
+-		    "disk":"CD/DVD (ATAPI)");
++		break;
+ 	}
++
+ 	if (sdinfo->satadrv_addr.qual == SATA_ADDR_DCPORT)
+ 		cmn_err(CE_CONT, "?\t%s port %d\n",
+ 		    msg_buf, sdinfo->satadrv_addr.cport);
+@@ -9460,10 +9513,9 @@ sata_show_drive_info(sata_hba_inst_t *sata_hba_inst,
+ 	if (sdinfo->satadrv_type == SATA_DTYPE_ATADISK) {
+ 		cmn_err(CE_CONT, "?\tserial number %s\n", msg_buf);
+ 	} else {
+-		/* Assuming ATAPI CD/DVD */
+ 		/*
+-		 * SOme drives do not implement serial number and may
+-		 * violate the spec by provinding spaces rather than zeros
++		 * Some drives do not implement serial number and may
++		 * violate the spec by providing spaces rather than zeros
+ 		 * in serial number field. Scan the buffer to detect it.
+ 		 */
+ 		for (i = 0; i < sizeof (sdinfo->satadrv_id.ai_drvser); i++) {
+@@ -10354,7 +10406,7 @@ sata_fetch_device_identify_data(sata_hba_inst_t *sata_hba_inst,
+ 	scmd->satacmd_lba_high_lsb = 0;		/* N/A */
+ 	scmd->satacmd_features_reg = 0;		/* N/A */
+ 	scmd->satacmd_device_reg = 0;		/* Always device 0 */
+-	if (sdinfo->satadrv_type == SATA_DTYPE_ATAPICD) {
++	if (sdinfo->satadrv_type & SATA_DTYPE_ATAPI) {
+ 		/* Identify Packet Device cmd */
+ 		scmd->satacmd_cmd_reg = SATAC_ID_PACKET_DEVICE;
+ 	} else {
+@@ -12293,10 +12345,10 @@ sata_cfgadm_state(sata_hba_inst_t *sata_hba_inst, int32_t port,
+ 		break;
+ 	}
+ 	case SATA_DTYPE_UNKNOWN:
+-	case SATA_DTYPE_ATAPINONCD:
+ 	case SATA_DTYPE_PMULT:	/* Until PMult is supported */
+ 	case SATA_DTYPE_ATADISK:
+ 	case SATA_DTYPE_ATAPICD:
++	case SATA_DTYPE_ATAPITAPE:
+ 	{
+ 		dev_info_t *tdip = NULL;
+ 		dev_info_t *dip = NULL;
+@@ -12450,6 +12502,10 @@ sata_ioctl_get_ap_type(sata_hba_inst_t *sata_hba_inst,
+ 		ap_type = "cd/dvd";
+ 		break;
+ 
++	case SATA_DTYPE_ATAPITAPE:
++		ap_type = "tape";
++		break;
++
+ 	case SATA_DTYPE_PMULT:
+ 		ap_type = "pmult";
+ 		break;
+@@ -12819,7 +12875,8 @@ sata_set_drive_features(sata_hba_inst_t *sata_hba_inst,
+ 	finfox = (restore != 0) ? " restore device features" :
+ 	    " initialize device features\n";
+ 
+-	if (sdinfo->satadrv_type == SATA_DTYPE_ATADISK) {
++	switch (sdinfo->satadrv_type) {
++	case SATA_DTYPE_ATADISK:
+ 		/* Arbitrarily set UDMA mode */
+ 		if (sata_set_dma_mode(sata_hba_inst, &new_sdinfo) !=
+ 		    SATA_SUCCESS) {
+@@ -12827,7 +12884,9 @@ sata_set_drive_features(sata_hba_inst_t *sata_hba_inst,
+ 			    "%s set UDMA mode\n", finfo));
+ 			return (SATA_FAILURE);
+ 		}
+-	} else { /* Assume SATA ATAPI CD/DVD */
++		break;
++	case SATA_DTYPE_ATAPICD:
++	case SATA_DTYPE_ATAPITAPE:
+ 		/*  Set Removable Media Status Notification, if necessary */
+ 		if ((new_sdinfo.satadrv_id.ai_cmdset83 &
+ 		    SATA_RM_STATUS_NOTIFIC) != 0 && restore != 0) {
+@@ -12858,6 +12917,7 @@ sata_set_drive_features(sata_hba_inst_t *sata_hba_inst,
+ 				rval = SATA_FAILURE;
+ 			}
+ 		}
++		break;
+ 	}
+ 
+ 	if (!(new_sdinfo.satadrv_id.ai_cmdset82 & SATA_LOOK_AHEAD) &&
+diff --git a/usr/src/uts/common/sys/sata/adapters/ahci/ahcireg.h b/usr/src/uts/common/sys/sata/adapters/ahci/ahcireg.h
+index 10c76835e7..52027b6cbf 100644
+--- a/usr/src/uts/common/sys/sata/adapters/ahci/ahcireg.h
++++ b/usr/src/uts/common/sys/sata/adapters/ahci/ahcireg.h
+@@ -28,8 +28,6 @@
+ #ifndef _AHCIREG_H
+ #define	_AHCIREG_H
+ 
+-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+-
+ #ifdef	__cplusplus
+ extern "C" {
+ #endif
+@@ -664,9 +662,6 @@ typedef struct ahci_cmd_header {
+ #define	BZERO_PRD_BYTE_COUNT(cmd_header)			\
+ 	(cmd_header->ahcich_prd_byte_count = 0)
+ 
+-#define	SET_PRD_BYTE_COUNT(cmd_header, count)			\
+-	(cmd_header->ahcich_prd_byte_count = count)
+-
+ 	/* DW 2 - Command Table Base Address */
+ 	uint32_t	ahcich_cmd_tab_base_addr;
+ 
+diff --git a/usr/src/uts/common/sys/sata/adapters/ahci/ahcivar.h b/usr/src/uts/common/sys/sata/adapters/ahci/ahcivar.h
+index dbf7ef2309..2a9e829122 100644
+--- a/usr/src/uts/common/sys/sata/adapters/ahci/ahcivar.h
++++ b/usr/src/uts/common/sys/sata/adapters/ahci/ahcivar.h
+@@ -139,6 +139,10 @@ typedef struct ahci_port {
+ 	/* Keep all the pending sata packets */
+ 	sata_pkt_t		*ahciport_slot_pkts[AHCI_PORT_MAX_CMD_SLOTS];
+ 
++	/* Keep the byte count of all PRD entries for every sata packet */
++	uint32_t		\
++			ahciport_prd_bytecounts[AHCI_PORT_MAX_CMD_SLOTS];
++
+ 	/* Keep the error retrieval sata packet */
+ 	sata_pkt_t		*ahciport_err_retri_pkt;
+ 
+@@ -342,7 +346,7 @@ _NOTE(MUTEX_PROTECTS_DATA(ahci_ctl_t::ahcictl_mutex,
+ 
+ #define	AHCIDBG_INIT		0x0001
+ #define	AHCIDBG_ENTRY		0x0002
+-#define	AHCIDBG_DUMP_PRB	0x0004
++#define	AHCIDBG_PRDT		0x0004
+ #define	AHCIDBG_EVENT		0x0008
+ #define	AHCIDBG_POLL_LOOP	0x0010
+ #define	AHCIDBG_PKTCOMP		0x0020
+@@ -351,12 +355,12 @@ _NOTE(MUTEX_PROTECTS_DATA(ahci_ctl_t::ahcictl_mutex,
+ #define	AHCIDBG_VERBOSE		0x0100
+ #define	AHCIDBG_INTR		0x0200
+ #define	AHCIDBG_ERRS		0x0400
+-#define	AHCIDBG_COOKIES		0x0800
+-#define	AHCIDBG_POWER		0x1000
+-#define	AHCIDBG_COMMAND		0x2000
+-#define	AHCIDBG_SENSEDATA	0x4000
+-#define	AHCIDBG_NCQ		0x8000
+-#define	AHCIDBG_PM		0x10000
++#define	AHCIDBG_ATACMD		0x0800
++#define	AHCIDBG_ATAPICMD	0x1000
++#define	AHCIDBG_SENSEDATA	0x2000
++#define	AHCIDBG_NCQ		0x4000
++#define	AHCIDBG_PM		0x8000
++#define	AHCIDBG_UNDERFLOW	0x10000
+ 
+ extern int ahci_debug_flag;
+ 
+diff --git a/usr/src/uts/common/sys/sata/impl/sata.h b/usr/src/uts/common/sys/sata/impl/sata.h
+index f23df9c4b2..dc65cc95a1 100644
+--- a/usr/src/uts/common/sys/sata/impl/sata.h
++++ b/usr/src/uts/common/sys/sata/impl/sata.h
+@@ -153,7 +153,7 @@ struct sata_cport_info {
+ 						 * SATA_DTYPE_NONE
+ 						 * SATA_DTYPE_ATADISK
+ 						 * SATA_DTYPE_ATAPICD
+-						 * SATA_DTYPE_ATAPINONCD
++						 * SATA_DTYPE_ATAPITAPE
+ 						 * SATA_DTYPE_PMULT
+ 						 * SATA_DTYPE_UNKNOWN
+ 						 */
+@@ -209,7 +209,7 @@ struct sata_drive_info {
+ 						 * Attached device type:
+ 						 * SATA_DTYPE_ATADISK
+ 						 * SATA_DTYPE_ATAPICD
+-						 * SATA_DTYPE_ATAPINONCD
++						 * SATA_DTYPE_ATAPITAPE
+ 						 */
+ 	uint32_t	satadrv_type;
+ 
+@@ -290,7 +290,7 @@ struct sata_pmport_info {
+ 						 * SATA_DTYPE_NONE
+ 						 * SATA_DTYPE_ATADISK
+ 						 * SATA_DTYPE_ATAPICD
+-						 * SATA_DTYPE_ATAPINONCD
++						 * SATA_DTYPE_ATAPITAPE
+ 						 * SATA_DTYPE_UNKNOWN
+ 						 */
+ 	uint32_t	pmport_dev_type;
+@@ -328,7 +328,8 @@ typedef	struct sata_pmport_info sata_pmport_info_t;
+  * ATA disks and ATAPI CD/DVD now.
+  */
+ #define	SATA_VALID_DEV_TYPE	(SATA_DTYPE_ATADISK | \
+-				SATA_DTYPE_ATAPICD)
++				SATA_DTYPE_ATAPICD | \
++				SATA_DTYPE_ATAPITAPE)
+ 
+ /*
+  * Device feature_support (satadrv_features_support)
+@@ -763,7 +764,7 @@ typedef struct sata_atapi_cmd {
+ 
+ #endif
+ 
+-/* sata_rev_tag 1.39 */
++/* sata_rev_tag 1.40 */
+ 
+ #ifdef	__cplusplus
+ }
+diff --git a/usr/src/uts/common/sys/sata/sata_hba.h b/usr/src/uts/common/sys/sata/sata_hba.h
+index 6172f458fd..f287d4e1ba 100644
+--- a/usr/src/uts/common/sys/sata/sata_hba.h
++++ b/usr/src/uts/common/sys/sata/sata_hba.h
+@@ -27,8 +27,6 @@
+ #ifndef _SATA_HBA_H
+ #define	_SATA_HBA_H
+ 
+-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+-
+ #ifdef	__cplusplus
+ extern "C" {
+ #endif
+@@ -199,9 +197,14 @@ _NOTE(SCHEME_PROTECTS_DATA("unshared data", sata_device))
+  */
+ 
+ #define	SATA_DTYPE_NONE			0x00	/* No device attached */
+-#define	SATA_DTYPE_ATADISK		0x01	/* ATA Disk */
+-#define	SATA_DTYPE_ATAPICD		0x02	/* Atapi CD/DVD device */
+-#define	SATA_DTYPE_ATAPINONCD		0x03	/* Atapi non-CD/DVD device */
++#define	SATA_DTYPE_ATADISK		0x01	/* ATA disk */
++#define	SATA_DTYPE_ATAPI		0x40	/* ATAPI device */
++#define	SATA_DTYPE_ATAPICD	\
++	(SATA_DTYPE_ATAPI|0x02)			/* ATAPI CD/DVD device */
++#define	SATA_DTYPE_ATAPITAPE	\
++	(SATA_DTYPE_ATAPI|0x04)			/* ATAPI tape */
++#define	SATA_DTYPE_ATAPIDISK	\
++	(SATA_DTYPE_ATAPI|0x08)			/* ATAPI disk */
+ #define	SATA_DTYPE_PMULT		0x10	/* Port Multiplier */
+ #define	SATA_DTYPE_UNKNOWN		0x20	/* Device attached, unkown */
+ 
+

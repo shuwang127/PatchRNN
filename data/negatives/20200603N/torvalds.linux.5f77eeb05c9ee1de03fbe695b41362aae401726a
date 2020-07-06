@@ -1,0 +1,160 @@
+commit 5f77eeb05c9ee1de03fbe695b41362aae401726a
+Author: Daniel Vetter <daniel.vetter@ffwll.ch>
+Date:   Mon Dec 8 16:40:10 2014 +0100
+
+    drm/i915: Use BUILD_BUG if possible in the i915 WARN_ON
+    
+    Faster feedback to errors is always better. This is inspired by the
+    addition to WARN_ONs to mask/enable helpers for registers to make sure
+    callers have the arguments ordered correctly: Pretty much always the
+    arguments are static.
+    
+    We use WARN_ON(1) a lot in default switch statements though where we
+    should always handle all cases. So add a new macro specifically for
+    that.
+    
+    The idea to use __builtin_constant_p is from Chris Wilson.
+    
+    v2: Use the ({}) gcc-ism to avoid the static inline, suggested by
+    Dave. My first attempt used __cond as the temp var, which is the same
+    used by BUILD_BUG_ON, but with inverted sense. Hilarity ensued, so
+    sprinkle i915 into the name.
+    
+    Also use a temporary variable to only evaluate the condition once,
+    suggested by Damien.
+    
+    v3: It's crazy but apparently 32bit gcc can't compile out the
+    BUILD_BUG_ON in a lot of cases and just falls over. I have no idea
+    why, but until clue grows just disable this nifty idea on 32bit
+    builds. Reported by 0-day builder.
+    
+    v4: Got it all wrong, apparently its the gcc version. We need 4.9+.
+    Now reported by Imre.
+    
+    v5: Chris suggested to add the case to MISSING_CASE for speedier
+    debug.
+    
+    v6: Even some gcc 4.9 versions don't see through the maze, so give up
+    for now. Keep the skeleton and MISSING_CASE stuff though.
+    
+    Cc: Imre Deak <imre.deak@intel.com>
+    Cc: Damien Lespiau <damien.lespiau@intel.com>
+    Cc: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Jani Nikula <jani.nikula@linux.intel.com>
+    Cc: Dave Gordon <david.s.gordon@intel.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@intel.com>
+
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 165a38f36009..479e0c119111 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -2347,7 +2347,7 @@ static const char *power_domain_str(enum intel_display_power_domain domain)
+ 	case POWER_DOMAIN_INIT:
+ 		return "INIT";
+ 	default:
+-		WARN_ON(1);
++		MISSING_CASE(domain);
+ 		return "?";
+ 	}
+ }
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index c74dc946cbf6..5f4cca3ef01c 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -58,7 +58,19 @@
+ #define DRIVER_DATE		"20141205"
+ 
+ #undef WARN_ON
+-#define WARN_ON(x)		WARN(x, "WARN_ON(" #x ")")
++/* Many gcc seem to no see through this and fall over :( */
++#if 0
++#define WARN_ON(x) ({ \
++	bool __i915_warn_cond = (x); \
++	if (__builtin_constant_p(__i915_warn_cond)) \
++		BUILD_BUG_ON(__i915_warn_cond); \
++	WARN(__i915_warn_cond, "WARN_ON(" #x ")"); })
++#else
++#define WARN_ON(x) WARN((x), "WARN_ON(" #x ")")
++#endif
++
++#define MISSING_CASE(x) WARN(1, "Missing switch case (%lu) in %s\n", \
++			     (long) (x), __func__);
+ 
+ enum pipe {
+ 	INVALID_PIPE = -1,
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index ac03a382000b..ce4e46c443a1 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -132,7 +132,7 @@ static gen6_gtt_pte_t snb_pte_encode(dma_addr_t addr,
+ 		pte |= GEN6_PTE_UNCACHED;
+ 		break;
+ 	default:
+-		WARN_ON(1);
++		MISSING_CASE(level);
+ 	}
+ 
+ 	return pte;
+@@ -156,7 +156,7 @@ static gen6_gtt_pte_t ivb_pte_encode(dma_addr_t addr,
+ 		pte |= GEN6_PTE_UNCACHED;
+ 		break;
+ 	default:
+-		WARN_ON(1);
++		MISSING_CASE(level);
+ 	}
+ 
+ 	return pte;
+@@ -1146,7 +1146,7 @@ int i915_ppgtt_init_hw(struct drm_device *dev)
+ 	else if (INTEL_INFO(dev)->gen >= 8)
+ 		gen8_ppgtt_enable(dev);
+ 	else
+-		WARN_ON(1);
++		MISSING_CASE(INTEL_INFO(dev)->gen);
+ 
+ 	if (ppgtt) {
+ 		for_each_ring(ring, dev_priv, i) {
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 841af6c1f50b..878c4857ff49 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -4847,7 +4847,7 @@ static void cherryview_set_cdclk(struct drm_device *dev, int cdclk)
+ 		cmd = 0;
+ 		break;
+ 	default:
+-		WARN_ON(1);
++		MISSING_CASE(cdclk);
+ 		return;
+ 	}
+ 
+@@ -8224,7 +8224,7 @@ static void i9xx_update_cursor(struct drm_crtc *crtc, u32 base)
+ 				cntl |= CURSOR_MODE_256_ARGB_AX;
+ 				break;
+ 			default:
+-				WARN_ON(1);
++				MISSING_CASE(intel_crtc->cursor_width);
+ 				return;
+ 		}
+ 		cntl |= pipe << 28; /* Connect to correct pipe */
+diff --git a/drivers/gpu/drm/i915/intel_uncore.c b/drivers/gpu/drm/i915/intel_uncore.c
+index 46de8d75b4bf..883d2febb705 100644
+--- a/drivers/gpu/drm/i915/intel_uncore.c
++++ b/drivers/gpu/drm/i915/intel_uncore.c
+@@ -1202,7 +1202,7 @@ void intel_uncore_init(struct drm_device *dev)
+ 
+ 	switch (INTEL_INFO(dev)->gen) {
+ 	default:
+-		WARN_ON(1);
++		MISSING_CASE(INTEL_INFO(dev)->gen);
+ 		return;
+ 	case 9:
+ 		ASSIGN_WRITE_MMIO_VFUNCS(gen9);
+@@ -1300,7 +1300,7 @@ int i915_reg_read_ioctl(struct drm_device *dev,
+ 		reg->val = I915_READ8(reg->offset);
+ 		break;
+ 	default:
+-		WARN_ON(1);
++		MISSING_CASE(entry->size);
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+

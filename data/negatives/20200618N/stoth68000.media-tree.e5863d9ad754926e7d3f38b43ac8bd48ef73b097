@@ -1,0 +1,542 @@
+commit e5863d9ad754926e7d3f38b43ac8bd48ef73b097
+Author: Mike Snitzer <snitzer@redhat.com>
+Date:   Wed Dec 17 21:08:12 2014 -0500
+
+    dm: allocate requests in target when stacking on blk-mq devices
+    
+    For blk-mq request-based DM the responsibility of allocating a cloned
+    request is transfered from DM core to the target type.  Doing so
+    enables the cloned request to be allocated from the appropriate
+    blk-mq request_queue's pool (only the DM target, e.g. multipath, can
+    know which block device to send a given cloned request to).
+    
+    Care was taken to preserve compatibility with old-style block request
+    completion that requires request-based DM _not_ acquire the clone
+    request's queue lock in the completion path.  As such, there are now 2
+    different request-based DM target_type interfaces:
+    1) the original .map_rq() interface will continue to be used for
+       non-blk-mq devices -- the preallocated clone request is passed in
+       from DM core.
+    2) a new .clone_and_map_rq() and .release_clone_rq() will be used for
+       blk-mq devices -- blk_get_request() and blk_put_request() are used
+       respectively from these hooks.
+    
+    dm_table_set_type() was updated to detect if the request-based target is
+    being stacked on blk-mq devices, if so DM_TYPE_MQ_REQUEST_BASED is set.
+    DM core disallows switching the DM table's type after it is set.  This
+    means that there is no mixing of non-blk-mq and blk-mq devices within
+    the same request-based DM table.
+    
+    [This patch was started by Keith and later heavily modified by Mike]
+    
+    Tested-by: Bart Van Assche <bvanassche@acm.org>
+    Signed-off-by: Keith Busch <keith.busch@intel.com>
+    Signed-off-by: Mike Snitzer <snitzer@redhat.com>
+
+diff --git a/drivers/md/dm-mpath.c b/drivers/md/dm-mpath.c
+index 2552b88f8953..863fc8c1ac06 100644
+--- a/drivers/md/dm-mpath.c
++++ b/drivers/md/dm-mpath.c
+@@ -11,6 +11,7 @@
+ #include "dm-path-selector.h"
+ #include "dm-uevent.h"
+ 
++#include <linux/blkdev.h>
+ #include <linux/ctype.h>
+ #include <linux/init.h>
+ #include <linux/mempool.h>
+@@ -378,12 +379,13 @@ static int __must_push_back(struct multipath *m)
+ /*
+  * Map cloned requests
+  */
+-static int multipath_map(struct dm_target *ti, struct request *clone,
+-			 union map_info *map_context)
++static int __multipath_map(struct dm_target *ti, struct request *clone,
++			   union map_info *map_context,
++			   struct request *rq, struct request **__clone)
+ {
+ 	struct multipath *m = (struct multipath *) ti->private;
+ 	int r = DM_MAPIO_REQUEUE;
+-	size_t nr_bytes = blk_rq_bytes(clone);
++	size_t nr_bytes = clone ? blk_rq_bytes(clone) : blk_rq_bytes(rq);
+ 	struct pgpath *pgpath;
+ 	struct block_device *bdev;
+ 	struct dm_mpath_io *mpio;
+@@ -416,12 +418,25 @@ static int multipath_map(struct dm_target *ti, struct request *clone,
+ 
+ 	bdev = pgpath->path.dev->bdev;
+ 
+-	clone->q = bdev_get_queue(bdev);
+-	clone->rq_disk = bdev->bd_disk;
+-	clone->cmd_flags |= REQ_FAILFAST_TRANSPORT;
+-
+ 	spin_unlock_irq(&m->lock);
+ 
++	if (clone) {
++		/* Old request-based interface: allocated clone is passed in */
++		clone->q = bdev_get_queue(bdev);
++		clone->rq_disk = bdev->bd_disk;
++		clone->cmd_flags |= REQ_FAILFAST_TRANSPORT;
++	} else {
++		/* blk-mq request-based interface */
++		*__clone = blk_get_request(bdev_get_queue(bdev),
++					   rq_data_dir(rq), GFP_KERNEL);
++		if (IS_ERR(*__clone))
++			/* ENOMEM, requeue */
++			return r;
++		(*__clone)->bio = (*__clone)->biotail = NULL;
++		(*__clone)->rq_disk = bdev->bd_disk;
++		(*__clone)->cmd_flags |= REQ_FAILFAST_TRANSPORT;
++	}
++
+ 	if (pgpath->pg->ps.type->start_io)
+ 		pgpath->pg->ps.type->start_io(&pgpath->pg->ps,
+ 					      &pgpath->path,
+@@ -434,6 +449,24 @@ static int multipath_map(struct dm_target *ti, struct request *clone,
+ 	return r;
+ }
+ 
++static int multipath_map(struct dm_target *ti, struct request *clone,
++			 union map_info *map_context)
++{
++	return __multipath_map(ti, clone, map_context, NULL, NULL);
++}
++
++static int multipath_clone_and_map(struct dm_target *ti, struct request *rq,
++				   union map_info *map_context,
++				   struct request **clone)
++{
++	return __multipath_map(ti, NULL, map_context, rq, clone);
++}
++
++static void multipath_release_clone(struct request *clone)
++{
++	blk_put_request(clone);
++}
++
+ /*
+  * If we run out of usable paths, should we queue I/O or error it?
+  */
+@@ -1670,11 +1703,13 @@ static int multipath_busy(struct dm_target *ti)
+  *---------------------------------------------------------------*/
+ static struct target_type multipath_target = {
+ 	.name = "multipath",
+-	.version = {1, 7, 0},
++	.version = {1, 8, 0},
+ 	.module = THIS_MODULE,
+ 	.ctr = multipath_ctr,
+ 	.dtr = multipath_dtr,
+ 	.map_rq = multipath_map,
++	.clone_and_map_rq = multipath_clone_and_map,
++	.release_clone_rq = multipath_release_clone,
+ 	.rq_end_io = multipath_end_io,
+ 	.presuspend = multipath_presuspend,
+ 	.postsuspend = multipath_postsuspend,
+diff --git a/drivers/md/dm-table.c b/drivers/md/dm-table.c
+index 3afae9e062f8..2d7e373955f3 100644
+--- a/drivers/md/dm-table.c
++++ b/drivers/md/dm-table.c
+@@ -827,6 +827,7 @@ static int dm_table_set_type(struct dm_table *t)
+ {
+ 	unsigned i;
+ 	unsigned bio_based = 0, request_based = 0, hybrid = 0;
++	bool use_blk_mq = false;
+ 	struct dm_target *tgt;
+ 	struct dm_dev_internal *dd;
+ 	struct list_head *devices;
+@@ -872,11 +873,26 @@ static int dm_table_set_type(struct dm_table *t)
+ 	/* Non-request-stackable devices can't be used for request-based dm */
+ 	devices = dm_table_get_devices(t);
+ 	list_for_each_entry(dd, devices, list) {
+-		if (!blk_queue_stackable(bdev_get_queue(dd->dm_dev->bdev))) {
+-			DMWARN("table load rejected: including"
+-			       " non-request-stackable devices");
++		struct request_queue *q = bdev_get_queue(dd->dm_dev->bdev);
++
++		if (!blk_queue_stackable(q)) {
++			DMERR("table load rejected: including"
++			      " non-request-stackable devices");
+ 			return -EINVAL;
+ 		}
++
++		if (q->mq_ops)
++			use_blk_mq = true;
++	}
++
++	if (use_blk_mq) {
++		/* verify _all_ devices in the table are blk-mq devices */
++		list_for_each_entry(dd, devices, list)
++			if (!bdev_get_queue(dd->dm_dev->bdev)->mq_ops) {
++				DMERR("table load rejected: not all devices"
++				      " are blk-mq request-stackable");
++				return -EINVAL;
++			}
+ 	}
+ 
+ 	/*
+@@ -890,7 +906,7 @@ static int dm_table_set_type(struct dm_table *t)
+ 		return -EINVAL;
+ 	}
+ 
+-	t->type = DM_TYPE_REQUEST_BASED;
++	t->type = !use_blk_mq ? DM_TYPE_REQUEST_BASED : DM_TYPE_MQ_REQUEST_BASED;
+ 
+ 	return 0;
+ }
+@@ -907,7 +923,15 @@ struct target_type *dm_table_get_immutable_target_type(struct dm_table *t)
+ 
+ bool dm_table_request_based(struct dm_table *t)
+ {
+-	return dm_table_get_type(t) == DM_TYPE_REQUEST_BASED;
++	unsigned table_type = dm_table_get_type(t);
++
++	return (table_type == DM_TYPE_REQUEST_BASED ||
++		table_type == DM_TYPE_MQ_REQUEST_BASED);
++}
++
++bool dm_table_mq_request_based(struct dm_table *t)
++{
++	return dm_table_get_type(t) == DM_TYPE_MQ_REQUEST_BASED;
+ }
+ 
+ static int dm_table_alloc_md_mempools(struct dm_table *t)
+diff --git a/drivers/md/dm-target.c b/drivers/md/dm-target.c
+index 242e3cec397a..925ec1b15e75 100644
+--- a/drivers/md/dm-target.c
++++ b/drivers/md/dm-target.c
+@@ -137,13 +137,26 @@ static int io_err_map_rq(struct dm_target *ti, struct request *clone,
+ 	return -EIO;
+ }
+ 
++static int io_err_clone_and_map_rq(struct dm_target *ti, struct request *rq,
++				   union map_info *map_context,
++				   struct request **clone)
++{
++	return -EIO;
++}
++
++static void io_err_release_clone_rq(struct request *clone)
++{
++}
++
+ static struct target_type error_target = {
+ 	.name = "error",
+-	.version = {1, 2, 0},
++	.version = {1, 3, 0},
+ 	.ctr  = io_err_ctr,
+ 	.dtr  = io_err_dtr,
+ 	.map  = io_err_map,
+ 	.map_rq = io_err_map_rq,
++	.clone_and_map_rq = io_err_clone_and_map_rq,
++	.release_clone_rq = io_err_release_clone_rq,
+ };
+ 
+ int __init dm_target_init(void)
+diff --git a/drivers/md/dm.c b/drivers/md/dm.c
+index ae1219893948..549b815999a1 100644
+--- a/drivers/md/dm.c
++++ b/drivers/md/dm.c
+@@ -1044,7 +1044,10 @@ static void free_rq_clone(struct request *clone)
+ 	struct dm_rq_target_io *tio = clone->end_io_data;
+ 
+ 	blk_rq_unprep_clone(clone);
+-	free_clone_request(tio->md, clone);
++	if (clone->q && clone->q->mq_ops)
++		tio->ti->type->release_clone_rq(clone);
++	else
++		free_clone_request(tio->md, clone);
+ 	free_rq_tio(tio);
+ }
+ 
+@@ -1086,7 +1089,8 @@ static void dm_unprep_request(struct request *rq)
+ 	rq->special = NULL;
+ 	rq->cmd_flags &= ~REQ_DONTPREP;
+ 
+-	free_rq_clone(clone);
++	if (clone)
++		free_rq_clone(clone);
+ }
+ 
+ /*
+@@ -1185,6 +1189,13 @@ static void dm_softirq_done(struct request *rq)
+ 	struct dm_rq_target_io *tio = rq->special;
+ 	struct request *clone = tio->clone;
+ 
++	if (!clone) {
++		blk_end_request_all(rq, tio->error);
++		rq_completed(tio->md, rq_data_dir(rq), false);
++		free_rq_tio(tio);
++		return;
++	}
++
+ 	if (rq->cmd_flags & REQ_FAILED)
+ 		mapped = false;
+ 
+@@ -1207,7 +1218,7 @@ static void dm_complete_request(struct request *rq, int error)
+  * Complete the not-mapped clone and the original request with the error status
+  * through softirq context.
+  * Target's rq_end_io() function isn't called.
+- * This may be used when the target's map_rq() function fails.
++ * This may be used when the target's map_rq() or clone_and_map_rq() functions fail.
+  */
+ static void dm_kill_unmapped_request(struct request *rq, int error)
+ {
+@@ -1222,13 +1233,15 @@ static void end_clone_request(struct request *clone, int error)
+ {
+ 	struct dm_rq_target_io *tio = clone->end_io_data;
+ 
+-	/*
+-	 * For just cleaning up the information of the queue in which
+-	 * the clone was dispatched.
+-	 * The clone is *NOT* freed actually here because it is alloced from
+-	 * dm own mempool and REQ_ALLOCED isn't set in clone->cmd_flags.
+-	 */
+-	__blk_put_request(clone->q, clone);
++	if (!clone->q->mq_ops) {
++		/*
++		 * For just cleaning up the information of the queue in which
++		 * the clone was dispatched.
++		 * The clone is *NOT* freed actually here because it is alloced
++		 * from dm own mempool (REQ_ALLOCED isn't set).
++		 */
++		__blk_put_request(clone->q, clone);
++	}
+ 
+ 	/*
+ 	 * Actual request completion is done in a softirq context which doesn't
+@@ -1789,6 +1802,8 @@ static struct dm_rq_target_io *prep_tio(struct request *rq,
+ 					struct mapped_device *md, gfp_t gfp_mask)
+ {
+ 	struct dm_rq_target_io *tio;
++	int srcu_idx;
++	struct dm_table *table;
+ 
+ 	tio = alloc_rq_tio(md, gfp_mask);
+ 	if (!tio)
+@@ -1802,10 +1817,15 @@ static struct dm_rq_target_io *prep_tio(struct request *rq,
+ 	memset(&tio->info, 0, sizeof(tio->info));
+ 	init_kthread_work(&tio->work, map_tio_request);
+ 
+-	if (!clone_rq(rq, md, tio, gfp_mask)) {
+-		free_rq_tio(tio);
+-		return NULL;
++	table = dm_get_live_table(md, &srcu_idx);
++	if (!dm_table_mq_request_based(table)) {
++		if (!clone_rq(rq, md, tio, gfp_mask)) {
++			dm_put_live_table(md, srcu_idx);
++			free_rq_tio(tio);
++			return NULL;
++		}
+ 	}
++	dm_put_live_table(md, srcu_idx);
+ 
+ 	return tio;
+ }
+@@ -1835,17 +1855,36 @@ static int dm_prep_fn(struct request_queue *q, struct request *rq)
+ 
+ /*
+  * Returns:
+- * 0  : the request has been processed (not requeued)
+- * !0 : the request has been requeued
++ * 0                : the request has been processed
++ * DM_MAPIO_REQUEUE : the original request needs to be requeued
++ * < 0              : the request was completed due to failure
+  */
+ static int map_request(struct dm_target *ti, struct request *rq,
+ 		       struct mapped_device *md)
+ {
+-	int r, requeued = 0;
++	int r;
+ 	struct dm_rq_target_io *tio = rq->special;
+-	struct request *clone = tio->clone;
++	struct request *clone = NULL;
++
++	if (tio->clone) {
++		clone = tio->clone;
++		r = ti->type->map_rq(ti, clone, &tio->info);
++	} else {
++		r = ti->type->clone_and_map_rq(ti, rq, &tio->info, &clone);
++		if (r < 0) {
++			/* The target wants to complete the I/O */
++			dm_kill_unmapped_request(rq, r);
++			return r;
++		}
++		if (IS_ERR(clone))
++			return DM_MAPIO_REQUEUE;
++		if (setup_clone(clone, rq, tio, GFP_KERNEL)) {
++			/* -ENOMEM */
++			ti->type->release_clone_rq(clone);
++			return DM_MAPIO_REQUEUE;
++		}
++	}
+ 
+-	r = ti->type->map_rq(ti, clone, &tio->info);
+ 	switch (r) {
+ 	case DM_MAPIO_SUBMITTED:
+ 		/* The target has taken the I/O to submit by itself later */
+@@ -1859,7 +1898,6 @@ static int map_request(struct dm_target *ti, struct request *rq,
+ 	case DM_MAPIO_REQUEUE:
+ 		/* The target wants to requeue the I/O */
+ 		dm_requeue_unmapped_request(clone);
+-		requeued = 1;
+ 		break;
+ 	default:
+ 		if (r > 0) {
+@@ -1869,17 +1907,20 @@ static int map_request(struct dm_target *ti, struct request *rq,
+ 
+ 		/* The target wants to complete the I/O */
+ 		dm_kill_unmapped_request(rq, r);
+-		break;
++		return r;
+ 	}
+ 
+-	return requeued;
++	return 0;
+ }
+ 
+ static void map_tio_request(struct kthread_work *work)
+ {
+ 	struct dm_rq_target_io *tio = container_of(work, struct dm_rq_target_io, work);
++	struct request *rq = tio->orig;
++	struct mapped_device *md = tio->md;
+ 
+-	map_request(tio->ti, tio->orig, tio->md);
++	if (map_request(tio->ti, rq, md) == DM_MAPIO_REQUEUE)
++		dm_requeue_unmapped_original_request(md, rq);
+ }
+ 
+ static void dm_start_request(struct mapped_device *md, struct request *orig)
+@@ -2459,6 +2500,14 @@ unsigned dm_get_md_type(struct mapped_device *md)
+ 	return md->type;
+ }
+ 
++static bool dm_md_type_request_based(struct mapped_device *md)
++{
++	unsigned table_type = dm_get_md_type(md);
++
++	return (table_type == DM_TYPE_REQUEST_BASED ||
++		table_type == DM_TYPE_MQ_REQUEST_BASED);
++}
++
+ struct target_type *dm_get_immutable_target_type(struct mapped_device *md)
+ {
+ 	return md->immutable_target_type;
+@@ -2511,8 +2560,7 @@ static int dm_init_request_based_queue(struct mapped_device *md)
+  */
+ int dm_setup_md_queue(struct mapped_device *md)
+ {
+-	if ((dm_get_md_type(md) == DM_TYPE_REQUEST_BASED) &&
+-	    !dm_init_request_based_queue(md)) {
++	if (dm_md_type_request_based(md) && !dm_init_request_based_queue(md)) {
+ 		DMWARN("Cannot initialize queue for request-based mapped device");
+ 		return -EINVAL;
+ 	}
+@@ -3184,27 +3232,35 @@ struct dm_md_mempools *dm_alloc_md_mempools(unsigned type, unsigned integrity, u
+ {
+ 	struct dm_md_mempools *pools = kzalloc(sizeof(*pools), GFP_KERNEL);
+ 	struct kmem_cache *cachep;
+-	unsigned int pool_size;
++	unsigned int pool_size = 0;
+ 	unsigned int front_pad;
+ 
+ 	if (!pools)
+ 		return NULL;
+ 
+-	if (type == DM_TYPE_BIO_BASED) {
++	switch (type) {
++	case DM_TYPE_BIO_BASED:
+ 		cachep = _io_cache;
+ 		pool_size = dm_get_reserved_bio_based_ios();
+ 		front_pad = roundup(per_bio_data_size, __alignof__(struct dm_target_io)) + offsetof(struct dm_target_io, clone);
+-	} else if (type == DM_TYPE_REQUEST_BASED) {
+-		cachep = _rq_tio_cache;
++		break;
++	case DM_TYPE_REQUEST_BASED:
+ 		pool_size = dm_get_reserved_rq_based_ios();
+ 		pools->rq_pool = mempool_create_slab_pool(pool_size, _rq_cache);
+ 		if (!pools->rq_pool)
+ 			goto out;
++		/* fall through to setup remaining rq-based pools */
++	case DM_TYPE_MQ_REQUEST_BASED:
++		cachep = _rq_tio_cache;
++		if (!pool_size)
++			pool_size = dm_get_reserved_rq_based_ios();
+ 		front_pad = offsetof(struct dm_rq_clone_bio_info, clone);
+ 		/* per_bio_data_size is not used. See __bind_mempools(). */
+ 		WARN_ON(per_bio_data_size != 0);
+-	} else
++		break;
++	default:
+ 		goto out;
++	}
+ 
+ 	pools->io_pool = mempool_create_slab_pool(pool_size, cachep);
+ 	if (!pools->io_pool)
+diff --git a/drivers/md/dm.h b/drivers/md/dm.h
+index 84b0f9e4ba6c..84d79784b866 100644
+--- a/drivers/md/dm.h
++++ b/drivers/md/dm.h
+@@ -34,9 +34,10 @@
+ /*
+  * Type of table and mapped_device's mempool
+  */
+-#define DM_TYPE_NONE		0
+-#define DM_TYPE_BIO_BASED	1
+-#define DM_TYPE_REQUEST_BASED	2
++#define DM_TYPE_NONE			0
++#define DM_TYPE_BIO_BASED		1
++#define DM_TYPE_REQUEST_BASED		2
++#define DM_TYPE_MQ_REQUEST_BASED	3
+ 
+ /*
+  * List of devices that a metadevice uses and should open/close.
+@@ -73,6 +74,7 @@ int dm_table_any_busy_target(struct dm_table *t);
+ unsigned dm_table_get_type(struct dm_table *t);
+ struct target_type *dm_table_get_immutable_target_type(struct dm_table *t);
+ bool dm_table_request_based(struct dm_table *t);
++bool dm_table_mq_request_based(struct dm_table *t);
+ void dm_table_free_md_mempools(struct dm_table *t);
+ struct dm_md_mempools *dm_table_get_md_mempools(struct dm_table *t);
+ 
+diff --git a/include/linux/device-mapper.h b/include/linux/device-mapper.h
+index 19296fba58e8..2646aed1d3fe 100644
+--- a/include/linux/device-mapper.h
++++ b/include/linux/device-mapper.h
+@@ -48,6 +48,11 @@ typedef void (*dm_dtr_fn) (struct dm_target *ti);
+ typedef int (*dm_map_fn) (struct dm_target *ti, struct bio *bio);
+ typedef int (*dm_map_request_fn) (struct dm_target *ti, struct request *clone,
+ 				  union map_info *map_context);
++typedef int (*dm_clone_and_map_request_fn) (struct dm_target *ti,
++					    struct request *rq,
++					    union map_info *map_context,
++					    struct request **clone);
++typedef void (*dm_release_clone_request_fn) (struct request *clone);
+ 
+ /*
+  * Returns:
+@@ -143,6 +148,8 @@ struct target_type {
+ 	dm_dtr_fn dtr;
+ 	dm_map_fn map;
+ 	dm_map_request_fn map_rq;
++	dm_clone_and_map_request_fn clone_and_map_rq;
++	dm_release_clone_request_fn release_clone_rq;
+ 	dm_endio_fn end_io;
+ 	dm_request_endio_fn rq_end_io;
+ 	dm_presuspend_fn presuspend;
+diff --git a/include/uapi/linux/dm-ioctl.h b/include/uapi/linux/dm-ioctl.h
+index a570d7b5796c..889f3a5b7b18 100644
+--- a/include/uapi/linux/dm-ioctl.h
++++ b/include/uapi/linux/dm-ioctl.h
+@@ -267,9 +267,9 @@ enum {
+ #define DM_DEV_SET_GEOMETRY	_IOWR(DM_IOCTL, DM_DEV_SET_GEOMETRY_CMD, struct dm_ioctl)
+ 
+ #define DM_VERSION_MAJOR	4
+-#define DM_VERSION_MINOR	29
++#define DM_VERSION_MINOR	30
+ #define DM_VERSION_PATCHLEVEL	0
+-#define DM_VERSION_EXTRA	"-ioctl (2014-10-28)"
++#define DM_VERSION_EXTRA	"-ioctl (2014-12-22)"
+ 
+ /* Status bits */
+ #define DM_READONLY_FLAG	(1 << 0) /* In/Out */
+

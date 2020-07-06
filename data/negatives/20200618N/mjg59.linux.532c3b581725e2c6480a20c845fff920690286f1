@@ -1,0 +1,50 @@
+commit 532c3b581725e2c6480a20c845fff920690286f1
+Author: Roland Dreier <rolandd@cisco.com>
+Date:   Tue Apr 24 16:31:04 2007 -0700
+
+    IB/mthca: Fix mthca_write_mtt() on HCAs with hidden memory
+    
+    Commit b2875d4c ("IB/mthca: Always fill MTTs from CPU") causes a crash
+    in mthca_write_mtt() with non-memfree HCAs that have their memory
+    hidden (that is, have only two PCI BARs instead of having a third BAR
+    that allows access to the RAM attached to the HCA) on 64-bit
+    architectures.  This is because the commit just before, c20e20ab
+    ("IB/mthca: Merge MR and FMR space on 64-bit systems") makes
+    dev->mr_table.fmr_mtt_buddy equal to &dev->mr_table.mtt_buddy and
+    hence mthca_write_mtt() tries to write directly into the HCA's MTT
+    table.  However, since that table is in the HCA's memory, this is
+    impossible without the PCI BAR that gives access to that memory.
+    
+    This causes a crash because mthca_tavor_write_mtt_seg() basically
+    tries to dereference some offset of a NULL pointer.  Fix this by
+    adding a test of MTHCA_FLAG_FMR in mthca_write_mtt() so that we always
+    use the WRITE_MTT firmware command rather than writing directly if
+    FMRs are not enabled.
+    
+    Signed-off-by: Roland Dreier <rolandd@cisco.com>
+
+diff --git a/drivers/infiniband/hw/mthca/mthca_mr.c b/drivers/infiniband/hw/mthca/mthca_mr.c
+index ee561c569d5f..aa6c70a6a36f 100644
+--- a/drivers/infiniband/hw/mthca/mthca_mr.c
++++ b/drivers/infiniband/hw/mthca/mthca_mr.c
+@@ -297,7 +297,8 @@ out:
+ 
+ int mthca_write_mtt_size(struct mthca_dev *dev)
+ {
+-	if (dev->mr_table.fmr_mtt_buddy != &dev->mr_table.mtt_buddy)
++	if (dev->mr_table.fmr_mtt_buddy != &dev->mr_table.mtt_buddy ||
++	    !(dev->mthca_flags & MTHCA_FLAG_FMR))
+ 		/*
+ 		 * Be friendly to WRITE_MTT command
+ 		 * and leave two empty slots for the
+@@ -355,7 +356,8 @@ int mthca_write_mtt(struct mthca_dev *dev, struct mthca_mtt *mtt,
+ 	int size = mthca_write_mtt_size(dev);
+ 	int chunk;
+ 
+-	if (dev->mr_table.fmr_mtt_buddy != &dev->mr_table.mtt_buddy)
++	if (dev->mr_table.fmr_mtt_buddy != &dev->mr_table.mtt_buddy ||
++	    !(dev->mthca_flags & MTHCA_FLAG_FMR))
+ 		return __mthca_write_mtt(dev, mtt, start_index, buffer_list, list_len);
+ 
+ 	while (list_len > 0) {
+

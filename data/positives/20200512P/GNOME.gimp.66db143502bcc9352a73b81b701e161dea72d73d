@@ -1,0 +1,48 @@
+commit 66db143502bcc9352a73b81b701e161dea72d73d
+Author: Jehan <jehan@girinstud.io>
+Date:   Fri May 11 17:56:37 2018 +0200
+
+    Bug 796014 - Cannot open some older .xcf files made with 2.8.22 in 2.10.
+    
+    To avoid an infinite loop, gimp_item_linked_is_locked() was temporarily
+    unlinking items before calling gimp_item_is_position_locked(). This
+    worked only based on gimp_item_real_is_position_locked() code which
+    called gimp_item_linked_is_locked() only when it was linked. It did not
+    take into account the fact that it was an abstract method which could
+    have other implementations. In particular the group layer implementation
+    would call in turn gimp_item_is_position_locked() on each child layer.
+    
+    Basically temporarily unsetting the link was anyway a very ugly hack.
+    The point is simply that we are only interested by the value of the
+    `lock_position` flag for this item, without further "intelligence". For
+    this, use gimp_item_get_lock_position() instead.
+
+diff --git a/app/core/gimpitem-linked.c b/app/core/gimpitem-linked.c
+index be525e0df6..b0cd474c53 100644
+--- a/app/core/gimpitem-linked.c
++++ b/app/core/gimpitem-linked.c
+@@ -55,18 +55,13 @@ gimp_item_linked_is_locked (GimpItem *item)
+ 
+   for (l = list; l && ! locked; l = g_list_next (l))
+     {
+-      GimpItem *item = l->data;
+-
+-      /*  temporarily set the item to not being linked, or we will
+-       *  run into a recursion because gimp_item_is_position_locked()
+-       *  call this function if the item is linked
++      /* We must not use gimp_item_is_position_locked(), especially
++       * since a child implementation may call the current function and
++       * end up in infinite loop.
++       * We are only interested in the value of `lock_position` flag.
+        */
+-      gimp_item_set_linked (item, FALSE, FALSE);
+-
+-      if (gimp_item_is_position_locked (item))
++      if (gimp_item_get_lock_position (l->data))
+         locked = TRUE;
+-
+-      gimp_item_set_linked (item, TRUE, FALSE);
+     }
+ 
+   g_list_free (list);
+

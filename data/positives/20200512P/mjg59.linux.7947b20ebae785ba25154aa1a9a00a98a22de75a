@@ -1,0 +1,58 @@
+commit 7947b20ebae785ba25154aa1a9a00a98a22de75a
+Author: Michael Chan <mchan@broadcom.com>
+Date:   Mon Jun 4 21:17:10 2007 -0700
+
+    [BNX2]: Fix netdev watchdog on 5708.
+    
+    There's a bug in the driver that only initializes half of the context
+    memory on the 5708.  Surprisingly, this works most of the time except
+    for some occasional netdev watchdogs when sending a lot of 64-byte
+    packets.  The fix is to add the missing code to initialize the 2nd
+    halves of all context memory.
+    
+    Signed-off-by: Michael Chan <mchan@broadcom.com>
+    Acked-by: Jeff Garzik <jeff@garzik.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/bnx2.c b/drivers/net/bnx2.c
+index da7c3b0c533c..9789f05cbc99 100644
+--- a/drivers/net/bnx2.c
++++ b/drivers/net/bnx2.c
+@@ -1811,6 +1811,7 @@ bnx2_init_context(struct bnx2 *bp)
+ 	vcid = 96;
+ 	while (vcid) {
+ 		u32 vcid_addr, pcid_addr, offset;
++		int i;
+ 
+ 		vcid--;
+ 
+@@ -1831,16 +1832,20 @@ bnx2_init_context(struct bnx2 *bp)
+ 			pcid_addr = vcid_addr;
+ 		}
+ 
+-		REG_WR(bp, BNX2_CTX_VIRT_ADDR, 0x00);
+-		REG_WR(bp, BNX2_CTX_PAGE_TBL, pcid_addr);
++		for (i = 0; i < (CTX_SIZE / PHY_CTX_SIZE); i++) {
++			vcid_addr += (i << PHY_CTX_SHIFT);
++			pcid_addr += (i << PHY_CTX_SHIFT);
+ 
+-		/* Zero out the context. */
+-		for (offset = 0; offset < PHY_CTX_SIZE; offset += 4) {
+-			CTX_WR(bp, 0x00, offset, 0);
+-		}
++			REG_WR(bp, BNX2_CTX_VIRT_ADDR, 0x00);
++			REG_WR(bp, BNX2_CTX_PAGE_TBL, pcid_addr);
+ 
+-		REG_WR(bp, BNX2_CTX_VIRT_ADDR, vcid_addr);
+-		REG_WR(bp, BNX2_CTX_PAGE_TBL, pcid_addr);
++			/* Zero out the context. */
++			for (offset = 0; offset < PHY_CTX_SIZE; offset += 4)
++				CTX_WR(bp, 0x00, offset, 0);
++
++			REG_WR(bp, BNX2_CTX_VIRT_ADDR, vcid_addr);
++			REG_WR(bp, BNX2_CTX_PAGE_TBL, pcid_addr);
++		}
+ 	}
+ }
+ 
+

@@ -1,0 +1,224 @@
+commit 9bd37b40fac198fee2ff4eabc8793f1a7f2770fe
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Sat Nov 30 16:36:46 2013 +0100
+
+    nspawn: set up a kdbus namespace when starting a container
+
+diff --git a/src/core/manager.c b/src/core/manager.c
+index a168589e3..7de0b2681 100644
+--- a/src/core/manager.c
++++ b/src/core/manager.c
+@@ -421,7 +421,7 @@ static int manager_setup_kdbus(Manager *m) {
+         if (m->running_as == SYSTEMD_USER && getenv("DBUS_SESSION_BUS_ADDRESS"))
+                 return 0;
+ 
+-        m->kdbus_fd = bus_kernel_create(m->running_as == SYSTEMD_SYSTEM ? "system" : "user", &p);
++        m->kdbus_fd = bus_kernel_create_bus(m->running_as == SYSTEMD_SYSTEM ? "system" : "user", &p);
+         if (m->kdbus_fd < 0) {
+                 log_debug("Failed to set up kdbus: %s", strerror(-m->kdbus_fd));
+                 return m->kdbus_fd;
+diff --git a/src/libsystemd-bus/bus-kernel.c b/src/libsystemd-bus/bus-kernel.c
+index 51e882c73..09e084a02 100644
+--- a/src/libsystemd-bus/bus-kernel.c
++++ b/src/libsystemd-bus/bus-kernel.c
+@@ -1042,7 +1042,7 @@ int kdbus_translate_attach_flags(uint64_t mask, uint64_t *kdbus_mask) {
+         return 0;
+ }
+ 
+-int bus_kernel_create(const char *name, char **s) {
++int bus_kernel_create_bus(const char *name, char **s) {
+         struct kdbus_cmd_bus_make *make;
+         struct kdbus_item *n;
+         int fd;
+@@ -1088,3 +1088,47 @@ int bus_kernel_create(const char *name, char **s) {
+ 
+         return fd;
+ }
++
++int bus_kernel_create_namespace(const char *name, char **s) {
++        struct kdbus_cmd_ns_make *make;
++        struct kdbus_item *n;
++        int fd;
++
++        assert(name);
++        assert(s);
++
++        fd = open("/dev/kdbus/control", O_RDWR|O_NOCTTY|O_CLOEXEC);
++        if (fd < 0)
++                return -errno;
++
++        make = alloca0(ALIGN8(offsetof(struct kdbus_cmd_ns_make, items) +
++                              offsetof(struct kdbus_item, str) +
++                              strlen(name) + 1));
++
++        n = make->items;
++        strcpy(n->str, name);
++        n->size = offsetof(struct kdbus_item, str) + strlen(n->str) + 1;
++        n->type = KDBUS_MAKE_NAME;
++
++        make->size = ALIGN8(offsetof(struct kdbus_cmd_ns_make, items) + n->size);
++        make->flags = KDBUS_MAKE_POLICY_OPEN;
++
++        if (ioctl(fd, KDBUS_CMD_NS_MAKE, make) < 0) {
++                close_nointr_nofail(fd);
++                return -errno;
++        }
++
++        if (s) {
++                char *p;
++
++                p = strappend("/dev/kdbus/", name);
++                if (!p) {
++                        close_nointr_nofail(fd);
++                        return -ENOMEM;
++                }
++
++                *s = p;
++        }
++
++        return fd;
++}
+diff --git a/src/libsystemd-bus/bus-kernel.h b/src/libsystemd-bus/bus-kernel.h
+index 746ab227a..92d3888ed 100644
+--- a/src/libsystemd-bus/bus-kernel.h
++++ b/src/libsystemd-bus/bus-kernel.h
+@@ -60,7 +60,8 @@ int bus_kernel_take_fd(sd_bus *b);
+ int bus_kernel_write_message(sd_bus *bus, sd_bus_message *m);
+ int bus_kernel_read_message(sd_bus *bus);
+ 
+-int bus_kernel_create(const char *name, char **s);
++int bus_kernel_create_bus(const char *name, char **s);
++int bus_kernel_create_namespace(const char *name, char **s);
+ 
+ int bus_kernel_pop_memfd(sd_bus *bus, void **address, size_t *size);
+ void bus_kernel_push_memfd(sd_bus *bus, int fd, void *address, size_t size);
+diff --git a/src/libsystemd-bus/test-bus-kernel-benchmark.c b/src/libsystemd-bus/test-bus-kernel-benchmark.c
+index 6afae7f48..010a16132 100644
+--- a/src/libsystemd-bus/test-bus-kernel-benchmark.c
++++ b/src/libsystemd-bus/test-bus-kernel-benchmark.c
+@@ -239,7 +239,7 @@ int main(int argc, char *argv[]) {
+ 
+         assert_se(arg_loop_usec > 0);
+ 
+-        bus_ref = bus_kernel_create("deine-mutter", &bus_name);
++        bus_ref = bus_kernel_create_bus("deine-mutter", &bus_name);
+         if (bus_ref == -ENOENT)
+                 exit(EXIT_TEST_SKIP);
+ 
+diff --git a/src/libsystemd-bus/test-bus-kernel-bloom.c b/src/libsystemd-bus/test-bus-kernel-bloom.c
+index dcf048338..62983eacc 100644
+--- a/src/libsystemd-bus/test-bus-kernel-bloom.c
++++ b/src/libsystemd-bus/test-bus-kernel-bloom.c
+@@ -42,7 +42,7 @@ static void test_one(
+         sd_bus *a, *b;
+         int r;
+ 
+-        bus_ref = bus_kernel_create("deine-mutter", &bus_name);
++        bus_ref = bus_kernel_create_bus("deine-mutter", &bus_name);
+         if (bus_ref == -ENOENT)
+                 exit(EXIT_TEST_SKIP);
+ 
+diff --git a/src/libsystemd-bus/test-bus-kernel.c b/src/libsystemd-bus/test-bus-kernel.c
+index 04dbc998d..23b185d3f 100644
+--- a/src/libsystemd-bus/test-bus-kernel.c
++++ b/src/libsystemd-bus/test-bus-kernel.c
+@@ -42,7 +42,7 @@ int main(int argc, char *argv[]) {
+ 
+         log_set_max_level(LOG_DEBUG);
+ 
+-        bus_ref = bus_kernel_create("deine-mutter", &bus_name);
++        bus_ref = bus_kernel_create_bus("deine-mutter", &bus_name);
+         if (bus_ref == -ENOENT)
+                 return EXIT_TEST_SKIP;
+ 
+diff --git a/src/libsystemd-bus/test-bus-zero-copy.c b/src/libsystemd-bus/test-bus-zero-copy.c
+index 032449a5d..92a7398a7 100644
+--- a/src/libsystemd-bus/test-bus-zero-copy.c
++++ b/src/libsystemd-bus/test-bus-zero-copy.c
+@@ -51,7 +51,7 @@ int main(int argc, char *argv[]) {
+ 
+         log_set_max_level(LOG_DEBUG);
+ 
+-        bus_ref = bus_kernel_create("deine-mutter", &bus_name);
++        bus_ref = bus_kernel_create_bus("deine-mutter", &bus_name);
+         if (bus_ref == -ENOENT)
+                 return EXIT_TEST_SKIP;
+ 
+diff --git a/src/nspawn/nspawn.c b/src/nspawn/nspawn.c
+index cd757c497..dd7337bc9 100644
+--- a/src/nspawn/nspawn.c
++++ b/src/nspawn/nspawn.c
+@@ -61,6 +61,7 @@
+ #include "bus-util.h"
+ #include "bus-error.h"
+ #include "ptyfwd.h"
++#include "bus-kernel.h"
+ 
+ #ifndef TTY_GID
+ #define TTY_GID 5
+@@ -927,6 +928,26 @@ static int setup_journal(const char *directory) {
+         return 0;
+ }
+ 
++static int setup_kdbus(const char *dest, const char *path) {
++        const char *p;
++
++        if (!path)
++                return 0;
++
++        p = strappenda(dest, "/dev/kdbus");
++        if (mkdir(p, 0755) < 0) {
++                log_error("Failed to create kdbus path: %m");
++                return  -errno;
++        }
++
++        if (mount(path, p, "bind", MS_BIND, NULL) < 0) {
++                log_error("Failed to mount kdbus namespace path: %m");
++                return -errno;
++        }
++
++        return 0;
++}
++
+ static int drop_capabilities(void) {
+         return capability_bounding_set_drop(~arg_retain, false);
+ }
+@@ -1032,12 +1053,13 @@ static bool audit_enabled(void) {
+ int main(int argc, char *argv[]) {
+         pid_t pid = 0;
+         int r = EXIT_FAILURE, k;
+-        _cleanup_close_ int master = -1;
++        _cleanup_close_ int master = -1, kdbus_fd = -1;
+         int n_fd_passed;
+         const char *console = NULL;
+         sigset_t mask;
+         _cleanup_close_pipe_ int kmsg_socket_pair[2] = { -1, -1 };
+         _cleanup_fdset_free_ FDSet *fds = NULL;
++        _cleanup_free_ char *kdbus_namespace = NULL;
+ 
+         log_parse_environment();
+         log_open();
+@@ -1138,6 +1160,12 @@ int main(int argc, char *argv[]) {
+                 goto finish;
+         }
+ 
++        kdbus_fd = bus_kernel_create_namespace(arg_machine, &kdbus_namespace);
++        if (r < 0)
++                log_debug("Failed to create kdbus namespace: %s", strerror(-r));
++        else
++                log_debug("Successfully created kdbus namespace as %s", kdbus_namespace);
++
+         if (socketpair(AF_UNIX, SOCK_DGRAM|SOCK_NONBLOCK|SOCK_CLOEXEC, 0, kmsg_socket_pair) < 0) {
+                 log_error("Failed to create kmsg socket pair.");
+                 goto finish;
+@@ -1289,6 +1317,9 @@ int main(int argc, char *argv[]) {
+                         if (mount_binds(arg_directory, arg_bind_ro, MS_RDONLY) < 0)
+                                 goto child_fail;
+ 
++                        if (setup_kdbus(arg_directory, kdbus_namespace) < 0)
++                                goto child_fail;
++
+                         if (chdir(arg_directory) < 0) {
+                                 log_error("chdir(%s) failed: %m", arg_directory);
+                                 goto child_fail;
+

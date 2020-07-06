@@ -1,0 +1,89 @@
+commit 735ec47da424a6acd3c49c15bd254cc36d7a76e0
+Author: pancake <pancake@nopcode.org>
+Date:   Mon May 9 17:24:12 2016 +0200
+
+    Fix #4816 - load libraries if bin.libs=true (wip)
+
+diff --git a/libr/core/config.c b/libr/core/config.c
+index de592cdbe..abfce7982 100644
+--- a/libr/core/config.c
++++ b/libr/core/config.c
+@@ -1541,6 +1541,7 @@ R_API int r_core_config_init(RCore *core) {
+ 	SETPREF("asm.describe", "false", "Show opcode description");
+ 	SETPREF("asm.marks", "true", "Show marks before the disassembly");
+ 	SETCB("bin.strpurge", "false", &cb_strpurge, "Try to purge false positive strings");
++	SETPREF("bin.libs", "false", "Try to load libraries after loading main binary");
+ 	SETCB("bin.strfilter", "", &cb_strfilter, "Filter strings (?:help, a:scii, e:mail, p:ath, u:rl, 8:utf8)");
+ 	SETCB("bin.filter", "true", &cb_binfilter, "Filter symbol names to fix dupped names");
+ 	SETCB("bin.force", "", &cb_binforce, "Force that rbin plugin");
+diff --git a/libr/core/file.c b/libr/core/file.c
+index 38923a355..50d5ebc44 100644
+--- a/libr/core/file.c
++++ b/libr/core/file.c
+@@ -421,6 +421,45 @@ static int r_core_file_do_load_for_io_plugin (RCore *r, ut64 baseaddr, ut64 load
+ 	return true;
+ }
+ 
++static int try_loadlib(RCore *core, const char *lib, ut64 addr) {
++	RCoreFile *cf = r_core_file_open (core, lib, 0, addr);
++	if (!cf) {
++		return false;
++	}
++	return true;
++}
++
++R_API bool r_core_file_loadlib(RCore *core, const char *lib, ut64 libaddr) {
++	const char *ldlibrarypath[] = {
++		"/usr/local/lib",
++		"/usr/lib",
++		"/lib",
++		"./",
++		NULL
++	};
++	const char **libpath = (const char **)&ldlibrarypath;
++
++	if (*lib == '/') {
++		if (try_loadlib (core, lib, libaddr)) {
++			return true;
++		}
++	} else {
++		while (*libpath) {
++			bool ret = false;
++			char *s = r_str_newf ("%s/%s", *libpath, lib);
++			if (try_loadlib (core, s, libaddr)) {
++				ret = true;
++			}
++			free (s);
++			if (ret) {
++				return true;
++			}
++			libpath++;
++		}
++	}
++	return false;
++}
++
+ R_API int r_core_bin_load(RCore *r, const char *filenameuri, ut64 baddr) {
+ 	const char *suppress_warning = r_config_get (r->config, "file.nowarn");
+ 	RCoreFile *cf = r_core_file_cur (r);
+@@ -504,6 +543,19 @@ R_API int r_core_bin_load(RCore *r, const char *filenameuri, ut64 baddr) {
+ 			r_config_set_i (r->config, "anal.gp", gp);
+ 		}
+ 	}
++	if (r_config_get_i (r->config, "bin.libs")) {
++		ut64 libaddr = (r->assembler->bits == 64)
++			? 0x00007fff00000000
++			: 0x7f000000;
++		const char *lib;
++		RListIter *iter;
++		RList *libs = r_bin_get_libs (r->bin);
++		r_list_foreach (libs, iter, lib) {
++			eprintf ("Opening %s\n", lib);
++			r_core_file_loadlib (r, lib, libaddr);
++			libaddr += 0x2000000;
++		}
++	}
+ 	return true;
+ }
+ 
+

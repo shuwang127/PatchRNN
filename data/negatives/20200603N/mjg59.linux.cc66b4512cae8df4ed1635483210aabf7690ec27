@@ -1,0 +1,42 @@
+commit cc66b4512cae8df4ed1635483210aabf7690ec27
+Author: Jens Axboe <jens.axboe@oracle.com>
+Date:   Tue Mar 4 11:47:46 2008 +0100
+
+    block: fix blkdev_issue_flush() not detecting and passing EOPNOTSUPP back
+    
+    This is important to eg dm, that tries to decide whether to stop using
+    barriers or not.
+    
+    Tested as working by Anders Henke <anders.henke@1und1.de>
+    
+    Signed-off-by: Jens Axboe <jens.axboe@oracle.com>
+
+diff --git a/block/blk-barrier.c b/block/blk-barrier.c
+index 6901eedeffce..55c5f1fc4f1f 100644
+--- a/block/blk-barrier.c
++++ b/block/blk-barrier.c
+@@ -259,8 +259,11 @@ int blk_do_ordered(struct request_queue *q, struct request **rqp)
+ 
+ static void bio_end_empty_barrier(struct bio *bio, int err)
+ {
+-	if (err)
++	if (err) {
++		if (err == -EOPNOTSUPP)
++			set_bit(BIO_EOPNOTSUPP, &bio->bi_flags);
+ 		clear_bit(BIO_UPTODATE, &bio->bi_flags);
++	}
+ 
+ 	complete(bio->bi_private);
+ }
+@@ -309,7 +312,9 @@ int blkdev_issue_flush(struct block_device *bdev, sector_t *error_sector)
+ 		*error_sector = bio->bi_sector;
+ 
+ 	ret = 0;
+-	if (!bio_flagged(bio, BIO_UPTODATE))
++	if (bio_flagged(bio, BIO_EOPNOTSUPP))
++		ret = -EOPNOTSUPP;
++	else if (!bio_flagged(bio, BIO_UPTODATE))
+ 		ret = -EIO;
+ 
+ 	bio_put(bio);
+

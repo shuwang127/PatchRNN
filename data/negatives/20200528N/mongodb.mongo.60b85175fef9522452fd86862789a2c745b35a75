@@ -1,0 +1,49 @@
+commit 60b85175fef9522452fd86862789a2c745b35a75
+Author: Mathias Stearn <mathias@10gen.com>
+Date:   Mon Aug 8 11:09:54 2011 -0400
+
+    Check dbhash on config servers once a minute and report failures SERVER-3323
+
+diff --git a/s/config.cpp b/s/config.cpp
+index 0080064964..07da064fa6 100644
+--- a/s/config.cpp
++++ b/s/config.cpp
+@@ -609,7 +609,7 @@ namespace mongo {
+         if ( checkConsistency ) {
+             string errmsg;
+             if ( ! checkConfigServersConsistent( errmsg ) ) {
+-                log( LL_ERROR ) << "config servers not in sync! " << errmsg << endl;
++                log( LL_ERROR ) << "config servers not in sync! " << errmsg << warnings;
+                 return false;
+             }
+         }
+diff --git a/s/server.cpp b/s/server.cpp
+index d8502ec058..1ee30f126e 100644
+--- a/s/server.cpp
++++ b/s/server.cpp
+@@ -26,6 +26,7 @@
+ #include "../util/ramlog.h"
+ #include "../util/signal_handlers.h"
+ #include "../util/admin_access.h"
++#include "../util/concurrency/task.h"
+ #include "../db/dbwebserver.h"
+ #include "../scripting/engine.h"
+ 
+@@ -318,6 +319,16 @@ int _main(int argc, char* argv[]) {
+         return 8;
+     }
+ 
++    {
++        class CheckConfigServers : public task::Task {
++            virtual string name() const { return "CheckConfigServers"; }
++            virtual void doWork() { configServer.ok(true); }
++        };
++        static CheckConfigServers checkConfigServers;
++
++        task::repeat(&checkConfigServers, 60*1000);
++    }
++
+     int configError = configServer.checkConfigVersion( params.count( "upgrade" ) );
+     if ( configError ) {
+         if ( configError > 0 ) {
+

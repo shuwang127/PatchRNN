@@ -1,0 +1,107 @@
+commit 3c1d150b3d209a08f0a2311afaa9b6b7fc3f72fc
+Author: Manuel Pégourié-Gonnard <mpg@elzevir.fr>
+Date:   Mon May 12 13:46:08 2014 +0200
+
+    Add cipher_crypt()
+
+diff --git a/include/polarssl/cipher.h b/include/polarssl/cipher.h
+index d26b20607..c8fdd2567 100644
+--- a/include/polarssl/cipher.h
++++ b/include/polarssl/cipher.h
+@@ -127,7 +127,7 @@ typedef enum {
+     POLARSSL_MODE_ECB,
+     POLARSSL_MODE_CBC,
+     POLARSSL_MODE_CFB,
+-    POLARSSL_MODE_OFB,
++    POLARSSL_MODE_OFB, /* Unused! */
+     POLARSSL_MODE_CTR,
+     POLARSSL_MODE_GCM,
+     POLARSSL_MODE_STREAM,
+@@ -506,7 +506,7 @@ int cipher_set_padding_mode( cipher_context_t *ctx, cipher_padding_t mode );
+  * \param iv_len        IV length for ciphers with variable-size IV;
+  *                      discarded by ciphers with fixed-size IV.
+  *
+- * \returns             O on success, or POLARSSL_ERR_CIPHER_BAD_INPUT_DATA
++ * \returns             0 on success, or POLARSSL_ERR_CIPHER_BAD_INPUT_DATA
+  *
+  * \note                Some ciphers don't use IVs nor NONCE. For these
+  *                      ciphers, this function has no effect.
+@@ -627,6 +627,38 @@ int cipher_check_tag( cipher_context_t *ctx,
+                       const unsigned char *tag, size_t tag_len );
+ #endif /* POLARSSL_CIPHER_MODE_AEAD */
+ 
++/**
++ * \brief               Generic all-in-one encryption/decryption
++ *                      (for all ciphers except AEAD constructs).
++ *
++ * \param ctx           generic cipher context
++ * \param iv            IV to use (or NONCE_COUNTER for CTR-mode ciphers)
++ * \param iv_len        IV length for ciphers with variable-size IV;
++ *                      discarded by ciphers with fixed-size IV.
++ * \param input         buffer holding the input data
++ * \param ilen          length of the input data
++ * \param output        buffer for the output data. Should be able to hold at
++ *                      least ilen + block_size. Cannot be the same buffer as
++ *                      input!
++ * \param olen          length of the output data, will be filled with the
++ *                      actual number of bytes written.
++ *
++ * \note                Some ciphers don't use IVs nor NONCE. For these
++ *                      ciphers, use iv = NULL and iv_len = 0.
++ *
++ * \returns             0 on success, or
++ *                      POLARSSL_ERR_CIPHER_BAD_INPUT_DATA, or
++ *                      POLARSSL_ERR_CIPHER_FULL_BLOCK_EXPECTED if decryption
++ *                      expected a full block but was not provided one, or
++ *                      POLARSSL_ERR_CIPHER_INVALID_PADDING on invalid padding
++ *                      while decrypting, or
++ *                      a cipher specific error code.
++ */
++int cipher_crypt( cipher_context_t *ctx,
++                  const unsigned char *iv, size_t iv_len,
++                  const unsigned char *input, size_t ilen,
++                  unsigned char *output, size_t *olen );
++
+ /**
+  * \brief          Checkup routine
+  *
+diff --git a/library/cipher.c b/library/cipher.c
+index 069330180..daeea1376 100644
+--- a/library/cipher.c
++++ b/library/cipher.c
+@@ -771,6 +771,34 @@ int cipher_check_tag( cipher_context_t *ctx,
+ }
+ #endif /* POLARSSL_CIPHER_MODE_AEAD */
+ 
++/*
++ * Packet-oriented wrapper for non-AEAD modes
++ */
++int cipher_crypt( cipher_context_t *ctx,
++                  const unsigned char *iv, size_t iv_len,
++                  const unsigned char *input, size_t ilen,
++                  unsigned char *output, size_t *olen )
++{
++    int ret;
++    size_t finish_olen;
++
++    if( ( ret = cipher_set_iv( ctx, iv, iv_len ) ) != 0 )
++        return( ret );
++
++    if( ( ret = cipher_reset( ctx ) ) != 0 )
++        return( ret );
++
++    if( ( ret = cipher_update( ctx, input, ilen, output, olen ) ) != 0 )
++        return( ret );
++
++    if( ( ret = cipher_finish( ctx, output + *olen, &finish_olen ) ) != 0 )
++        return( ret );
++
++    *olen += finish_olen;
++
++    return( 0 );
++}
++
+ #if defined(POLARSSL_SELF_TEST)
+ 
+ /*
+

@@ -1,0 +1,59 @@
+commit 3b7a3a05e8b006a73c406230b3d2d3da920779d9
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Tue Jun 16 18:06:40 2015 -0400
+
+    ufs: free excessive blocks upon ->write_begin() failure/short copy
+    
+    Broken in "[PATCH] ufs: truncate should allocate block for last byte";
+    all way back in 2006.  ufs_setattr() hadn't been the only user of
+    vmtruncate() and eliminating ->truncate() method required corrections
+    in a bunch of places.  Eventually those places had migrated into
+    ->write_begin() failure exit and ->write_end() after short copy...
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/ufs/inode.c b/fs/ufs/inode.c
+index 282b0ced6272..a4fc3adfdc4c 100644
+--- a/fs/ufs/inode.c
++++ b/fs/ufs/inode.c
+@@ -530,8 +530,10 @@ static void ufs_write_failed(struct address_space *mapping, loff_t to)
+ {
+ 	struct inode *inode = mapping->host;
+ 
+-	if (to > inode->i_size)
++	if (to > inode->i_size) {
+ 		truncate_pagecache(inode, inode->i_size);
++		ufs_truncate_blocks(inode);
++	}
+ }
+ 
+ static int ufs_write_begin(struct file *file, struct address_space *mapping,
+@@ -548,6 +550,18 @@ static int ufs_write_begin(struct file *file, struct address_space *mapping,
+ 	return ret;
+ }
+ 
++static int ufs_write_end(struct file *file, struct address_space *mapping,
++			loff_t pos, unsigned len, unsigned copied,
++			struct page *page, void *fsdata)
++{
++	int ret;
++
++	ret = generic_write_end(file, mapping, pos, len, copied, page, fsdata);
++	if (ret < len)
++		ufs_write_failed(mapping, pos + len);
++	return ret;
++}
++
+ static sector_t ufs_bmap(struct address_space *mapping, sector_t block)
+ {
+ 	return generic_block_bmap(mapping,block,ufs_getfrag_block);
+@@ -557,7 +571,7 @@ const struct address_space_operations ufs_aops = {
+ 	.readpage = ufs_readpage,
+ 	.writepage = ufs_writepage,
+ 	.write_begin = ufs_write_begin,
+-	.write_end = generic_write_end,
++	.write_end = ufs_write_end,
+ 	.bmap = ufs_bmap
+ };
+ 
+

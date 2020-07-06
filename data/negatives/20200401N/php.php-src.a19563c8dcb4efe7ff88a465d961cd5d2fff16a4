@@ -1,0 +1,167 @@
+commit a19563c8dcb4efe7ff88a465d961cd5d2fff16a4
+Author: Sascha Schumann <sas@php.net>
+Date:   Sun Aug 5 16:52:29 2001 +0000
+
+    more tsrm cleanup
+
+diff --git a/ext/session/session.c b/ext/session/session.c
+index 638b188c25..7eb820cb22 100644
+--- a/ext/session/session.c
++++ b/ext/session/session.c
+@@ -290,7 +290,7 @@ PS_SERIALIZER_ENCODE_FUNC(php_binary)
+ 			smart_str_appendc(&buf, (unsigned char) key_length);
+ 			smart_str_appendl(&buf, key, key_length);
+ 			
+-			php_var_serialize(&buf, struc, &var_hash);
++			php_var_serialize(&buf, struc, &var_hash TSRMLS_CC);
+ 		} else {
+ 			if (key_length > PS_BIN_MAX) continue;
+ 			smart_str_appendc(&buf, (unsigned char) (key_length & PS_BIN_UNDEF));
+@@ -326,7 +326,7 @@ PS_SERIALIZER_DECODE_FUNC(php_binary)
+ 		
+ 		if (has_value) {
+ 			MAKE_STD_ZVAL(current);
+-			if (php_var_unserialize(&current, &p, endptr, &var_hash)) {
++			if (php_var_unserialize(&current, &p, endptr, &var_hash TSRMLS_CC)) {
+ 				php_set_session_var(name, namelen, current, &var_hash  TSRMLS_CC);
+ 			}
+ 			zval_ptr_dtor(&current);
+@@ -356,7 +356,7 @@ PS_SERIALIZER_ENCODE_FUNC(php)
+ 			smart_str_appendl(&buf, key, (unsigned char) key_length);
+ 			smart_str_appendc(&buf, PS_DELIMITER);
+ 			
+-			php_var_serialize(&buf, struc, &var_hash);
++			php_var_serialize(&buf, struc, &var_hash TSRMLS_CC);
+ 		} else {
+ 			if (key_length + 2 > MAX_STR) continue;
+ 			smart_str_appendc(&buf, PS_UNDEF_MARKER);
+@@ -403,7 +403,7 @@ PS_SERIALIZER_DECODE_FUNC(php)
+ 		
+ 		if (has_value) {
+ 			MAKE_STD_ZVAL(current);
+-			if (php_var_unserialize(&current, &q, endptr, &var_hash)) {
++			if (php_var_unserialize(&current, &q, endptr, &var_hash TSRMLS_CC)) {
+ 				php_set_session_var(name, namelen, current, &var_hash TSRMLS_CC);
+ 			}
+ 			zval_ptr_dtor(&current);
+diff --git a/ext/standard/php_var.h b/ext/standard/php_var.h
+index 95de575f43..33a5d8d844 100644
+--- a/ext/standard/php_var.h
++++ b/ext/standard/php_var.h
+@@ -32,8 +32,8 @@ void php_var_dump(zval **struc, int level TSRMLS_DC);
+ /* typdef HashTable php_serialize_data_t; */
+ #define php_serialize_data_t HashTable
+ 
+-PHPAPI void php_var_serialize(smart_str *buf, zval **struc, php_serialize_data_t *var_hash);
+-PHPAPI int php_var_unserialize(zval **rval, const char **p, const char *max, php_serialize_data_t *var_hash);
++PHPAPI void php_var_serialize(smart_str *buf, zval **struc, php_serialize_data_t *var_hash TSRMLS_DC);
++PHPAPI int php_var_unserialize(zval **rval, const char **p, const char *max, php_serialize_data_t *var_hash TSRMLS_DC);
+ 
+ #define PHP_VAR_SERIALIZE_INIT(var_hash) \
+    zend_hash_init(&(var_hash),10,NULL,NULL,0)
+diff --git a/ext/standard/var.c b/ext/standard/var.c
+index 8627aabca5..a47231f36f 100644
+--- a/ext/standard/var.c
++++ b/ext/standard/var.c
+@@ -74,7 +74,6 @@ void php_var_dump(zval **struc, int level TSRMLS_DC)
+ 			php_printf("%sint(%ld)\n", COMMON, Z_LVAL_PP(struc));
+ 			break;
+ 		case IS_DOUBLE: {
+-				TSRMLS_FETCH();
+ 
+ 				php_printf("%sfloat(%.*G)\n", COMMON, (int) EG(precision), Z_DVAL_PP(struc));
+ 			}
+@@ -100,7 +99,6 @@ head_done:
+ 			break;
+ 		case IS_RESOURCE: {
+ 			char *type_name;
+-			TSRMLS_FETCH();
+ 
+ 			type_name = zend_rsrc_list_get_rsrc_type(Z_LVAL_PP(struc) TSRMLS_CC);
+ 			php_printf("%sresource(%ld) of type (%s)\n", COMMON, Z_LVAL_PP(struc), type_name ? type_name : "Unknown");
+@@ -358,10 +356,8 @@ static void php_var_serialize_intern(smart_str *buf, zval **struc, HashTable *va
+ 	} 
+ }
+ 
+-PHPAPI void php_var_serialize(smart_str *buf, zval **struc, HashTable *var_hash)
++PHPAPI void php_var_serialize(smart_str *buf, zval **struc, HashTable *var_hash TSRMLS_DC)
+ {
+-	TSRMLS_FETCH();
+-
+ 	php_var_serialize_intern(buf, struc, var_hash TSRMLS_CC);
+ 	smart_str_0(buf);
+ }
+@@ -369,7 +365,7 @@ PHPAPI void php_var_serialize(smart_str *buf, zval **struc, HashTable *var_hash)
+ /* }}} */
+ /* {{{ php_var_unserialize */
+ 
+-PHPAPI int php_var_unserialize(zval **rval, const char **p, const char *max, HashTable *var_hash)
++PHPAPI int php_var_unserialize(zval **rval, const char **p, const char *max, HashTable *var_hash TSRMLS_DC)
+ {
+ 	const char *q;
+ 	char *str;
+@@ -378,7 +374,6 @@ PHPAPI int php_var_unserialize(zval **rval, const char **p, const char *max, Has
+ 	ulong id;
+ 	HashTable *myht;
+ 	zval **rval_ref;
+-	TSRMLS_FETCH();
+ 
+ 	if (var_hash && **p != 'R') {  /* references aren't counted by serializer! */
+ 		zend_hash_next_index_insert(var_hash, rval, sizeof(*rval), NULL);
+@@ -567,13 +562,13 @@ PHPAPI int php_var_unserialize(zval **rval, const char **p, const char *max, Has
+ 				ALLOC_INIT_ZVAL(key);
+ 				ALLOC_INIT_ZVAL(data);
+ 
+-				if (!php_var_unserialize(&key, p, max, NULL)) {
++				if (!php_var_unserialize(&key, p, max, NULL TSRMLS_CC)) {
+ 					zval_dtor(key);
+ 					FREE_ZVAL(key);
+ 					FREE_ZVAL(data);
+ 					return 0;
+ 				}
+-				if (!php_var_unserialize(&data, p, max, var_hash)) {
++				if (!php_var_unserialize(&data, p, max, var_hash TSRMLS_CC)) {
+ 					zval_dtor(key);
+ 					FREE_ZVAL(key);
+ 					zval_dtor(data);
+@@ -629,7 +624,7 @@ PHP_FUNCTION(serialize)
+ 	return_value->value.str.len = 0;
+ 
+ 	PHP_VAR_SERIALIZE_INIT(var_hash);
+-	php_var_serialize(&buf, struc, &var_hash);
++	php_var_serialize(&buf, struc, &var_hash TSRMLS_CC);
+ 	PHP_VAR_SERIALIZE_DESTROY(var_hash);
+ 	RETVAL_STRINGL(buf.c, buf.len, 0);
+ }
+@@ -656,7 +651,7 @@ PHP_FUNCTION(unserialize)
+ 		}
+ 
+ 		PHP_VAR_UNSERIALIZE_INIT(var_hash);
+-		if (!php_var_unserialize(&return_value, &p, p + Z_STRLEN_PP(buf),  &var_hash)) {
++		if (!php_var_unserialize(&return_value, &p, p + Z_STRLEN_PP(buf),  &var_hash TSRMLS_CC)) {
+ 			PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+ 			zval_dtor(return_value);
+ 			php_error(E_NOTICE, "unserialize() failed at offset %d of %d bytes",p - Z_STRVAL_PP(buf),Z_STRLEN_PP(buf));
+diff --git a/ext/sysvshm/sysvshm.c b/ext/sysvshm/sysvshm.c
+index 60f6cf87bd..eeacad9d7f 100644
+--- a/ext/sysvshm/sysvshm.c
++++ b/ext/sysvshm/sysvshm.c
+@@ -245,7 +245,7 @@ PHP_FUNCTION(shm_put_var)
+ 	/* setup string-variable and serialize */
+ 
+ 	PHP_VAR_SERIALIZE_INIT(var_hash);
+-	php_var_serialize(&shm_var,arg_var,&var_hash);
++	php_var_serialize(&shm_var,arg_var,&var_hash TSRMLS_CC);
+ 	PHP_VAR_SERIALIZE_DESTROY(var_hash);
+ 	/* insert serialized variable into shared memory */
+ 	ret=php_put_shm_data(shm_list_ptr->ptr,key,shm_var.c,shm_var.len);
+@@ -301,7 +301,7 @@ PHP_FUNCTION(shm_get_var)
+ 	shm_data=&shm_var->mem;
+ 	
+ 	PHP_VAR_UNSERIALIZE_INIT(var_hash);
+-	if(php_var_unserialize(&return_value, (const char **) &shm_data, shm_data+shm_var->length,&var_hash)!=1) {
++	if(php_var_unserialize(&return_value, (const char **) &shm_data, shm_data+shm_var->length,&var_hash TSRMLS_CC)!=1) {
+ 		PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+ 		php_error(E_WARNING, "variable data in shared memory is corruped");
+ 		RETURN_FALSE;
+

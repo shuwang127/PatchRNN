@@ -1,0 +1,110 @@
+commit f62724873652ddb19edf7f92843e9456fe3be3ea
+Author: Kyungmin Park <kyungmin.park@samsung.com>
+Date:   Fri Dec 22 16:02:50 2006 +0900
+
+    [MTD] OneNAND: fix onenand_wait bug
+    
+    Fix onenand_wait error reporting
+    
+    Signed-off-by: Kyungmin Park <kyungmin.park@samsung.com>
+
+diff --git a/drivers/mtd/onenand/onenand_base.c b/drivers/mtd/onenand/onenand_base.c
+index 63ca61b83bf5..3fab4d1b68bd 100644
+--- a/drivers/mtd/onenand/onenand_base.c
++++ b/drivers/mtd/onenand/onenand_base.c
+@@ -318,15 +318,10 @@ static int onenand_wait(struct mtd_info *mtd, int state)
+ 	ctrl = this->read_word(this->base + ONENAND_REG_CTRL_STATUS);
+ 
+ 	if (ctrl & ONENAND_CTRL_ERROR) {
+-		/* It maybe occur at initial bad block */
+ 		DEBUG(MTD_DEBUG_LEVEL0, "onenand_wait: controller error = 0x%04x\n", ctrl);
+-		/* Clear other interrupt bits for preventing ECC error */
+-		interrupt &= ONENAND_INT_MASTER;
+-	}
+-
+-	if (ctrl & ONENAND_CTRL_LOCK) {
+-		DEBUG(MTD_DEBUG_LEVEL0, "onenand_wait: it's locked error = 0x%04x\n", ctrl);
+-		return -EACCES;
++		if (ctrl & ONENAND_CTRL_LOCK)
++			DEBUG(MTD_DEBUG_LEVEL0, "onenand_wait: it's locked error.\n");
++		return ctrl;
+ 	}
+ 
+ 	if (interrupt & ONENAND_INT_READ) {
+@@ -750,21 +745,21 @@ static int onenand_read(struct mtd_info *mtd, loff_t from, size_t len,
+ 
+ 			ret = this->wait(mtd, FL_READING);
+ 			/* First copy data and check return value for ECC handling */
+-			onenand_update_bufferram(mtd, from, 1);
++			onenand_update_bufferram(mtd, from, !ret);
+ 		}
+ 
+ 		this->read_bufferram(mtd, ONENAND_DATARAM, buf, column, thislen);
+ 
+-		read += thislen;
+-
+-		if (read == len)
+-			break;
+-
+ 		if (ret) {
+ 			DEBUG(MTD_DEBUG_LEVEL0, "onenand_read: read failed = %d\n", ret);
+ 			goto out;
+ 		}
+ 
++		read += thislen;
++
++		if (read == len)
++			break;
++
+ 		from += thislen;
+ 		buf += thislen;
+ 	}
+@@ -832,16 +827,16 @@ int onenand_do_read_oob(struct mtd_info *mtd, loff_t from, size_t len,
+ 
+ 		this->read_bufferram(mtd, ONENAND_SPARERAM, buf, column, thislen);
+ 
++		if (ret) {
++			DEBUG(MTD_DEBUG_LEVEL0, "onenand_read_oob: read failed = 0x%x\n", ret);
++			goto out;
++		}
++
+ 		read += thislen;
+ 
+ 		if (read == len)
+ 			break;
+ 
+-		if (ret) {
+-			DEBUG(MTD_DEBUG_LEVEL0, "onenand_read_oob: read failed = %d\n", ret);
+-			goto out;
+-		}
+-
+ 		buf += thislen;
+ 
+ 		/* Read more? */
+@@ -1199,10 +1194,7 @@ static int onenand_erase(struct mtd_info *mtd, struct erase_info *instr)
+ 		ret = this->wait(mtd, FL_ERASING);
+ 		/* Check, if it is write protected */
+ 		if (ret) {
+-			if (ret == -EPERM)
+-				DEBUG(MTD_DEBUG_LEVEL0, "onenand_erase: Device is write protected!!!\n");
+-			else
+-				DEBUG(MTD_DEBUG_LEVEL0, "onenand_erase: Failed erase, block %d\n", (unsigned) (addr >> this->erase_shift));
++			DEBUG(MTD_DEBUG_LEVEL0, "onenand_erase: Failed erase, block %d\n", (unsigned) (addr >> this->erase_shift));
+ 			instr->state = MTD_ERASE_FAILED;
+ 			instr->fail_addr = addr;
+ 			goto erase_exit;
+diff --git a/drivers/mtd/onenand/onenand_bbt.c b/drivers/mtd/onenand/onenand_bbt.c
+index 6cceeca40567..98f8fd1c6375 100644
+--- a/drivers/mtd/onenand/onenand_bbt.c
++++ b/drivers/mtd/onenand/onenand_bbt.c
+@@ -93,7 +93,8 @@ static int create_bbt(struct mtd_info *mtd, uint8_t *buf, struct nand_bbt_descr
+ 			ret = onenand_do_read_oob(mtd, from + j * mtd->writesize + bd->offs,
+ 						  readlen, &retlen, &buf[0]);
+ 
+-			if (ret)
++			/* If it is a initial bad block, just ignore it */
++			if (ret && !(ret & ONENAND_CTRL_LOAD))
+ 				return ret;
+ 
+ 			if (check_short_pattern(&buf[j * scanlen], scanlen, mtd->writesize, bd)) {
+

@@ -1,0 +1,125 @@
+commit 52f9ee10c5d65b78b8549f0a60efb46ac44c25db
+Author: joreland@mysql.com <>
+Date:   Thu Aug 5 17:53:31 2004 +0200
+
+    bug#4586 testSystemRestart -n SR_FULLDB
+    keep acc from shrinking/expanding when less than one page per fragment
+    is left.
+    
+    This makes ACC not shrink so that one get out of pages during
+    log execution in SR (which crashes badly)
+
+diff --git a/ndb/src/kernel/blocks/dbacc/Dbacc.hpp b/ndb/src/kernel/blocks/dbacc/Dbacc.hpp
+index 5185e91caac..f10350a7c99 100644
+--- a/ndb/src/kernel/blocks/dbacc/Dbacc.hpp
++++ b/ndb/src/kernel/blocks/dbacc/Dbacc.hpp
+@@ -1564,6 +1564,8 @@ private:
+ 
+   Uint32 c_errorInsert3000_TableId;
+   Uint32 cSrUndoRecords[5];
++
++  Uint32 c_no_fragment_allocated;
+ };
+ 
+ #endif
+diff --git a/ndb/src/kernel/blocks/dbacc/DbaccMain.cpp b/ndb/src/kernel/blocks/dbacc/DbaccMain.cpp
+index ccc1acdd273..184b7054001 100644
+--- a/ndb/src/kernel/blocks/dbacc/DbaccMain.cpp
++++ b/ndb/src/kernel/blocks/dbacc/DbaccMain.cpp
+@@ -599,6 +599,7 @@ void Dbacc::ndbrestart1Lab(Signal* signal)
+   for (Uint32 tmp = 0; tmp < ZMAX_UNDO_VERSION; tmp++) {
+     csrVersList[tmp] = RNIL;
+   }//for
++  c_no_fragment_allocated = 0;
+   return;
+ }//Dbacc::ndbrestart1Lab()
+ 
+@@ -1360,6 +1361,8 @@ void Dbacc::releaseDirIndexResources(Signal* signal, FragmentrecPtr regFragPtr)
+ 
+ void Dbacc::releaseFragRecord(Signal* signal, FragmentrecPtr regFragPtr) 
+ {
++  ndbrequire(c_no_fragment_allocated > 0);
++  c_no_fragment_allocated--;
+   regFragPtr.p->nextfreefrag = cfirstfreefrag;
+   cfirstfreefrag = regFragPtr.i;
+   initFragGeneral(regFragPtr);
+@@ -6349,25 +6352,26 @@ void Dbacc::execEXPANDCHECK2(Signal* signal)
+     /*--------------------------------------------------------------*/
+     return;
+   }//if
+-  if (fragrecptr.p->firstOverflowRec == RNIL) {
+-    jam();
+-    allocOverflowPage(signal);
+-    if (tresult > ZLIMIT_OF_ERROR) {
++  if (cfirstfreepage == RNIL) {
++    if ((cfreepage + c_no_fragment_allocated) >= cpagesize) {
+       jam();
+       /*--------------------------------------------------------------*/
+-      /* WE COULD NOT ALLOCATE ANY OVERFLOW PAGE. THUS WE HAVE TO STOP*/
+-      /* THE EXPAND SINCE WE CANNOT GUARANTEE ITS COMPLETION.         */
++      /* WE HAVE TO STOP THE EXPAND PROCESS SINCE THERE ARE NO FREE   */
++      /* PAGES. THIS MEANS THAT WE COULD BE FORCED TO CRASH SINCE WE  */
++      /* CANNOT COMPLETE THE EXPAND. TO AVOID THE CRASH WE EXIT HERE. */
+       /*--------------------------------------------------------------*/
+       return;
+     }//if
+   }//if
+-  if (cfirstfreepage == RNIL) {
+-    if (cfreepage >= cpagesize) {
++
++  if (fragrecptr.p->firstOverflowRec == RNIL) {
++    jam();
++    allocOverflowPage(signal);
++    if (tresult > ZLIMIT_OF_ERROR) {
+       jam();
+       /*--------------------------------------------------------------*/
+-      /* WE HAVE TO STOP THE EXPAND PROCESS SINCE THERE ARE NO FREE   */
+-      /* PAGES. THIS MEANS THAT WE COULD BE FORCED TO CRASH SINCE WE  */
+-      /* CANNOT COMPLETE THE EXPAND. TO AVOID THE CRASH WE EXIT HERE. */
++      /* WE COULD NOT ALLOCATE ANY OVERFLOW PAGE. THUS WE HAVE TO STOP*/
++      /* THE EXPAND SINCE WE CANNOT GUARANTEE ITS COMPLETION.         */
+       /*--------------------------------------------------------------*/
+       return;
+     }//if
+@@ -6933,16 +6937,8 @@ void Dbacc::execSHRINKCHECK2(Signal* signal)
+       }//if
+     }//if
+   }//if
+-  if (fragrecptr.p->firstOverflowRec == RNIL) {
+-    jam();
+-    allocOverflowPage(signal);
+-    if (tresult > ZLIMIT_OF_ERROR) {
+-      jam();
+-      return;
+-    }//if
+-  }//if
+   if (cfirstfreepage == RNIL) {
+-    if (cfreepage >= cpagesize) {
++    if (cfreepage + c_no_fragment_allocated >= cpagesize) {
+       jam();
+       /*--------------------------------------------------------------*/
+       /* WE HAVE TO STOP THE SHRINK PROCESS SINCE THERE ARE NO FREE   */
+@@ -6952,6 +6948,14 @@ void Dbacc::execSHRINKCHECK2(Signal* signal)
+       return;
+     }//if
+   }//if
++  if (fragrecptr.p->firstOverflowRec == RNIL) {
++    jam();
++    allocOverflowPage(signal);
++    if (tresult > ZLIMIT_OF_ERROR) {
++      jam();
++      return;
++    }//if
++  }//if
+   if (checkScanShrink(signal) == 1) {
+     jam();
+     /*--------------------------------------------------------------*/
+@@ -12771,6 +12775,7 @@ void Dbacc::seizeDirrange(Signal* signal)
+ /* --------------------------------------------------------------------------------- */
+ void Dbacc::seizeFragrec(Signal* signal) 
+ {
++  c_no_fragment_allocated++;
+   fragrecptr.i = cfirstfreefrag;
+   ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+   cfirstfreefrag = fragrecptr.p->nextfreefrag;
+

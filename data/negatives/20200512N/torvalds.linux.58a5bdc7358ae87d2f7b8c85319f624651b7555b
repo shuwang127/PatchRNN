@@ -1,0 +1,170 @@
+commit 58a5bdc7358ae87d2f7b8c85319f624651b7555b
+Author: Alex Elder <elder@linaro.org>
+Date:   Tue Nov 18 13:26:46 2014 -0600
+
+    greybus: send buffers without gbufs
+    
+    Change the method that sends messages so that it sends "raw" buffers
+    rather than gbufs.  To do this, we supply the host device and
+    destination CPort when sending.  As with other recent patches,
+    change the name of the method to reflect that we're no longer
+    dealing with gbufs.
+    
+    The interface has changed as well.  Now this routine will return a
+    "cookie" value.  The cookie is used to represent the outgoing
+    request, and is supplied by the caller if necessary to cancel a
+    previously-sent buffer.  We'll store the result in gbuf->hcd_data
+    for now (which produces the same result as before...).
+    
+    Signed-off-by: Alex Elder <elder@linaro.org>
+    Signed-off-by: Greg Kroah-Hartman <greg@kroah.com>
+
+diff --git a/drivers/staging/greybus/core.c b/drivers/staging/greybus/core.c
+index 39f8c4a5c2d2..04fc5412c351 100644
+--- a/drivers/staging/greybus/core.c
++++ b/drivers/staging/greybus/core.c
+@@ -170,8 +170,7 @@ struct greybus_host_device *greybus_create_hd(struct greybus_host_driver *driver
+ 	 * so that we don't have to every time we make them.
+ 	 */
+ 	if ((!driver->buffer_alloc) || (!driver->buffer_free) ||
+-	    (!driver->submit_gbuf) ||
+-	    (!driver->buffer_cancel) ||
++	    (!driver->buffer_send) || (!driver->buffer_cancel) ||
+ 	    (!driver->submit_svc)) {
+ 		pr_err("Must implement all greybus_host_driver callbacks!\n");
+ 		return NULL;
+diff --git a/drivers/staging/greybus/es1-ap-usb.c b/drivers/staging/greybus/es1-ap-usb.c
+index 9801d08fbc08..3404dc59a151 100644
+--- a/drivers/staging/greybus/es1-ap-usb.c
++++ b/drivers/staging/greybus/es1-ap-usb.c
+@@ -183,47 +183,65 @@ static struct urb *next_free_urb(struct es1_ap_dev *es1, gfp_t gfp_mask)
+ 	return urb;
+ }
+ 
+-static int submit_gbuf(struct gbuf *gbuf, gfp_t gfp_mask)
++/*
++ * Returns an opaque cookie value if successful, or a pointer coded
++ * error otherwise.  If the caller wishes to cancel the in-flight
++ * buffer, it must supply the returned cookie to the cancel routine.
++ */
++static void *buffer_send(struct greybus_host_device *hd, u16 dest_cport_id,
++			void *buffer, size_t buffer_size, gfp_t gfp_mask)
+ {
+-	struct greybus_host_device *hd = gbuf->hd;
+ 	struct es1_ap_dev *es1 = hd_to_es1(hd);
+ 	struct usb_device *udev = es1->usb_dev;
+-	u16 dest_cport_id = gbuf->dest_cport_id;
++	u8 *transfer_buffer = buffer;
++	int transfer_buffer_size;
+ 	int retval;
+-	u8 *transfer_buffer;
+-	u8 *buffer;
+ 	struct urb *urb;
+ 
+-	transfer_buffer = gbuf->transfer_buffer;
+-	if (!transfer_buffer)
+-		return -EINVAL;
+-	buffer = &transfer_buffer[-1];	/* yes, we mean -1 */
++	if (!buffer) {
++		pr_err("null buffer supplied to send\n");
++		return ERR_PTR(-EINVAL);
++	}
++	if (buffer_size > (size_t)INT_MAX) {
++		pr_err("bad buffer size (%zu) supplied to send\n", buffer_size);
++		return ERR_PTR(-EINVAL);
++	}
++	transfer_buffer--;
++	transfer_buffer_size = buffer_size + 1;
+ 
+-	/* Do one last check of the target CPort id before filling it in */
++	/*
++	 * The data actually transferred will include an indication
++	 * of where the data should be sent.  Do one last check of
++	 * the target CPort id before filling it in.
++	 */
+ 	if (dest_cport_id == CPORT_ID_BAD) {
+ 		pr_err("request to send inbound data buffer\n");
+-		return -EINVAL;
++		return ERR_PTR(-EINVAL);
+ 	}
+ 	if (dest_cport_id > (u16)U8_MAX) {
+ 		pr_err("dest_cport_id (%hd) is out of range for ES1\n",
+ 			dest_cport_id);
+-		return -EINVAL;
++		return ERR_PTR(-EINVAL);
+ 	}
+-	*buffer = dest_cport_id;
++	/* OK, the destination is fine; record it in the transfer buffer */
++	*transfer_buffer = dest_cport_id;
+ 
+ 	/* Find a free urb */
+ 	urb = next_free_urb(es1, gfp_mask);
+ 	if (!urb)
+-		return -ENOMEM;
+-
+-	gbuf->hcd_data = urb;
++		return ERR_PTR(-ENOMEM);
+ 
+ 	usb_fill_bulk_urb(urb, udev,
+ 			  usb_sndbulkpipe(udev, es1->cport_out_endpoint),
+-			  buffer, gbuf->transfer_buffer_length + 1,
++			  transfer_buffer, transfer_buffer_size,
+ 			  cport_out_callback, hd);
+ 	retval = usb_submit_urb(urb, gfp_mask);
+-	return retval;
++	if (retval) {
++		pr_err("error %d submitting URB\n", retval);
++		return ERR_PTR(retval);
++	}
++
++	return urb;
+ }
+ 
+ static void buffer_cancel(void *cookie)
+@@ -242,7 +260,7 @@ static struct greybus_host_driver es1_driver = {
+ 	.hd_priv_size		= sizeof(struct es1_ap_dev),
+ 	.buffer_alloc		= buffer_alloc,
+ 	.buffer_free		= buffer_free,
+-	.submit_gbuf		= submit_gbuf,
++	.buffer_send		= buffer_send,
+ 	.buffer_cancel		= buffer_cancel,
+ 	.submit_svc		= submit_svc,
+ };
+diff --git a/drivers/staging/greybus/greybus.h b/drivers/staging/greybus/greybus.h
+index a9b2b459d7ad..4ac7376fe815 100644
+--- a/drivers/staging/greybus/greybus.h
++++ b/drivers/staging/greybus/greybus.h
+@@ -81,7 +81,8 @@ struct greybus_host_driver {
+ 
+ 	void *(*buffer_alloc)(unsigned int size, gfp_t gfp_mask);
+ 	void (*buffer_free)(void *buffer);
+-	int (*submit_gbuf)(struct gbuf *gbuf, gfp_t gfp_mask);
++	void *(*buffer_send)(struct greybus_host_device *hd, u16 dest_cport_id,
++			void *buffer, size_t buffer_size, gfp_t gfp_mask);
+ 	void (*buffer_cancel)(void *cookie);
+ 	int (*submit_svc)(struct svc_msg *svc_msg,
+ 			    struct greybus_host_device *hd);
+diff --git a/drivers/staging/greybus/operation.c b/drivers/staging/greybus/operation.c
+index 26c9dd688cc3..33cc4145db3c 100644
+--- a/drivers/staging/greybus/operation.c
++++ b/drivers/staging/greybus/operation.c
+@@ -106,8 +106,16 @@ gb_pending_operation_find(struct gb_connection *connection, u16 id)
+ static int greybus_submit_gbuf(struct gbuf *gbuf, gfp_t gfp_mask)
+ {
+ 	gbuf->status = -EINPROGRESS;
+-
+-	return gbuf->hd->driver->submit_gbuf(gbuf, gfp_mask);
++	gbuf->hcd_data = gbuf->hd->driver->buffer_send(gbuf->hd,
++				gbuf->dest_cport_id, gbuf->transfer_buffer,
++				gbuf->transfer_buffer_length, gfp_mask);
++	if (IS_ERR(gbuf->hcd_data)) {
++		gbuf->status = PTR_ERR(gbuf->hcd_data);
++		gbuf->hcd_data = NULL;
++
++		return gbuf->status;
++	}
++	return 0;
+ }
+ 
+ static void greybus_kill_gbuf(struct gbuf *gbuf)
+

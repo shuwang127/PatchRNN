@@ -1,0 +1,89 @@
+commit dce2db0a35197e2f4421245079f19ab753e97348
+Author: Marcelo Tosatti <mtosatti@redhat.com>
+Date:   Tue Nov 27 23:28:51 2012 -0200
+
+    x86: pvclock: create helper for pvclock data retrieval
+    
+    Originally from Jeremy Fitzhardinge.
+    
+    So code can be reused.
+    
+    Acked-by: Glauber Costa <glommer@parallels.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/arch/x86/include/asm/pvclock.h b/arch/x86/include/asm/pvclock.h
+index c59cc97fe6c1..47e25d464104 100644
+--- a/arch/x86/include/asm/pvclock.h
++++ b/arch/x86/include/asm/pvclock.h
+@@ -56,4 +56,32 @@ static inline u64 pvclock_scale_delta(u64 delta, u32 mul_frac, int shift)
+ 	return product;
+ }
+ 
++static __always_inline
++u64 pvclock_get_nsec_offset(const struct pvclock_vcpu_time_info *src)
++{
++	u64 delta = __native_read_tsc() - src->tsc_timestamp;
++	return pvclock_scale_delta(delta, src->tsc_to_system_mul,
++				   src->tsc_shift);
++}
++
++static __always_inline
++unsigned __pvclock_read_cycles(const struct pvclock_vcpu_time_info *src,
++			       cycle_t *cycles, u8 *flags)
++{
++	unsigned version;
++	cycle_t ret, offset;
++	u8 ret_flags;
++
++	version = src->version;
++	rdtsc_barrier();
++	offset = pvclock_get_nsec_offset(src);
++	ret = src->system_time + offset;
++	ret_flags = src->flags;
++	rdtsc_barrier();
++
++	*cycles = ret;
++	*flags = ret_flags;
++	return version;
++}
++
+ #endif /* _ASM_X86_PVCLOCK_H */
+diff --git a/arch/x86/kernel/pvclock.c b/arch/x86/kernel/pvclock.c
+index d59e60661794..a7d90910c61a 100644
+--- a/arch/x86/kernel/pvclock.c
++++ b/arch/x86/kernel/pvclock.c
+@@ -26,13 +26,6 @@ void pvclock_set_flags(u8 flags)
+ 	valid_flags = flags;
+ }
+ 
+-static u64 pvclock_get_nsec_offset(const struct pvclock_vcpu_time_info *src)
+-{
+-	u64 delta = native_read_tsc() - src->tsc_timestamp;
+-	return pvclock_scale_delta(delta, src->tsc_to_system_mul,
+-				   src->tsc_shift);
+-}
+-
+ unsigned long pvclock_tsc_khz(struct pvclock_vcpu_time_info *src)
+ {
+ 	u64 pv_tsc_khz = 1000000ULL << 32;
+@@ -55,17 +48,12 @@ void pvclock_resume(void)
+ cycle_t pvclock_clocksource_read(struct pvclock_vcpu_time_info *src)
+ {
+ 	unsigned version;
+-	cycle_t ret, offset;
++	cycle_t ret;
+ 	u64 last;
+ 	u8 flags;
+ 
+ 	do {
+-		version = src->version;
+-		rdtsc_barrier();
+-		offset = pvclock_get_nsec_offset(src);
+-		ret = src->system_time + offset;
+-		flags = src->flags;
+-		rdtsc_barrier();
++		version = __pvclock_read_cycles(src, &ret, &flags);
+ 	} while ((src->version & 1) || version != src->version);
+ 
+ 	if ((valid_flags & PVCLOCK_TSC_STABLE_BIT) &&
+

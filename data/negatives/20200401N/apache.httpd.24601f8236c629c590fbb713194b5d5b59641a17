@@ -1,0 +1,82 @@
+commit 24601f8236c629c590fbb713194b5d5b59641a17
+Author: Stefan Fritsch <sf@apache.org>
+Date:   Mon Nov 7 22:58:52 2011 +0000
+
+    More error checking for ap_pregsub
+    
+    
+    git-svn-id: https://svn.apache.org/repos/asf/httpd/httpd/trunk@1198988 13f79535-47bb-0310-9956-ffa450edef68
+
+diff --git a/modules/mappers/mod_alias.c b/modules/mappers/mod_alias.c
+index 18b48f557e..e0a17eacfb 100644
+--- a/modules/mappers/mod_alias.c
++++ b/modules/mappers/mod_alias.c
+@@ -333,6 +333,9 @@ static int alias_matches(const char *uri, const char *alias_fakename)
+     return urip - uri;
+ }
+ 
++static char magic_error_value;
++#define PREGSUB_ERROR      (&magic_error_value)
++
+ static char *try_alias_list(request_rec *r, apr_array_header_t *aliases,
+                             int is_redir, int *status)
+ {
+@@ -379,6 +382,12 @@ static char *try_alias_list(request_rec *r, apr_array_header_t *aliases,
+                                                               pathlen));
+                        }
+                     }
++                    else {
++                        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
++                                      "Regex substitution in '%s' failed. "
++                                      "Replacement too long?", alias->real);
++                        return PREGSUB_ERROR;
++                    }
+                 }
+                 else {
+                     /* need something non-null */
+@@ -438,6 +447,8 @@ static int translate_alias_redir(request_rec *r)
+     }
+ 
+     if ((ret = try_alias_list(r, serverconf->redirects, 1, &status)) != NULL) {
++        if (ret == PREGSUB_ERROR)
++            return HTTP_INTERNAL_SERVER_ERROR;
+         if (ap_is_HTTP_REDIRECT(status)) {
+             if (ret[0] == '/') {
+                 char *orig_target = ret;
+@@ -487,6 +498,8 @@ static int fixup_redir(request_rec *r)
+     /* It may have changed since last time, so try again */
+ 
+     if ((ret = try_alias_list(r, dirconf->redirects, 1, &status)) != NULL) {
++        if (ret == PREGSUB_ERROR)
++            return HTTP_INTERNAL_SERVER_ERROR;
+         if (ap_is_HTTP_REDIRECT(status)) {
+             if (ret[0] == '/') {
+                 char *orig_target = ret;
+diff --git a/modules/proxy/mod_proxy.c b/modules/proxy/mod_proxy.c
+index d5cf9ea687..dfce1d7bfc 100644
+--- a/modules/proxy/mod_proxy.c
++++ b/modules/proxy/mod_proxy.c
+@@ -576,6 +576,13 @@ PROXY_DECLARE(int) ap_proxy_trans_match(request_rec *r, struct proxy_alias *ent,
+             }
+             found = ap_pregsub(r->pool, real, use_uri, AP_MAX_REG_MATCH,
+                     (use_uri == r->uri) ? regm : reg1);
++            if (!found) {
++                ap_log_rerror(APLOG_MARK, APLOG_CRIT, 0, r,
++                              "Substitution in regular expression failed. "
++                              "Replacement too long?");
++                return HTTP_INTERNAL_SERVER_ERROR;
++            }
++
+             /* Note: The strcmp() below catches cases where there
+              * was no regex substitution. This is so cases like:
+              *
+@@ -589,7 +596,7 @@ PROXY_DECLARE(int) ap_proxy_trans_match(request_rec *r, struct proxy_alias *ent,
+              *
+              * which may be confusing.
+              */
+-            if (found && strcmp(found, real)) {
++            if (strcmp(found, real) != 0) {
+                 found = apr_pstrcat(r->pool, "proxy:", found, NULL);
+             }
+             else {
+

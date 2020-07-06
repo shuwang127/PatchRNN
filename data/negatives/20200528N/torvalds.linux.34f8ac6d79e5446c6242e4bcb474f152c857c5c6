@@ -1,0 +1,66 @@
+commit 34f8ac6d79e5446c6242e4bcb474f152c857c5c6
+Author: Jonathan Brassow <jbrassow@redhat.com>
+Date:   Fri Jan 27 14:53:53 2012 -0600
+
+    Prevent DM RAID from loading bitmap twice.
+    
+    The life cycle of a device-mapper target is:
+    1) create
+    2) resume
+    3) suspend
+    *) possibly repeat from 2
+    4) destroy
+    
+    The dm-raid target is unconditionally calling MD's bitmap_load function upon
+    every resume.  If steps 2 & 3 above are repeated, bitmap_load is called
+    multiple times.  It is only written to be called once; otherwise, it allocates
+    new memory for the bitmap (without freeing the old) and incrementing the number
+    of pages it thinks it has without zeroing first.  This ultimately leads to
+    access beyond allocated memory and lost memory.
+    
+    Simply avoiding the bitmap_load call upon resume is not sufficient.  If the
+    target was suspended while the initial recovery was only partially complete,
+    it needs to be restarted when the target is resumed.  This is why
+    'md_wakeup_thread' is called before issuing the 'mddev_resume'.
+    
+    Signed-off-by: Jonathan Brassow <jbrassow@redhat.com>
+    Signed-off-by: NeilBrown <neilb@suse.de>
+
+diff --git a/drivers/md/dm-raid.c b/drivers/md/dm-raid.c
+index c2907d836e4e..86cb7e5d83d5 100644
+--- a/drivers/md/dm-raid.c
++++ b/drivers/md/dm-raid.c
+@@ -56,7 +56,8 @@ struct raid_dev {
+ struct raid_set {
+ 	struct dm_target *ti;
+ 
+-	uint64_t print_flags;
++	uint32_t bitmap_loaded;
++	uint32_t print_flags;
+ 
+ 	struct mddev md;
+ 	struct raid_type *raid_type;
+@@ -1085,7 +1086,7 @@ static int raid_status(struct dm_target *ti, status_type_t type,
+ 				raid_param_cnt += 2;
+ 		}
+ 
+-		raid_param_cnt += (hweight64(rs->print_flags & ~DMPF_REBUILD) * 2);
++		raid_param_cnt += (hweight32(rs->print_flags & ~DMPF_REBUILD) * 2);
+ 		if (rs->print_flags & (DMPF_SYNC | DMPF_NOSYNC))
+ 			raid_param_cnt--;
+ 
+@@ -1197,7 +1198,12 @@ static void raid_resume(struct dm_target *ti)
+ {
+ 	struct raid_set *rs = ti->private;
+ 
+-	bitmap_load(&rs->md);
++	if (!rs->bitmap_loaded) {
++		bitmap_load(&rs->md);
++		rs->bitmap_loaded = 1;
++	} else
++		md_wakeup_thread(rs->md.thread);
++
+ 	mddev_resume(&rs->md);
+ }
+ 
+

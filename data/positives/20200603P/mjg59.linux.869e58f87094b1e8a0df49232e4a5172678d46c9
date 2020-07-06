@@ -1,0 +1,45 @@
+commit 869e58f87094b1e8a0df49232e4a5172678d46c9
+Author: Denis V. Lunev <den@openvz.org>
+Date:   Fri Jan 18 23:53:31 2008 -0800
+
+    [NETNS]: Double free in netlink_release.
+    
+    Netlink protocol table is global for all namespaces. Some netlink
+    protocols have been virtualized, i.e. they have per/namespace netlink
+    socket. This difference can easily lead to double free if more than 1
+    namespace is started. Count the number of kernel netlink sockets to
+    track that this table is not used any more.
+    
+    Signed-off-by: Denis V. Lunev <den@openvz.org>
+    Tested-by: Alexey Dobriyan <adobriyan@openvz.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/netlink/af_netlink.c b/net/netlink/af_netlink.c
+index 21f9e30184e2..29fef558aab6 100644
+--- a/net/netlink/af_netlink.c
++++ b/net/netlink/af_netlink.c
+@@ -498,9 +498,12 @@ static int netlink_release(struct socket *sock)
+ 
+ 	netlink_table_grab();
+ 	if (netlink_is_kernel(sk)) {
+-		kfree(nl_table[sk->sk_protocol].listeners);
+-		nl_table[sk->sk_protocol].module = NULL;
+-		nl_table[sk->sk_protocol].registered = 0;
++		BUG_ON(nl_table[sk->sk_protocol].registered == 0);
++		if (--nl_table[sk->sk_protocol].registered == 0) {
++			kfree(nl_table[sk->sk_protocol].listeners);
++			nl_table[sk->sk_protocol].module = NULL;
++			nl_table[sk->sk_protocol].registered = 0;
++		}
+ 	} else if (nlk->subscriptions)
+ 		netlink_update_listeners(sk);
+ 	netlink_table_ungrab();
+@@ -1389,6 +1392,7 @@ netlink_kernel_create(struct net *net, int unit, unsigned int groups,
+ 		nl_table[unit].registered = 1;
+ 	} else {
+ 		kfree(listeners);
++		nl_table[unit].registered++;
+ 	}
+ 	netlink_table_ungrab();
+ 
+

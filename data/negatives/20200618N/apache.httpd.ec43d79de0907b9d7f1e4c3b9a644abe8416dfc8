@@ -1,0 +1,78 @@
+commit ec43d79de0907b9d7f1e4c3b9a644abe8416dfc8
+Author: Jim Jagielski <jim@apache.org>
+Date:   Thu Jan 26 03:52:34 2017 +0000
+
+    Adjust as needed
+    
+    git-svn-id: https://svn.apache.org/repos/asf/httpd/httpd/trunk@1780328 13f79535-47bb-0310-9956-ffa450edef68
+
+diff --git a/modules/mappers/mod_actions.c b/modules/mappers/mod_actions.c
+index 2a67a2742a..ac9c3b7428 100644
+--- a/modules/mappers/mod_actions.c
++++ b/modules/mappers/mod_actions.c
+@@ -186,7 +186,8 @@ static int action_handler(request_rec *r)
+         ap_field_noparam(r->pool, r->content_type);
+ 
+     if (action && (t = apr_table_get(conf->action_types, action))) {
+-        if (*t++ == '0' && r->finfo.filetype == APR_NOFILE) {
++        int virtual = (*t++ == '0' ? 0 : 1);
++        if (!virtual && r->finfo.filetype == APR_NOFILE) {
+             ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, APLOGNO(00652)
+                           "File does not exist: %s", r->filename);
+             return HTTP_NOT_FOUND;
+@@ -197,6 +198,9 @@ static int action_handler(request_rec *r)
+          * (will be REDIRECT_HANDLER there)
+          */
+         apr_table_setn(r->subprocess_env, "HANDLER", action);
++        if (virtual) {
++            apr_table_setn(r->notes, "virtual_script", "1");
++        }
+     }
+ 
+     if (script == NULL)
+diff --git a/modules/proxy/mod_proxy_fcgi.c b/modules/proxy/mod_proxy_fcgi.c
+index 5ddd2d35b8..7cca32b32e 100644
+--- a/modules/proxy/mod_proxy_fcgi.c
++++ b/modules/proxy/mod_proxy_fcgi.c
+@@ -269,6 +269,7 @@ static apr_status_t send_environment(proxy_conn_rec *conn, request_rec *r,
+     apr_status_t rv;
+     apr_size_t avail_len, len, required_len;
+     int next_elem, starting_elem;
++    int fpm = 0;
+     fcgi_req_config_t *rconf = ap_get_module_config(r->request_config, &proxy_fcgi_module);
+     fcgi_dirconf_t *dconf = ap_get_module_config(r->per_dir_config, &proxy_fcgi_module);
+ 
+@@ -301,6 +302,8 @@ static apr_status_t send_environment(proxy_conn_rec *conn, request_rec *r,
+                     *qs = '\0';
+                 }
+             }
++        } else {
++            fpm = 1;
+         }
+ 
+         if (newfname) {
+@@ -318,6 +321,23 @@ static apr_status_t send_environment(proxy_conn_rec *conn, request_rec *r,
+     ap_add_common_vars(r);
+     ap_add_cgi_vars(r);
+  
++    if (fpm || apr_table_get(r->notes, "virtual_script")) {
++        /*
++         * Adjust SCRIPT_NAME, PATH_INFO and PATH_TRANSLATED for PHP-FPM
++         * TODO: Right now, PATH_INFO and PATH_TRANSLATED look OK...
++         */
++        const char *pend;
++        const char *script_name = apr_table_get(r->subprocess_env, "SCRIPT_NAME");
++        pend = script_name + strlen(script_name);
++        if (r->path_info && *r->path_info) {
++            pend = script_name + ap_find_path_info(script_name, r->path_info) - 1;
++        }
++        while (pend != script_name && *pend != '/') {
++            pend--;
++        }
++        apr_table_setn(r->subprocess_env, "SCRIPT_NAME", pend);
++    }
++
+     /* XXX are there any FastCGI specific env vars we need to send? */
+ 
+     /* XXX mod_cgi/mod_cgid use ap_create_environment here, which fills in
+

@@ -1,0 +1,91 @@
+commit 9c669b731470154a1f7b0ad1c3231cf02114c163
+Author: Shuah Khan <shuah.kh@samsung.com>
+Date:   Fri Feb 21 21:50:13 2014 -0300
+
+    [media] em28xx: add suspend/resume to em28xx_ops
+    
+    em28xx usb driver will have to suspend and resume its extensions. Adding
+    suspend and resume to em28xx_ops gives extensions the ability to install
+    suspend and resume that can be invoked from em28xx_usb driver suspend()
+    and resume() interfaces.
+    
+    Approach:
+    Add power management support to em28xx usb driver. This driver works in
+    conjunction with extensions for each of the functions on the USB device
+    for video/audio/dvb/remote functionality that is present on media USB
+    devices it supports. During suspend and resume each of these extensions
+    will have to do their part in suspending the components they control.
+    
+    Adding suspend and resume hooks to the existing struct em28xx_ops will
+    enable the extensions the ability to implement suspend and resume hooks
+    to be called from em28xx driver. The overall approach is as follows:
+    
+    -- add suspend and resume hooks to em28xx_ops
+    -- add suspend and resume routines to em28xx-core to invoke suspend
+       and resume hooks for all registered extensions.
+    -- change em28xx dvb, audio, input, and video extensions to implement
+       em28xx_ops: suspend and resume hooks. These hooks do what is necessary
+       to suspend and resume the devices they control.
+    
+    Signed-off-by: Shuah Khan <shuah.kh@samsung.com>
+    Signed-off-by: Mauro Carvalho Chehab <m.chehab@samsung.com>
+
+diff --git a/drivers/media/usb/em28xx/em28xx-core.c b/drivers/media/usb/em28xx/em28xx-core.c
+index 898fb9bd88a2..6de41c6a0770 100644
+--- a/drivers/media/usb/em28xx/em28xx-core.c
++++ b/drivers/media/usb/em28xx/em28xx-core.c
+@@ -1106,3 +1106,31 @@ void em28xx_close_extension(struct em28xx *dev)
+ 	list_del(&dev->devlist);
+ 	mutex_unlock(&em28xx_devlist_mutex);
+ }
++
++int em28xx_suspend_extension(struct em28xx *dev)
++{
++	const struct em28xx_ops *ops = NULL;
++
++	em28xx_info("Suspending extensions");
++	mutex_lock(&em28xx_devlist_mutex);
++	list_for_each_entry(ops, &em28xx_extension_devlist, next) {
++		if (ops->suspend)
++			ops->suspend(dev);
++	}
++	mutex_unlock(&em28xx_devlist_mutex);
++	return 0;
++}
++
++int em28xx_resume_extension(struct em28xx *dev)
++{
++	const struct em28xx_ops *ops = NULL;
++
++	em28xx_info("Resuming extensions");
++	mutex_lock(&em28xx_devlist_mutex);
++	list_for_each_entry(ops, &em28xx_extension_devlist, next) {
++		if (ops->resume)
++			ops->resume(dev);
++	}
++	mutex_unlock(&em28xx_devlist_mutex);
++	return 0;
++}
+diff --git a/drivers/media/usb/em28xx/em28xx.h b/drivers/media/usb/em28xx/em28xx.h
+index 32d8a4bb7961..9b02f15485d1 100644
+--- a/drivers/media/usb/em28xx/em28xx.h
++++ b/drivers/media/usb/em28xx/em28xx.h
+@@ -713,6 +713,8 @@ struct em28xx_ops {
+ 	int id;
+ 	int (*init)(struct em28xx *);
+ 	int (*fini)(struct em28xx *);
++	int (*suspend)(struct em28xx *);
++	int (*resume)(struct em28xx *);
+ };
+ 
+ /* Provided by em28xx-i2c.c */
+@@ -758,6 +760,8 @@ int em28xx_register_extension(struct em28xx_ops *dev);
+ void em28xx_unregister_extension(struct em28xx_ops *dev);
+ void em28xx_init_extension(struct em28xx *dev);
+ void em28xx_close_extension(struct em28xx *dev);
++int em28xx_suspend_extension(struct em28xx *dev);
++int em28xx_resume_extension(struct em28xx *dev);
+ 
+ /* Provided by em28xx-cards.c */
+ extern struct em28xx_board em28xx_boards[];
+

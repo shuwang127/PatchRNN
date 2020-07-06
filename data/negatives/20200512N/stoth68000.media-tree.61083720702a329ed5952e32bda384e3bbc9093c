@@ -1,0 +1,177 @@
+commit 61083720702a329ed5952e32bda384e3bbc9093c
+Author: Shani Michaeli <shanim@mellanox.com>
+Date:   Wed Feb 6 16:19:09 2013 +0000
+
+    mlx4_core: Propagate MR deregistration failures to caller
+    
+    MR deregistration fails when memory windows are bound to the MR.
+    Handle such failures by propagating them to the caller ULP.
+    
+    Signed-off-by: Haggai Eran <haggaie@mellanox.com>
+    Signed-off-by: Shani Michaeli <shanim@mellanox.com>
+    Signed-off-by: Or Gerlitz <ogerlitz@mellanox.com>
+    Signed-off-by: Roland Dreier <roland@purestorage.com>
+
+diff --git a/drivers/infiniband/hw/mlx4/mr.c b/drivers/infiniband/hw/mlx4/mr.c
+index bbaf6176f207..254e1cf26439 100644
+--- a/drivers/infiniband/hw/mlx4/mr.c
++++ b/drivers/infiniband/hw/mlx4/mr.c
+@@ -68,7 +68,7 @@ struct ib_mr *mlx4_ib_get_dma_mr(struct ib_pd *pd, int acc)
+ 	return &mr->ibmr;
+ 
+ err_mr:
+-	mlx4_mr_free(to_mdev(pd->device)->dev, &mr->mmr);
++	(void) mlx4_mr_free(to_mdev(pd->device)->dev, &mr->mmr);
+ 
+ err_free:
+ 	kfree(mr);
+@@ -163,7 +163,7 @@ struct ib_mr *mlx4_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
+ 	return &mr->ibmr;
+ 
+ err_mr:
+-	mlx4_mr_free(to_mdev(pd->device)->dev, &mr->mmr);
++	(void) mlx4_mr_free(to_mdev(pd->device)->dev, &mr->mmr);
+ 
+ err_umem:
+ 	ib_umem_release(mr->umem);
+@@ -177,8 +177,11 @@ struct ib_mr *mlx4_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
+ int mlx4_ib_dereg_mr(struct ib_mr *ibmr)
+ {
+ 	struct mlx4_ib_mr *mr = to_mmr(ibmr);
++	int ret;
+ 
+-	mlx4_mr_free(to_mdev(ibmr->device)->dev, &mr->mmr);
++	ret = mlx4_mr_free(to_mdev(ibmr->device)->dev, &mr->mmr);
++	if (ret)
++		return ret;
+ 	if (mr->umem)
+ 		ib_umem_release(mr->umem);
+ 	kfree(mr);
+@@ -212,7 +215,7 @@ struct ib_mr *mlx4_ib_alloc_fast_reg_mr(struct ib_pd *pd,
+ 	return &mr->ibmr;
+ 
+ err_mr:
+-	mlx4_mr_free(dev->dev, &mr->mmr);
++	(void) mlx4_mr_free(dev->dev, &mr->mmr);
+ 
+ err_free:
+ 	kfree(mr);
+@@ -291,7 +294,7 @@ struct ib_fmr *mlx4_ib_fmr_alloc(struct ib_pd *pd, int acc,
+ 	return &fmr->ibfmr;
+ 
+ err_mr:
+-	mlx4_mr_free(to_mdev(pd->device)->dev, &fmr->mfmr.mr);
++	(void) mlx4_mr_free(to_mdev(pd->device)->dev, &fmr->mfmr.mr);
+ 
+ err_free:
+ 	kfree(fmr);
+diff --git a/drivers/net/ethernet/mellanox/mlx4/en_main.c b/drivers/net/ethernet/mellanox/mlx4/en_main.c
+index 3a2b8c65642d..a2987142734d 100644
+--- a/drivers/net/ethernet/mellanox/mlx4/en_main.c
++++ b/drivers/net/ethernet/mellanox/mlx4/en_main.c
+@@ -176,7 +176,7 @@ static void mlx4_en_remove(struct mlx4_dev *dev, void *endev_ptr)
+ 
+ 	flush_workqueue(mdev->workqueue);
+ 	destroy_workqueue(mdev->workqueue);
+-	mlx4_mr_free(dev, &mdev->mr);
++	(void) mlx4_mr_free(dev, &mdev->mr);
+ 	iounmap(mdev->uar_map);
+ 	mlx4_uar_free(dev, &mdev->priv_uar);
+ 	mlx4_pd_free(dev, mdev->priv_pdn);
+@@ -283,7 +283,7 @@ static void *mlx4_en_add(struct mlx4_dev *dev)
+ 	return mdev;
+ 
+ err_mr:
+-	mlx4_mr_free(dev, &mdev->mr);
++	(void) mlx4_mr_free(dev, &mdev->mr);
+ err_map:
+ 	if (!mdev->uar_map)
+ 		iounmap(mdev->uar_map);
+diff --git a/drivers/net/ethernet/mellanox/mlx4/mr.c b/drivers/net/ethernet/mellanox/mlx4/mr.c
+index 49705cf860c6..06b16e4ace80 100644
+--- a/drivers/net/ethernet/mellanox/mlx4/mr.c
++++ b/drivers/net/ethernet/mellanox/mlx4/mr.c
+@@ -442,7 +442,7 @@ int mlx4_mr_alloc(struct mlx4_dev *dev, u32 pd, u64 iova, u64 size, u32 access,
+ }
+ EXPORT_SYMBOL_GPL(mlx4_mr_alloc);
+ 
+-static void mlx4_mr_free_reserved(struct mlx4_dev *dev, struct mlx4_mr *mr)
++static int mlx4_mr_free_reserved(struct mlx4_dev *dev, struct mlx4_mr *mr)
+ {
+ 	int err;
+ 
+@@ -450,20 +450,31 @@ static void mlx4_mr_free_reserved(struct mlx4_dev *dev, struct mlx4_mr *mr)
+ 		err = mlx4_HW2SW_MPT(dev, NULL,
+ 				     key_to_hw_index(mr->key) &
+ 				     (dev->caps.num_mpts - 1));
+-		if (err)
+-			mlx4_warn(dev, "xxx HW2SW_MPT failed (%d)\n", err);
++		if (err) {
++			mlx4_warn(dev, "HW2SW_MPT failed (%d),", err);
++			mlx4_warn(dev, "MR has MWs bound to it.\n");
++			return err;
++		}
+ 
+ 		mr->enabled = MLX4_MPT_EN_SW;
+ 	}
+ 	mlx4_mtt_cleanup(dev, &mr->mtt);
++
++	return 0;
+ }
+ 
+-void mlx4_mr_free(struct mlx4_dev *dev, struct mlx4_mr *mr)
++int mlx4_mr_free(struct mlx4_dev *dev, struct mlx4_mr *mr)
+ {
+-	mlx4_mr_free_reserved(dev, mr);
++	int ret;
++
++	ret = mlx4_mr_free_reserved(dev, mr);
++	if (ret)
++		return ret;
+ 	if (mr->enabled)
+ 		mlx4_mpt_free_icm(dev, key_to_hw_index(mr->key));
+ 	mlx4_mpt_release(dev, key_to_hw_index(mr->key));
++
++	return 0;
+ }
+ EXPORT_SYMBOL_GPL(mlx4_mr_free);
+ 
+@@ -831,7 +842,7 @@ int mlx4_fmr_alloc(struct mlx4_dev *dev, u32 pd, u32 access, int max_pages,
+ 	return 0;
+ 
+ err_free:
+-	mlx4_mr_free(dev, &fmr->mr);
++	(void) mlx4_mr_free(dev, &fmr->mr);
+ 	return err;
+ }
+ EXPORT_SYMBOL_GPL(mlx4_fmr_alloc);
+@@ -888,10 +899,14 @@ EXPORT_SYMBOL_GPL(mlx4_fmr_unmap);
+ 
+ int mlx4_fmr_free(struct mlx4_dev *dev, struct mlx4_fmr *fmr)
+ {
++	int ret;
++
+ 	if (fmr->maps)
+ 		return -EBUSY;
+ 
+-	mlx4_mr_free(dev, &fmr->mr);
++	ret = mlx4_mr_free(dev, &fmr->mr);
++	if (ret)
++		return ret;
+ 	fmr->mr.enabled = MLX4_MPT_DISABLED;
+ 
+ 	return 0;
+diff --git a/include/linux/mlx4/device.h b/include/linux/mlx4/device.h
+index 20ea939c22a6..e9fe8caaf8bb 100644
+--- a/include/linux/mlx4/device.h
++++ b/include/linux/mlx4/device.h
+@@ -801,7 +801,7 @@ u64 mlx4_mtt_addr(struct mlx4_dev *dev, struct mlx4_mtt *mtt);
+ 
+ int mlx4_mr_alloc(struct mlx4_dev *dev, u32 pd, u64 iova, u64 size, u32 access,
+ 		  int npages, int page_shift, struct mlx4_mr *mr);
+-void mlx4_mr_free(struct mlx4_dev *dev, struct mlx4_mr *mr);
++int mlx4_mr_free(struct mlx4_dev *dev, struct mlx4_mr *mr);
+ int mlx4_mr_enable(struct mlx4_dev *dev, struct mlx4_mr *mr);
+ int mlx4_write_mtt(struct mlx4_dev *dev, struct mlx4_mtt *mtt,
+ 		   int start_index, int npages, u64 *page_list);
+

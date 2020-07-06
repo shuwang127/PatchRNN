@@ -1,0 +1,59 @@
+commit a5152457b8f416255e1ff6fd416c1fa4493c012e
+Author: Jon Olav Hauglid <jon.hauglid@oracle.com>
+Date:   Fri Sep 21 13:22:45 2012 +0200
+
+    Bug#11755580 ASSERTION IN QUERY CACHE WHEN RUNNING EVENT SCHEDULER
+    Bug#14609893 MYSQLD CRASH OBSERVED WITH "QUERY_CACHE13END_OF_RESULT"
+    
+    The triggered assert checks that a cached query result is
+    non-empty at the end of statement execution. It was triggered
+    if we are executing queries where the result is not sent to the
+    client. This could e.g. be events (Bug#11755580) or when executing
+    stored routines containing queries while the server was in
+    bootstrap mode (Bug#14609893). The query cache also had to be
+    turned on and have a non-zero size.
+    
+    A query result is inserted into the query cache by calls to
+    Query_cache::insert() which is called from net_write_packet().
+    However, without active vio, net_write_packet() is skipped.
+    This meant that the query cache result was never completed,
+    eventually triggering the assert. It did not happen for normal
+    statement execution in bootstrap mode since then
+    Query_cache::end_of_result() is not called. However, stored
+    routines are executed with the normal code path which contains
+    calls to Query_cache methods.
+    
+    This patch fixes the problem by changing Query_cache::store_query()
+    to not register queries unless there is an active vio (and
+    Query_cache::insert() therefore subsequentally will be called).
+    This will cause Query_cache::end_of_result() to not find an
+    incomplete result and thereby not trigger the assert.
+    
+    This bug was only a problem on debug builds. On release builds,
+    safety code in Query_cache::end_of_result() would simply remove
+    incomplete query results from the query cache.
+
+diff --git a/sql/sql_cache.cc b/sql/sql_cache.cc
+index d2438fcdb6a..64b50b6d175 100644
+--- a/sql/sql_cache.cc
++++ b/sql/sql_cache.cc
+@@ -1182,9 +1182,17 @@ void Query_cache::store_query(THD *thd, TABLE_LIST *tables_used)
+     query is uncachable.
+ 
+     See also a note on double-check locking usage above.
++
++    Without active vio, net_write_packet() will not be called and
++    therefore neither Query_cache::insert(). Since we will never get a
++    complete query result in this case, it does not make sense to
++    register the query in the first place.
+   */
+-  if (thd->locked_tables_mode || query_cache_size == 0)
++  if (thd->locked_tables_mode ||
++      query_cache_size == 0 ||
++      thd->net.vio == NULL)
+     DBUG_VOID_RETURN;
++
+   uint8 tables_type= 0;
+ 
+   if ((local_tables= is_cacheable(thd, thd->query_length(),
+

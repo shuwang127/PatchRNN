@@ -1,0 +1,140 @@
+commit 91cdda40714178497cbd182261b2ea6ec5cb9276
+Author: Vasundhara Volam <vasundhara-v.volam@broadcom.com>
+Date:   Wed Jan 17 03:21:14 2018 -0500
+
+    bnxt_en: Forward VF MAC address to the PF.
+    
+    Forward hwrm_func_vf_cfg command from VF to PF driver, to store
+    VF MAC address in PF's context.  This will allow "ip link show"
+    to display all VF MAC addresses.
+    
+    Maintain 2 locations of MAC address in VF info structure, one for
+    a PF assigned MAC and one for VF assigned MAC.
+    
+    Display VF assigned MAC in "ip link show", only if PF assigned MAC is
+    not valid.
+    
+    Signed-off-by: Vasundhara Volam <vasundhara-v.volam@broadcom.com>
+    Signed-off-by: Michael Chan <michael.chan@broadcom.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/broadcom/bnxt/bnxt.c b/drivers/net/ethernet/broadcom/bnxt/bnxt.c
+index e265219ee6c9..ec8e623be0b0 100644
+--- a/drivers/net/ethernet/broadcom/bnxt/bnxt.c
++++ b/drivers/net/ethernet/broadcom/bnxt/bnxt.c
+@@ -213,6 +213,7 @@ MODULE_DEVICE_TABLE(pci, bnxt_pci_tbl);
+ 
+ static const u16 bnxt_vf_req_snif[] = {
+ 	HWRM_FUNC_CFG,
++	HWRM_FUNC_VF_CFG,
+ 	HWRM_PORT_PHY_QCFG,
+ 	HWRM_CFA_L2_FILTER_ALLOC,
+ };
+@@ -8432,7 +8433,7 @@ static int bnxt_init_mac_addr(struct bnxt *bp)
+ 		struct bnxt_vf_info *vf = &bp->vf;
+ 
+ 		if (is_valid_ether_addr(vf->mac_addr)) {
+-			/* overwrite netdev dev_adr with admin VF MAC */
++			/* overwrite netdev dev_addr with admin VF MAC */
+ 			memcpy(bp->dev->dev_addr, vf->mac_addr, ETH_ALEN);
+ 		} else {
+ 			eth_hw_addr_random(bp->dev);
+diff --git a/drivers/net/ethernet/broadcom/bnxt/bnxt.h b/drivers/net/ethernet/broadcom/bnxt/bnxt.h
+index 920c19bf7baa..0b30dcc37adb 100644
+--- a/drivers/net/ethernet/broadcom/bnxt/bnxt.h
++++ b/drivers/net/ethernet/broadcom/bnxt/bnxt.h
+@@ -804,7 +804,10 @@ struct bnxt_hw_resc {
+ #if defined(CONFIG_BNXT_SRIOV)
+ struct bnxt_vf_info {
+ 	u16	fw_fid;
+-	u8	mac_addr[ETH_ALEN];
++	u8	mac_addr[ETH_ALEN];	/* PF assigned MAC Address */
++	u8	vf_mac_addr[ETH_ALEN];	/* VF assigned MAC address, only
++					 * stored by PF.
++					 */
+ 	u16	vlan;
+ 	u32	flags;
+ #define BNXT_VF_QOS		0x1
+diff --git a/drivers/net/ethernet/broadcom/bnxt/bnxt_sriov.c b/drivers/net/ethernet/broadcom/bnxt/bnxt_sriov.c
+index 508e917c7adc..d87faad901fe 100644
+--- a/drivers/net/ethernet/broadcom/bnxt/bnxt_sriov.c
++++ b/drivers/net/ethernet/broadcom/bnxt/bnxt_sriov.c
+@@ -135,7 +135,10 @@ int bnxt_get_vf_config(struct net_device *dev, int vf_id,
+ 	ivi->vf = vf_id;
+ 	vf = &bp->pf.vf[vf_id];
+ 
+-	memcpy(&ivi->mac, vf->mac_addr, ETH_ALEN);
++	if (is_valid_ether_addr(vf->mac_addr))
++		memcpy(&ivi->mac, vf->mac_addr, ETH_ALEN);
++	else
++		memcpy(&ivi->mac, vf->vf_mac_addr, ETH_ALEN);
+ 	ivi->max_tx_rate = vf->max_tx_rate;
+ 	ivi->min_tx_rate = vf->min_tx_rate;
+ 	ivi->vlan = vf->vlan;
+@@ -883,17 +886,51 @@ static int bnxt_hwrm_exec_fwd_resp(struct bnxt *bp, struct bnxt_vf_info *vf,
+ 	return rc;
+ }
+ 
++static int bnxt_vf_store_mac(struct bnxt *bp, struct bnxt_vf_info *vf)
++{
++	u32 msg_size = sizeof(struct hwrm_func_vf_cfg_input);
++	struct hwrm_func_vf_cfg_input *req =
++		(struct hwrm_func_vf_cfg_input *)vf->hwrm_cmd_req_addr;
++
++	/* Only allow VF to set a valid MAC address if the PF assigned MAC
++	 * address is zero
++	 */
++	if (req->enables & cpu_to_le32(FUNC_VF_CFG_REQ_ENABLES_DFLT_MAC_ADDR)) {
++		if (is_valid_ether_addr(req->dflt_mac_addr) &&
++		    !is_valid_ether_addr(vf->mac_addr)) {
++			ether_addr_copy(vf->vf_mac_addr, req->dflt_mac_addr);
++			return bnxt_hwrm_exec_fwd_resp(bp, vf, msg_size);
++		}
++		return bnxt_hwrm_fwd_err_resp(bp, vf, msg_size);
++	}
++	return bnxt_hwrm_exec_fwd_resp(bp, vf, msg_size);
++}
++
+ static int bnxt_vf_validate_set_mac(struct bnxt *bp, struct bnxt_vf_info *vf)
+ {
+ 	u32 msg_size = sizeof(struct hwrm_cfa_l2_filter_alloc_input);
+ 	struct hwrm_cfa_l2_filter_alloc_input *req =
+ 		(struct hwrm_cfa_l2_filter_alloc_input *)vf->hwrm_cmd_req_addr;
++	bool mac_ok = false;
+ 
+-	if (!is_valid_ether_addr(vf->mac_addr) ||
+-	    ether_addr_equal((const u8 *)req->l2_addr, vf->mac_addr))
++	/* VF MAC address must first match PF MAC address, if it is valid.
++	 * Otherwise, it must match the VF MAC address if firmware spec >=
++	 * 1.2.2
++	 */
++	if (is_valid_ether_addr(vf->mac_addr)) {
++		if (ether_addr_equal((const u8 *)req->l2_addr, vf->mac_addr))
++			mac_ok = true;
++	} else if (is_valid_ether_addr(vf->vf_mac_addr)) {
++		if (ether_addr_equal((const u8 *)req->l2_addr, vf->vf_mac_addr))
++			mac_ok = true;
++	} else if (bp->hwrm_spec_code < 0x10202) {
++		mac_ok = true;
++	} else {
++		mac_ok = true;
++	}
++	if (mac_ok)
+ 		return bnxt_hwrm_exec_fwd_resp(bp, vf, msg_size);
+-	else
+-		return bnxt_hwrm_fwd_err_resp(bp, vf, msg_size);
++	return bnxt_hwrm_fwd_err_resp(bp, vf, msg_size);
+ }
+ 
+ static int bnxt_vf_set_link(struct bnxt *bp, struct bnxt_vf_info *vf)
+@@ -955,6 +992,9 @@ static int bnxt_vf_req_validate_snd(struct bnxt *bp, struct bnxt_vf_info *vf)
+ 	u32 req_type = le16_to_cpu(encap_req->req_type);
+ 
+ 	switch (req_type) {
++	case HWRM_FUNC_VF_CFG:
++		rc = bnxt_vf_store_mac(bp, vf);
++		break;
+ 	case HWRM_CFA_L2_FILTER_ALLOC:
+ 		rc = bnxt_vf_validate_set_mac(bp, vf);
+ 		break;
+

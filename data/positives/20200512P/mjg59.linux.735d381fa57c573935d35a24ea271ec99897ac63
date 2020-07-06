@@ -1,0 +1,119 @@
+commit 735d381fa57c573935d35a24ea271ec99897ac63
+Author: Jiri Pirko <jiri@resnulli.us>
+Date:   Mon Jun 10 17:42:25 2013 +0200
+
+    team: remove synchronize_rcu() called during port disable
+    
+    Check the unlikely case of team->en_port_count == 0 before modulo
+    operation.
+    
+    Signed-off-by: Jiri Pirko <jiri@resnulli.us>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/team/team.c b/drivers/net/team/team.c
+index 488ed4f535e5..e46fef38685b 100644
+--- a/drivers/net/team/team.c
++++ b/drivers/net/team/team.c
+@@ -525,31 +525,26 @@ static void team_set_no_mode(struct team *team)
+ 	team->mode = &__team_no_mode;
+ }
+ 
+-static void __team_adjust_ops(struct team *team, int en_port_count)
++static void team_adjust_ops(struct team *team)
+ {
+ 	/*
+ 	 * To avoid checks in rx/tx skb paths, ensure here that non-null and
+ 	 * correct ops are always set.
+ 	 */
+ 
+-	if (!en_port_count || !team_is_mode_set(team) ||
++	if (!team->en_port_count || !team_is_mode_set(team) ||
+ 	    !team->mode->ops->transmit)
+ 		team->ops.transmit = team_dummy_transmit;
+ 	else
+ 		team->ops.transmit = team->mode->ops->transmit;
+ 
+-	if (!en_port_count || !team_is_mode_set(team) ||
++	if (!team->en_port_count || !team_is_mode_set(team) ||
+ 	    !team->mode->ops->receive)
+ 		team->ops.receive = team_dummy_receive;
+ 	else
+ 		team->ops.receive = team->mode->ops->receive;
+ }
+ 
+-static void team_adjust_ops(struct team *team)
+-{
+-	__team_adjust_ops(team, team->en_port_count);
+-}
+-
+ /*
+  * We can benefit from the fact that it's ensured no port is present
+  * at the time of mode change. Therefore no packets are in fly so there's no
+@@ -877,14 +872,9 @@ static void team_port_disable(struct team *team,
+ 	hlist_del_rcu(&port->hlist);
+ 	__reconstruct_port_hlist(team, port->index);
+ 	port->index = -1;
+-	team_queue_override_port_del(team, port);
+-	__team_adjust_ops(team, team->en_port_count - 1);
+-	/*
+-	 * Wait until readers see adjusted ops. This ensures that
+-	 * readers never see team->en_port_count == 0
+-	 */
+-	synchronize_rcu();
+ 	team->en_port_count--;
++	team_queue_override_port_del(team, port);
++	team_adjust_ops(team);
+ }
+ 
+ #define TEAM_VLAN_FEATURES (NETIF_F_ALL_CSUM | NETIF_F_SG | \
+diff --git a/drivers/net/team/team_mode_loadbalance.c b/drivers/net/team/team_mode_loadbalance.c
+index cdc31b5ea15e..829a9cd2b4da 100644
+--- a/drivers/net/team/team_mode_loadbalance.c
++++ b/drivers/net/team/team_mode_loadbalance.c
+@@ -112,9 +112,8 @@ static struct team_port *lb_hash_select_tx_port(struct team *team,
+ 						struct sk_buff *skb,
+ 						unsigned char hash)
+ {
+-	int port_index;
++	int port_index = team_num_to_port_index(team, hash);
+ 
+-	port_index = hash % team->en_port_count;
+ 	return team_get_port_by_index_rcu(team, port_index);
+ }
+ 
+diff --git a/drivers/net/team/team_mode_roundrobin.c b/drivers/net/team/team_mode_roundrobin.c
+index d268e4de781b..90311c7375fb 100644
+--- a/drivers/net/team/team_mode_roundrobin.c
++++ b/drivers/net/team/team_mode_roundrobin.c
+@@ -30,7 +30,8 @@ static bool rr_transmit(struct team *team, struct sk_buff *skb)
+ 	struct team_port *port;
+ 	int port_index;
+ 
+-	port_index = rr_priv(team)->sent_packets++ % team->en_port_count;
++	port_index = team_num_to_port_index(team,
++					    rr_priv(team)->sent_packets++);
+ 	port = team_get_port_by_index_rcu(team, port_index);
+ 	port = team_get_first_port_txable_rcu(team, port);
+ 	if (unlikely(!port))
+diff --git a/include/linux/if_team.h b/include/linux/if_team.h
+index 705459524706..b662045a81c0 100644
+--- a/include/linux/if_team.h
++++ b/include/linux/if_team.h
+@@ -229,6 +229,16 @@ static inline struct team_port *team_get_port_by_index(struct team *team,
+ 			return port;
+ 	return NULL;
+ }
++
++static inline int team_num_to_port_index(struct team *team, int num)
++{
++	int en_port_count = ACCESS_ONCE(team->en_port_count);
++
++	if (unlikely(!en_port_count))
++		return 0;
++	return num % en_port_count;
++}
++
+ static inline struct team_port *team_get_port_by_index_rcu(struct team *team,
+ 							   int port_index)
+ {
+

@@ -1,0 +1,83 @@
+commit d8a66c6b5b4a7f6e25c44860ecfc9fe28ee95473
+Author: krw <krw@openbsd.org>
+Date:   Sun Jun 5 21:03:50 2005 +0000
+
+    Revert ss_mustek use of new scsi_mode_select(). Further development
+    revealed it is doing it's own weird stuff not reproduced in new
+    functions. e.g. it doesn't use mode sense headers. Rather than try to
+    fix it or figure it out at this time ...
+
+diff --git a/sys/scsi/ss_mustek.c b/sys/scsi/ss_mustek.c
+index e9f53e4ac1c..87cbf390be3 100644
+--- a/sys/scsi/ss_mustek.c
++++ b/sys/scsi/ss_mustek.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ss_mustek.c,v 1.11 2005/05/14 00:20:43 krw Exp $	*/
++/*	$OpenBSD: ss_mustek.c,v 1.12 2005/06/05 21:03:50 krw Exp $	*/
+ /*	$NetBSD: ss_mustek.c,v 1.4 1996/05/05 19:52:57 christos Exp $	*/
+ 
+ /*
+@@ -254,6 +254,7 @@ int
+ mustek_trigger_scanner(ss)
+ 	struct ss_softc *ss;
+ {
++	struct mustek_mode_select_cmd mode_cmd;
+ 	struct mustek_mode_select_data mode_data;
+ 	struct mustek_set_window_cmd window_cmd;
+ 	struct mustek_set_window_data window_data;
+@@ -310,6 +311,10 @@ mustek_trigger_scanner(ss)
+ 	/*
+ 	 * do what it takes to actualize the mode
+ 	 */
++	bzero(&mode_cmd, sizeof(mode_cmd));
++	mode_cmd.opcode = MUSTEK_MODE_SELECT;
++	_lto2b(sizeof(mode_data), mode_cmd.length);
++
+ 	bzero(&mode_data, sizeof(mode_data));
+ 	mode_data.mode =
+ 	    MUSTEK_MODE_MASK | MUSTEK_HT_PATTERN_BUILTIN | MUSTEK_UNIT_SPEC;
+@@ -336,8 +341,9 @@ mustek_trigger_scanner(ss)
+ 
+ 	SC_DEBUG(sc_link, SDEV_DB1, ("mustek_trigger_scanner: mode_select\n"));
+ 	/* send the command to the scanner */
+-	error = scsi_mode_select(sc_link, 0,
+-	    (struct scsi_mode_header *)&mode_data, sizeof(mode_data), 0, 5000);
++	error = scsi_scsi_cmd(sc_link, (struct scsi_generic *) &mode_cmd,
++	    sizeof(mode_cmd), (u_char *) &mode_data, sizeof(mode_data),
++	    MUSTEK_RETRIES, 5000, NULL, SCSI_DATA_OUT);
+ 	if (error)
+ 		return (error);
+ 
+diff --git a/sys/scsi/ss_mustek.h b/sys/scsi/ss_mustek.h
+index 95dbc4b3107..cf5e562c00e 100644
+--- a/sys/scsi/ss_mustek.h
++++ b/sys/scsi/ss_mustek.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ss_mustek.h,v 1.5 2005/04/05 12:13:16 krw Exp $	*/
++/*	$OpenBSD: ss_mustek.h,v 1.6 2005/06/05 21:03:50 krw Exp $	*/
+ /*	$NetBSD: ss_mustek.h,v 1.2 1996/03/19 03:08:37 mycroft Exp $	*/
+ 
+ /*
+@@ -52,6 +52,7 @@
+ #define MUSTEK_SET_WINDOW	0x04	/* set image area and windows */
+ #define MUSTEK_READ		0x08	/* read command */
+ #define MUSTEK_GET_STATUS	0x0f	/* image status */
++#define MUSTEK_MODE_SELECT	0x15	/* set resolution, paper length, .. */
+ #define MUSTEK_ADF		0x10	/* ADF and backtracking selection */
+ #define MUSTEK_START_STOP	0x1b	/* start/stop scan */
+ #define MUSTEK_LUT		0x55	/* look up table download */
+@@ -125,6 +126,13 @@ struct mustek_get_status_data {
+ 	u_int8_t lines[3];		/* LSB */
+ };
+ 
++struct mustek_mode_select_cmd {
++	u_int8_t opcode;		/* 0x15 */
++	u_int8_t reserved[2];
++	u_int8_t length[2];
++	u_int8_t control;
++};
++
+ /*
+  * resolution settings:
+  *   MFS06000CX:
+

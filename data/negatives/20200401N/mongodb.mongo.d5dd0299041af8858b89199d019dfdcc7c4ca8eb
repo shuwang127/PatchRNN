@@ -1,0 +1,76 @@
+commit d5dd0299041af8858b89199d019dfdcc7c4ca8eb
+Author: Greg Studer <greg@10gen.com>
+Date:   Mon Jun 4 20:33:12 2012 -0400
+
+    SERVER-4262 fixes for regression in mongod setshardversion logic with epoch
+    
+    need to check epoch when comparing non-zero, otherwise we'll never reload different epochs
+
+diff --git a/src/mongo/s/config.h b/src/mongo/s/config.h
+index 6ec5e6639e..11b139ae20 100644
+--- a/src/mongo/s/config.h
++++ b/src/mongo/s/config.h
+@@ -121,7 +121,7 @@ namespace mongo {
+         }
+         virtual ~DBConfig() {}
+ 
+-        string getName() { return _name; };
++        string getName() const { return _name; };
+ 
+         /**
+          * @return if anything in this db is partitioned or not
+diff --git a/src/mongo/s/d_logic.cpp b/src/mongo/s/d_logic.cpp
+index 4c9279d953..990df25bb5 100644
+--- a/src/mongo/s/d_logic.cpp
++++ b/src/mongo/s/d_logic.cpp
+@@ -72,7 +72,15 @@ namespace mongo {
+             BufBuilder b( 32768 );
+             b.skip( sizeof( QueryResult ) );
+             {
+-                BSONObj obj = BSON( "$err" << errmsg << "ns" << ns );
++                BSONObjBuilder bob;
++
++                bob.append( "$err", errmsg );
++                bob.append( "ns", ns );
++                wanted.addToBSON( bob, "vWanted" );
++                received.addToBSON( bob, "vReceived" );
++
++                BSONObj obj = bob.obj();
++
+                 b.appendBuf( obj.objdata() , obj.objsize() );
+             }
+ 
+diff --git a/src/mongo/s/d_state.cpp b/src/mongo/s/d_state.cpp
+index e10b882d10..54c7ca60a2 100644
+--- a/src/mongo/s/d_state.cpp
++++ b/src/mongo/s/d_state.cpp
+@@ -534,7 +534,7 @@ namespace mongo {
+                 return false;
+             }
+ 
+-            if( cmdObj[ "version" ].eoo() ){
++            if( ! ConfigVersion::canParseBSON( cmdObj, "version" ) ){
+                 errmsg = "need to specify version";
+                 return false;
+             }
+@@ -609,7 +609,8 @@ namespace mongo {
+                 return true;
+             }
+ 
+-            if ( version < oldVersion ) {
++            // TODO: Refactor all of this
++            if ( version < oldVersion && version.hasCompatibleEpoch( oldVersion ) ) {
+                 errmsg = "this connection already had a newer version of collection '" + ns + "'";
+                 result.append( "ns" , ns );
+                 version.addToBSON( result, "newVersion" );
+@@ -617,7 +618,8 @@ namespace mongo {
+                 return false;
+             }
+ 
+-            if ( version < globalVersion ) {
++            // TODO: Refactor all of this
++            if ( version < globalVersion && version.hasCompatibleEpoch( globalVersion ) ) {
+                 while ( shardingState.inCriticalMigrateSection() ) {
+                     dbtemprelease r;
+                     sleepmillis(2);
+

@@ -1,0 +1,66 @@
+commit 664fee3dc37939bb8010906913fa9dbc52abb587
+Author: Masami Hiramatsu <masami.hiramatsu.pt@hitachi.com>
+Date:   Wed Sep 17 08:41:01 2014 +0000
+
+    perf probe: Do not use dwfl_module_addrsym if dwarf_diename finds symbol name
+    
+    Do not use dwfl_module_addrsym if dwarf_diename can find the symbol
+    name, since dwfl_module_addrsym can be failed on shared libraries.
+    
+    Without this patch
+      ----
+      $ perf probe -x ../lib/traceevent/libtraceevent.so -V create_arg_op
+      Failed to find symbol at 0x11df1
+      Failed to find the address of create_arg_op
+        Error: Failed to show vars.
+      ----
+    With this patch
+      ----
+      $ perf probe -x ../lib/traceevent/libtraceevent.so -V create_arg_op
+      Available variables at create_arg_op
+              @<create_arg_op+0>
+                      enum filter_op_type     btype
+                      struct filter_arg*      arg
+      ----
+    
+    This bug was reported on linux-perf-users@vger.kernel.org.
+    
+    Reported-by: david lerner <dlernerdroid@gmail.com>
+    Signed-off-by: Masami Hiramatsu <masami.hiramatsu.pt@hitachi.com>
+    Cc: david lerner <dlernerdroid@gmail.com>
+    Cc: linux-perf-user@vger.kernel.org
+    Cc: yrl.pp-manager.tt@hitachi.com
+    Link: http://permalink.gmane.org/gmane.linux.kernel.perf.user/1691
+    Link: http://lkml.kernel.org/r/20140917084101.3722.25299.stgit@kbuild-f20.novalocal
+    Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+
+diff --git a/tools/perf/util/probe-finder.c b/tools/perf/util/probe-finder.c
+index 9c593561aa71..c7918f83b300 100644
+--- a/tools/perf/util/probe-finder.c
++++ b/tools/perf/util/probe-finder.c
+@@ -609,14 +609,18 @@ static int convert_to_trace_point(Dwarf_Die *sp_die, Dwfl_Module *mod,
+ 		return -EINVAL;
+ 	}
+ 
+-	/* Get an appropriate symbol from symtab */
+-	symbol = dwfl_module_addrsym(mod, paddr, &sym, NULL);
++	symbol = dwarf_diename(sp_die);
+ 	if (!symbol) {
+-		pr_warning("Failed to find symbol at 0x%lx\n",
+-			   (unsigned long)paddr);
+-		return -ENOENT;
++		/* Try to get the symbol name from symtab */
++		symbol = dwfl_module_addrsym(mod, paddr, &sym, NULL);
++		if (!symbol) {
++			pr_warning("Failed to find symbol at 0x%lx\n",
++				   (unsigned long)paddr);
++			return -ENOENT;
++		}
++		eaddr = sym.st_value;
+ 	}
+-	tp->offset = (unsigned long)(paddr - sym.st_value);
++	tp->offset = (unsigned long)(paddr - eaddr);
+ 	tp->address = (unsigned long)paddr;
+ 	tp->symbol = strdup(symbol);
+ 	if (!tp->symbol)
+

@@ -1,0 +1,68 @@
+commit 416c1079d30f1a52399b96f6772e993274b774ae
+Author: Clemens Ladisch <clemens@ladisch.de>
+Date:   Wed Dec 7 09:11:05 2005 +0100
+
+    [ALSA] Nest sound devices
+    
+    Modules: ALSA Core
+    
+    Make the control device parent of all other ALSA devices of a card.
+    
+    Signed-off-by: Clemens Ladisch <clemens@ladisch.de>
+
+diff --git a/include/sound/core.h b/include/sound/core.h
+index 90ac6132ea3b..dbe7a2c30272 100644
+--- a/include/sound/core.h
++++ b/include/sound/core.h
+@@ -134,6 +134,7 @@ struct snd_card {
+ 	wait_queue_head_t shutdown_sleep;
+ 	struct work_struct free_workq;	/* for free in workqueue */
+ 	struct device *dev;
++	struct class_device *parent_device;
+ 
+ #ifdef CONFIG_PM
+ 	unsigned int power_state;	/* power state */
+diff --git a/sound/core/device.c b/sound/core/device.c
+index b1cf6ec56784..478264cab67e 100644
+--- a/sound/core/device.c
++++ b/sound/core/device.c
+@@ -193,7 +193,7 @@ int snd_device_register_all(struct snd_card *card)
+ 	int err;
+ 	
+ 	snd_assert(card != NULL, return -ENXIO);
+-	list_for_each(list, &card->devices) {
++	list_for_each_prev(list, &card->devices) {
+ 		dev = snd_device(list);
+ 		if (dev->state == SNDRV_DEV_BUILD && dev->ops->dev_register) {
+ 			if ((err = dev->ops->dev_register(dev)) < 0)
+diff --git a/sound/core/sound.c b/sound/core/sound.c
+index a8eda02bcf1c..2f6108deb211 100644
+--- a/sound/core/sound.c
++++ b/sound/core/sound.c
+@@ -245,6 +245,7 @@ int snd_register_device(int type, struct snd_card *card, int dev,
+ 	int minor;
+ 	struct snd_minor *preg;
+ 	struct device *device = NULL;
++	struct class_device *class_device = NULL;
+ 
+ 	snd_assert(name, return -EINVAL);
+ 	preg = kmalloc(sizeof(struct snd_minor) + strlen(name) + 1, GFP_KERNEL);
+@@ -272,9 +273,15 @@ int snd_register_device(int type, struct snd_card *card, int dev,
+ 	snd_minors[minor] = preg;
+ 	if (type != SNDRV_DEVICE_TYPE_CONTROL || preg->card >= cards_limit)
+ 		devfs_mk_cdev(MKDEV(major, minor), S_IFCHR | device_mode, "snd/%s", name);
+-	if (card)
++	if (card) {
+ 		device = card->dev;
+-	class_device_create(sound_class, NULL, MKDEV(major, minor), device, "%s", name);
++		class_device = card->parent_device;
++	}
++	class_device = class_device_create(sound_class, class_device,
++					   MKDEV(major, minor), device,
++					   "%s", name);
++	if (type == SNDRV_DEVICE_TYPE_CONTROL)
++		card->parent_device = class_device;
+ 
+ 	up(&sound_mutex);
+ 	return 0;
+

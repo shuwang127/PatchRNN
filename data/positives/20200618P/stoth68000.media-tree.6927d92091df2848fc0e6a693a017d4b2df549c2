@@ -1,0 +1,49 @@
+commit 6927d92091df2848fc0e6a693a017d4b2df549c2
+Author: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Date:   Mon Oct 17 14:27:48 2011 -0400
+
+    xen/blkback: Fix two races in the handling of barrier requests.
+    
+    There are two windows of opportunity to cause a race when
+    processing a barrier request. This patch fixes this.
+    
+    Signed-off-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+
+diff --git a/drivers/block/xen-blkback/blkback.c b/drivers/block/xen-blkback/blkback.c
+index a1ee2659d2bc..79efec24569b 100644
+--- a/drivers/block/xen-blkback/blkback.c
++++ b/drivers/block/xen-blkback/blkback.c
+@@ -456,15 +456,15 @@ static void xen_blk_drain_io(struct xen_blkif *blkif)
+ {
+ 	atomic_set(&blkif->drain, 1);
+ 	do {
++		/* The initial value is one, and one refcnt taken at the
++		 * start of the xen_blkif_schedule thread. */
++		if (atomic_read(&blkif->refcnt) <= 2)
++			break;
+ 		wait_for_completion_interruptible_timeout(
+ 				&blkif->drain_complete, HZ);
+ 
+ 		if (!atomic_read(&blkif->drain))
+ 			break;
+-		/* The initial value is one, and one refcnt taken at the
+-		 * start of the xen_blkif_schedule thread. */
+-		if (atomic_read(&blkif->refcnt) <= 2)
+-			break;
+ 	} while (!kthread_should_stop());
+ 	atomic_set(&blkif->drain, 0);
+ }
+@@ -502,11 +502,11 @@ static void __end_block_io_op(struct pending_req *pending_req, int error)
+ 		make_response(pending_req->blkif, pending_req->id,
+ 			      pending_req->operation, pending_req->status);
+ 		xen_blkif_put(pending_req->blkif);
+-		free_req(pending_req);
+ 		if (atomic_read(&pending_req->blkif->refcnt) <= 2) {
+ 			if (atomic_read(&pending_req->blkif->drain))
+ 				complete(&pending_req->blkif->drain_complete);
+ 		}
++		free_req(pending_req);
+ 	}
+ }
+ 
+

@@ -1,0 +1,37 @@
+commit 3b663780347ce532b08be1c859b1df14f0eea4c8
+Author: Sage Weil <sage@newdream.net>
+Date:   Wed May 18 16:12:12 2011 -0700
+
+    ceph: take reference on mds request r_unsafe_dir
+    
+    We put ourselves on an inode list for the parent directory of metadata
+    operations so that an fsync on the directory will wait for metadata updates
+    to commit to disk.  We weren't holding a reference to that directory,
+    however, and under certain workloads (fsstress in this case) the directory
+    can go away.
+    
+    Signed-off-by: Sage Weil <sage@newdream.net>
+
+diff --git a/fs/ceph/mds_client.c b/fs/ceph/mds_client.c
+index d0fae4ce9ba5..ebce88ab3982 100644
+--- a/fs/ceph/mds_client.c
++++ b/fs/ceph/mds_client.c
+@@ -578,6 +578,7 @@ static void __register_request(struct ceph_mds_client *mdsc,
+ 	if (dir) {
+ 		struct ceph_inode_info *ci = ceph_inode(dir);
+ 
++		ihold(dir);
+ 		spin_lock(&ci->i_unsafe_lock);
+ 		req->r_unsafe_dir = dir;
+ 		list_add_tail(&req->r_unsafe_dir_item, &ci->i_unsafe_dirops);
+@@ -598,6 +599,9 @@ static void __unregister_request(struct ceph_mds_client *mdsc,
+ 		spin_lock(&ci->i_unsafe_lock);
+ 		list_del_init(&req->r_unsafe_dir_item);
+ 		spin_unlock(&ci->i_unsafe_lock);
++
++		iput(req->r_unsafe_dir);
++		req->r_unsafe_dir = NULL;
+ 	}
+ 
+ 	ceph_mdsc_put_request(req);
+

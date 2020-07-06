@@ -1,0 +1,71 @@
+commit 707a0c811ca02861f1500f0696efebcf3bd2e2e2
+Author: Bartosz Markowski <bartosz.markowski@tieto.com>
+Date:   Wed Sep 2 13:20:19 2015 +0200
+
+    ath10k: fix beamformee VHT STS capability
+    
+    The VHT STS CAP shall be reported by firmware to host, like in case of
+    QCA99x0. For QCA6174 hw family this isn't set for some reason.
+    So for this particular chips, let's assume it has the ability to
+    support VHT NDP in up to 4 STSs (which is true by the way).
+    
+    Change the published beamformee STS cap accordingly to 3 or to what
+    the firmware reports.
+    
+    Assumption so far, it suppose to be the num_rf_chains-1, was
+    completely wrong.
+    
+    Signed-off-by: Bartosz Markowski <bartosz.markowski@tieto.com>
+    Signed-off-by: Kalle Valo <kvalo@qca.qualcomm.com>
+
+diff --git a/drivers/net/wireless/ath/ath10k/mac.c b/drivers/net/wireless/ath/ath10k/mac.c
+index 64674c955d44..3ecc448f8ed6 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.c
++++ b/drivers/net/wireless/ath/ath10k/mac.c
+@@ -4064,17 +4064,35 @@ static u32 get_nss_from_chainmask(u16 chain_mask)
+ 	return 1;
+ }
+ 
++static int ath10k_mac_get_vht_cap_bf_sts(struct ath10k *ar)
++{
++	int nsts = ar->vht_cap_info;
++	nsts &= IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK;
++	nsts >>= IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT;
++
++	/* If firmware does not deliver to host number of space-time
++	 * streams supported, assume it support up to 4 BF STS and return
++	 * the value for VHT CAP: nsts-1)
++	 * */
++	if (nsts == 0)
++		return 3;
++
++	return nsts;
++}
++
+ static int ath10k_mac_set_txbf_conf(struct ath10k_vif *arvif)
+ {
+ 	u32 value = 0;
+ 	struct ath10k *ar = arvif->ar;
++	int nsts;
+ 
+ 	if (ath10k_wmi_get_txbf_conf_scheme(ar) != WMI_TXBF_CONF_BEFORE_ASSOC)
+ 		return 0;
+ 
++	nsts = ath10k_mac_get_vht_cap_bf_sts(ar);
+ 	if (ar->vht_cap_info & (IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE |
+ 				IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE))
+-		value |= SM((ar->num_rf_chains - 1), WMI_TXBF_STS_CAP_OFFSET);
++		value |= SM(nsts, WMI_TXBF_STS_CAP_OFFSET);
+ 
+ 	if (ar->vht_cap_info & (IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE |
+ 				IEEE80211_VHT_CAP_MU_BEAMFORMER_CAPABLE))
+@@ -6804,7 +6822,7 @@ static struct ieee80211_sta_vht_cap ath10k_create_vht_cap(struct ath10k *ar)
+ 
+ 	if (ar->vht_cap_info & (IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE |
+ 				IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE)) {
+-		val = ar->num_rf_chains - 1;
++		val = ath10k_mac_get_vht_cap_bf_sts(ar);
+ 		val <<= IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT;
+ 		val &= IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK;
+ 
+

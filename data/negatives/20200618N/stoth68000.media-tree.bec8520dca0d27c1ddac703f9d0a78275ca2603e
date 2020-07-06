@@ -1,0 +1,73 @@
+commit bec8520dca0d27c1ddac703f9d0a78275ca2603e
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Sat Nov 19 13:47:35 2016 +0000
+
+    x86/tsc: Detect random warps
+    
+    If time warps can be observed then they should only ever be observed on one
+    CPU. If they are observed on both CPUs then the system is completely hosed.
+    
+    Add a check for this condition and notify if it happens.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Reviewed-by: Ingo Molnar <mingo@kernel.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Yinghai Lu <yinghai@kernel.org>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Link: http://lkml.kernel.org/r/20161119134017.574838461@linutronix.de
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/arch/x86/kernel/tsc_sync.c b/arch/x86/kernel/tsc_sync.c
+index 78083bf23ed1..40f8edd55151 100644
+--- a/arch/x86/kernel/tsc_sync.c
++++ b/arch/x86/kernel/tsc_sync.c
+@@ -37,6 +37,7 @@ static arch_spinlock_t sync_lock = __ARCH_SPIN_LOCK_UNLOCKED;
+ static cycles_t last_tsc;
+ static cycles_t max_warp;
+ static int nr_warps;
++static int random_warps;
+ 
+ /*
+  * TSC-warp measurement loop running on both CPUs.  This is not called
+@@ -45,7 +46,7 @@ static int nr_warps;
+ static void check_tsc_warp(unsigned int timeout)
+ {
+ 	cycles_t start, now, prev, end;
+-	int i;
++	int i, cur_warps = 0;
+ 
+ 	start = rdtsc_ordered();
+ 	/*
+@@ -85,7 +86,14 @@ static void check_tsc_warp(unsigned int timeout)
+ 		if (unlikely(prev > now)) {
+ 			arch_spin_lock(&sync_lock);
+ 			max_warp = max(max_warp, prev - now);
++			/*
++			 * Check whether this bounces back and forth. Only
++			 * one CPU should observe time going backwards.
++			 */
++			if (cur_warps != nr_warps)
++				random_warps++;
+ 			nr_warps++;
++			cur_warps = nr_warps;
+ 			arch_spin_unlock(&sync_lock);
+ 		}
+ 	}
+@@ -160,6 +168,8 @@ void check_tsc_sync_source(int cpu)
+ 			smp_processor_id(), cpu);
+ 		pr_warning("Measured %Ld cycles TSC warp between CPUs, "
+ 			   "turning off TSC clock.\n", max_warp);
++		if (random_warps)
++			pr_warning("TSC warped randomly between CPUs\n");
+ 		mark_tsc_unstable("check_tsc_sync_source failed");
+ 	} else {
+ 		pr_debug("TSC synchronization [CPU#%d -> CPU#%d]: passed\n",
+@@ -170,6 +180,7 @@ void check_tsc_sync_source(int cpu)
+ 	 * Reset it - just in case we boot another CPU later:
+ 	 */
+ 	atomic_set(&start_count, 0);
++	random_warps = 0;
+ 	nr_warps = 0;
+ 	max_warp = 0;
+ 	last_tsc = 0;
+

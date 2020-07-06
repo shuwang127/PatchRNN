@@ -1,0 +1,88 @@
+commit 0c45440ab25b9e0d32f8fcb0588733a04db79547
+Author: Jan Wedvik <jan.wedvik@oracle.com>
+Date:   Tue Jun 7 14:08:29 2011 +0200
+
+    This fix only applies to pushed queries (i.e. those using NdbQuery and the SPJ block).
+    
+    This commit fixes an error related to bushy scans where the right hand side (i.e. the scan that is executed
+    several times for genrating a cross product) used pruning. The algoritm for couning how many fragments to scan
+    only worked correctly for the first execution. The second execution would typically cause an assert.
+
+diff --git a/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp b/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp
+index 95be7b4ea45..8b8d706f825 100644
+--- a/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp
++++ b/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp
+@@ -4879,12 +4879,6 @@ Dbspj::scanIndex_parent_row(Signal* signal,
+     }
+ 
+     Uint32 ptrI = fragPtr.p->m_rangePtrI;
+-    if (ptrI == RNIL)
+-    {
+-      jam();
+-      data.m_frags_not_complete++;
+-    }
+-
+     bool hasNull;
+     if (treeNodePtr.p->m_bits & TreeNode::T_KEYINFO_CONSTRUCTED)
+     {
+@@ -4972,6 +4966,39 @@ Dbspj::scanIndex_parent_batch_complete(Signal* signal,
+   data.m_rows_received = 0;
+   data.m_rows_expecting = 0;
+   ndbassert(data.m_frags_outstanding == 0);
++  ndbassert(data.m_frags_not_complete == 0);
++
++  Ptr<ScanFragHandle> fragPtr;
++  {
++    Local_ScanFragHandle_list list(m_scanfraghandle_pool, data.m_fragments);
++    list.first(fragPtr);
++
++    if ((treeNodePtr.p->m_bits & TreeNode::T_PRUNE_PATTERN) == 0)
++    {
++      if (fragPtr.p->m_rangePtrI != RNIL)
++      {
++        // No pruning, so we must scan all fragments.
++        jam();
++        data.m_frags_not_complete = data.m_fragCount;
++      }
++    }
++    else
++    {
++      while(!fragPtr.isNull())
++      {
++        if (fragPtr.p->m_rangePtrI != RNIL)
++        {
++          jam();
++          /**
++           * This is a pruned scan, so we must scan those fragments that
++           * some distribution key hashed to.
++           */
++          data.m_frags_not_complete++;
++        }
++        list.next(fragPtr);
++      }
++    }
++  }
+ 
+   if (data.m_frags_not_complete == 0)
+   {
+@@ -4981,11 +5008,6 @@ Dbspj::scanIndex_parent_batch_complete(Signal* signal,
+      */
+     return;
+   }
+-  else if ((treeNodePtr.p->m_bits & TreeNode::T_PRUNE_PATTERN) == 0)
+-  {
+-    jam();
+-    data.m_frags_not_complete = data.m_fragCount;
+-  }
+ 
+   /**
+    * When parent's batch is complete, we send our batch
+@@ -5014,7 +5036,6 @@ Dbspj::scanIndex_parent_batch_repeat(Signal* signal,
+     DEBUG("Register TreeNode for restart, m_node_no: " << treeNodePtr.p->m_node_no);
+     ndbrequire(treeNodePtr.p->m_state != TreeNode::TN_ACTIVE);
+     registerActiveCursor(requestPtr, treeNodePtr);
+-    data.m_frags_not_complete = 1;
+     data.m_batch_chunks = 0;
+   }
+ }
+

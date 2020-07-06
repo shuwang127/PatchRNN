@@ -1,0 +1,2855 @@
+commit c04cafc1cdd093afcb32e313bcefbc9bb8972d9e
+Author: Timo Sirainen <tss@iki.fi>
+Date:   Sun Oct 27 08:37:18 2002 +0200
+
+    Moved several fields from .imap.index file to .imap.index.data file. Fixed
+    code so that most of the fields do not need to be set when building index,
+    allowing the index building to be fast (just readdir()s with maildir). This
+    still needs some configuration and ability to update the fields whenever it
+    can grab exclusive lock.
+    
+    Also fixed SEARCH LARGER, SMALLER and KEYWORD.
+    
+    --HG--
+    branch : HEAD
+
+diff --git a/src/lib-index/mail-index-compress.c b/src/lib-index/mail-index-compress.c
+index 316bb4a08..831ed2907 100644
+--- a/src/lib-index/mail-index-compress.c
++++ b/src/lib-index/mail-index-compress.c
+@@ -120,6 +120,7 @@ int mail_index_compress(MailIndex *index)
+ static int mail_index_copy_data(MailIndex *index, int fd, const char *path)
+ {
+ 	MailIndexDataHeader data_hdr;
++	MailIndexDataRecordHeader *rec_hdr;
+ 	MailIndexRecord *rec;
+ 	unsigned char *mmap_data;
+ 	size_t mmap_data_size;
+@@ -149,14 +150,24 @@ static int mail_index_copy_data(MailIndex *index, int fd, const char *path)
+ 	offset = sizeof(data_hdr);
+ 	rec = index->lookup(index, 1);
+ 	while (rec != NULL) {
+-		if (rec->data_position + rec->data_size > mmap_data_size) {
+-			index_set_corrupted(index, "data_position+data_size "
+-					    "points outside file");
++		if (rec->data_position +
++		    sizeof(MailIndexDataRecordHeader) > mmap_data_size) {
++			index_set_corrupted(index,
++				"data_position points outside file");
++			return FALSE;
++		}
++
++		rec_hdr = (MailIndexDataRecordHeader *) (mmap_data +
++							 rec_hdr->data_size);
++
++		if (rec->data_position + rec_hdr->data_size > mmap_data_size) {
++			index_set_corrupted(index,
++				"data_size points outside file");
+ 			return FALSE;
+ 		}
+ 
+ 		if (write_full(fd, mmap_data + rec->data_position,
+-			       rec->data_size) < 0) {
++			       rec_hdr->data_size) < 0) {
+ 			if (errno == ENOSPC)
+ 				index->nodiskspace = TRUE;
+ 
+@@ -166,7 +177,7 @@ static int mail_index_copy_data(MailIndex *index, int fd, const char *path)
+ 		}
+ 
+ 		rec->data_position = offset;
+-		offset += rec->data_size;
++		offset += rec_hdr->data_size;
+ 
+ 		rec = index->next(index, rec);
+ 	}
+@@ -222,7 +233,7 @@ int mail_index_compress_data(MailIndex *index)
+ 		/* now, rename the temp file to new data file. but before that
+ 		   reset indexid to make sure that other processes know the
+ 		   data file is closed. */
+-		(void)mail_index_data_mark_deleted(index->data);
++		(void)mail_index_data_mark_file_deleted(index->data);
+ 
+ 		mail_index_data_free(index->data);
+ 
+diff --git a/src/lib-index/mail-index-data.c b/src/lib-index/mail-index-data.c
+index 1d4ac9d08..2dad107d0 100644
+--- a/src/lib-index/mail-index-data.c
++++ b/src/lib-index/mail-index-data.c
+@@ -368,7 +368,7 @@ int mail_index_data_reset(MailIndexData *data)
+ 	return mmap_update(data, 0, 0);
+ }
+ 
+-int mail_index_data_mark_deleted(MailIndexData *data)
++int mail_index_data_mark_file_deleted(MailIndexData *data)
+ {
+ 	if (data->anon_mmap)
+ 		return TRUE;
+@@ -459,13 +459,19 @@ uoff_t mail_index_data_append(MailIndexData *data, const void *buffer,
+ 	return offset;
+ }
+ 
+-int mail_index_data_add_deleted_space(MailIndexData *data, size_t data_size)
++int mail_index_data_delete(MailIndexData *data, MailIndexRecord *index_rec)
+ {
++        MailIndexDataRecordHeader *rec_hdr;
+ 	uoff_t max_del_space;
+ 
+ 	i_assert(data->index->lock_type == MAIL_LOCK_EXCLUSIVE);
+ 
+-	data->header->deleted_space += data_size;
++	rec_hdr = mail_index_data_lookup_header(data, index_rec);
++	if (rec_hdr == NULL)
++		return FALSE;
++
++	/* just mark it deleted. */
++	data->header->deleted_space += rec_hdr->data_size;
+ 
+ 	/* see if we've reached the max. deleted space in file */
+ 	if (data->header->used_file_size >= COMPRESS_MIN_SIZE &&
+@@ -502,42 +508,75 @@ int mail_index_data_sync_file(MailIndexData *data, int *fsync_fd)
+ 	return TRUE;
+ }
+ 
++MailIndexDataRecordHeader *
++mail_index_data_lookup_header(MailIndexData *data, MailIndexRecord *index_rec)
++{
++	uoff_t pos;
++
++	pos = index_rec->data_position;
++	if (pos == 0) {
++		/* data not yet written to record */
++		return NULL;
++	}
++
++	if (!mmap_update(data, pos, sizeof(MailIndexDataRecordHeader)))
++		return NULL;
++
++	if (pos + sizeof(MailIndexDataRecordHeader) > data->mmap_used_length) {
++		index_data_set_corrupted(data,
++			"Data position of record %u points outside file "
++			"(%"PRIuUOFF_T" + %"PRIuSIZE_T" > %"PRIuSIZE_T")",
++			index_rec->uid, pos, sizeof(MailIndexDataRecordHeader),
++			data->mmap_used_length);
++		return NULL;
++	}
++
++	if ((pos % MEM_ALIGN_SIZE) != 0) {
++		index_data_set_corrupted(data,
++			"Data position (%"PRIuUOFF_T") is not memory aligned "
++			"for record %u", pos, index_rec->uid);
++		return NULL;
++	}
++
++	return (MailIndexDataRecordHeader *) ((char *) data->mmap_base + pos);
++}
++
+ MailIndexDataRecord *
+ mail_index_data_lookup(MailIndexData *data, MailIndexRecord *index_rec,
+-		       MailField field)
++		       MailDataField field)
+ {
++        MailIndexDataRecordHeader *rec_hdr;
+ 	MailIndexDataRecord *rec;
+ 	uoff_t pos, max_pos;
+ 
++	index_reset_error(data->index);
++
+ 	if (index_rec->data_position == 0) {
+-		/* data not yet written to record - FIXME: is this an error? */
++		/* data not yet written to record */
+ 		return NULL;
+ 	}
+ 
+-	if (!mmap_update(data, index_rec->data_position, index_rec->data_size))
++	rec_hdr = mail_index_data_lookup_header(data, index_rec);
++	if (rec_hdr == NULL)
++		return NULL;
++
++	if (!mmap_update(data, index_rec->data_position, rec_hdr->data_size))
+ 		return NULL;
+ 
+ 	pos = index_rec->data_position;
+-	max_pos = pos + index_rec->data_size;
++	max_pos = index_rec->data_position + rec_hdr->data_size;
+ 
+ 	if (pos > data->mmap_used_length ||
+-	    (data->mmap_used_length - pos < index_rec->data_size)) {
++	    (data->mmap_used_length - pos < rec_hdr->data_size)) {
+ 		index_data_set_corrupted(data,
+ 			"Given data size larger than file size "
+ 			"(%"PRIuUOFF_T" + %u > %"PRIuSIZE_T") for record %u",
+-			index_rec->data_position, index_rec->data_size,
++			index_rec->data_position, rec_hdr->data_size,
+ 			data->mmap_used_length, index_rec->uid);
+ 		return NULL;
+ 	}
+ 
+-	if ((pos % MEM_ALIGN_SIZE) != 0) {
+-		index_data_set_corrupted(data,
+-			"Data position (%"PRIuUOFF_T") is not memory aligned "
+-			"for record %u", index_rec->data_position,
+-			index_rec->uid);
+-		return NULL;
+-	}
+-
++	pos += sizeof(MailIndexDataRecordHeader);
+ 	do {
+ 		rec = (MailIndexDataRecord *) ((char *) data->mmap_base + pos);
+ 
+@@ -579,14 +618,20 @@ MailIndexDataRecord *
+ mail_index_data_next(MailIndexData *data, MailIndexRecord *index_rec,
+ 		     MailIndexDataRecord *rec)
+ {
++        MailIndexDataRecordHeader *rec_hdr;
+ 	uoff_t pos, end_pos, max_pos;
+ 
++	index_reset_error(data->index);
++
+ 	if (rec == NULL)
+ 		return NULL;
+ 
++	rec_hdr = (MailIndexDataRecordHeader *) ((char *) data->mmap_base +
++						 index_rec->data_position);
++
+ 	/* get position to next record */
+ 	pos = DATA_FILE_POSITION(data, rec) + DATA_RECORD_SIZE(rec);
+-	max_pos = index_rec->data_position + index_rec->data_size;
++	max_pos = index_rec->data_position + rec_hdr->data_size;
+ 
+ 	/* make sure it's within range */
+ 	if (pos >= max_pos)
+diff --git a/src/lib-index/mail-index-data.h b/src/lib-index/mail-index-data.h
+index e6b5f37ee..52865d9e0 100644
+--- a/src/lib-index/mail-index-data.h
++++ b/src/lib-index/mail-index-data.h
+@@ -12,7 +12,7 @@ int mail_index_data_reset(MailIndexData *data);
+ 
+ /* Set indexid to 0 to notify other processes using this file that they should
+    re-open it. */
+-int mail_index_data_mark_deleted(MailIndexData *data);
++int mail_index_data_mark_file_deleted(MailIndexData *data);
+ 
+ /* Mark the file as being modified */
+ void mail_index_data_mark_modified(MailIndexData *data);
+@@ -22,17 +22,22 @@ void mail_index_data_mark_modified(MailIndexData *data);
+ uoff_t mail_index_data_append(MailIndexData *data, const void *buffer,
+ 			      size_t size);
+ 
+-/* Increase header->deleted_space field */
+-int mail_index_data_add_deleted_space(MailIndexData *data, size_t data_size);
++/* Mark the given record deleted. */
++int mail_index_data_delete(MailIndexData *data, MailIndexRecord *index_rec);
+ 
+ /* Synchronize the data into disk */
+ int mail_index_data_sync_file(MailIndexData *data, int *fsync_fd);
+ 
++/* Looks up a record header from data file. Returns NULL if not found or
++   if error occured. */
++MailIndexDataRecordHeader *
++mail_index_data_lookup_header(MailIndexData *data, MailIndexRecord *index_rec);
++
+ /* Looks up a field from data file. If field is 0, returns the first field
+    found. Returns NULL if not found or if error occured. */
+ MailIndexDataRecord *
+ mail_index_data_lookup(MailIndexData *data, MailIndexRecord *index_rec,
+-		       MailField field);
++		       MailDataField field);
+ 
+ /* Returns the next record in data file, or NULL if there's no more. */
+ MailIndexDataRecord *
+diff --git a/src/lib-index/mail-index-update-cache.c b/src/lib-index/mail-index-update-cache.c
+index 012b1e58d..8db953dd7 100644
+--- a/src/lib-index/mail-index-update-cache.c
++++ b/src/lib-index/mail-index-update-cache.c
+@@ -7,19 +7,22 @@
+ #include <unistd.h>
+ 
+ static int cache_record(MailIndex *index, MailIndexRecord *rec,
+-			MailField cache_fields)
++			MailDataField cache_fields)
+ {
+ 	MailIndexUpdate *update;
+ 	IBuffer *inbuf;
++	time_t internal_date;
+ 	int failed, deleted;
+ 
+-	inbuf = index->open_mail(index, rec, &deleted);
++	inbuf = index->open_mail(index, rec, &internal_date, &deleted);
+ 	if (inbuf == NULL)
+ 		return deleted;
+ 
+-	cache_fields &= ~rec->cached_fields;
++	cache_fields &= ~rec->data_fields;
+ 
+ 	update = index->update_begin(index, rec);
++	index->update_field_raw(update, DATA_HDR_INTERNAL_DATE,
++				&internal_date, sizeof(internal_date));
+ 	mail_index_update_headers(update, inbuf, cache_fields, NULL, NULL);
+ 	failed = !index->update_end(update);
+ 
+@@ -30,7 +33,7 @@ static int cache_record(MailIndex *index, MailIndexRecord *rec,
+ int mail_index_update_cache(MailIndex *index)
+ {
+ 	MailIndexRecord *rec;
+-	MailField cache_fields;
++	MailDataField cache_fields;
+ 
+ 	if (!index->set_lock(index, MAIL_LOCK_EXCLUSIVE))
+ 		return FALSE;
+@@ -43,7 +46,7 @@ int mail_index_update_cache(MailIndex *index)
+ 
+ 	rec = index->lookup(index, 1);
+ 	while (rec != NULL) {
+-		if ((rec->cached_fields & cache_fields) != cache_fields) {
++		if ((rec->data_fields & cache_fields) != cache_fields) {
+ 			if (!cache_record(index, rec, cache_fields))
+ 				return FALSE;
+ 		}
+diff --git a/src/lib-index/mail-index-update.c b/src/lib-index/mail-index-update.c
+index 7af3efe02..fdc35ccb2 100644
+--- a/src/lib-index/mail-index-update.c
++++ b/src/lib-index/mail-index-update.c
+@@ -19,17 +19,19 @@ struct _MailIndexUpdate {
+ 
+ 	MailIndex *index;
+ 	MailIndexRecord *rec;
++	MailIndexDataRecordHeader data_hdr;
+ 
+ 	unsigned int updated_fields;
+-	void *fields[FIELD_TYPE_MAX_BITS];
+-	size_t field_sizes[FIELD_TYPE_MAX_BITS];
+-	size_t field_extra_sizes[FIELD_TYPE_MAX_BITS];
++	void *fields[DATA_FIELD_MAX_BITS];
++	size_t field_sizes[DATA_FIELD_MAX_BITS];
++	size_t field_extra_sizes[DATA_FIELD_MAX_BITS];
+ };
+ 
+ MailIndexUpdate *mail_index_update_begin(MailIndex *index, MailIndexRecord *rec)
+ {
+ 	Pool pool;
+ 	MailIndexUpdate *update;
++	MailIndexDataRecordHeader *data_hdr;
+ 
+ 	i_assert(index->lock_type == MAIL_LOCK_EXCLUSIVE);
+ 
+@@ -39,14 +41,18 @@ MailIndexUpdate *mail_index_update_begin(MailIndex *index, MailIndexRecord *rec)
+ 	update->pool = pool;
+ 	update->index = index;
+ 	update->rec = rec;
++
++	data_hdr = mail_index_data_lookup_header(index->data, rec);
++	if (data_hdr != NULL)
++		memcpy(&update->data_hdr, data_hdr, sizeof(*data_hdr));
+ 	return update;
+ }
+ 
+-static int mail_field_get_index(MailField field)
++static int mail_field_get_index(MailDataField field)
+ {
+ 	unsigned int i, mask;
+ 
+-	for (i = 0, mask = 1; i < FIELD_TYPE_MAX_BITS; i++, mask <<= 1) {
++	for (i = 0, mask = 1; i < DATA_FIELD_MAX_BITS; i++, mask <<= 1) {
+ 		if (field == mask)
+ 			return i;
+ 	}
+@@ -54,132 +60,100 @@ static int mail_field_get_index(MailField field)
+ 	return -1;
+ }
+ 
+-static int have_new_fields(MailIndexUpdate *update)
++static void get_changed_field_sizes(MailIndexUpdate *update,
++				    size_t *min_size, size_t *max_size)
+ {
+-	MailField field;
+-
+-	if (update->rec->cached_fields == 0) {
+-		/* new record */
+-		return TRUE;
+-	}
++	int i;
+ 
+-	for (field = 1; field != FIELD_TYPE_LAST; field <<= 1) {
+-		if ((update->updated_fields & field) &&
+-		    (update->rec->cached_fields & field) == 0)
+-			return TRUE;
++	for (i = 0; i < DATA_FIELD_MAX_BITS; i++) {
++		if (update->fields[i] != NULL) {
++			*min_size += SIZEOF_MAIL_INDEX_DATA +
++				MEM_ALIGN(update->field_sizes[i]);
++			*max_size += SIZEOF_MAIL_INDEX_DATA +
++				MEM_ALIGN(update->field_sizes[i] +
++					  update->field_extra_sizes[i]);
++		}
+ 	}
+-
+-	return FALSE;
+ }
+ 
+-static int have_too_large_fields(MailIndexUpdate *update)
++static void get_data_block_sizes(MailIndexUpdate *update,
++				 size_t *min_size, size_t *max_size)
+ {
+ 	MailIndexDataRecord *rec;
+-	unsigned int size_left;
+-	int index;
+ 
+-	size_left = update->rec->data_size;
++	/* first get size of new fields */
++	*min_size = *max_size = sizeof(MailIndexDataRecordHeader);
++	get_changed_field_sizes(update, min_size, max_size);
+ 
+-	/* start from the first data field - it's required to exist */
++	/* then the size of unchanged fields */
+ 	rec = mail_index_data_lookup(update->index->data, update->rec, 0);
+ 	while (rec != NULL) {
+-		if (rec->full_field_size > size_left) {
+-			/* corrupted */
+-			update->index->header->flags |= MAIL_INDEX_FLAG_REBUILD;
+-			return TRUE;
++		if ((rec->field & update->updated_fields) == 0) {
++			*min_size += SIZEOF_MAIL_INDEX_DATA +
++				rec->full_field_size;
++			*max_size += SIZEOF_MAIL_INDEX_DATA +
++				rec->full_field_size;
+ 		}
+-		size_left -= rec->full_field_size;
+ 
+-		if (rec->field & update->updated_fields) {
+-			/* field was changed */
+-			index = mail_field_get_index(rec->field);
+-			i_assert(index >= 0);
+-
+-			if (update->field_sizes[index] +
+-			    update->field_extra_sizes[index] >
+-			    rec->full_field_size)
+-				return TRUE;
+-		}
+ 		rec = mail_index_data_next(update->index->data,
+ 					   update->rec, rec);
+ 	}
+-
+-	return FALSE;
+ }
+ 
+ /* Append all the data at the end of the data file and update 
+    the index's data position */
+-static int update_by_append(MailIndexUpdate *update)
++static int update_by_append(MailIndexUpdate *update, size_t data_size)
+ {
++        MailIndexDataRecordHeader *dest_hdr;
+         MailIndexDataRecord *rec, *destrec;
+-	MailField field;
++	MailDataField field;
+ 	uoff_t fpos;
+ 	void *mem;
+ 	const void *src;
+-	size_t max_size, pos, src_size;
++	size_t pos, src_size;
+ 	int i;
+ 
+-	/* allocate the old size + also the new size of all changed or added
+-	   fields. this is more than required, but it's much easier than
+-	   calculating the exact size.
+-
+-	   If this calculation overflows (no matter what value), it doesn't
+-	   really matter as it's later checked anyway. */
+-	max_size = update->rec->data_size;
+-	for (i = 0; i < FIELD_TYPE_MAX_BITS; i++) {
+-		max_size += SIZEOF_MAIL_INDEX_DATA +
+-			update->field_sizes[i] +
+-			update->field_extra_sizes[i] + MEM_ALIGN_SIZE-1;
+-	}
++	i_assert(data_size <= UINT_MAX);
+ 
+-	if (max_size > INT_MAX) {
+-		/* rec->data_size most likely corrupted */
+-		index_set_corrupted(update->index,
+-				    "data_size points outside file");
+-		return FALSE;
+-	}
++	mem = p_malloc(update->pool, data_size);
+ 
+-	/* allocate two extra records to avoid overflows in case of bad
+-	   rec->full_field_size which itself fits into max_size, but
+-	   either the record part would make it point ouside allocate memory,
+-	   or the next field's record would do that */
+-	mem = p_malloc(update->pool, max_size + sizeof(MailIndexDataRecord)*2);
+-	pos = 0;
++	/* set header */
++	dest_hdr = (MailIndexDataRecordHeader *) mem;
++	pos = sizeof(MailIndexDataRecordHeader);
+ 
++	memcpy(dest_hdr, &update->data_hdr, sizeof(*dest_hdr));
++	dest_hdr->data_size = data_size;
++
++	/* set fields */
+ 	rec = mail_index_data_lookup(update->index->data, update->rec, 0);
+-	for (i = 0, field = 1; field != FIELD_TYPE_LAST; i++, field <<= 1) {
++	for (i = 0, field = 1; field != DATA_FIELD_LAST; i++, field <<= 1) {
+ 		destrec = (MailIndexDataRecord *) ((char *) mem + pos);
+ 
+ 		if (update->fields[i] != NULL) {
+ 			/* value was modified - use it */
+-			destrec->full_field_size = update->field_sizes[i] +
+-				update->field_extra_sizes[i];
++			destrec->full_field_size =
++				MEM_ALIGN(update->field_sizes[i] +
++					  update->field_extra_sizes[i]);
+ 			src = update->fields[i];
+ 			src_size = update->field_sizes[i];
+ 		} else if (rec != NULL && rec->field == field) {
+ 			/* use the old value */
+ 			destrec->full_field_size = rec->full_field_size;
+ 			src = rec->data;
+-			src_size = rec->full_field_size;
++			src_size = destrec->full_field_size;
+ 		} else {
+ 			/* the field doesn't exist, jump to next */
+ 			continue;
+ 		}
++		i_assert((destrec->full_field_size % MEM_ALIGN_SIZE) == 0);
+ 
+-		if (src_size > max_size || max_size - src_size < pos) {
+-			/* corrupted data file - old value had a field
+-			   larger than expected */
+-			index_set_corrupted(update->index,
+-				"full_field_size points outside data_size "
+-				"(field %u?)", update->index->filepath,
+-				rec == NULL ? 0 : rec->field);
+-			return FALSE;
++		/* make sure we don't overflow our buffer */
++		if (src_size > data_size || data_size - src_size < pos) {
++			i_panic("data file for index %s unexpectedly modified",
++				update->index->filepath);
+ 		}
+ 		memcpy(destrec->data, src, src_size);
+ 
+-		/* memory alignment fix */
+-		destrec->full_field_size = MEM_ALIGN(destrec->full_field_size);
+-
+ 		destrec->field = field;
+ 		pos += DATA_RECORD_SIZE(destrec);
+ 
+@@ -189,7 +163,7 @@ static int update_by_append(MailIndexUpdate *update)
+ 		}
+ 	}
+ 
+-	i_assert(pos <= max_size);
++	i_assert(pos == data_size);
+ 
+ 	/* append the data at the end of the data file */
+ 	fpos = mail_index_data_append(update->index->data, mem, pos);
+@@ -197,13 +171,11 @@ static int update_by_append(MailIndexUpdate *update)
+ 		return FALSE;
+ 
+ 	/* the old data is discarded */
+-	(void)mail_index_data_add_deleted_space(update->index->data,
+-						update->rec->data_size);
++	(void)mail_index_data_delete(update->index->data, update->rec);
+ 
+ 	/* update index file position - it's mmap()ed so it'll be written
+ 	   into disk when index is unlocked. */
+ 	update->rec->data_position = fpos;
+-	update->rec->data_size = pos;
+ 	return TRUE;
+ }
+ 
+@@ -214,7 +186,9 @@ static void update_by_replace(MailIndexUpdate *update)
+ 	MailIndexDataRecord *rec;
+ 	int index;
+ 
+-	/* start from the first data field - it's required to exist */
++	// FIXME: 1) this doesn't work, 2) we need to handle optimally the
++	// writing of extra_space
++
+ 	rec = mail_index_data_lookup(update->index->data, update->rec, 0);
+ 	while (rec != NULL) {
+ 		if (rec->field & update->updated_fields) {
+@@ -237,22 +211,27 @@ static void update_by_replace(MailIndexUpdate *update)
+ 
+ int mail_index_update_end(MailIndexUpdate *update)
+ {
++	MailIndexDataRecordHeader *data_hdr;
++	size_t min_size, max_size;
+ 	int failed = FALSE;
+ 
+ 	i_assert(update->index->lock_type == MAIL_LOCK_EXCLUSIVE);
+ 
+ 	if (update->updated_fields != 0) {
+-		/* if any of the fields were newly added, or have grown larger
+-		   than their old max. size, we need to move the record to end
+-		   of file. */
+-		if (have_new_fields(update) || have_too_large_fields(update))
+-			failed = !update_by_append(update);
+-		else
++		/* if fields don't fit to allocated data block, we have
++		   to move it to end of file */
++		get_data_block_sizes(update, &min_size, &max_size);
++		data_hdr = mail_index_data_lookup_header(update->index->data,
++							 update->rec);
++
++		if (data_hdr != NULL && min_size <= data_hdr->data_size)
+ 			update_by_replace(update);
++		else
++			failed = !update_by_append(update, max_size);
+ 
+ 		if (!failed) {
+ 			/* update cached fields mask */
+-			update->rec->cached_fields |= update->updated_fields;
++			update->rec->data_fields |= update->updated_fields;
+ 		}
+ 	}
+ 
+@@ -260,7 +239,7 @@ int mail_index_update_end(MailIndexUpdate *update)
+ 	return !failed;
+ }
+ 
+-static void update_field_full(MailIndexUpdate *update, MailField field,
++static void update_field_full(MailIndexUpdate *update, MailDataField field,
+ 			      const void *value, size_t size,
+ 			      size_t extra_space)
+ {
+@@ -276,16 +255,46 @@ static void update_field_full(MailIndexUpdate *update, MailField field,
+ 	memcpy(update->fields[index], value, size);
+ }
+ 
+-void mail_index_update_field(MailIndexUpdate *update, MailField field,
++static void update_header_field(MailIndexUpdate *update, MailDataField field,
++				const void *value, size_t size)
++{
++	switch (field) {
++	case DATA_HDR_INTERNAL_DATE:
++		i_assert(size == sizeof(time_t));
++		update->data_hdr.internal_date = *((time_t *) value);
++		break;
++	case DATA_HDR_VIRTUAL_SIZE:
++		i_assert(size == sizeof(uoff_t));
++		update->data_hdr.virtual_size = *((uoff_t *) value);
++		break;
++	case DATA_HDR_HEADER_SIZE:
++		i_assert(size == sizeof(uoff_t));
++		update->data_hdr.header_size = *((uoff_t *) value);
++		break;
++	case DATA_HDR_BODY_SIZE:
++		i_assert(size == sizeof(uoff_t));
++		update->data_hdr.body_size = *((uoff_t *) value);
++		break;
++	default:
++		i_assert(0);
++	}
++
++	update->updated_fields |= field;
++}
++
++void mail_index_update_field(MailIndexUpdate *update, MailDataField field,
+ 			     const char *value, size_t extra_space)
+ {
+ 	update_field_full(update, field, value, strlen(value) + 1, extra_space);
+ }
+ 
+-void mail_index_update_field_raw(MailIndexUpdate *update, MailField field,
++void mail_index_update_field_raw(MailIndexUpdate *update, MailDataField field,
+ 				 const void *value, size_t size)
+ {
+-	update_field_full(update, field, value, size, 0);
++	if (field >= DATA_FIELD_LAST)
++		update_header_field(update, field, value, size);
++	else
++		update_field_full(update, field, value, size, 0);
+ }
+ 
+ typedef struct {
+@@ -308,7 +317,7 @@ static void update_header_func(MessagePart *part,
+ 		return;
+ 
+ 	/* see if we can do anything with this field */
+-	if (ctx->update->index->header->cache_fields & FIELD_TYPE_ENVELOPE) {
++	if (ctx->update->index->header->cache_fields & DATA_FIELD_ENVELOPE) {
+ 		if (ctx->envelope_pool == NULL) {
+ 			ctx->envelope_pool =
+ 				pool_create("index envelope", 2048, FALSE);
+@@ -326,7 +335,7 @@ static void update_header_func(MessagePart *part,
+ }
+ 
+ void mail_index_update_headers(MailIndexUpdate *update, IBuffer *inbuf,
+-                               MailField cache_fields,
++                               MailDataField cache_fields,
+ 			       MessageHeaderFunc header_func, void *context)
+ {
+ 	HeaderUpdateContext ctx;
+@@ -335,7 +344,7 @@ void mail_index_update_headers(MailIndexUpdate *update, IBuffer *inbuf,
+ 	Pool pool;
+ 	const char *value;
+ 	size_t size;
+-	uoff_t start_offset;
++	uoff_t start_offset, uoff_size;
+ 
+ 	ctx.update = update;
+ 	ctx.envelope_pool = NULL;
+@@ -354,7 +363,7 @@ void mail_index_update_headers(MailIndexUpdate *update, IBuffer *inbuf,
+ 
+ 		value = update->index->lookup_field_raw(update->index,
+ 							update->rec,
+-							FIELD_TYPE_MESSAGEPART,
++							DATA_FIELD_MESSAGEPART,
+ 							&size);
+ 		if (value == NULL)
+ 			part = NULL;
+@@ -381,40 +390,49 @@ void mail_index_update_headers(MailIndexUpdate *update, IBuffer *inbuf,
+ 		}
+ 
+ 		/* update our sizes */
+-		update->rec->header_size = part->header_size.physical_size;
+-		update->rec->body_size = part->body_size.physical_size;
++		update->index->update_field_raw(update, DATA_HDR_HEADER_SIZE,
++			&part->header_size.physical_size,
++			sizeof(part->header_size.physical_size));
++		update->index->update_field_raw(update, DATA_HDR_BODY_SIZE,
++			&part->body_size.physical_size,
++			sizeof(part->body_size.physical_size));
++
++		uoff_size = part->header_size.virtual_size +
++			part->body_size.virtual_size;
++		update->index->update_field_raw(update, DATA_HDR_VIRTUAL_SIZE,
++						&uoff_size, sizeof(uoff_size));
+ 
+ 		/* don't save both BODY + BODYSTRUCTURE since BODY can be
+ 		   generated from BODYSTRUCTURE. FIXME: However that takes
+ 		   CPU, maybe this should be configurable (I/O vs. CPU)? */
+-		if ((cache_fields & FIELD_TYPE_BODY) &&
+-		    ((update->rec->cached_fields | cache_fields) &
+-		     FIELD_TYPE_BODYSTRUCTURE) == 0) {
++		if ((cache_fields & DATA_FIELD_BODY) &&
++		    ((update->rec->data_fields | cache_fields) &
++		     DATA_FIELD_BODYSTRUCTURE) == 0) {
+ 			t_push();
+ 			i_buffer_seek(inbuf, start_offset);
+ 			value = imap_part_get_bodystructure(pool, &part,
+ 							    inbuf, FALSE);
+-			update->index->update_field(update, FIELD_TYPE_BODY,
++			update->index->update_field(update, DATA_FIELD_BODY,
+ 						    value, 0);
+ 			t_pop();
+ 		}
+ 
+-		if (cache_fields & FIELD_TYPE_BODYSTRUCTURE) {
++		if (cache_fields & DATA_FIELD_BODYSTRUCTURE) {
+ 			t_push();
+ 			i_buffer_seek(inbuf, start_offset);
+ 			value = imap_part_get_bodystructure(pool, &part,
+ 							    inbuf, TRUE);
+ 			update->index->update_field(update,
+-						    FIELD_TYPE_BODYSTRUCTURE,
++						    DATA_FIELD_BODYSTRUCTURE,
+ 						    value, 0);
+ 			t_pop();
+ 		}
+ 
+-		if (cache_fields & FIELD_TYPE_MESSAGEPART) {
++		if (cache_fields & DATA_FIELD_MESSAGEPART) {
+ 			t_push();
+ 			value = message_part_serialize(part, &size);
+ 			update->index->update_field_raw(update,
+-							FIELD_TYPE_MESSAGEPART,
++							DATA_FIELD_MESSAGEPART,
+ 							value, size);
+ 			t_pop();
+ 		}
+@@ -424,14 +442,19 @@ void mail_index_update_headers(MailIndexUpdate *update, IBuffer *inbuf,
+ 		message_parse_header(NULL, inbuf, &hdr_size,
+ 				     update_header_func, &ctx);
+ 
+-		update->rec->header_size = hdr_size.physical_size;
+-		update->rec->body_size = inbuf->v_size - inbuf->v_offset;
++		update->index->update_field_raw(update, DATA_HDR_HEADER_SIZE,
++			&hdr_size.physical_size,
++			sizeof(hdr_size.physical_size));
++
++		uoff_size = inbuf->v_size - inbuf->v_offset;
++		update->index->update_field_raw(update, DATA_HDR_BODY_SIZE,
++						&uoff_size, sizeof(uoff_size));
+ 	}
+ 
+ 	if (ctx.envelope != NULL) {
+ 		t_push();
+ 		value = imap_envelope_get_part_data(ctx.envelope);
+-		update->index->update_field(update, FIELD_TYPE_ENVELOPE,
++		update->index->update_field(update, DATA_FIELD_ENVELOPE,
+ 					    value, 0);
+ 		t_pop();
+ 
+diff --git a/src/lib-index/mail-index-util.c b/src/lib-index/mail-index-util.c
+index 0d732182f..b785c6c14 100644
+--- a/src/lib-index/mail-index-util.c
++++ b/src/lib-index/mail-index-util.c
+@@ -105,61 +105,3 @@ int mail_index_create_temp_file(MailIndex *index, const char **path)
+ 
+ 	return fd;
+ }
+-
+-
+-int mail_index_get_virtual_size(MailIndex *index, MailIndexRecord *rec,
+-				int fastscan, uoff_t *virtual_size)
+-{
+-	MessageSize hdr_size, body_size;
+-	IBuffer *inbuf;
+-	const void *part_data;
+-	size_t size;
+-	int deleted;
+-
+-	if ((rec->index_flags & INDEX_MAIL_FLAG_BINARY_HEADER) &&
+-	    (rec->index_flags & INDEX_MAIL_FLAG_BINARY_BODY)) {
+-		/* virtual size == physical size */
+-		*virtual_size += rec->header_size + rec->body_size;
+-		return TRUE;
+-	}
+-
+-	part_data = index->lookup_field_raw(index, rec,
+-					    FIELD_TYPE_MESSAGEPART, &size);
+-	if (part_data == NULL)
+-		index->cache_fields_later(index, FIELD_TYPE_MESSAGEPART);
+-	else {
+-		/* get sizes from preparsed message structure */
+-		if (!message_part_deserialize_size(part_data, size,
+-						   &hdr_size, &body_size)) {
+-			/* corrupted, ignore */
+-			index_set_corrupted(index,
+-				"Corrupted cached MessagePart data");
+-		} else {
+-			*virtual_size = hdr_size.virtual_size +
+-				body_size.virtual_size;
+-			return TRUE;
+-		}
+-	}
+-
+-	/* only way left is to actually parse the message */
+-	*virtual_size = 0;
+-
+-	if (fastscan) {
+-		/* and we don't want that */
+-		return FALSE;
+-	}
+-
+-	inbuf = index->open_mail(index, rec, &deleted);
+-	if (inbuf == NULL) {
+-		/* If we were deleted, just return TRUE with 0 size. */
+-		return deleted;
+-	}
+-
+-	/* we don't care about the difference in header/body,
+-	   so parse the whole message as a "body" */
+-	message_get_body_size(inbuf, &body_size, (uoff_t)-1);
+-	*virtual_size = body_size.virtual_size;
+-
+-	i_buffer_unref(inbuf);
+-	return TRUE;
+-}
+diff --git a/src/lib-index/mail-index-util.h b/src/lib-index/mail-index-util.h
+index 1013d26d1..859efef20 100644
+--- a/src/lib-index/mail-index-util.h
++++ b/src/lib-index/mail-index-util.h
+@@ -22,11 +22,4 @@ void index_reset_error(MailIndex *index);
+    and sets *path to the full path of the created file.  */
+ int mail_index_create_temp_file(MailIndex *index, const char **path);
+ 
+-/* Calculates virtual size for specified message. If the fastscan is FALSE
+-   and the size can't be figured out from headers, the message is opened and
+-   fully scanned to calculate the size. Returns TRUE if size was successfully
+-   got. If mail was just deleted, returns TRUE and sets virtual_size to 0. */
+-int mail_index_get_virtual_size(MailIndex *index, MailIndexRecord *rec,
+-				int fastscan, uoff_t *virtual_size);
+-
+ #endif
+diff --git a/src/lib-index/mail-index.c b/src/lib-index/mail-index.c
+index 3ebea84af..0b1a89184 100644
+--- a/src/lib-index/mail-index.c
++++ b/src/lib-index/mail-index.c
+@@ -580,11 +580,11 @@ MailIndexRecord *mail_index_lookup_uid_range(MailIndex *index,
+ }
+ 
+ const char *mail_index_lookup_field(MailIndex *index, MailIndexRecord *rec,
+-				    MailField field)
++				    MailDataField field)
+ {
+ 	MailIndexDataRecord *datarec;
+ 
+-	datarec = (rec->cached_fields & field) == 0 ? NULL :
++	datarec = (rec->data_fields & field) == 0 ? NULL :
+ 		mail_index_data_lookup(index->data, rec, field);
+ 	if (datarec == NULL)
+ 		return NULL;
+@@ -598,22 +598,55 @@ const char *mail_index_lookup_field(MailIndex *index, MailIndexRecord *rec,
+ }
+ 
+ const void *mail_index_lookup_field_raw(MailIndex *index, MailIndexRecord *rec,
+-					MailField field, size_t *size)
++					MailDataField field, size_t *size)
+ {
++	MailIndexDataRecordHeader *datahdr;
+ 	MailIndexDataRecord *datarec;
+ 
+-	datarec = (rec->cached_fields & field) == 0 ? NULL :
+-		mail_index_data_lookup(index->data, rec, field);
+-	if (datarec == NULL) {
++	if ((rec->data_fields & field) == 0) {
+ 		*size = 0;
+ 		return NULL;
+ 	}
+ 
+-	*size = datarec->full_field_size;
+-	return datarec->data;
++	if (field < DATA_FIELD_LAST) {
++		/* read data field */
++		datarec = mail_index_data_lookup(index->data, rec, field);
++		if (datarec == NULL) {
++			*size = 0;
++			return NULL;
++		}
++
++		*size = datarec->full_field_size;
++		return datarec->data;
++	}
++
++	/* read header field */
++	datahdr = mail_index_data_lookup_header(index->data, rec);
++	if (datahdr == NULL) {
++		*size = 0;
++		return NULL;
++	}
++
++	switch (field) {
++	case DATA_HDR_INTERNAL_DATE:
++		*size = sizeof(datahdr->internal_date);
++		return &datahdr->internal_date;
++	case DATA_HDR_VIRTUAL_SIZE:
++		*size = sizeof(datahdr->virtual_size);
++		return &datahdr->virtual_size;
++	case DATA_HDR_HEADER_SIZE:
++		*size = sizeof(datahdr->header_size);
++		return &datahdr->header_size;
++	case DATA_HDR_BODY_SIZE:
++		*size = sizeof(datahdr->body_size);
++		return &datahdr->body_size;
++	default:
++		*size = 0;
++		return NULL;
++	}
+ }
+ 
+-void mail_index_cache_fields_later(MailIndex *index, MailField field)
++void mail_index_cache_fields_later(MailIndex *index, MailDataField field)
+ {
+ 	i_assert(index->lock_type != MAIL_LOCK_UNLOCK);
+ 
+@@ -635,6 +668,21 @@ void mail_index_cache_fields_later(MailIndex *index, MailField field)
+ 	}
+ }
+ 
++time_t mail_get_internal_date(MailIndex *index, MailIndexRecord *rec)
++{
++	const time_t *date;
++	size_t size;
++
++	date = index->lookup_field_raw(index, rec,
++				       DATA_HDR_INTERNAL_DATE, &size);
++	if (date == NULL)
++		return (time_t)-1;
++	else {
++		i_assert(size == sizeof(*date));
++		return *date;
++	}
++}
++
+ void mail_index_mark_flag_changes(MailIndex *index, MailIndexRecord *rec,
+ 				  MailFlags old_flags, MailFlags new_flags)
+ {
+@@ -776,7 +824,7 @@ int mail_index_expunge(MailIndex *index, MailIndexRecord *rec,
+ 	hdr->messages_count--;
+ 	mail_index_mark_flag_changes(index, rec, rec->msg_flags, 0);
+ 
+-	(void)mail_index_data_add_deleted_space(index->data, rec->data_size);
++	(void)mail_index_data_delete(index->data, rec);
+ 
+ 	records = MAIL_INDEX_RECORD_COUNT(index);
+ 	if (hdr->first_hole_index + hdr->first_hole_records == records) {
+@@ -866,31 +914,29 @@ static int mail_index_grow(MailIndex *index)
+ 	return TRUE;
+ }
+ 
+-int mail_index_append_begin(MailIndex *index, MailIndexRecord **rec)
++MailIndexRecord *mail_index_append_begin(MailIndex *index)
+ {
+-	MailIndexRecord *destrec;
++	MailIndexRecord *rec;
+ 
+ 	i_assert(index->lock_type == MAIL_LOCK_EXCLUSIVE);
+-	i_assert((*rec)->uid == 0);
+-	i_assert((*rec)->msg_flags == 0);
+ 
+ 	if (index->mmap_used_length == index->mmap_full_length) {
+ 		if (!mail_index_grow(index))
+-			return FALSE;
++			return NULL;
+ 	}
+ 
+ 	i_assert(index->header->used_file_size == index->mmap_used_length);
+ 	i_assert(index->mmap_used_length + sizeof(MailIndexRecord) <=
+ 		 index->mmap_full_length);
+ 
+-	destrec = (MailIndexRecord *) ((char *) index->mmap_base +
+-				       index->mmap_used_length);
+-	memcpy(destrec, *rec, sizeof(MailIndexRecord));
+-	*rec = destrec;
++	rec = (MailIndexRecord *) ((char *) index->mmap_base +
++				   index->mmap_used_length);
++	memset(rec, 0, sizeof(MailIndexRecord));
+ 
+ 	index->header->used_file_size += sizeof(MailIndexRecord);
+ 	index->mmap_used_length += sizeof(MailIndexRecord);
+-	return TRUE;
++
++	return rec;
+ }
+ 
+ int mail_index_append_end(MailIndex *index, MailIndexRecord *rec)
+diff --git a/src/lib-index/mail-index.h b/src/lib-index/mail-index.h
+index 1214d4495..fdf98adc8 100644
+--- a/src/lib-index/mail-index.h
++++ b/src/lib-index/mail-index.h
+@@ -27,16 +27,26 @@ enum {
+ };
+ 
+ typedef enum {
+-	FIELD_TYPE_LOCATION		= 0x0001,
+-	FIELD_TYPE_ENVELOPE		= 0x0002,
+-	FIELD_TYPE_BODY			= 0x0004,
+-	FIELD_TYPE_BODYSTRUCTURE	= 0x0008,
+-	FIELD_TYPE_MD5			= 0x0010,
+-	FIELD_TYPE_MESSAGEPART		= 0x0020,
++	DATA_FIELD_LOCATION		= 0x00000001,
++	DATA_FIELD_ENVELOPE		= 0x00000002,
++	DATA_FIELD_BODY			= 0x00000004,
++	DATA_FIELD_BODYSTRUCTURE	= 0x00000008,
++	DATA_FIELD_MD5			= 0x00000010,
++	DATA_FIELD_MESSAGEPART		= 0x00000020,
++
++	DATA_FIELD_LAST			= 0x00000040,
++	DATA_FIELD_MAX_BITS		= 6,
++
++	/* separate from above, but in same bitmask */
++	DATA_HDR_INTERNAL_DATE		= 0x80000000,
++	DATA_HDR_VIRTUAL_SIZE		= 0x40000000,
++	DATA_HDR_HEADER_SIZE		= 0x20000000,
++	DATA_HDR_BODY_SIZE		= 0x10000000
++} MailDataField;
+ 
+-	FIELD_TYPE_LAST			= 0x0040,
+-	FIELD_TYPE_MAX_BITS		= 6
+-} MailField;
++#define IS_BODYSTRUCTURE_FIELD(field) \
++	(((field) & (DATA_FIELD_BODY | DATA_FIELD_BODYSTRUCTURE | \
++		     DATA_FIELD_MESSAGEPART)) != 0)
+ 
+ typedef enum {
+ 	/* If binary flags are set, it's not checked whether mail is
+@@ -51,14 +61,6 @@ typedef enum {
+ 	INDEX_MAIL_FLAG_DIRTY		= 0x0004
+ } MailIndexMailFlags;
+ 
+-#define IS_HEADER_FIELD(field) \
+-	(((field) & (FIELD_TYPE_FROM | FIELD_TYPE_TO | FIELD_TYPE_CC | \
+-		     FIELD_TYPE_BCC | FIELD_TYPE_SUBJECT)) != 0)
+-
+-#define IS_BODYSTRUCTURE_FIELD(field) \
+-	(((field) & (FIELD_TYPE_BODY|FIELD_TYPE_BODYSTRUCTURE| \
+-		     FIELD_TYPE_MESSAGEPART)) != 0)
+-
+ typedef enum {
+ 	MAIL_LOCK_UNLOCK = 0,
+ 	MAIL_LOCK_SHARED,
+@@ -76,6 +78,7 @@ typedef struct _MailIndexDataHeader MailIndexDataHeader;
+ 
+ typedef struct _MailIndexRecord MailIndexRecord;
+ typedef struct _MailIndexDataRecord MailIndexDataRecord;
++typedef struct _MailIndexDataRecordHeader MailIndexDataRecordHeader;
+ 
+ typedef struct _MailIndexUpdate MailIndexUpdate;
+ 
+@@ -122,23 +125,27 @@ struct _MailIndexDataHeader {
+ };
+ 
+ struct _MailIndexRecord {
+-	/* remember to keep uoff_t's 8 byte aligned so we don't waste space */
+ 	unsigned int uid;
+ 	unsigned int msg_flags; /* MailFlags */
+-	time_t internal_date;
+ 
+ 	unsigned int index_flags; /* MailIndexMailFlags */
+-	unsigned int cached_fields; /* MailField */
++	unsigned int data_fields; /* MailDataField */
+ 
+-	unsigned int data_size;
+ 	uoff_t data_position;
++};
++
++struct _MailIndexDataRecordHeader {
++	unsigned int data_size; /* including this header */
+ 
+-	uoff_t header_size; /* 0 if not known yet */
+-	uoff_t body_size; /* if header_size == 0, the size of full message */
++	time_t internal_date;
++	uoff_t virtual_size;
++
++	uoff_t header_size;
++	uoff_t body_size;
+ };
+ 
+ struct _MailIndexDataRecord {
+-	unsigned int field; /* MailField */
++	unsigned int field; /* MailDataField */
+ 	unsigned int full_field_size;
+ 	char data[MEM_ALIGN_SIZE]; /* variable size */
+ };
+@@ -221,22 +228,26 @@ struct _MailIndex {
+ 	/* Find field from specified record, or NULL if it's not in index.
+ 	   Makes sure that the field ends with \0. */
+ 	const char *(*lookup_field)(MailIndex *index, MailIndexRecord *rec,
+-				    MailField field);
++				    MailDataField field);
+ 
+ 	/* Find field from specified record, or NULL if it's not in index. */
+ 	const void *(*lookup_field_raw)(MailIndex *index, MailIndexRecord *rec,
+-					MailField field, size_t *size);
++					MailDataField field, size_t *size);
+ 
+ 	/* Mark the fields to be cached later. If any of them is already
+ 	   set in hdr->cache_fields, mark the caching to happen next time
+ 	   index is opened. */
+-	void (*cache_fields_later)(MailIndex *index, MailField field);
++	void (*cache_fields_later)(MailIndex *index, MailDataField field);
+ 
+-	/* Open mail file and return it as mmap()ed IBuffer. If we fails,
++	/* Open mail file and return it as mmap()ed IBuffer. If we fail,
+ 	   we return NULL and set deleted = TRUE if failure was because the
+-	   mail was just deleted (ie. not an error). */
++	   mail was just deleted (ie. not an error). internal_date is set
++	   if it's non-NULL. */
+ 	IBuffer *(*open_mail)(MailIndex *index, MailIndexRecord *rec,
+-			      int *deleted);
++			      time_t *internal_date, int *deleted);
++
++	/* Returns internal date of message, or (time_t)-1 if error occured. */
++	time_t (*get_internal_date)(MailIndex *index, MailIndexRecord *rec);
+ 
+ 	/* Expunge a mail from index. Tree and modifylog is also updated. The
+ 	   index must be exclusively locked before calling this function.
+@@ -259,10 +270,9 @@ struct _MailIndex {
+ 			    int external_change);
+ 
+ 	/* Append a new record to index. The index must be exclusively
+-	   locked before calling this function. The record pointer is
+-	   updated to the mmap()ed record. rec->uid is updated in
++	   locked before calling this function. rec->uid is updated in
+ 	   append_end(). */
+-	int (*append_begin)(MailIndex *index, MailIndexRecord **rec);
++	MailIndexRecord *(*append_begin)(MailIndex *index);
+ 	int (*append_end)(MailIndex *index, MailIndexRecord *rec);
+ 
+ 	/* Updating fields happens by calling update_begin(), one or more
+@@ -282,11 +292,11 @@ struct _MailIndex {
+ 					 MailIndexRecord *rec);
+ 	int (*update_end)(MailIndexUpdate *update);
+ 
+-	void (*update_field)(MailIndexUpdate *update, MailField field,
++	void (*update_field)(MailIndexUpdate *update, MailDataField field,
+ 			     const char *value, size_t extra_space);
+ 	/* Just remember that full_field_size will be MEM_ALIGNed, so
+ 	   it may differer from the given size parameter. */
+-	void (*update_field_raw)(MailIndexUpdate *update, MailField field,
++	void (*update_field_raw)(MailIndexUpdate *update, MailDataField field,
+ 				 const void *value, size_t size);
+ 
+ 	/* Returns last error message */
+@@ -311,7 +321,7 @@ struct _MailIndex {
+ 
+ 	char *dir; /* directory where to place the index files */
+ 	char *filepath; /* index file path */
+-	MailField default_cache_fields, never_cache_fields;
++	MailDataField default_cache_fields, never_cache_fields;
+ 	unsigned int indexid;
+ 	unsigned int sync_id;
+ 
+@@ -377,24 +387,25 @@ MailIndexRecord *mail_index_lookup_uid_range(MailIndex *index,
+ 					     unsigned int last_uid,
+ 					     unsigned int *seq_r);
+ const char *mail_index_lookup_field(MailIndex *index, MailIndexRecord *rec,
+-				    MailField field);
++				    MailDataField field);
+ const void *mail_index_lookup_field_raw(MailIndex *index, MailIndexRecord *rec,
+-					MailField field, size_t *size);
+-void mail_index_cache_fields_later(MailIndex *index, MailField field);
++					MailDataField field, size_t *size);
++void mail_index_cache_fields_later(MailIndex *index, MailDataField field);
+ int mail_index_expunge(MailIndex *index, MailIndexRecord *rec,
+ 		       unsigned int seq, int external_change);
+ int mail_index_update_flags(MailIndex *index, MailIndexRecord *rec,
+ 			    unsigned int seq, MailFlags flags,
+ 			    int external_change);
+-int mail_index_append_begin(MailIndex *index, MailIndexRecord **rec);
++MailIndexRecord *mail_index_append_begin(MailIndex *index);
+ int mail_index_append_end(MailIndex *index, MailIndexRecord *rec);
+ MailIndexUpdate *mail_index_update_begin(MailIndex *index,
+ 					 MailIndexRecord *rec);
+ int mail_index_update_end(MailIndexUpdate *update);
+-void mail_index_update_field(MailIndexUpdate *update, MailField field,
++void mail_index_update_field(MailIndexUpdate *update, MailDataField field,
+ 			     const char *value, size_t extra_space);
+-void mail_index_update_field_raw(MailIndexUpdate *update, MailField field,
++void mail_index_update_field_raw(MailIndexUpdate *update, MailDataField field,
+ 				 const void *value, size_t size);
++time_t mail_get_internal_date(MailIndex *index, MailIndexRecord *rec);
+ const char *mail_index_get_last_error(MailIndex *index);
+ int mail_index_is_diskspace_error(MailIndex *index);
+ int mail_index_is_inconsistency_error(MailIndex *index);
+@@ -408,7 +419,7 @@ int mail_index_verify_hole_range(MailIndex *index);
+ void mail_index_mark_flag_changes(MailIndex *index, MailIndexRecord *rec,
+ 				  MailFlags old_flags, MailFlags new_flags);
+ void mail_index_update_headers(MailIndexUpdate *update, IBuffer *inbuf,
+-                               MailField cache_fields,
++                               MailDataField cache_fields,
+ 			       MessageHeaderFunc header_func, void *context);
+ int mail_index_update_cache(MailIndex *index);
+ int mail_index_compress(MailIndex *index);
+diff --git a/src/lib-index/maildir/maildir-build.c b/src/lib-index/maildir/maildir-build.c
+index a1409b8e6..32e4b5a56 100644
+--- a/src/lib-index/maildir/maildir-build.c
++++ b/src/lib-index/maildir/maildir-build.c
+@@ -11,21 +11,6 @@
+ #include <dirent.h>
+ #include <sys/stat.h>
+ 
+-static MailIndexRecord *mail_index_record_append_begin(MailIndex *index,
+-						       time_t internal_date)
+-{
+-	MailIndexRecord trec, *rec;
+-
+-	memset(&trec, 0, sizeof(MailIndexRecord));
+-	trec.internal_date = internal_date;
+-
+-	rec = &trec;
+-	if (!index->append_begin(index, &rec))
+-		return NULL;
+-
+-	return rec;
+-}
+-
+ static int maildir_index_append_fd(MailIndex *index, int fd, const char *path,
+ 				   const char *fname)
+ {
+@@ -37,24 +22,10 @@ static int maildir_index_append_fd(MailIndex *index, int fd, const char *path,
+ 	i_assert(path != NULL);
+ 	i_assert(fname != NULL);
+ 
+-	/* check that file size is somewhat reasonable */
+-	if (fstat(fd, &st) < 0)
+-		return index_file_set_syscall_error(index, path, "fstat()");
+-
+-	if (st.st_size < 10) {
+-		/* This cannot be a mail file - delete it */
+-		index_set_error(index, "Invalid size %"PRIuUOFF_T
+-				" with mail in %s - deleted", st.st_size, path);
+-		if (unlink(path) < 0)
+-			index_file_set_syscall_error(index, path, "unlink()");
+-		return TRUE;
+-	}
+-
+ 	if (!index->set_lock(index, MAIL_LOCK_EXCLUSIVE))
+ 		return FALSE;
+ 
+-	/* append the file into index */
+-	rec = mail_index_record_append_begin(index, st.st_mtime);
++	rec = index->append_begin(index);
+ 	if (rec == NULL)
+ 		return FALSE;
+ 
+@@ -64,12 +35,18 @@ static int maildir_index_append_fd(MailIndex *index, int fd, const char *path,
+ 
+ 	update = index->update_begin(index, rec);
+ 
++	/* set internal date */
++	if (fd != -1 && fstat(fd, &st) == 0) {
++		index->update_field_raw(update, DATA_HDR_INTERNAL_DATE,
++					&st.st_mtime, sizeof(st.st_mtime));
++	}
++
+ 	/* set the location */
+-	index->update_field(update, FIELD_TYPE_LOCATION, fname,
++	index->update_field(update, DATA_FIELD_LOCATION, fname,
+ 			    MAILDIR_LOCATION_EXTRA_SPACE);
+ 
+ 	/* parse the header and update record's fields */
+-	failed = !maildir_record_update(index, update, fd);
++	failed = fd == -1 ? FALSE : !maildir_record_update(index, update, fd);
+ 
+ 	if (!index->update_end(update) || failed)
+ 		return FALSE;
+diff --git a/src/lib-index/maildir/maildir-index.c b/src/lib-index/maildir/maildir-index.c
+index f283f4f86..1e8914ea6 100644
+--- a/src/lib-index/maildir/maildir-index.c
++++ b/src/lib-index/maildir/maildir-index.c
+@@ -6,6 +6,7 @@
+ #include "mail-index-util.h"
+ 
+ #include <stdio.h>
++#include <sys/stat.h>
+ 
+ extern MailIndex maildir_index;
+ 
+@@ -159,6 +160,33 @@ static void maildir_index_free(MailIndex *index)
+ 	i_free(index);
+ }
+ 
++static time_t maildir_get_internal_date(MailIndex *index, MailIndexRecord *rec)
++{
++	struct stat st;
++	const char *fname;
++	time_t date;
++
++	/* try getting it from cache */
++	date = mail_get_internal_date(index, rec);
++	if (date != (time_t)-1)
++		return date;
++
++	/* stat() gives it */
++	fname = index->lookup_field(index, rec, DATA_FIELD_LOCATION);
++	if (fname == NULL) {
++		index_data_set_corrupted(index->data,
++			"Missing location field for record %u", rec->uid);
++		return (time_t)-1;
++	}
++
++	if (stat(fname, &st) < 0) {
++		index_file_set_syscall_error(index, fname, "stat()");
++		return (time_t)-1;
++	}
++
++	return st.st_mtime;
++}
++
+ static int maildir_index_update_flags(MailIndex *index, MailIndexRecord *rec,
+ 				      unsigned int seq, MailFlags flags,
+ 				      int external_change)
+@@ -168,10 +196,10 @@ static int maildir_index_update_flags(MailIndex *index, MailIndexRecord *rec,
+ 	const char *old_path, *new_path;
+ 
+ 	/* we need to update the flags in the file name */
+-	old_fname = index->lookup_field(index, rec, FIELD_TYPE_LOCATION);
++	old_fname = index->lookup_field(index, rec, DATA_FIELD_LOCATION);
+ 	if (old_fname == NULL) {
+-		index_data_set_corrupted(index->data, "Missing location field "
+-					 "for record %u", rec->uid);
++		index_data_set_corrupted(index->data,
++			"Missing location field for record %u", rec->uid);
+ 		return FALSE;
+ 	}
+ 
+@@ -194,7 +222,7 @@ static int maildir_index_update_flags(MailIndex *index, MailIndexRecord *rec,
+ 
+ 		/* update the filename in index */
+ 		update = index->update_begin(index, rec);
+-		index->update_field(update, FIELD_TYPE_LOCATION, new_fname, 0);
++		index->update_field(update, DATA_FIELD_LOCATION, new_fname, 0);
+ 
+ 		if (!index->update_end(update))
+ 			return FALSE;
+@@ -223,6 +251,7 @@ MailIndex maildir_index = {
+ 	mail_index_lookup_field_raw,
+ 	mail_index_cache_fields_later,
+ 	maildir_open_mail,
++	maildir_get_internal_date,
+ 	mail_index_expunge,
+ 	maildir_index_update_flags,
+ 	mail_index_append_begin,
+diff --git a/src/lib-index/maildir/maildir-index.h b/src/lib-index/maildir/maildir-index.h
+index 11db3ee3d..60ddbfaab 100644
+--- a/src/lib-index/maildir/maildir-index.h
++++ b/src/lib-index/maildir/maildir-index.h
+@@ -21,7 +21,7 @@ int maildir_index_build_dir(MailIndex *index, const char *source_dir,
+ 			    const char *dest_dir);
+ 
+ IBuffer *maildir_open_mail(MailIndex *index, MailIndexRecord *rec,
+-			   int *deleted);
++			   time_t *internal_date, int *deleted);
+ 
+ int maildir_record_update(MailIndex *index, MailIndexUpdate *update, int fd);
+ 
+diff --git a/src/lib-index/maildir/maildir-open.c b/src/lib-index/maildir/maildir-open.c
+index 96e8e8972..a1cda1779 100644
+--- a/src/lib-index/maildir/maildir-open.c
++++ b/src/lib-index/maildir/maildir-open.c
+@@ -8,10 +8,12 @@
+ 
+ #include <unistd.h>
+ #include <fcntl.h>
++#include <sys/stat.h>
+ 
+ IBuffer *maildir_open_mail(MailIndex *index, MailIndexRecord *rec,
+-			   int *deleted)
++			   time_t *internal_date, int *deleted)
+ {
++	struct stat st;
+ 	const char *fname, *path;
+ 	int fd;
+ 
+@@ -23,10 +25,10 @@ IBuffer *maildir_open_mail(MailIndex *index, MailIndexRecord *rec,
+ 	if (index->inconsistent)
+ 		return NULL;
+ 
+-	fname = index->lookup_field(index, rec, FIELD_TYPE_LOCATION);
++	fname = index->lookup_field(index, rec, DATA_FIELD_LOCATION);
+ 	if (fname == NULL) {
+-		index_data_set_corrupted(index->data, "Missing location field "
+-					 "for record %u", rec->uid);
++		index_data_set_corrupted(index->data,
++			"Missing location field for record %u", rec->uid);
+ 		return NULL;
+ 	}
+ 
+@@ -42,6 +44,15 @@ IBuffer *maildir_open_mail(MailIndex *index, MailIndexRecord *rec,
+ 		return NULL;
+ 	}
+ 
++	if (internal_date != NULL) {
++		*internal_date = mail_get_internal_date(index, rec);
++
++		if (*internal_date == (time_t)-1) {
++			if (fstat(fd, &st) == 0)
++				*internal_date = st.st_mtime;
++		}
++	}
++
+ 	return i_buffer_create_mmap(fd, default_pool, MAIL_MMAP_BLOCK_SIZE,
+ 				    0, 0, TRUE);
+ }
+diff --git a/src/lib-index/maildir/maildir-rebuild.c b/src/lib-index/maildir/maildir-rebuild.c
+index e0faccb30..0299265c1 100644
+--- a/src/lib-index/maildir/maildir-rebuild.c
++++ b/src/lib-index/maildir/maildir-rebuild.c
+@@ -24,7 +24,7 @@ int maildir_index_rebuild(MailIndex *index)
+ 	index->mmap_used_length = index->header->used_file_size;
+ 
+ 	/* require these fields */
+-	index->header->cache_fields |= FIELD_TYPE_LOCATION;
++	index->header->cache_fields |= DATA_FIELD_LOCATION;
+ 
+ 	/* update indexid, which also means that our state has completely
+ 	   changed */
+diff --git a/src/lib-index/maildir/maildir-sync.c b/src/lib-index/maildir/maildir-sync.c
+index 1ab3d449b..1abdd7be6 100644
+--- a/src/lib-index/maildir/maildir-sync.c
++++ b/src/lib-index/maildir/maildir-sync.c
+@@ -33,7 +33,7 @@ static int maildir_index_sync_file(MailIndex *index, MailIndexRecord *rec,
+ 	update = index->update_begin(index, rec);
+ 
+ 	if (fname_changed)
+-		index->update_field(update, FIELD_TYPE_LOCATION, fname, 0);
++		index->update_field(update, DATA_FIELD_LOCATION, fname, 0);
+ 	if (file_changed) {
+ 		/* file itself changed - reload the header */
+ 		fd = open(path, O_RDONLY);
+@@ -68,6 +68,7 @@ static int maildir_index_sync_files(MailIndex *index, const char *dir,
+ 				    HashTable *files, int check_content_changes)
+ {
+ 	MailIndexRecord *rec;
++	MailIndexDataRecordHeader *data_hdr;
+ 	struct stat st;
+ 	const char *fname, *value;
+ 	char str[1024], *p;
+@@ -78,11 +79,11 @@ static int maildir_index_sync_files(MailIndex *index, const char *dir,
+ 
+ 	rec = index->lookup(index, 1);
+ 	for (seq = 1; rec != NULL; rec = index->next(index, rec)) {
+-		fname = index->lookup_field(index, rec, FIELD_TYPE_LOCATION);
++		fname = index->lookup_field(index, rec, DATA_FIELD_LOCATION);
+ 		if (fname == NULL) {
+ 			index_data_set_corrupted(index->data,
+-						 "Missing location field for "
+-						 "record %u", rec->uid);
++				"Missing location field for record %u",
++				rec->uid);
+ 			return FALSE;
+ 		}
+ 
+@@ -116,8 +117,11 @@ static int maildir_index_sync_files(MailIndex *index, const char *dir,
+ 				return FALSE;
+ 			}
+ 
+-			file_changed = (uoff_t)st.st_size !=
+-				rec->body_size + rec->header_size;
++			data_hdr = mail_index_data_lookup_header(index->data,
++								 rec);
++			file_changed = data_hdr != NULL &&
++				(uoff_t)st.st_size !=
++				data_hdr->body_size + data_hdr->header_size;
+ 		}
+ 
+ 		/* changed - update */
+diff --git a/src/lib-index/maildir/maildir-update.c b/src/lib-index/maildir/maildir-update.c
+index 34ad7a954..5a30a2881 100644
+--- a/src/lib-index/maildir/maildir-update.c
++++ b/src/lib-index/maildir/maildir-update.c
+@@ -7,11 +7,11 @@
+ int maildir_record_update(MailIndex *index, MailIndexUpdate *update, int fd)
+ {
+ 	IBuffer *inbuf;
+-        MailField cache_fields;
++        MailDataField cache_fields;
+ 
+ 	/* don't even bother opening the file if we're not going to do
+ 	   anything */
+-	cache_fields = index->header->cache_fields & ~FIELD_TYPE_LOCATION;
++	cache_fields = index->header->cache_fields & ~DATA_FIELD_LOCATION;
+ 	if (cache_fields == 0)
+ 		return TRUE;
+ 
+diff --git a/src/lib-index/mbox/mbox-append.c b/src/lib-index/mbox/mbox-append.c
+index 4f7d82312..04eeba54b 100644
+--- a/src/lib-index/mbox/mbox-append.c
++++ b/src/lib-index/mbox/mbox-append.c
+@@ -8,21 +8,6 @@
+ #include "mbox-index.h"
+ #include "mail-index-util.h"
+ 
+-static MailIndexRecord *mail_index_record_append_begin(MailIndex *index,
+-						       time_t internal_date)
+-{
+-	MailIndexRecord trec, *rec;
+-
+-	memset(&trec, 0, sizeof(MailIndexRecord));
+-	trec.internal_date = internal_date;
+-
+-	rec = &trec;
+-	if (!index->append_begin(index, &rec))
+-		return NULL;
+-
+-	return rec;
+-}
+-
+ static int mbox_index_append_next(MailIndex *index, IBuffer *inbuf)
+ {
+ 	MailIndexRecord *rec;
+@@ -72,14 +57,17 @@ static int mbox_index_append_next(MailIndex *index, IBuffer *inbuf)
+ 	eoh_offset = inbuf->v_offset;
+ 
+ 	/* add message to index */
+-	rec = mail_index_record_append_begin(index, internal_date);
++	rec = index->append_begin(index);
+ 	if (rec == NULL)
+ 		return FALSE;
+ 
+ 	update = index->update_begin(index, rec);
+ 
++	index->update_field_raw(update, DATA_HDR_INTERNAL_DATE,
++				&internal_date, sizeof(internal_date));
++
+ 	/* location = offset to beginning of headers in message */
+-	index->update_field_raw(update, FIELD_TYPE_LOCATION,
++	index->update_field_raw(update, DATA_FIELD_LOCATION,
+ 				&abs_start_offset, sizeof(uoff_t));
+ 
+ 	/* parse the header and cache wanted fields. get the message flags
+@@ -102,7 +90,7 @@ static int mbox_index_append_next(MailIndex *index, IBuffer *inbuf)
+ 
+ 	/* save MD5 */
+ 	md5_final(&ctx.md5, md5_digest);
+-	index->update_field_raw(update, FIELD_TYPE_MD5,
++	index->update_field_raw(update, DATA_FIELD_MD5,
+ 				md5_digest, sizeof(md5_digest));
+ 
+ 	if (!index->update_end(update))
+diff --git a/src/lib-index/mbox/mbox-index.c b/src/lib-index/mbox/mbox-index.c
+index f82951293..d41efa804 100644
+--- a/src/lib-index/mbox/mbox-index.c
++++ b/src/lib-index/mbox/mbox-index.c
+@@ -616,28 +616,58 @@ int mbox_verify_end_of_body(IBuffer *inbuf, uoff_t end_offset)
+ 		(size >= 5 && strncmp((const char *) data, "From ", 5) == 0);
+ }
+ 
+-int mbox_mail_get_start_offset(MailIndex *index, MailIndexRecord *rec,
+-			       uoff_t *offset)
++int mbox_mail_get_location(MailIndex *index, MailIndexRecord *rec,
++			   uoff_t *offset, uoff_t *hdr_size, uoff_t *body_size)
+ {
++	MailIndexDataRecordHeader *data_hdr;
+ 	const uoff_t *location;
+ 	size_t size;
+ 
+-	location = index->lookup_field_raw(index, rec,
+-					   FIELD_TYPE_LOCATION, &size);
+-	if (location == NULL) {
+-		index_data_set_corrupted(index->data, "Missing location field "
+-					 "for record %u", rec->uid);
+-		*offset = 0;
+-		return FALSE;
+-	} else if (size < sizeof(uoff_t) || *location > OFF_T_MAX) {
+-		index_data_set_corrupted(index->data, "Invalid location field "
+-					 "for record %u", rec->uid);
+-		*offset = 0;
+-		return FALSE;
+-	} else {
++	if (offset != NULL) {
++		location = index->lookup_field_raw(index, rec,
++						   DATA_FIELD_LOCATION, &size);
++		if (location == NULL) {
++			index_data_set_corrupted(index->data,
++				"Missing location field for record %u",
++				rec->uid);
++			return FALSE;
++		} else if (size != sizeof(uoff_t) || *location > OFF_T_MAX) {
++			index_data_set_corrupted(index->data,
++				"Invalid location field for record %u",
++				rec->uid);
++			return FALSE;
++		}
++
+ 		*offset = *location;
+-		return TRUE;
+ 	}
++
++	if (hdr_size != NULL || body_size != NULL) {
++		data_hdr = mail_index_data_lookup_header(index->data, rec);
++		if (data_hdr == NULL) {
++			index_set_corrupted(index,
++				"Missing data header for record %u", rec->uid);
++			return FALSE;
++		}
++
++		if ((rec->data_fields & DATA_HDR_HEADER_SIZE) == 0) {
++			index_set_corrupted(index,
++				"Missing header size for record %u", rec->uid);
++			return FALSE;
++		}
++
++		if ((rec->data_fields & DATA_HDR_BODY_SIZE) == 0) {
++			index_set_corrupted(index,
++				"Missing body size for record %u", rec->uid);
++			return FALSE;
++		}
++
++		if (hdr_size != NULL)
++			*hdr_size = data_hdr->header_size;
++		if (body_size != NULL)
++			*body_size = data_hdr->body_size;
++	}
++
++	return TRUE;
+ }
+ 
+ MailIndex *mbox_index_alloc(const char *dir, const char *mbox_path)
+@@ -702,6 +732,7 @@ MailIndex mbox_index = {
+ 	mail_index_lookup_field_raw,
+ 	mail_index_cache_fields_later,
+ 	mbox_open_mail,
++	mail_get_internal_date,
+ 	mail_index_expunge,
+ 	mbox_index_update_flags,
+ 	mail_index_append_begin,
+diff --git a/src/lib-index/mbox/mbox-index.h b/src/lib-index/mbox/mbox-index.h
+index cba4c062b..257ceb81b 100644
+--- a/src/lib-index/mbox/mbox-index.h
++++ b/src/lib-index/mbox/mbox-index.h
+@@ -43,14 +43,15 @@ void mbox_skip_empty_lines(IBuffer *inbuf);
+ void mbox_skip_header(IBuffer *inbuf);
+ void mbox_skip_message(IBuffer *inbuf);
+ int mbox_verify_end_of_body(IBuffer *inbuf, uoff_t end_offset);
+-int mbox_mail_get_start_offset(MailIndex *index, MailIndexRecord *rec,
+-			       uoff_t *offset);
++int mbox_mail_get_location(MailIndex *index, MailIndexRecord *rec,
++			   uoff_t *offset, uoff_t *hdr_size, uoff_t *body_size);
+ 
+ MailIndex *mbox_index_alloc(const char *dir, const char *mbox_path);
+ int mbox_index_rebuild(MailIndex *index);
+ int mbox_index_sync(MailIndex *index);
+ int mbox_sync_full(MailIndex *index);
+-IBuffer *mbox_open_mail(MailIndex *index, MailIndexRecord *rec, int *deleted);
++IBuffer *mbox_open_mail(MailIndex *index, MailIndexRecord *rec,
++			time_t *internal_date, int *deleted);
+ 
+ int mbox_index_append(MailIndex *index, IBuffer *inbuf);
+ 
+diff --git a/src/lib-index/mbox/mbox-open.c b/src/lib-index/mbox/mbox-open.c
+index d6a5ba5eb..8b59c09f2 100644
+--- a/src/lib-index/mbox/mbox-open.c
++++ b/src/lib-index/mbox/mbox-open.c
+@@ -3,16 +3,18 @@
+ #include "lib.h"
+ #include "ibuffer.h"
+ #include "mbox-index.h"
++#include "mail-index-data.h"
+ #include "mail-index-util.h"
+ 
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <fcntl.h>
+ 
+-IBuffer *mbox_open_mail(MailIndex *index, MailIndexRecord *rec, int *deleted)
++IBuffer *mbox_open_mail(MailIndex *index, MailIndexRecord *rec,
++			time_t *internal_date, int *deleted)
+ {
+ 	IBuffer *inbuf;
+-	uoff_t offset;
++	uoff_t offset, hdr_size, body_size;
+ 
+ 	i_assert(index->lock_type != MAIL_LOCK_UNLOCK);
+ 
+@@ -22,15 +24,18 @@ IBuffer *mbox_open_mail(MailIndex *index, MailIndexRecord *rec, int *deleted)
+ 	if (index->inconsistent)
+ 		return NULL;
+ 
+-	if (!mbox_mail_get_start_offset(index, rec, &offset))
++	if (!mbox_mail_get_location(index, rec, &offset, &hdr_size, &body_size))
+ 		return NULL;
+ 
+ 	inbuf = mbox_get_inbuf(index, offset, MAIL_LOCK_SHARED);
+ 	if (inbuf == NULL)
+ 		return NULL;
+ 
++	if (internal_date != NULL)
++		*internal_date = mail_get_internal_date(index, rec);
++
+ 	i_assert(index->mbox_sync_counter == index->mbox_lock_counter);
+ 
+-	i_buffer_set_read_limit(inbuf, rec->header_size + rec->body_size);
++	i_buffer_set_read_limit(inbuf, hdr_size + body_size);
+ 	return inbuf;
+ }
+diff --git a/src/lib-index/mbox/mbox-rebuild.c b/src/lib-index/mbox/mbox-rebuild.c
+index 6c6cd22ae..5b8d9af02 100644
+--- a/src/lib-index/mbox/mbox-rebuild.c
++++ b/src/lib-index/mbox/mbox-rebuild.c
+@@ -28,8 +28,8 @@ int mbox_index_rebuild(MailIndex *index)
+ 	index->mmap_used_length = index->header->used_file_size;
+ 
+ 	/* require these fields */
+-	index->header->cache_fields |= FIELD_TYPE_LOCATION |
+-		FIELD_TYPE_MESSAGEPART | FIELD_TYPE_MD5;
++	index->header->cache_fields |= DATA_FIELD_LOCATION |
++		DATA_FIELD_MESSAGEPART | DATA_FIELD_MD5;
+ 
+ 	/* update indexid, which also means that our state has completely
+ 	   changed */
+diff --git a/src/lib-index/mbox/mbox-rewrite.c b/src/lib-index/mbox/mbox-rewrite.c
+index 3a0a1bd6d..22ca1b673 100644
+--- a/src/lib-index/mbox/mbox-rewrite.c
++++ b/src/lib-index/mbox/mbox-rewrite.c
+@@ -295,8 +295,8 @@ static void header_func(MessagePart *part __attr_unused__,
+ 
+ static int mbox_write_header(MailIndex *index,
+ 			     MailIndexRecord *rec, unsigned int seq,
+-			     IBuffer *inbuf, OBuffer *outbuf,
+-			     uoff_t end_offset)
++			     IBuffer *inbuf, OBuffer *outbuf, uoff_t end_offset,
++			     uoff_t hdr_size, uoff_t body_size)
+ {
+ 	/* We need to update fields that define message flags. Standard fields
+ 	   are stored in Status and X-Status. For custom flags we use
+@@ -310,7 +310,7 @@ static int mbox_write_header(MailIndex *index,
+ 	   Last used UID is also not updated, and set to 0 initially.
+ 	*/
+ 	MboxRewriteContext ctx;
+-	MessageSize hdr_size;
++	MessageSize hdr_parsed_size;
+ 
+ 	if (inbuf->v_offset >= end_offset) {
+ 		/* fsck should have noticed it.. */
+@@ -325,16 +325,16 @@ static int mbox_write_header(MailIndex *index,
+ 	memset(&ctx, 0, sizeof(ctx));
+ 	ctx.outbuf = outbuf;
+ 	ctx.seq = seq;
+-	ctx.content_length = rec->body_size;
++	ctx.content_length = body_size;
+ 	ctx.msg_flags = rec->msg_flags;
+ 	ctx.uid_validity = index->header->uid_validity-1;
+ 	ctx.custom_flags = mail_custom_flags_list_get(index->custom_flags);
+ 
+-	i_buffer_set_read_limit(inbuf, inbuf->v_offset + rec->header_size);
+-	message_parse_header(NULL, inbuf, &hdr_size, header_func, &ctx);
++	i_buffer_set_read_limit(inbuf, inbuf->v_offset + hdr_size);
++	message_parse_header(NULL, inbuf, &hdr_parsed_size, header_func, &ctx);
+ 	i_buffer_set_read_limit(inbuf, 0);
+ 
+-	i_assert(hdr_size.physical_size == rec->header_size);
++	i_assert(hdr_parsed_size.physical_size == hdr_size);
+ 
+ 	/* append the flag fields */
+ 	if (seq == 1 && !ctx.ximapbase_found) {
+@@ -402,7 +402,7 @@ int mbox_index_rewrite(MailIndex *index)
+ 	MailIndexRecord *rec;
+ 	IBuffer *inbuf;
+ 	OBuffer *outbuf;
+-	uoff_t offset, dirty_offset;
++	uoff_t offset, hdr_size, body_size, dirty_offset;
+ 	const char *path;
+ 	unsigned int seq;
+ 	int tmp_fd, failed, dirty_found, rewrite;
+@@ -456,6 +456,8 @@ int mbox_index_rewrite(MailIndex *index)
+ 	}
+ 	dirty_offset = 0;
+ 
++	//offset = hdr_size = body_size = 0; /* just to keep compiler happy */
++
+ 	t_push();
+ 	outbuf = o_buffer_create_file(tmp_fd, data_stack_pool, 8192,
+ 				      IO_PRIORITY_DEFAULT, FALSE);
+@@ -465,21 +467,19 @@ int mbox_index_rewrite(MailIndex *index)
+ 	while (rec != NULL) {
+ 		if (dirty_found || (rec->index_flags & INDEX_MAIL_FLAG_DIRTY)) {
+ 			/* get offset to beginning of mail headers */
+-			if (!mbox_mail_get_start_offset(index, rec, &offset)) {
++			if (!mbox_mail_get_location(index, rec, &offset,
++						    &hdr_size, &body_size)) {
+ 				/* fsck should have fixed it */
+ 				failed = TRUE;
+ 				break;
+ 			}
+ 
+-			if (offset + rec->header_size +
+-			    rec->body_size > inbuf->v_size) {
++			if (offset + hdr_size + body_size > inbuf->v_size) {
+ 				index_set_corrupted(index,
+ 						    "Invalid message size");
+ 				failed = TRUE;
+ 				break;
+ 			}
+-		} else {
+-			offset = 0;
+ 		}
+ 
+ 		if (!dirty_found &&
+@@ -499,15 +499,15 @@ int mbox_index_rewrite(MailIndex *index)
+ 			}
+ 
+ 			/* write header, updating flag fields */
+-			offset += rec->header_size;
++			offset += hdr_size;
+ 			if (!mbox_write_header(index, rec, seq, inbuf, outbuf,
+-					       offset)) {
++					       offset, hdr_size, body_size)) {
+ 				failed = TRUE;
+ 				break;
+ 			}
+ 
+ 			/* write body */
+-			offset += rec->body_size;
++			offset += body_size;
+ 			if (!mbox_write(index, inbuf, outbuf, offset)) {
+ 				failed = TRUE;
+ 				break;
+diff --git a/src/lib-index/mbox/mbox-sync-full.c b/src/lib-index/mbox/mbox-sync-full.c
+index 452d57e37..f5959df21 100644
+--- a/src/lib-index/mbox/mbox-sync-full.c
++++ b/src/lib-index/mbox/mbox-sync-full.c
+@@ -36,7 +36,7 @@ static int verify_header_md5sum(MailIndex *index, MailIndexRecord *rec,
+ 	size_t size;
+ 
+ 	/* MD5 sums must match */
+-	old_digest = index->lookup_field_raw(index, rec, FIELD_TYPE_MD5, &size);
++	old_digest = index->lookup_field_raw(index, rec, DATA_FIELD_MD5, &size);
+ 	return old_digest != NULL && size >= 16 &&
+                 memcmp(old_digest, current_digest, 16) == 0;
+ }
+@@ -49,14 +49,16 @@ static int mail_update_header_size(MailIndex *index, MailIndexRecord *rec,
+ 	void *part_data_copy;
+ 	size_t size;
+ 
+-	/* update index record */
+-	rec->header_size = hdr_size->physical_size;
++	/* update FIELD_HDR_HEADER_SIZE */
++	index->update_field_raw(update, DATA_HDR_HEADER_SIZE,
++				&hdr_size->physical_size,
++				sizeof(hdr_size->physical_size));
+ 
+-	if ((rec->cached_fields & FIELD_TYPE_MESSAGEPART) == 0)
++	if ((rec->data_fields & DATA_FIELD_MESSAGEPART) == 0)
+ 		return TRUE;
+ 
+-	/* update FIELD_TYPE_MESSAGEPART */
+-	part_data = index->lookup_field_raw(index, rec, FIELD_TYPE_MESSAGEPART,
++	/* update DATA_FIELD_MESSAGEPART */
++	part_data = index->lookup_field_raw(index, rec, DATA_FIELD_MESSAGEPART,
+ 					    &size);
+ 	if (part_data == NULL) {
+ 		/* well, this wasn't expected but don't bother failing */
+@@ -77,7 +79,7 @@ static int mail_update_header_size(MailIndex *index, MailIndexRecord *rec,
+ 
+ 	t_pop();
+ 
+-	index->update_field_raw(update, FIELD_TYPE_MESSAGEPART,
++	index->update_field_raw(update, DATA_FIELD_MESSAGEPART,
+ 				part_data_copy, size);
+ 	return TRUE;
+ }
+@@ -87,19 +89,21 @@ static int match_next_record(MailIndex *index, MailIndexRecord *rec,
+ 			     MailIndexRecord **next_rec, int *dirty)
+ {
+         MailIndexUpdate *update;
+-	MessageSize hdr_size;
++	MessageSize hdr_parsed_size;
+ 	MboxHeaderContext ctx;
+-	uoff_t header_offset, body_offset, offset;
++	uoff_t header_offset, body_offset, offset, hdr_size, body_size;
+ 	unsigned char current_digest[16];
+ 
+ 	*next_rec = NULL;
+ 
+ 	/* skip the From-line */
+ 	skip_line(inbuf);
+-
+ 	header_offset = inbuf->v_offset;
+ 
+-	if (rec->body_size == 0) {
++	if (!mbox_mail_get_location(index, rec, NULL, &hdr_size, &body_size))
++		return FALSE;
++
++	if (body_size == 0) {
+ 		/* possibly broken message, find the next From-line and make
+ 		   sure header parser won't pass it. */
+ 		mbox_skip_header(inbuf);
+@@ -110,7 +114,8 @@ static int match_next_record(MailIndex *index, MailIndexRecord *rec,
+ 	/* get the MD5 sum of fixed headers and the current message flags
+ 	   in Status and X-Status fields */
+         mbox_header_init_context(&ctx, index, inbuf);
+-	message_parse_header(NULL, inbuf, &hdr_size, mbox_header_func, &ctx);
++	message_parse_header(NULL, inbuf, &hdr_parsed_size,
++			     mbox_header_func, &ctx);
+ 	md5_final(&ctx.md5, current_digest);
+ 
+ 	mbox_header_free_context(&ctx);
+@@ -119,8 +124,7 @@ static int match_next_record(MailIndex *index, MailIndexRecord *rec,
+ 	body_offset = inbuf->v_offset;
+ 	do {
+ 		if (verify_header_md5sum(index, rec, current_digest) &&
+-		    mbox_verify_end_of_body(inbuf,
+-					    body_offset + rec->body_size)) {
++		    mbox_verify_end_of_body(inbuf, body_offset + body_size)) {
+ 			/* valid message */
+ 			update = index->update_begin(index, rec);
+ 
+@@ -138,19 +142,20 @@ static int match_next_record(MailIndex *index, MailIndexRecord *rec,
+ 			}
+ 
+ 			/* update location */
+-			if (!mbox_mail_get_start_offset(index, rec, &offset))
++			if (!mbox_mail_get_location(index, rec, &offset,
++						    NULL, NULL))
+ 				return FALSE;
+ 			if (offset != header_offset) {
+ 				index->update_field_raw(update,
+-							FIELD_TYPE_LOCATION,
++							DATA_FIELD_LOCATION,
+ 							&header_offset,
+ 							sizeof(uoff_t));
+ 			}
+ 
+ 			/* update size */
+-			if (rec->header_size != hdr_size.physical_size ) {
+-				if (!mail_update_header_size(index, rec,
+-							     update, &hdr_size))
++			if (hdr_size != hdr_parsed_size.physical_size ) {
++				if (!mail_update_header_size(index, rec, update,
++							     &hdr_parsed_size))
+ 					return FALSE;
+ 			}
+ 
+diff --git a/src/lib-index/mbox/mbox-sync.c b/src/lib-index/mbox/mbox-sync.c
+index 49d26ff97..26452eb0f 100644
+--- a/src/lib-index/mbox/mbox-sync.c
++++ b/src/lib-index/mbox/mbox-sync.c
+@@ -13,7 +13,7 @@
+ static uoff_t get_indexed_mbox_size(MailIndex *index)
+ {
+ 	MailIndexRecord *rec;
+-	uoff_t offset;
++	uoff_t offset, hdr_size, body_size;
+ 
+ 	if (index->lock_type == MAIL_LOCK_UNLOCK) {
+ 		if (!mail_index_set_lock(index, MAIL_LOCK_SHARED))
+@@ -28,8 +28,9 @@ static uoff_t get_indexed_mbox_size(MailIndex *index)
+ 	if (rec != NULL) {
+ 		/* get the offset + size of last message, which tells the
+ 		   last known mbox file size */
+-		if (mbox_mail_get_start_offset(index, rec, &offset))
+-			offset += rec->header_size + rec->body_size;
++		if (mbox_mail_get_location(index, rec, &offset,
++					   &hdr_size, &body_size))
++			offset += hdr_size + body_size;
+ 	}
+ 
+ 	if (index->lock_type == MAIL_LOCK_SHARED)
+diff --git a/src/lib-storage/index/index-copy.c b/src/lib-storage/index/index-copy.c
+index 58a1d0b40..22a3aedec 100644
+--- a/src/lib-storage/index/index-copy.c
++++ b/src/lib-storage/index/index-copy.c
+@@ -19,15 +19,16 @@ static int copy_func(MailIndex *index, MailIndexRecord *rec,
+ {
+ 	CopyContext *ctx = context;
+ 	IBuffer *inbuf;
++	time_t internal_date;
+ 	int failed, deleted;
+ 
+-	inbuf = index->open_mail(index, rec, &deleted);
++	inbuf = index->open_mail(index, rec, &internal_date, &deleted);
+ 	if (inbuf == NULL)
+ 		return FALSE;
+ 
+ 	/* save it in destination mailbox */
+ 	failed = !ctx->dest->save(ctx->dest, rec->msg_flags,
+-				  ctx->custom_flags, rec->internal_date, 0,
++				  ctx->custom_flags, internal_date, 0,
+ 				  inbuf, inbuf->v_size);
+ 
+ 	i_buffer_unref(inbuf);
+diff --git a/src/lib-storage/index/index-fetch.c b/src/lib-storage/index/index-fetch.c
+index 6812d2da0..c6e3607f8 100644
+--- a/src/lib-storage/index/index-fetch.c
++++ b/src/lib-storage/index/index-fetch.c
+@@ -14,6 +14,23 @@
+ 
+ #include <unistd.h>
+ 
++static int index_fetch_internaldate(MailIndexRecord *rec, FetchContext *ctx)
++{
++	time_t date;
++
++	date = imap_msgcache_get_internal_date(ctx->cache);
++	if (date != (time_t)-1) {
++		t_string_printfa(ctx->str, "INTERNALDATE \"%s\" ",
++				 imap_to_datetime(date));
++		return TRUE;
++	} else {
++		mail_storage_set_critical(ctx->storage,
++			"Couldn't generate INTERNALDATE for UID %u (index %s)",
++			rec->uid, ctx->index->filepath);
++		return FALSE;
++	}
++}
++
+ static int index_fetch_body(MailIndexRecord *rec, FetchContext *ctx)
+ {
+ 	const char *body;
+@@ -65,18 +82,17 @@ static int index_fetch_envelope(MailIndexRecord *rec, FetchContext *ctx)
+ 
+ static int index_fetch_rfc822_size(MailIndexRecord *rec, FetchContext *ctx)
+ {
+-	MessageSize hdr_size, body_size;
++	uoff_t size;
+ 
+-	if (!imap_msgcache_get_rfc822(ctx->cache, NULL,
+-				      &hdr_size, &body_size)) {
++	size = imap_msgcache_get_virtual_size(ctx->cache);
++	if (size == (uoff_t)-1) {
+ 		mail_storage_set_critical(ctx->storage,
+ 			"Couldn't get RFC822.SIZE for UID %u (index %s)",
+ 			rec->uid, ctx->index->filepath);
+ 		return FALSE;
+ 	}
+ 
+-	t_string_printfa(ctx->str, "RFC822.SIZE %"PRIuUOFF_T" ",
+-			 hdr_size.virtual_size + body_size.virtual_size);
++	t_string_printfa(ctx->str, "RFC822.SIZE %"PRIuUOFF_T" ", size);
+ 	return TRUE;
+ }
+ 
+@@ -95,12 +111,6 @@ static void index_fetch_flags(MailIndexRecord *rec, FetchContext *ctx)
+ 					  ctx->custom_flags_count));
+ }
+ 
+-static void index_fetch_internaldate(MailIndexRecord *rec, FetchContext *ctx)
+-{
+-	t_string_printfa(ctx->str, "INTERNALDATE \"%s\" ",
+-			 imap_to_datetime(rec->internal_date));
+-}
+-
+ static void index_fetch_uid(MailIndexRecord *rec, FetchContext *ctx)
+ {
+ 	t_string_printfa(ctx->str, "UID %u ", rec->uid);
+@@ -194,11 +204,11 @@ static ImapCacheField index_get_cache(MailFetchData *fetch_data)
+ 		field |= IMAP_CACHE_BODYSTRUCTURE;
+ 	if (fetch_data->envelope)
+ 		field |= IMAP_CACHE_ENVELOPE;
++	if (fetch_data->internaldate)
++		field |= IMAP_CACHE_INTERNALDATE;
+ 
+-	if (fetch_data->rfc822_size) {
+-		field |= IMAP_CACHE_MESSAGE_HDR_SIZE |
+-			IMAP_CACHE_MESSAGE_BODY_SIZE;
+-	}
++	if (fetch_data->rfc822_size)
++		field |= IMAP_CACHE_VIRTUAL_SIZE;
+ 	if (fetch_data->rfc822) {
+ 		field |= IMAP_CACHE_MESSAGE_OPEN | IMAP_CACHE_MESSAGE_HDR_SIZE |
+ 			IMAP_CACHE_MESSAGE_BODY_SIZE;
+@@ -215,33 +225,15 @@ static ImapCacheField index_get_cache(MailFetchData *fetch_data)
+ 	return field;
+ }
+ 
+-static int index_msgcache_open(FetchContext *ctx, MailIndexRecord *rec)
++static int fetch_msgcache_open(FetchContext *ctx, MailIndexRecord *rec)
+ {
+ 	ImapCacheField fields;
+-	uoff_t virtual_header_size, virtual_body_size;
+-	void *mail_cache_context;
+ 
+ 	fields = index_get_cache(ctx->fetch_data);
+ 	if (fields == 0)
+ 		return TRUE;
+ 
+-	mail_cache_context = index_msgcache_get_context(ctx->index, rec);
+-
+-	if (rec->header_size == 0) {
+-		virtual_header_size = 0;
+-		virtual_body_size = 0;
+-	} else {
+-		virtual_header_size =
+-			(rec->index_flags & INDEX_MAIL_FLAG_BINARY_HEADER) ?
+-			rec->header_size : 0;
+-		virtual_body_size =
+-			(rec->index_flags & INDEX_MAIL_FLAG_BINARY_BODY) ?
+-			rec->body_size : 0;
+-	}
+-
+-	return imap_msgcache_open(ctx->cache, rec->uid, fields,
+-				  virtual_header_size, virtual_body_size,
+-				  mail_cache_context);
++	return index_msgcache_open(ctx->cache, ctx->index, rec, fields);
+ }
+ 
+ static int index_fetch_mail(MailIndex *index __attr_unused__,
+@@ -258,7 +250,7 @@ static int index_fetch_mail(MailIndex *index __attr_unused__,
+ 	/* first see what we need to do. this way we don't first do some
+ 	   light parsing and later notice that we need to do heavier parsing
+ 	   anyway */
+-	if (!index_msgcache_open(ctx, rec)) {
++	if (!fetch_msgcache_open(ctx, rec)) {
+ 		/* most likely message not found, just ignore it. */
+ 		imap_msgcache_close(ctx->cache);
+ 		ctx->failed = TRUE;
+@@ -286,10 +278,11 @@ static int index_fetch_mail(MailIndex *index __attr_unused__,
+ 			index_fetch_uid(rec, ctx);
+ 		if (ctx->fetch_data->flags || fetch_flags)
+ 			index_fetch_flags(rec, ctx);
+-		if (ctx->fetch_data->internaldate)
+-			index_fetch_internaldate(rec, ctx);
+ 
+ 		/* rest can */
++		if (ctx->fetch_data->internaldate)
++			if (!index_fetch_internaldate(rec, ctx))
++				break;
+ 		if (ctx->fetch_data->body)
+ 			if (!index_fetch_body(rec, ctx))
+ 				break;
+diff --git a/src/lib-storage/index/index-msgcache.c b/src/lib-storage/index/index-msgcache.c
+index c1659c2f9..1f260e9fc 100644
+--- a/src/lib-storage/index/index-msgcache.c
++++ b/src/lib-storage/index/index-msgcache.c
+@@ -2,26 +2,73 @@
+ 
+ #include "lib.h"
+ #include "ibuffer.h"
++#include "imap-date.h"
+ #include "imap-message-cache.h"
+ #include "message-part-serialize.h"
+ #include "mail-index.h"
+ #include "mail-index-util.h"
++#include "index-storage.h"
+ 
+ #include <unistd.h>
+ 
+ typedef struct {
+ 	MailIndex *index;
+ 	MailIndexRecord *rec;
++	time_t internal_date;
+ } IndexMsgcacheContext;
+ 
+-void *index_msgcache_get_context(MailIndex *index, MailIndexRecord *rec)
++int index_msgcache_open(ImapMessageCache *cache, MailIndex *index,
++			MailIndexRecord *rec, ImapCacheField fields)
+ {
+ 	IndexMsgcacheContext *ctx;
++	uoff_t vp_header_size, vp_body_size, full_virtual_size;
++	const uoff_t *uoff_p;
++	size_t size;
+ 
+ 	ctx = t_new(IndexMsgcacheContext, 1);
+ 	ctx->index = index;
+ 	ctx->rec = rec;
+-	return ctx;
++	ctx->internal_date = (time_t)-1;
++
++	full_virtual_size = (uoff_t)-1;
++	vp_header_size = (uoff_t)-1;
++	vp_body_size = (uoff_t)-1;
++
++	if ((ctx->rec->index_flags & INDEX_MAIL_FLAG_BINARY_HEADER)) {
++		uoff_p = ctx->index->lookup_field_raw(ctx->index, ctx->rec,
++						      DATA_HDR_HEADER_SIZE,
++						      &size);
++		if (uoff_p != NULL) {
++			i_assert(size == sizeof(*uoff_p));
++			vp_header_size = *uoff_p;
++		}
++	}
++
++	if ((ctx->rec->index_flags & INDEX_MAIL_FLAG_BINARY_BODY)) {
++		uoff_p = ctx->index->lookup_field_raw(ctx->index, ctx->rec,
++						      DATA_HDR_BODY_SIZE,
++						      &size);
++		if (uoff_p != NULL) {
++			i_assert(size == sizeof(*uoff_p));
++			vp_body_size = *uoff_p;
++		}
++	}
++
++	if (vp_header_size != (uoff_t)-1 && vp_body_size != (uoff_t)-1)
++		full_virtual_size = vp_header_size + vp_body_size;
++	else {
++		uoff_p = ctx->index->lookup_field_raw(ctx->index, ctx->rec,
++						      DATA_HDR_VIRTUAL_SIZE,
++						      &size);
++		if (uoff_p != NULL) {
++			i_assert(size == sizeof(*uoff_p));
++			full_virtual_size = *uoff_p;
++		}
++	}
++
++	return imap_msgcache_open(cache, rec->uid, fields,
++				  vp_header_size, vp_body_size,
++				  full_virtual_size, ctx);
+ }
+ 
+ static IBuffer *index_msgcache_open_mail(void *context)
+@@ -29,7 +76,8 @@ static IBuffer *index_msgcache_open_mail(void *context)
+ 	IndexMsgcacheContext *ctx = context;
+ 	int deleted;
+ 
+-	return ctx->index->open_mail(ctx->index, ctx->rec, &deleted);
++	return ctx->index->open_mail(ctx->index, ctx->rec,
++				     &ctx->internal_date, &deleted);
+ }
+ 
+ static IBuffer *index_msgcache_inbuf_rewind(IBuffer *inbuf,
+@@ -49,26 +97,43 @@ static const char *index_msgcache_get_cached_field(ImapCacheField field,
+ 						   void *context)
+ {
+ 	IndexMsgcacheContext *ctx = context;
+-	MailField index_field;
++	MailDataField data_field;
++	const time_t *time_p;
+ 	const char *ret;
++	size_t size;
+ 
+ 	switch (field) {
++	case IMAP_CACHE_INTERNALDATE:
++		if (ctx->internal_date != (time_t)-1)
++			return imap_to_datetime(ctx->internal_date);
++
++		time_p = ctx->index->lookup_field_raw(ctx->index, ctx->rec,
++						      DATA_HDR_INTERNAL_DATE,
++						      &size);
++		if (time_p == NULL) {
++			i_assert(size == sizeof(*time_p));
++			return imap_to_datetime(*time_p);
++		} else {
++			ctx->index->cache_fields_later(ctx->index,
++						       DATA_HDR_INTERNAL_DATE);
++			return NULL;
++		}
+ 	case IMAP_CACHE_BODY:
+-		index_field = FIELD_TYPE_BODY;
++		data_field = DATA_FIELD_BODY;
+ 		break;
+ 	case IMAP_CACHE_BODYSTRUCTURE:
+-		index_field = FIELD_TYPE_BODYSTRUCTURE;
++		data_field = DATA_FIELD_BODYSTRUCTURE;
+ 		break;
+ 	case IMAP_CACHE_ENVELOPE:
+-		index_field = FIELD_TYPE_ENVELOPE;
++		data_field = DATA_FIELD_ENVELOPE;
+ 		break;
+ 	default:
+ 		return NULL;
+ 	}
+ 
+-	ret = ctx->index->lookup_field(ctx->index, ctx->rec, index_field);
++	ret = ctx->index->lookup_field(ctx->index, ctx->rec, data_field);
+ 	if (ret == NULL)
+-		ctx->index->cache_fields_later(ctx->index, index_field);
++		ctx->index->cache_fields_later(ctx->index, data_field);
+ 	return ret;
+ }
+ 
+@@ -80,11 +145,11 @@ static MessagePart *index_msgcache_get_cached_parts(Pool pool, void *context)
+ 	size_t part_size;
+ 
+ 	part_data = ctx->index->lookup_field_raw(ctx->index, ctx->rec,
+-						 FIELD_TYPE_MESSAGEPART,
++						 DATA_FIELD_MESSAGEPART,
+ 						 &part_size);
+ 	if (part_data == NULL) {
+ 		ctx->index->cache_fields_later(ctx->index,
+-					       FIELD_TYPE_MESSAGEPART);
++					       DATA_FIELD_MESSAGEPART);
+ 		return NULL;
+ 	}
+ 
+@@ -98,9 +163,20 @@ static MessagePart *index_msgcache_get_cached_parts(Pool pool, void *context)
+ 	return part;
+ }
+ 
++static time_t index_msgcache_get_internal_date(void *context)
++{
++	IndexMsgcacheContext *ctx = context;
++
++	if (ctx->internal_date != (time_t)-1)
++		return ctx->internal_date;
++
++	return ctx->index->get_internal_date(ctx->index, ctx->rec);
++}
++
+ ImapMessageCacheIface index_msgcache_iface = {
+ 	index_msgcache_open_mail,
+ 	index_msgcache_inbuf_rewind,
+ 	index_msgcache_get_cached_field,
+-	index_msgcache_get_cached_parts
++	index_msgcache_get_cached_parts,
++	index_msgcache_get_internal_date
+ };
+diff --git a/src/lib-storage/index/index-search.c b/src/lib-storage/index/index-search.c
+index 754e08b3f..73ba67d49 100644
+--- a/src/lib-storage/index/index-search.c
++++ b/src/lib-storage/index/index-search.c
+@@ -12,6 +12,7 @@
+ #include "index-storage.h"
+ #include "mail-index-util.h"
+ #include "mail-modifylog.h"
++#include "mail-custom-flags.h"
+ #include "mail-search.h"
+ 
+ #include <stdlib.h>
+@@ -26,6 +27,7 @@ typedef struct {
+ 	IndexMailbox *ibox;
+ 	MailIndexRecord *rec;
+ 	unsigned int client_seq;
++	int cached;
+ } SearchIndexContext;
+ 
+ typedef struct {
+@@ -105,19 +107,38 @@ static uoff_t str_to_uoff_t(const char *str)
+ 			return 0;
+ 
+ 		num = num*10 + (*str - '0');
++		str++;
+ 	}
+ 
+ 	return num;
+ }
+ 
++static int search_keyword(MailIndex *index, MailIndexRecord *rec,
++			  const char *value)
++{
++	const char **custom_flags;
++	int i;
++
++	if ((rec->msg_flags & MAIL_CUSTOM_FLAGS_MASK) == 0)
++		return FALSE;
++
++	custom_flags = mail_custom_flags_list_get(index->custom_flags);
++	for (i = 0; i < MAIL_CUSTOM_FLAGS_COUNT; i++) {
++		if (custom_flags[i] != NULL &&
++		    strcasecmp(custom_flags[i], value) == 0) {
++			return rec->msg_flags &
++				(1 << (MAIL_CUSTOM_FLAG_1_BIT+i));
++		}
++	}
++
++	return FALSE;
++}
++
+ /* Returns >0 = matched, 0 = not matched, -1 = unknown */
+ static int search_arg_match_index(IndexMailbox *ibox, MailIndexRecord *rec,
+ 				  unsigned int client_seq,
+ 				  MailSearchArgType type, const char *value)
+ {
+-	time_t t;
+-	uoff_t size, user_size;
+-
+ 	switch (type) {
+ 	case SEARCH_ALL:
+ 		return TRUE;
+@@ -142,53 +163,99 @@ static int search_arg_match_index(IndexMailbox *ibox, MailIndexRecord *rec,
+ 	case SEARCH_RECENT:
+ 		return rec->uid >= ibox->index->first_recent_uid;
+ 	case SEARCH_KEYWORD:
+-		return FALSE;
++		return search_keyword(ibox->index, rec, value);
+ 
+-	/* dates */
++	default:
++		return -1;
++	}
++}
++
++static void search_index_arg(MailSearchArg *arg, void *context)
++{
++	SearchIndexContext *ctx = context;
++
++	switch (search_arg_match_index(ctx->ibox, ctx->rec, ctx->client_seq,
++				       arg->type, arg->value.str)) {
++	case -1:
++		/* unknown */
++		break;
++	case 0:
++		ARG_SET_RESULT(arg, -1);
++		break;
++	default:
++		ARG_SET_RESULT(arg, 1);
++		break;
++	}
++}
++
++static ImapMessageCache *search_open_cache(SearchIndexContext *ctx)
++{
++	if (!ctx->cached) {
++		(void)index_msgcache_open(ctx->ibox->cache,
++					  ctx->ibox->index, ctx->rec, 0);
++		ctx->cached = TRUE;
++	}
++	return ctx->ibox->cache;
++}
++
++/* Returns >0 = matched, 0 = not matched, -1 = unknown */
++static int search_arg_match_cached(SearchIndexContext *ctx,
++				   MailSearchArgType type, const char *value)
++{
++	time_t internal_date, search_time;
++	uoff_t virtual_size, search_size;
++
++	switch (type) {
++	/* internal dates */
+ 	case SEARCH_BEFORE:
+-		if (!imap_parse_date(value, &t))
+-			return FALSE;
+-		return rec->internal_date < t;
+ 	case SEARCH_ON:
+-		if (!imap_parse_date(value, &t))
+-			return FALSE;
+-		return rec->internal_date >= t &&
+-			rec->internal_date < t + 3600*24;
+ 	case SEARCH_SINCE:
+-		if (!imap_parse_date(value, &t))
+-			return FALSE;
+-		return rec->internal_date >= t;
+-
+-	/* sizes, only with fastscanning */
+-	case SEARCH_SMALLER:
+-		user_size = str_to_uoff_t(value);
+-		if (mail_index_get_virtual_size(ibox->index, rec, TRUE, &size))
+-			return size > 0 && size < user_size;
++		internal_date = imap_msgcache_get_internal_date(
++					search_open_cache(ctx));
++		if (internal_date == (time_t)-1)
++			return -1;
+ 
+-		/* knowing physical size may be enough */
+-		if (rec->header_size + rec->body_size >= user_size)
++		if (!imap_parse_date(value, &search_time))
+ 			return 0;
+-		return -1;
++
++		switch (type) {
++		case SEARCH_BEFORE:
++			return internal_date < search_time;
++		case SEARCH_ON:
++			return internal_date >= search_time &&
++				internal_date < search_time + 3600*24;
++		case SEARCH_SINCE:
++			return internal_date >= search_time;
++		default:
++			/* unreachable */
++			break;
++		}
++
++	/* sizes */
++	case SEARCH_SMALLER:
+ 	case SEARCH_LARGER:
+-		user_size = str_to_uoff_t(value);
+-		if (mail_index_get_virtual_size(ibox->index, rec, TRUE, &size))
+-			return size > user_size;
++		virtual_size = imap_msgcache_get_virtual_size(
++					search_open_cache(ctx));
++		if (virtual_size == (uoff_t)-1)
++			return -1;
++
++		search_size = str_to_uoff_t(value);
++		if (type == SEARCH_SMALLER)
++			return virtual_size < search_size;
++		else
++			return virtual_size > search_size;
+ 
+-		/* knowing physical size may be enough */
+-		if (rec->header_size + rec->body_size > user_size)
+-			return 1;
+-		return -1;
+ 	default:
+ 		return -1;
+ 	}
+ }
+ 
+-static void search_index_arg(MailSearchArg *arg, void *context)
++static void search_cached_arg(MailSearchArg *arg, void *context)
+ {
+ 	SearchIndexContext *ctx = context;
+ 
+-	switch (search_arg_match_index(ctx->ibox, ctx->rec, ctx->client_seq,
+-				       arg->type, arg->value.str)) {
++	switch (search_arg_match_cached(ctx, arg->type,
++					arg->value.str)) {
+ 	case -1:
+ 		/* unknown */
+ 		break;
+@@ -244,8 +311,8 @@ static int search_substr(const char *haystack, const char *needle)
+ }
+ 
+ /* Returns >0 = matched, 0 = not matched, -1 = unknown */
+-static int search_arg_match_cached(MailIndex *index, MailIndexRecord *rec,
+-				   MailSearchArgType type, const char *value)
++static int search_arg_match_envelope(MailIndex *index, MailIndexRecord *rec,
++				     MailSearchArgType type, const char *value)
+ {
+         ImapEnvelopeField env_field;
+ 	const char *envelope, *field;
+@@ -287,11 +354,11 @@ static int search_arg_match_cached(MailIndex *index, MailIndexRecord *rec,
+ 	t_push();
+ 
+ 	/* get field from hopefully cached envelope */
+-	envelope = index->lookup_field(index, rec, FIELD_TYPE_ENVELOPE);
++	envelope = index->lookup_field(index, rec, DATA_FIELD_ENVELOPE);
+ 	if (envelope != NULL)
+ 		field = imap_envelope_parse(envelope, env_field);
+ 	else {
+-		index->cache_fields_later(index, FIELD_TYPE_ENVELOPE);
++		index->cache_fields_later(index, DATA_FIELD_ENVELOPE);
+ 		field = NULL;
+ 	}
+ 
+@@ -311,52 +378,12 @@ static int search_arg_match_cached(MailIndex *index, MailIndexRecord *rec,
+ 	return ret;
+ }
+ 
+-static void search_cached_arg(MailSearchArg *arg, void *context)
++static void search_envelope_arg(MailSearchArg *arg, void *context)
+ {
+ 	SearchIndexContext *ctx = context;
+ 
+-	switch (search_arg_match_cached(ctx->ibox->index, ctx->rec,
+-					arg->type, arg->value.str)) {
+-	case -1:
+-		/* unknown */
+-		break;
+-	case 0:
+-		ARG_SET_RESULT(arg, -1);
+-		break;
+-	default:
+-		ARG_SET_RESULT(arg, 1);
+-		break;
+-	}
+-}
+-
+-/* Returns >0 = matched, 0 = not matched, -1 = unknown */
+-static int search_arg_match_slow(MailIndex *index, MailIndexRecord *rec,
+-				 MailSearchArgType type, const char *value)
+-{
+-	uoff_t size;
+-
+-	switch (type) {
+-	/* sizes, only with fastscanning */
+-	case SEARCH_SMALLER:
+-		if (!mail_index_get_virtual_size(index, rec, FALSE, &size))
+-			return -1;
+-		return size > 0 && size < str_to_uoff_t(value);
+-	case SEARCH_LARGER:
+-		if (!mail_index_get_virtual_size(index, rec, FALSE, &size))
+-			return -1;
+-		return size > str_to_uoff_t(value);
+-
+-	default:
+-		return -1;
+-	}
+-}
+-
+-static void search_slow_arg(MailSearchArg *arg, void *context)
+-{
+-	SearchIndexContext *ctx = context;
+-
+-	switch (search_arg_match_slow(ctx->ibox->index, ctx->rec,
+-				      arg->type, arg->value.str)) {
++	switch (search_arg_match_envelope(ctx->ibox->index, ctx->rec,
++					  arg->type, arg->value.str)) {
+ 	case -1:
+ 		/* unknown */
+ 		break;
+@@ -544,8 +571,7 @@ static void search_text_body(MailSearchArg *arg, void *context)
+ 		search_text(arg, ctx);
+ }
+ 
+-static void search_arg_match_data(IBuffer *inbuf, uoff_t max_size,
+-				  MailSearchArg *args,
++static void search_arg_match_data(IBuffer *inbuf, MailSearchArg *args,
+ 				  MailSearchForeachFunc search_func)
+ {
+ 	SearchTextContext ctx;
+@@ -559,8 +585,6 @@ static void search_arg_match_data(IBuffer *inbuf, uoff_t max_size,
+ 	mail_search_args_foreach(args, search_func, &ctx);
+         max_searchword_len = ctx.max_searchword_len;
+ 
+-	i_buffer_set_read_limit(inbuf, inbuf->v_offset + max_size);
+-
+ 	/* do this in blocks: read data, compare it for all search words, skip
+ 	   for block size - (strlen(largest_searchword)-1) and continue. */
+ 	while (i_buffer_read_data(inbuf, &data, &size,
+@@ -582,20 +606,20 @@ static void search_arg_match_data(IBuffer *inbuf, uoff_t max_size,
+ 	i_buffer_set_read_limit(inbuf, 0);
+ }
+ 
+-static int search_arg_match_text(IndexMailbox *ibox, MailIndexRecord *rec,
+-				 MailSearchArg *args)
++static int search_arg_match_text(MailSearchArg *args, SearchIndexContext *ctx)
+ {
+ 	IBuffer *inbuf;
+ 	MessageSize hdr_size;
+-	int have_headers, have_body, have_text, deleted;
++	uoff_t old_limit;
++	int have_headers, have_body, have_text;
+ 
+ 	/* first check what we need to use */
+ 	mail_search_args_analyze(args, &have_headers, &have_body, &have_text);
+ 	if (!have_headers && !have_body && !have_text)
+ 		return TRUE;
+ 
+-	inbuf = ibox->index->open_mail(ibox->index, rec, &deleted);
+-	if (inbuf == NULL)
++	if (!imap_msgcache_get_rfc822(search_open_cache(ctx), &inbuf,
++				      have_headers ? NULL : &hdr_size, NULL))
+ 		return FALSE;
+ 
+ 	if (have_headers) {
+@@ -608,13 +632,6 @@ static int search_arg_match_text(IndexMailbox *ibox, MailIndexRecord *rec,
+ 		ctx.args = args;
+ 		message_parse_header(NULL, inbuf, &hdr_size,
+ 				     search_header, &ctx);
+-
+-		i_assert(rec->header_size == 0 ||
+-			 hdr_size.physical_size == rec->header_size);
+-	} else if (rec->header_size == 0) {
+-		message_get_header_size(inbuf, &hdr_size);
+-	} else {
+-		hdr_size.physical_size = rec->header_size;
+ 	}
+ 
+ 	if (have_text) {
+@@ -627,8 +644,10 @@ static int search_arg_match_text(IndexMailbox *ibox, MailIndexRecord *rec,
+ 			}
+ 		}
+ 
+-		search_arg_match_data(inbuf, hdr_size.physical_size,
+-				      args, search_text_header);
++		old_limit = inbuf->v_limit;
++		i_buffer_set_read_limit(inbuf, hdr_size.physical_size);
++		search_arg_match_data(inbuf, args, search_text_header);
++		i_buffer_set_read_limit(inbuf, old_limit);
+ 	}
+ 
+ 	if (have_text || have_body) {
+@@ -637,8 +656,7 @@ static int search_arg_match_text(IndexMailbox *ibox, MailIndexRecord *rec,
+ 			i_buffer_skip(inbuf, hdr_size.physical_size);
+ 		}
+ 
+-		search_arg_match_data(inbuf, rec->body_size, args,
+-				      search_text_body);
++		search_arg_match_data(inbuf, args, search_text_body);
+ 	}
+ 
+ 	i_buffer_unref(inbuf);
+@@ -819,7 +837,7 @@ static int search_messages(IndexMailbox *ibox, MailSearchArg *args,
+ 	const ModifyLogExpunge *expunges;
+ 	unsigned int first_uid, last_uid, client_seq, expunges_before;
+ 	char num[MAX_LARGEST_T_STRLEN+10];
+-	int found;
++	int found, failed;
+ 
+ 	if (ibox->synced_messages_count == 0)
+ 		return TRUE;
+@@ -851,14 +869,19 @@ static int search_messages(IndexMailbox *ibox, MailSearchArg *args,
+ 
+ 		ctx.rec = rec;
+ 		ctx.client_seq = client_seq;
++		ctx.cached = FALSE;
+ 
+ 		mail_search_args_reset(args);
+ 
++		t_push();
+ 		mail_search_args_foreach(args, search_index_arg, &ctx);
+ 		mail_search_args_foreach(args, search_cached_arg, &ctx);
+-		mail_search_args_foreach(args, search_slow_arg, &ctx);
++		mail_search_args_foreach(args, search_envelope_arg, &ctx);
++		failed = !search_arg_match_text(args, &ctx);
++                imap_msgcache_close(ibox->cache);
++		t_pop();
+ 
+-		if (search_arg_match_text(ibox, rec, args)) {
++		if (!failed) {
+ 			found = TRUE;
+ 			for (arg = args; arg != NULL; arg = arg->next) {
+ 				if (arg->result != 1) {
+diff --git a/src/lib-storage/index/index-storage.c b/src/lib-storage/index/index-storage.c
+index c00c704d9..1b5abfc57 100644
+--- a/src/lib-storage/index/index-storage.c
++++ b/src/lib-storage/index/index-storage.c
+@@ -76,7 +76,7 @@ void index_storage_unref(MailIndex *index)
+ 	i_assert(0);
+ }
+ 
+-static MailField get_cache_fields(const char *fields)
++static MailDataField get_data_fields(const char *fields)
+ {
+ 	static const char *field_names[] = {
+ 		"Location",
+@@ -89,7 +89,7 @@ static MailField get_cache_fields(const char *fields)
+ 	};
+ 
+ 	char *const *arr;
+-	MailField ret;
++	MailDataField ret;
+ 	int i;
+ 
+ 	if (fields == NULL || *fields == '\0')
+@@ -115,28 +115,28 @@ static MailField get_cache_fields(const char *fields)
+ 	return ret;
+ }
+ 
+-static MailField get_default_cache_fields(void)
++static MailDataField get_default_cache_fields(void)
+ {
+-	static MailField ret = 0;
++	static MailDataField ret = 0;
+ 	static int ret_set = FALSE;
+ 
+ 	if (ret_set)
+ 		return ret;
+ 
+-	ret = get_cache_fields(getenv("MAIL_CACHE_FIELDS"));
++	ret = get_data_fields(getenv("MAIL_CACHE_FIELDS"));
+ 	ret_set = TRUE;
+ 	return ret;
+ }
+ 
+-static MailField get_never_cache_fields(void)
++static MailDataField get_never_cache_fields(void)
+ {
+-	static MailField ret = 0;
++	static MailDataField ret = 0;
+ 	static int ret_set = FALSE;
+ 
+ 	if (ret_set)
+ 		return ret;
+ 
+-	ret = get_cache_fields(getenv("MAIL_NEVER_CACHE_FIELDS"));
++	ret = get_data_fields(getenv("MAIL_NEVER_CACHE_FIELDS"));
+ 	ret_set = TRUE;
+ 	return ret;
+ }
+diff --git a/src/lib-storage/index/index-storage.h b/src/lib-storage/index/index-storage.h
+index 21853338e..6d0026fe2 100644
+--- a/src/lib-storage/index/index-storage.h
++++ b/src/lib-storage/index/index-storage.h
+@@ -53,7 +53,8 @@ int index_expunge_mail(IndexMailbox *ibox, MailIndexRecord *rec,
+ int index_storage_save(MailStorage *storage, const char *path,
+ 		       IBuffer *inbuf, OBuffer *outbuf, uoff_t data_size);
+ 
+-void *index_msgcache_get_context(MailIndex *index, MailIndexRecord *rec);
++int index_msgcache_open(ImapMessageCache *cache, MailIndex *index,
++			MailIndexRecord *rec, ImapCacheField fields);
+ 
+ /* Mailbox methods: */
+ void index_storage_set_sync_callbacks(Mailbox *box,
+diff --git a/src/lib-storage/index/maildir/maildir-copy.c b/src/lib-storage/index/maildir/maildir-copy.c
+index 418c493fc..90b65d8bb 100644
+--- a/src/lib-storage/index/maildir/maildir-copy.c
++++ b/src/lib-storage/index/maildir/maildir-copy.c
+@@ -31,7 +31,7 @@ static int copy_hard_func(MailIndex *index, MailIndexRecord *rec,
+ 		return FALSE;
+ 
+ 	/* link the file */
+-	fname = index->lookup_field(index, rec, FIELD_TYPE_LOCATION);
++	fname = index->lookup_field(index, rec, DATA_FIELD_LOCATION);
+ 	i_snprintf(src, sizeof(src), "%s/cur/%s", index->dir, fname);
+ 
+ 	fname = maildir_filename_set_flags(maildir_generate_tmp_filename(),
+diff --git a/src/lib-storage/index/maildir/maildir-expunge.c b/src/lib-storage/index/maildir/maildir-expunge.c
+index 26ce651b4..faf41a862 100644
+--- a/src/lib-storage/index/maildir/maildir-expunge.c
++++ b/src/lib-storage/index/maildir/maildir-expunge.c
+@@ -11,7 +11,7 @@ static int expunge_msg(IndexMailbox *ibox, MailIndexRecord *rec)
+ 	char path[1024];
+ 
+ 	fname = ibox->index->lookup_field(ibox->index, rec,
+-					  FIELD_TYPE_LOCATION);
++					  DATA_FIELD_LOCATION);
+ 	if (fname != NULL) {
+ 		i_snprintf(path, sizeof(path), "%s/cur/%s",
+ 			   ibox->index->dir, fname);
+diff --git a/src/lib-storage/index/mbox/mbox-expunge.c b/src/lib-storage/index/mbox/mbox-expunge.c
+index 0f33b4dd2..35c3bd62c 100644
+--- a/src/lib-storage/index/mbox/mbox-expunge.c
++++ b/src/lib-storage/index/mbox/mbox-expunge.c
+@@ -14,7 +14,8 @@ static int expunge_real(IndexMailbox *ibox, MailIndexRecord *rec,
+ 			unsigned int seq, IBuffer *inbuf, OBuffer *outbuf,
+ 			int notify)
+ {
+-	uoff_t offset, end_offset, from_offset, copy_size, old_limit;
++	uoff_t offset, hdr_size, body_size;
++	uoff_t end_offset, from_offset, copy_size, old_limit;
+ 	const unsigned char *data;
+ 	size_t size;
+ 	int expunges, failed;
+@@ -26,9 +27,10 @@ static int expunge_real(IndexMailbox *ibox, MailIndexRecord *rec,
+ 		   not the fastest way maybe, but easiest.. */
+ 		rec = ibox->index->lookup(ibox->index, seq-1);
+ 		
+-		if (!mbox_mail_get_start_offset(ibox->index, rec, &offset))
++		if (!mbox_mail_get_location(ibox->index, rec, &offset,
++					    &hdr_size, &body_size))
+ 			return FALSE;
+-		end_offset = offset + rec->header_size + rec->body_size;
++		end_offset = offset + hdr_size + body_size;
+ 
+ 		/* get back to the deleted record */
+ 		rec = ibox->index->next(ibox->index, rec);
+@@ -38,11 +40,12 @@ static int expunge_real(IndexMailbox *ibox, MailIndexRecord *rec,
+ 
+ 	expunges = FALSE;
+ 	while (rec != NULL) {
+-		if (!mbox_mail_get_start_offset(ibox->index, rec, &offset))
++		if (!mbox_mail_get_location(ibox->index, rec, &offset,
++					    &hdr_size, &body_size))
+ 			return FALSE;
+ 
+ 		from_offset = end_offset;
+-		end_offset = offset + rec->header_size + rec->body_size;
++		end_offset = offset + hdr_size + body_size;
+ 
+ 		if (rec->msg_flags & MAIL_DELETED) {
+ 			if (!index_expunge_mail(ibox, rec, seq, notify))
+

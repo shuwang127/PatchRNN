@@ -1,0 +1,60 @@
+commit 173beedc1601f51dae9d579aa7a414c5aa8f700b
+Author: Nadav Amit <namit@cs.technion.ac.il>
+Date:   Sun Nov 2 11:54:54 2014 +0200
+
+    KVM: x86: Software disabled APIC should still deliver NMIs
+    
+    Currently, the APIC logical map does not consider VCPUs whose local-apic is
+    software-disabled.  However, NMIs, INIT, etc. should still be delivered to such
+    VCPUs. Therefore, the APIC mode should first be determined, and then the map,
+    considering all VCPUs should be constructed.
+    
+    To address this issue, first find the APIC mode, and only then construct the
+    logical map.
+    
+    Signed-off-by: Nadav Amit <namit@cs.technion.ac.il>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index 344e7d36d0e8..c98b44d0ffe6 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -156,8 +156,6 @@ static void recalculate_apic_map(struct kvm *kvm)
+ 
+ 	kvm_for_each_vcpu(i, vcpu, kvm) {
+ 		struct kvm_lapic *apic = vcpu->arch.apic;
+-		u16 cid, lid;
+-		u32 ldr;
+ 
+ 		if (!kvm_apic_present(vcpu))
+ 			continue;
+@@ -175,13 +173,22 @@ static void recalculate_apic_map(struct kvm *kvm)
+ 			new->cid_mask = (1 << KVM_X2APIC_CID_BITS) - 1;
+ 			new->lid_mask = 0xffff;
+ 			new->broadcast = X2APIC_BROADCAST;
+-		} else if (kvm_apic_sw_enabled(apic) &&
+-				!new->cid_mask /* flat mode */ &&
+-				kvm_apic_get_reg(apic, APIC_DFR) == APIC_DFR_CLUSTER) {
+-			new->cid_shift = 4;
+-			new->cid_mask = 0xf;
+-			new->lid_mask = 0xf;
++			break;
++		} else if (kvm_apic_sw_enabled(apic)) {
++			if (kvm_apic_get_reg(apic, APIC_DFR) ==
++							APIC_DFR_CLUSTER) {
++				new->cid_shift = 4;
++				new->cid_mask = 0xf;
++				new->lid_mask = 0xf;
++			}
++			break;
+ 		}
++	}
++
++	kvm_for_each_vcpu(i, vcpu, kvm) {
++		struct kvm_lapic *apic = vcpu->arch.apic;
++		u16 cid, lid;
++		u32 ldr;
+ 
+ 		new->phys_map[kvm_apic_id(apic)] = apic;
+ 
+

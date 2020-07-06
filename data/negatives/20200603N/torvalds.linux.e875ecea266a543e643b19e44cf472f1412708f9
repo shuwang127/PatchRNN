@@ -1,0 +1,140 @@
+commit e875ecea266a543e643b19e44cf472f1412708f9
+Author: NeilBrown <neilb@suse.de>
+Date:   Thu Jul 28 11:39:24 2011 +1000
+
+    md/raid10 record bad blocks as needed during recovery.
+    
+    When recovering one or more devices, if all the good devices have
+    bad blocks we should record a bad block on the device being rebuilt.
+    
+    If this fails, we need to abort the recovery.
+    
+    To ensure we don't think that we aborted later than we actually did,
+    we need to move the check for MD_RECOVERY_INTR earlier in md_do_sync,
+    in particular before mddev->curr_resync is updated.
+    
+    Signed-off-by: NeilBrown <neilb@suse.de>
+
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index a6b6471da2bc..d97a62534798 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -7165,11 +7165,14 @@ void md_do_sync(mddev_t *mddev)
+ 			atomic_add(sectors, &mddev->recovery_active);
+ 		}
+ 
++		if (test_bit(MD_RECOVERY_INTR, &mddev->recovery))
++			break;
++
+ 		j += sectors;
+ 		if (j>1) mddev->curr_resync = j;
+ 		mddev->curr_mark_cnt = io_sectors;
+ 		if (last_check == 0)
+-			/* this is the earliers that rebuilt will be
++			/* this is the earliest that rebuild will be
+ 			 * visible in /proc/mdstat
+ 			 */
+ 			md_new_event(mddev);
+@@ -7178,10 +7181,6 @@ void md_do_sync(mddev_t *mddev)
+ 			continue;
+ 
+ 		last_check = io_sectors;
+-
+-		if (test_bit(MD_RECOVERY_INTR, &mddev->recovery))
+-			break;
+-
+ 	repeat:
+ 		if (time_after_eq(jiffies, mark[last_mark] + SYNC_MARK_STEP )) {
+ 			/* step marks */
+diff --git a/drivers/md/raid10.c b/drivers/md/raid10.c
+index 5f0355832b46..de6089926273 100644
+--- a/drivers/md/raid10.c
++++ b/drivers/md/raid10.c
+@@ -2005,7 +2005,7 @@ static sector_t sync_request(mddev_t *mddev, sector_t sector_nr,
+ 	max_sync = RESYNC_PAGES << (PAGE_SHIFT-9);
+ 	if (!test_bit(MD_RECOVERY_SYNC, &mddev->recovery)) {
+ 		/* recovery... the complicated one */
+-		int j, k;
++		int j;
+ 		r10_bio = NULL;
+ 
+ 		for (i=0 ; i<conf->raid_disks; i++) {
+@@ -2013,6 +2013,7 @@ static sector_t sync_request(mddev_t *mddev, sector_t sector_nr,
+ 			r10bio_t *rb2;
+ 			sector_t sect;
+ 			int must_sync;
++			int any_working;
+ 
+ 			if (conf->mirrors[i].rdev == NULL ||
+ 			    test_bit(In_sync, &conf->mirrors[i].rdev->flags)) 
+@@ -2064,7 +2065,9 @@ static sector_t sync_request(mddev_t *mddev, sector_t sector_nr,
+ 			must_sync = bitmap_start_sync(mddev->bitmap, sect,
+ 						      &sync_blocks, still_degraded);
+ 
++			any_working = 0;
+ 			for (j=0; j<conf->copies;j++) {
++				int k;
+ 				int d = r10_bio->devs[j].devnum;
+ 				mdk_rdev_t *rdev;
+ 				sector_t sector, first_bad;
+@@ -2073,6 +2076,7 @@ static sector_t sync_request(mddev_t *mddev, sector_t sector_nr,
+ 				    !test_bit(In_sync, &conf->mirrors[d].rdev->flags))
+ 					continue;
+ 				/* This is where we read from */
++				any_working = 1;
+ 				rdev = conf->mirrors[d].rdev;
+ 				sector = r10_bio->devs[j].addr;
+ 
+@@ -2121,16 +2125,35 @@ static sector_t sync_request(mddev_t *mddev, sector_t sector_nr,
+ 				break;
+ 			}
+ 			if (j == conf->copies) {
+-				/* Cannot recover, so abort the recovery */
++				/* Cannot recover, so abort the recovery or
++				 * record a bad block */
+ 				put_buf(r10_bio);
+ 				if (rb2)
+ 					atomic_dec(&rb2->remaining);
+ 				r10_bio = rb2;
+-				if (!test_and_set_bit(MD_RECOVERY_INTR,
+-						      &mddev->recovery))
+-					printk(KERN_INFO "md/raid10:%s: insufficient "
+-					       "working devices for recovery.\n",
+-					       mdname(mddev));
++				if (any_working) {
++					/* problem is that there are bad blocks
++					 * on other device(s)
++					 */
++					int k;
++					for (k = 0; k < conf->copies; k++)
++						if (r10_bio->devs[k].devnum == i)
++							break;
++					if (!rdev_set_badblocks(
++						    conf->mirrors[i].rdev,
++						    r10_bio->devs[k].addr,
++						    max_sync, 0))
++						any_working = 0;
++				}
++				if (!any_working)  {
++					if (!test_and_set_bit(MD_RECOVERY_INTR,
++							      &mddev->recovery))
++						printk(KERN_INFO "md/raid10:%s: insufficient "
++						       "working devices for recovery.\n",
++						       mdname(mddev));
++					conf->mirrors[i].recovery_disabled
++						= mddev->recovery_disabled;
++				}
+ 				break;
+ 			}
+ 		}
+@@ -2290,7 +2313,8 @@ static sector_t sync_request(mddev_t *mddev, sector_t sector_nr,
+ 	return sectors_skipped + nr_sectors;
+  giveup:
+ 	/* There is nowhere to write, so all non-sync
+-	 * drives must be failed, so try the next chunk...
++	 * drives must be failed or in resync, all drives
++	 * have a bad block, so try the next chunk...
+ 	 */
+ 	if (sector_nr + max_sync < max_sector)
+ 		max_sector = sector_nr + max_sync;
+

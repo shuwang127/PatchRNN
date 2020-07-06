@@ -1,0 +1,55 @@
+commit 83b7b44e1c1e9e493ccd4146558481ab5af0116a
+Author: Eric Dumazet <dada1@cosmosbay.com>
+Date:   Wed Dec 6 20:38:53 2006 -0800
+
+    [PATCH] fs: reorder some 'struct inode' fields to speedup i_size manipulations
+    
+    On 32bits SMP platforms, 64bits i_size is protected by a seqcount
+    (i_size_seqcount).
+    
+    When i_size is read or written, i_size_seqcount is read/written as well, so
+    it make sense to group these two fields together in the same cache line.
+    
+    This patch moves i_size_seqcount next to i_size, and also moves i_version
+    to let offsetof(struct inode, i_size) being 0x40 instead of 0x3c (for
+    32bits platforms).
+    
+    For 64 bits platforms, i_size_seqcount doesnt exist, and the move of a
+    'long i_version' should not introduce a new hole because of padding.
+    
+    Signed-off-by: Eric Dumazet <dada1@cosmosbay.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index d791bae9de9c..3a1927e516d0 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -548,12 +548,15 @@ struct inode {
+ 	uid_t			i_uid;
+ 	gid_t			i_gid;
+ 	dev_t			i_rdev;
++	unsigned long		i_version;
+ 	loff_t			i_size;
++#ifdef __NEED_I_SIZE_ORDERED
++	seqcount_t		i_size_seqcount;
++#endif
+ 	struct timespec		i_atime;
+ 	struct timespec		i_mtime;
+ 	struct timespec		i_ctime;
+ 	unsigned int		i_blkbits;
+-	unsigned long		i_version;
+ 	blkcnt_t		i_blocks;
+ 	unsigned short          i_bytes;
+ 	spinlock_t		i_lock;	/* i_blocks, i_bytes, maybe i_size */
+@@ -598,9 +601,6 @@ struct inode {
+ 	void			*i_security;
+ #endif
+ 	void			*i_private; /* fs or device private pointer */
+-#ifdef __NEED_I_SIZE_ORDERED
+-	seqcount_t		i_size_seqcount;
+-#endif
+ };
+ 
+ /*
+

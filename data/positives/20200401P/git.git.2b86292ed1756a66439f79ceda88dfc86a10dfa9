@@ -1,0 +1,68 @@
+commit 2b86292ed1756a66439f79ceda88dfc86a10dfa9
+Author: Johannes Schindelin <johannes.schindelin@gmx.de>
+Date:   Thu Dec 17 18:08:15 2015 +0100
+
+    mingw: emulate write(2) that fails with a EPIPE
+    
+    On Windows, when writing to a pipe fails, errno is always
+    EINVAL. However, Git expects it to be EPIPE.
+    
+    According to the documentation, there are two cases in which write()
+    triggers EINVAL: the buffer is NULL, or the length is odd but the mode
+    is 16-bit Unicode (the broken pipe is not mentioned as possible cause).
+    Git never sets the file mode to anything but binary, therefore we know
+    that errno should actually be EPIPE if it is EINVAL and the buffer is
+    not NULL.
+    
+    See https://msdn.microsoft.com/en-us/library/1570wh78.aspx for more
+    details.
+    
+    This works around t5571.11 failing with v2.6.4 on Windows.
+    
+    Signed-off-by: Johannes Schindelin <johannes.schindelin@gmx.de>
+    Acked-by: Johannes Sixt <j6t@kdbg.org>
+    Signed-off-by: Junio C Hamano <gitster@pobox.com>
+
+diff --git a/compat/mingw.c b/compat/mingw.c
+index f74da235f..1d70f649f 100644
+--- a/compat/mingw.c
++++ b/compat/mingw.c
+@@ -394,6 +394,23 @@ int mingw_fflush(FILE *stream)
+ 	return ret;
+ }
+ 
++#undef write
++ssize_t mingw_write(int fd, const void *buf, size_t len)
++{
++	ssize_t result = write(fd, buf, len);
++
++	if (result < 0 && errno == EINVAL && buf) {
++		/* check if fd is a pipe */
++		HANDLE h = (HANDLE) _get_osfhandle(fd);
++		if (GetFileType(h) == FILE_TYPE_PIPE)
++			errno = EPIPE;
++		else
++			errno = EINVAL;
++	}
++
++	return result;
++}
++
+ int mingw_access(const char *filename, int mode)
+ {
+ 	wchar_t wfilename[MAX_PATH];
+diff --git a/compat/mingw.h b/compat/mingw.h
+index 738865c6c..57ca477d1 100644
+--- a/compat/mingw.h
++++ b/compat/mingw.h
+@@ -210,6 +210,9 @@ FILE *mingw_freopen (const char *filename, const char *otype, FILE *stream);
+ int mingw_fflush(FILE *stream);
+ #define fflush mingw_fflush
+ 
++ssize_t mingw_write(int fd, const void *buf, size_t len);
++#define write mingw_write
++
+ int mingw_access(const char *filename, int mode);
+ #undef access
+ #define access mingw_access
+

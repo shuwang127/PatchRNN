@@ -1,0 +1,81 @@
+commit fc0adebe0eb34e94eacc7a677a1d55b349131953
+Author: cbell/Chuck@mysql_cab_desk. <>
+Date:   Thu Jan 18 13:35:49 2007 -0500
+
+    BUG#21490 - No warning issued for deprecated replication parameters
+    This patch deprecates the replication startup options in the configuration
+    file and on the command line. The options deprecated include:
+    
+    MASTER_HOST, MASTER_USER, MASTER_PASSWORD, MASTER_PORT, MASTER_CONNECT_RETRY,
+    MASTER_SSL, MASTER_SSL_CA, MASTER_SSL_CAPATH, MASTER_SSL_CERT, MASTER_SSL_KEY,
+    and MASTER_SSL_CIPHER
+    
+    The code is designed to print the warning message once.
+
+diff --git a/sql/mysql_priv.h b/sql/mysql_priv.h
+index cad42320db4..06a02978994 100644
+--- a/sql/mysql_priv.h
++++ b/sql/mysql_priv.h
+@@ -91,6 +91,18 @@ char* query_table_status(THD *thd,const char *db,const char *table_name);
+ #define PREV_BITS(type,A)	((type) (((type) 1 << (A)) -1))
+ #define all_bits_set(A,B) ((A) & (B) != (B))
+ 
++#define WARN_DEPRECATED(Thd,Ver,Old,New)                                             \
++  do {                                                                               \
++    DBUG_ASSERT(strncmp(Ver, MYSQL_SERVER_VERSION, sizeof(Ver)-1) > 0);              \
++    if (Thd != NULL)                                                                 \
++      push_warning_printf(((THD *)Thd), MYSQL_ERROR::WARN_LEVEL_WARN,                \
++                        ER_WARN_DEPRECATED_SYNTAX, ER(ER_WARN_DEPRECATED_SYNTAX),    \
++                        (Old), (Ver), (New));                                        \
++    else                                                                             \
++      sql_print_warning("The syntax %s is deprecated and will be removed "           \
++                        "in MySQL %s. Please use %s instead.", (Old), (Ver), (New)); \
++  } while(0)
++
+ extern CHARSET_INFO *system_charset_info, *files_charset_info ;
+ extern CHARSET_INFO *national_charset_info, *table_alias_charset;
+ 
+diff --git a/sql/mysqld.cc b/sql/mysqld.cc
+index 488751eb015..a7dc8bede84 100644
+--- a/sql/mysqld.cc
++++ b/sql/mysqld.cc
+@@ -356,6 +356,8 @@ my_bool opt_safe_user_create = 0, opt_no_mix_types = 0;
+ my_bool opt_show_slave_auth_info, opt_sql_bin_update = 0;
+ my_bool opt_log_slave_updates= 0;
+ my_bool	opt_innodb;
++bool slave_warning_issued = false; 
++
+ #ifdef HAVE_NDBCLUSTER_DB
+ const char *opt_ndbcluster_connectstring= 0;
+ const char *opt_ndb_connectstring= 0;
+@@ -6888,6 +6890,29 @@ get_one_option(int optid, const struct my_option *opt __attribute__((unused)),
+   case (int) OPT_STANDALONE:		/* Dummy option for NT */
+     break;
+ #endif
++  /*
++    The following change issues a deprecation warning if the slave
++    configuration is specified either in the my.cnf file or on
++    the command-line. See BUG#21490.
++  */
++  case OPT_MASTER_HOST:
++  case OPT_MASTER_USER:
++  case OPT_MASTER_PASSWORD:
++  case OPT_MASTER_PORT:
++  case OPT_MASTER_CONNECT_RETRY:
++  case OPT_MASTER_SSL:          
++  case OPT_MASTER_SSL_KEY:
++  case OPT_MASTER_SSL_CERT:       
++  case OPT_MASTER_SSL_CAPATH:
++  case OPT_MASTER_SSL_CIPHER:
++  case OPT_MASTER_SSL_CA:
++    if (!slave_warning_issued)                 //only show the warning once
++    {
++      slave_warning_issued = true;   
++      WARN_DEPRECATED(0, "5.2", "for replication startup options", 
++        "'CHANGE MASTER'");
++    }
++    break;
+   case OPT_CONSOLE:
+     if (opt_console)
+       opt_error_log= 0;			// Force logs to stdout
+

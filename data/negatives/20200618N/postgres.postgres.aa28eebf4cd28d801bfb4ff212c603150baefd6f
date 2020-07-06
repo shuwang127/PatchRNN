@@ -1,0 +1,314 @@
+commit aa28eebf4cd28d801bfb4ff212c603150baefd6f
+Author: Philip Warner <pjw@rhyme.com.au>
+Date:   Tue Mar 6 04:08:04 2001 +0000
+
+    - Only disable triggers in DataOnly (or implied data-only) restores.
+    - Change -U option to -L to allow -U to specify username in future. (pg_restore)
+
+diff --git a/src/bin/pg_dump/pg_backup_archiver.c b/src/bin/pg_dump/pg_backup_archiver.c
+index 1b08b2ce8b..0a98564e61 100644
+--- a/src/bin/pg_dump/pg_backup_archiver.c
++++ b/src/bin/pg_dump/pg_backup_archiver.c
+@@ -37,6 +37,9 @@
+  * Modifications - 27-Jan-2001 - pjw@rhyme.com.au
+  *	  - When dropping the schema, reconnect as owner of each object.
+  *
++ * Modifications - 6-Mar-2001 - pjw@rhyme.com.au
++ *	  - Only disable triggers in DataOnly (or implied data-only) restores.
++ *
+  *-------------------------------------------------------------------------
+  */
+ 
+@@ -65,8 +68,8 @@ static void		_reconnectAsOwner(ArchiveHandle* AH, const char *dbname, TocEntry*
+ static void		_reconnectAsUser(ArchiveHandle* AH, const char *dbname, char *user);
+ 
+ static int		_tocEntryRequired(TocEntry* te, RestoreOptions *ropt);
+-static void		_disableTriggers(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt);
+-static void		_enableTriggers(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt);
++static void		_disableTriggersIfNecessary(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt);
++static void		_enableTriggersIfNecessary(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt);
+ static TocEntry*	_getTocEntry(ArchiveHandle* AH, int id);
+ static void		_moveAfter(ArchiveHandle* AH, TocEntry* pos, TocEntry* te);
+ static void		_moveBefore(ArchiveHandle* AH, TocEntry* pos, TocEntry* te);
+@@ -128,8 +131,9 @@ void RestoreArchive(Archive* AHX, RestoreOptions *ropt)
+ {
+     ArchiveHandle*	AH = (ArchiveHandle*) AHX;
+     TocEntry		*te = AH->toc->next;
+-    int			reqs;
++    int				reqs;
+     OutputContext	sav;
++	int				impliedDataOnly;
+ 
+ 	AH->ropt = ropt;
+ 
+@@ -159,6 +163,33 @@ void RestoreArchive(Archive* AHX, RestoreOptions *ropt)
+ 
+ 	}
+ 
++	/*
++	 * Work out if we have an implied data-only retore. This can happen if 
++	 * the dump was data only or if the user has used a toc list to exclude
++     * all of the schema data. All we do is look for schema entries - if none
++	 * are found then we set the dataOnly flag. 
++	 *
++	 * We could scan for wanted TABLE entries, but that is not the same as 
++	 * dataOnly. At this stage, it seems unnecessary (6-Mar-2001).
++     */
++    if (!ropt->dataOnly) {
++		te = AH->toc->next;
++		impliedDataOnly = 1;
++		while (te != AH->toc) {
++			reqs = _tocEntryRequired(te, ropt);
++			if ( (reqs & 1) != 0 ) {  /* It's schema, and it's wanted */
++				impliedDataOnly = 0;
++				break;
++			}
++			te = te->next;
++		}
++		if (impliedDataOnly)
++		{
++			ropt->dataOnly = impliedDataOnly;
++			ahlog(AH, 1, "Implied data-only restore\n", te->desc, te->name);
++		}
++    }
++
+ 	if (!ropt->superuser)
+ 		fprintf(stderr, "\n%s: ******** WARNING ******** \n"
+ 							"        Data restoration may fail since any defined triggers\n"
+@@ -244,7 +275,7 @@ void RestoreArchive(Archive* AHX, RestoreOptions *ropt)
+ 
+ 			} else {
+ 
+-				_disableTriggers(AH, te, ropt);
++				_disableTriggersIfNecessary(AH, te, ropt);
+ 
+ 				/* Reconnect if necessary (_disableTriggers may have reconnected) */
+ 				_reconnectAsOwner(AH, "-", te);
+@@ -263,7 +294,7 @@ void RestoreArchive(Archive* AHX, RestoreOptions *ropt)
+ 
+ 				(*AH->PrintTocDataPtr)(AH, te, ropt);
+ 
+-				_enableTriggers(AH, te, ropt);
++				_enableTriggersIfNecessary(AH, te, ropt);
+ 			}
+ 		}
+ 		te = te->next;
+@@ -275,7 +306,7 @@ void RestoreArchive(Archive* AHX, RestoreOptions *ropt)
+ 	if (_canRestoreBlobs(AH) && AH->createdBlobXref)
+ 	{
+ 		/* NULL parameter means disable ALL user triggers */
+-		_disableTriggers(AH, NULL, ropt);
++		_disableTriggersIfNecessary(AH, NULL, ropt);
+ 
+ 		te = AH->toc->next;
+ 		while (te != AH->toc) {
+@@ -302,7 +333,7 @@ void RestoreArchive(Archive* AHX, RestoreOptions *ropt)
+ 		}
+ 
+ 		/* NULL parameter means enable ALL user triggers */
+-		_enableTriggers(AH, NULL, ropt);
++		_enableTriggersIfNecessary(AH, NULL, ropt);
+ 	}
+ 
+ 	/*
+@@ -349,12 +380,13 @@ static int _canRestoreBlobs(ArchiveHandle *AH)
+ 	return _restoringToDB(AH);
+ }
+ 
+-static void _disableTriggers(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt)
++static void _disableTriggersIfNecessary(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt)
+ {
+ 	char	*oldUser = NULL;
+ 
+ 	/* Can't do much if we're connected & don't have a superuser */
+-	if (_restoringToDB(AH) && !ropt->superuser)
++    /* Also, don't bother with triggers unless a data-only retore. */
++	if ( !ropt->dataOnly || (_restoringToDB(AH) && !ropt->superuser) )
+ 		return;
+ 
+ 	/*
+@@ -404,12 +436,13 @@ static void _disableTriggers(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ro
+ 	}
+ }
+ 
+-static void _enableTriggers(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt)
++static void _enableTriggersIfNecessary(ArchiveHandle *AH, TocEntry *te, RestoreOptions *ropt)
+ {
+ 	char		*oldUser = NULL;
+ 
+ 	/* Can't do much if we're connected & don't have a superuser */
+-	if (_restoringToDB(AH) && !ropt->superuser)
++	/* Also, don't bother with triggers unless a data-only retore. */
++	if ( !ropt->dataOnly || (_restoringToDB(AH) && !ropt->superuser) )
+ 		return;
+ 
+ 	/*
+diff --git a/src/bin/pg_dump/pg_backup_archiver.h b/src/bin/pg_dump/pg_backup_archiver.h
+index ebbfdb31d8..bb926d6e6f 100644
+--- a/src/bin/pg_dump/pg_backup_archiver.h
++++ b/src/bin/pg_dump/pg_backup_archiver.h
+@@ -62,7 +62,7 @@ typedef z_stream *z_streamp;
+ 
+ #define K_VERS_MAJOR 1
+ #define K_VERS_MINOR 4 
+-#define K_VERS_REV 28 
++#define K_VERS_REV 29 
+ 
+ /* Data block types */
+ #define BLK_DATA 1
+diff --git a/src/bin/pg_dump/pg_restore.c b/src/bin/pg_dump/pg_restore.c
+index 546b90c250..c973eb984e 100644
+--- a/src/bin/pg_dump/pg_restore.c
++++ b/src/bin/pg_dump/pg_restore.c
+@@ -47,6 +47,9 @@
+  *		Cleaned up code for reconnecting to database.
+  *		Force a reconnect as superuser before enabling/disabling triggers.
+  *
++ * Modifications - 6-Mar-2001 - pjw@rhyme.com.au
++ *		Change -U option to -L to allow -U to specify username in future.
++ *
+  *-------------------------------------------------------------------------
+  */
+ 
+@@ -100,7 +103,7 @@ struct option cmdopts[] = {
+ 				{ "superuser", 1, NULL, 'S' },
+ 				{ "table", 2, NULL, 't'},
+ 				{ "trigger", 2, NULL, 'T' },
+-				{ "use-list", 1, NULL, 'U'},
++				{ "use-list", 1, NULL, 'L'},
+ 				{ "verbose", 0, NULL, 'v' },
+ 				{ NULL, 0, NULL, 0}
+ 			    };
+@@ -135,9 +138,9 @@ int main(int argc, char **argv)
+ 	}
+ 
+ #ifdef HAVE_GETOPT_LONG
+-	while ((c = getopt_long(argc, argv, "acCd:f:F:h:i:lNoOp:P:rRsS:t:T:uU:vx", cmdopts, NULL)) != EOF)
++	while ((c = getopt_long(argc, argv, "acCd:f:F:h:i:lL:NoOp:P:rRsS:t:T:uvx", cmdopts, NULL)) != EOF)
+ #else
+-	while ((c = getopt(argc, argv, "acCd:f:F:h:i:lNoOp:P:rRsS:t:T:uU:vx")) != -1)
++	while ((c = getopt(argc, argv, "acCd:f:F:h:i:lL:NoOp:P:rRsS:t:T:uvx")) != -1)
+ #endif
+ 	{
+ 		switch (c)
+@@ -173,6 +176,15 @@ int main(int argc, char **argv)
+ 			case 'i':
+ 				opts->ignoreVersion = 1;
+ 				break;
++
++			case 'l':			/* Dump the TOC summary */
++				opts->tocSummary = 1;
++				break;
++
++			case 'L':			/* input TOC summary file name */
++				opts->tocFile = strdup(optarg);
++				break;
++
+ 			case 'N':
+ 				opts->origOrder = 1;
+ 				break;
+@@ -219,18 +231,11 @@ int main(int argc, char **argv)
+ 				opts->selTable = 1;
+ 				opts->tableNames = _cleanupName(optarg);
+ 				break;
+-			case 'l':			/* Dump the TOC summary */
+-				opts->tocSummary = 1;
+-				break;
+ 
+ 			case 'u':
+ 				opts->requirePassword = 1;
+ 				break;
+ 
+-			case 'U':			/* input TOC summary file name */
+-				opts->tocFile = strdup(optarg);
+-				break;
+-
+ 			case 'v':			/* verbose */
+ 				opts->verbose = 1;
+ 				break;
+@@ -251,29 +256,29 @@ int main(int argc, char **argv)
+ 
+     if (opts->formatName) { 
+ 
+-	switch (opts->formatName[0]) {
++		switch (opts->formatName[0]) {
+ 
+-	    case 'c':
+-	    case 'C':
+-			opts->format = archCustom;
+-			break;
++			case 'c':
++			case 'C':
++				opts->format = archCustom;
++				break;
+ 
+-	    case 'f':
+-	    case 'F':
+-			opts->format = archFiles;
+-			break;
++			case 'f':
++			case 'F':
++				opts->format = archFiles;
++				break;
+ 
+-		case 't':
+-		case 'T':
+-			opts->format = archTar;
+-			break;
++			case 't':
++			case 'T':
++				opts->format = archTar;
++				break;
+ 
+-	    default:
+-			fprintf(stderr, "%s: Unknown archive format '%s', please specify 't' or 'c'\n",
+-						progname, opts->formatName);
+-			exit (1);
+-	}
+-    }
++			default:
++				fprintf(stderr, "%s: Unknown archive format '%s', please specify 't' or 'c'\n",
++							progname, opts->formatName);
++				exit (1);
++		}
++    } 
+ 
+     AH = OpenArchive(fileSpec, opts->format);
+ 
+@@ -329,6 +334,8 @@ static void usage(const char *progname)
+ 		"  -h, --host HOSTNAME      server host name\n"
+ 	    "  -i, --index[=NAME]       dump indexes or named index\n"
+ 	    "  -l, --list               dump summarized TOC for this file\n"
++		"  -L, --use-list=FILENAME  use specified table of contents for ordering\n"
++		"                           output from this file\n"
+ 		"  -N, --orig-order         dump in original dump order\n"
+ 	    "  -o, --oid-order          dump in oid order\n"
+ 		"  -O, --no-owner           do not output reconnect to database to match\n"
+@@ -343,8 +350,6 @@ static void usage(const char *progname)
+ 	    "  -t [TABLE], --table[=TABLE]  dump for this table only\n"
+ 	    "  -T, --trigger[=NAME]     dump triggers or named trigger\n"
+ 		"  -u, --password           use password authentication\n"
+-	    "  -U, --use-list=FILENAME  use specified table of contents for ordering\n"
+-		"                           output from this file\n"
+ 	    "  -v, --verbose            verbose\n"
+ 	    "  -x, --no-acl             skip dumping of ACLs (grant/revoke)\n");
+ 
+@@ -360,6 +365,8 @@ static void usage(const char *progname)
+ 		"  -h HOSTNAME              server host name\n"
+ 	    "  -i NAME                  dump indexes or named index\n"
+ 	    "  -l                       dump summarized TOC for this file\n"
++		"  -L FILENAME              use specified table of contents for ordering\n"
++		"                           output from this file\n"
+ 		"  -N                       dump in original dump order\n"
+ 	    "  -o                       dump in oid order\n"
+ 		"  -O                       do not output reconnect to database to match\n"
+@@ -374,8 +381,6 @@ static void usage(const char *progname)
+ 	    "  -t NAME                  dump for this table only\n"
+ 	    "  -T NAME                  dump triggers or named trigger\n"
+ 		"  -u                       use password authentication\n"
+-	    "  -U FILENAME              use specified table of contents for ordering\n"
+-		"                           output from this file\n"
+ 	    "  -v                       verbose\n"
+ 	    "  -x                       skip dumping of ACLs (grant/revoke)\n");
+ #endif
+

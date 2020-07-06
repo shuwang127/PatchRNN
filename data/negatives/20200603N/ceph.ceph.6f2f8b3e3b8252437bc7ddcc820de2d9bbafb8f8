@@ -1,0 +1,39 @@
+commit 6f2f8b3e3b8252437bc7ddcc820de2d9bbafb8f8
+Author: Sage Weil <sage@redhat.com>
+Date:   Mon Mar 6 13:50:30 2017 -0500
+
+    os/bluestore: pin writing cache buffers until txc is finished
+    
+    Notably, this includes WAL writes, which means an in-flight WAL write will
+    always be in the cache.
+    
+    Signed-off-by: Sage Weil <sage@redhat.com>
+
+diff --git a/src/os/bluestore/BlueStore.cc b/src/os/bluestore/BlueStore.cc
+index c0821f969d..7a7dde46a8 100644
+--- a/src/os/bluestore/BlueStore.cc
++++ b/src/os/bluestore/BlueStore.cc
+@@ -7124,10 +7124,6 @@ void BlueStore::_txc_state_proc(TransContext *txc)
+       }
+       txc->log_state_latency(logger, l_bluestore_state_io_done_lat);
+       txc->state = TransContext::STATE_KV_QUEUED;
+-      for (auto& sb : txc->shared_blobs_written) {
+-	sb->bc.finish_write(sb->get_cache(), txc->seq);
+-      }
+-      txc->shared_blobs_written.clear();
+       if (cct->_conf->bluestore_sync_submit_transaction &&
+ 	  fm->supports_parallel_transactions()) {
+ 	if (txc->last_nid >= nid_max ||
+@@ -7384,6 +7380,11 @@ void BlueStore::_txc_finish(TransContext *txc)
+   dout(20) << __func__ << " " << txc << " onodes " << txc->onodes << dendl;
+   assert(txc->state == TransContext::STATE_FINISHING);
+ 
++  for (auto& sb : txc->shared_blobs_written) {
++    sb->bc.finish_write(sb->get_cache(), txc->seq);
++  }
++  txc->shared_blobs_written.clear();
++
+   for (auto ls : { &txc->onodes, &txc->modified_objects }) {
+     for (auto& o : *ls) {
+       std::lock_guard<std::mutex> l(o->flush_lock);
+

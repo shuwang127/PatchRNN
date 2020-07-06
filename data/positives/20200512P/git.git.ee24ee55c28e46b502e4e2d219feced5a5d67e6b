@@ -1,0 +1,56 @@
+commit ee24ee55c28e46b502e4e2d219feced5a5d67e6b
+Author: Jim Meyering <jim@meyering.net>
+Date:   Tue Feb 27 00:11:35 2007 +0100
+
+    diff --cc: integer overflow given a 2GB-or-larger file
+    
+    Few of us use git to compare or even version-control 2GB files,
+    but when we do, we'll want it to work.
+    
+    Reading a recent patch, I noticed two lines like this:
+    
+       int len = st.st_size;
+    
+    Instead of "int", that should be "size_t".  Otherwise, in the
+    non-symlink case, with 64-bit size_t, if the file's size is 2GB,
+    the following xmalloc will fail:
+    
+       result = xmalloc(len + 1);
+    
+    trying to allocate 2^64 - 2^31 + 1 bytes (assuming sign-extension
+    in the int-to-size_t promotion).  And even if it didn't fail, the
+    subsequent "result[len] = 0;" would be equivalent to an unpleasant
+    "result[-2147483648] = 0;"
+    
+    The other nearby "int"-declared size variable, sz, should also be of
+    type size_t, for the same reason.  If sz ever wraps around and becomes
+    negative, xread will corrupt memory _before_ the "result" buffer.
+    
+    Signed-off-by: Jim Meyering <jim@meyering.net>
+    Signed-off-by: Junio C Hamano <junkio@cox.net>
+
+diff --git a/combine-diff.c b/combine-diff.c
+index 6b7c6be95..044633d16 100644
+--- a/combine-diff.c
++++ b/combine-diff.c
+@@ -684,7 +684,7 @@ static void show_patch_diff(struct combine_diff_path *elem, int num_parent,
+ 			goto deleted_file;
+ 
+ 		if (S_ISLNK(st.st_mode)) {
+-			int len = st.st_size;
++			size_t len = st.st_size;
+ 			result_size = len;
+ 			result = xmalloc(len + 1);
+ 			if (result_size != readlink(elem->path, result, len)) {
+@@ -697,8 +697,8 @@ static void show_patch_diff(struct combine_diff_path *elem, int num_parent,
+ 		}
+ 		else if (0 <= (fd = open(elem->path, O_RDONLY)) &&
+ 			 !fstat(fd, &st)) {
+-			int len = st.st_size;
+-			int sz = 0;
++			size_t len = st.st_size;
++			size_t sz = 0;
+ 
+ 			elem->mode = canon_mode(st.st_mode);
+ 			result_size = len;
+

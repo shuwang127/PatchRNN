@@ -1,0 +1,159 @@
+commit 92064b8116cf42d430d68a2ae13f203db5fb8882
+Author: Luis Soares <luis.soares@sun.com>
+Date:   Mon May 24 17:43:27 2010 +0100
+
+    BUG#53657: Slave crashed with error 22 when trying to lock mutex
+               at mf_iocache.c, line 1722
+    
+    The slave crashed while two threads: IO thread and user thread
+    raced for the same mutex (the append_buffer_lock protecting the
+    relay log's IO_CACHE). The IO thread was trying to flush the
+    cache, and for that was grabbing the append_buffer_lock.
+    
+    However, the other thread was closing and reopening the relay log
+    when the IO thread tried to lock. Closing and reopening the log
+    includes destroying and reinitialising the IO_CACHE
+    mutex. Therefore, the IO thread tried to lock a destroyed mutex.
+    
+    We fix this by backporting patch for BUG#50364 which fixed this
+    bug in mysql server 5.5+. The patch deploys missing
+    synchronization when flush_master_info is called and the relay
+    log is flushed by the IO thread. In detail the patch backports
+    revision (from mysql-trunk):
+    - luis.soares@sun.com-20100203165617-b1yydr0ee24ycpjm
+    
+    This patch already includes the post-push fix also in BUG#50364:
+    - luis.soares@sun.com-20100222002629-0cijwqk6baxhj7gr
+
+diff --git a/sql/repl_failsafe.cc b/sql/repl_failsafe.cc
+index c6a05e93bf4..c25d43ea5ba 100644
+--- a/sql/repl_failsafe.cc
++++ b/sql/repl_failsafe.cc
+@@ -976,7 +976,7 @@ bool load_master_data(THD* thd)
+           host was specified; there could have been a problem when replication
+           started, which led to relay log's IO_CACHE to not be inited.
+         */
+-        if (flush_master_info(active_mi, 0))
++        if (flush_master_info(active_mi, FALSE, FALSE))
+           sql_print_error("Failed to flush master info file");
+       }
+       mysql_free_result(master_status_res);
+diff --git a/sql/rpl_mi.cc b/sql/rpl_mi.cc
+index 5e46837e948..63f1f21c957 100644
+--- a/sql/rpl_mi.cc
++++ b/sql/rpl_mi.cc
+@@ -312,7 +312,7 @@ file '%s')", fname);
+   mi->inited = 1;
+   // now change cache READ -> WRITE - must do this before flush_master_info
+   reinit_io_cache(&mi->file, WRITE_CACHE, 0L, 0, 1);
+-  if ((error=test(flush_master_info(mi, 1))))
++  if ((error=test(flush_master_info(mi, TRUE, TRUE))))
+     sql_print_error("Failed to flush master info file");
+   pthread_mutex_unlock(&mi->data_lock);
+   DBUG_RETURN(error);
+@@ -338,10 +338,13 @@ file '%s')", fname);
+      1 - flush master info failed
+      0 - all ok
+ */
+-int flush_master_info(Master_info* mi, bool flush_relay_log_cache)
++int flush_master_info(Master_info* mi, 
++                      bool flush_relay_log_cache, 
++                      bool need_lock_relay_log)
+ {
+   IO_CACHE* file = &mi->file;
+   char lbuf[22];
++  int err= 0;
+ 
+   DBUG_ENTER("flush_master_info");
+   DBUG_PRINT("enter",("master_pos: %ld", (long) mi->master_log_pos));
+@@ -358,9 +361,23 @@ int flush_master_info(Master_info* mi, bool flush_relay_log_cache)
+     When we come to this place in code, relay log may or not be initialized;
+     the caller is responsible for setting 'flush_relay_log_cache' accordingly.
+   */
+-  if (flush_relay_log_cache &&
+-      flush_io_cache(mi->rli.relay_log.get_log_file()))
+-    DBUG_RETURN(2);
++  if (flush_relay_log_cache)
++  {
++    pthread_mutex_t *log_lock= mi->rli.relay_log.get_log_lock();
++    IO_CACHE *log_file= mi->rli.relay_log.get_log_file();
++
++    if (need_lock_relay_log)
++      pthread_mutex_lock(log_lock);
++
++    safe_mutex_assert_owner(log_lock);
++    err= flush_io_cache(log_file);
++
++    if (need_lock_relay_log)
++      pthread_mutex_unlock(log_lock);
++
++    if (err)
++      DBUG_RETURN(2);
++  }
+ 
+   /*
+     We flushed the relay log BEFORE the master.info file, because if we crash
+diff --git a/sql/rpl_mi.h b/sql/rpl_mi.h
+index 93fb0a98198..023879f84fa 100644
+--- a/sql/rpl_mi.h
++++ b/sql/rpl_mi.h
+@@ -108,7 +108,8 @@ int init_master_info(Master_info* mi, const char* master_info_fname,
+ 		     bool abort_if_no_master_info_file,
+ 		     int thread_mask);
+ void end_master_info(Master_info* mi);
+-int flush_master_info(Master_info* mi, bool flush_relay_log_cache);
+-
++int flush_master_info(Master_info* mi, 
++                      bool flush_relay_log_cache, 
++                      bool need_lock_relay_log);
+ #endif /* HAVE_REPLICATION */
+ #endif /* RPL_MI_H */
+diff --git a/sql/rpl_rli.cc b/sql/rpl_rli.cc
+index 1263b7c52d9..316e26f7e40 100644
+--- a/sql/rpl_rli.cc
++++ b/sql/rpl_rli.cc
+@@ -120,7 +120,7 @@ int init_relay_log_info(Relay_log_info* rli,
+   /*
+     The relay log will now be opened, as a SEQ_READ_APPEND IO_CACHE.
+     Note that the I/O thread flushes it to disk after writing every
+-    event, in flush_master_info(mi, 1).
++    event, in flush_master_info(mi, 1, ?).
+   */
+ 
+   /*
+diff --git a/sql/slave.cc b/sql/slave.cc
+index 2e4642d179e..af53bc65c0e 100644
+--- a/sql/slave.cc
++++ b/sql/slave.cc
+@@ -1480,7 +1480,7 @@ static void write_ignored_events_info_to_relay_log(THD *thd, Master_info *mi)
+                    " to the relay log, SHOW SLAVE STATUS may be"
+                    " inaccurate");
+       rli->relay_log.harvest_bytes_written(&rli->log_space_total);
+-      if (flush_master_info(mi, 1))
++      if (flush_master_info(mi, TRUE, TRUE))
+         sql_print_error("Failed to flush master info file");
+       delete ev;
+     }
+@@ -2731,7 +2731,7 @@ Stopping slave I/O thread due to out-of-memory error from master");
+                    "could not queue event from master");
+         goto err;
+       }
+-      if (flush_master_info(mi, 1))
++      if (flush_master_info(mi, TRUE, TRUE))
+       {
+         sql_print_error("Failed to flush master info file");
+         goto err;
+diff --git a/sql/sql_repl.cc b/sql/sql_repl.cc
+index c220f609c09..75a738a0073 100644
+--- a/sql/sql_repl.cc
++++ b/sql/sql_repl.cc
+@@ -1282,7 +1282,7 @@ bool change_master(THD* thd, Master_info* mi)
+     Relay log's IO_CACHE may not be inited, if rli->inited==0 (server was never
+     a slave before).
+   */
+-  if (flush_master_info(mi, 0))
++  if (flush_master_info(mi, FALSE, FALSE))
+   {
+     my_error(ER_RELAY_LOG_INIT, MYF(0), "Failed to flush master info file");
+     unlock_slave_threads(mi);
+

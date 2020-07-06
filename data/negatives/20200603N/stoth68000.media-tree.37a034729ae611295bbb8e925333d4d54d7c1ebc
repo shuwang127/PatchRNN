@@ -1,0 +1,47 @@
+commit 37a034729ae611295bbb8e925333d4d54d7c1ebc
+Author: NeilBrown <neilb@suse.de>
+Date:   Wed Oct 4 02:15:44 2006 -0700
+
+    [PATCH] knfsd: call lockd_down when closing a socket via a write to nfsd/portlist
+    
+    The refcount that nfsd holds on lockd is based on the number of open sockets.
+    So when we close a socket, we should decrement the ref (with lockd_down).
+    
+    Currently when a socket is closed via writing to the portlist file, that
+    doesn't happen.
+    
+    So: make sure we get an error return if the socket that was requested does is
+    not found, and call lockd_down if it was.
+    
+    Cc: "J. Bruce Fields" <bfields@fieldses.org>
+    Signed-off-by: Neil Brown <neilb@suse.de>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/fs/nfsd/nfsctl.c b/fs/nfsd/nfsctl.c
+index 5c6a477c20ec..83997282fc1a 100644
+--- a/fs/nfsd/nfsctl.c
++++ b/fs/nfsd/nfsctl.c
+@@ -545,6 +545,8 @@ static ssize_t write_ports(struct file *file, char *buf, size_t size)
+ 		if (nfsd_serv)
+ 			len = svc_sock_names(buf, nfsd_serv, toclose);
+ 		unlock_kernel();
++		if (len >= 0)
++			lockd_down();
+ 		kfree(toclose);
+ 		return len;
+ 	}
+diff --git a/net/sunrpc/svcsock.c b/net/sunrpc/svcsock.c
+index cba85d195222..4e0813b12ccf 100644
+--- a/net/sunrpc/svcsock.c
++++ b/net/sunrpc/svcsock.c
+@@ -493,6 +493,8 @@ svc_sock_names(char *buf, struct svc_serv *serv, char *toclose)
+ 	spin_unlock(&serv->sv_lock);
+ 	if (closesk)
+ 		svc_delete_socket(closesk);
++	else if (toclose)
++		return -ENOENT;
+ 	return len;
+ }
+ EXPORT_SYMBOL(svc_sock_names);
+

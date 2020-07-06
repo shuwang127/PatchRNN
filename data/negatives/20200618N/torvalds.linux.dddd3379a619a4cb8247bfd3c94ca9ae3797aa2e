@@ -1,0 +1,85 @@
+commit dddd3379a619a4cb8247bfd3c94ca9ae3797aa2e
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Wed Nov 24 10:05:55 2010 +0100
+
+    perf: Fix inherit vs. context rotation bug
+    
+    It was found that sometimes children of tasks with inherited events had
+    one extra event. Eventually it turned out to be due to the list rotation
+    no being exclusive with the list iteration in the inheritance code.
+    
+    Cure this by temporarily disabling the rotation while we inherit the events.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    LKML-Reference: <new-submission>
+    Cc: <stable@kernel.org>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/include/linux/perf_event.h b/include/linux/perf_event.h
+index 40150f345982..142e3d6042c7 100644
+--- a/include/linux/perf_event.h
++++ b/include/linux/perf_event.h
+@@ -850,6 +850,7 @@ struct perf_event_context {
+ 	int				nr_active;
+ 	int				is_active;
+ 	int				nr_stat;
++	int				rotate_disable;
+ 	atomic_t			refcount;
+ 	struct task_struct		*task;
+ 
+diff --git a/kernel/perf_event.c b/kernel/perf_event.c
+index 671f6c8c8a32..f365dd8ef8b0 100644
+--- a/kernel/perf_event.c
++++ b/kernel/perf_event.c
+@@ -1622,8 +1622,12 @@ static void rotate_ctx(struct perf_event_context *ctx)
+ {
+ 	raw_spin_lock(&ctx->lock);
+ 
+-	/* Rotate the first entry last of non-pinned groups */
+-	list_rotate_left(&ctx->flexible_groups);
++	/*
++	 * Rotate the first entry last of non-pinned groups. Rotation might be
++	 * disabled by the inheritance code.
++	 */
++	if (!ctx->rotate_disable)
++		list_rotate_left(&ctx->flexible_groups);
+ 
+ 	raw_spin_unlock(&ctx->lock);
+ }
+@@ -6162,6 +6166,7 @@ int perf_event_init_context(struct task_struct *child, int ctxn)
+ 	struct perf_event *event;
+ 	struct task_struct *parent = current;
+ 	int inherited_all = 1;
++	unsigned long flags;
+ 	int ret = 0;
+ 
+ 	child->perf_event_ctxp[ctxn] = NULL;
+@@ -6202,6 +6207,15 @@ int perf_event_init_context(struct task_struct *child, int ctxn)
+ 			break;
+ 	}
+ 
++	/*
++	 * We can't hold ctx->lock when iterating the ->flexible_group list due
++	 * to allocations, but we need to prevent rotation because
++	 * rotate_ctx() will change the list from interrupt context.
++	 */
++	raw_spin_lock_irqsave(&parent_ctx->lock, flags);
++	parent_ctx->rotate_disable = 1;
++	raw_spin_unlock_irqrestore(&parent_ctx->lock, flags);
++
+ 	list_for_each_entry(event, &parent_ctx->flexible_groups, group_entry) {
+ 		ret = inherit_task_group(event, parent, parent_ctx,
+ 					 child, ctxn, &inherited_all);
+@@ -6209,6 +6223,10 @@ int perf_event_init_context(struct task_struct *child, int ctxn)
+ 			break;
+ 	}
+ 
++	raw_spin_lock_irqsave(&parent_ctx->lock, flags);
++	parent_ctx->rotate_disable = 0;
++	raw_spin_unlock_irqrestore(&parent_ctx->lock, flags);
++
+ 	child_ctx = child->perf_event_ctxp[ctxn];
+ 
+ 	if (child_ctx && inherited_all) {
+

@@ -1,0 +1,55 @@
+commit 5a51b713ccf8835d5adf7217e2f86eb12b1ca851
+Author: Oleg Nesterov <oleg@tv-sign.ru>
+Date:   Mon Sep 22 14:42:51 2008 -0700
+
+    posix-timers: lock_timer: kill the bogus ->it_id check
+    
+    lock_timer() checks that the timer found by idr_find(timer_id) has ->it_id
+    == timer_id.  This buys nothing.  This check can fail only if
+    sys_timer_create() unlocked idr_lock after idr_get_new(), but didn't set
+    ->it_id = new_timer_id yet.  But in that case ->it_process == NULL so
+    lock_timer() can't succeed anyway.
+    
+    Also remove a couple of unneeded typecasts.
+    
+    Note that with or without this patch we have a small problem.
+    sys_timer_create() doesn't ensure that the result of setting (say)
+    ->it_sigev_notify must be visible if lock_timer() succeeds.
+    
+    Signed-off-by: Oleg Nesterov <oleg@tv-sign.ru>
+    Cc: mingo@elte.hu
+    Cc: Roland McGrath <roland@redhat.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/kernel/posix-timers.c b/kernel/posix-timers.c
+index 3eff47b0d8d5..7185f05d53a9 100644
+--- a/kernel/posix-timers.c
++++ b/kernel/posix-timers.c
+@@ -474,8 +474,7 @@ sys_timer_create(const clockid_t which_clock,
+ 		goto out;
+ 	}
+ 	spin_lock_irq(&idr_lock);
+-	error = idr_get_new(&posix_timers_id, (void *) new_timer,
+-			    &new_timer_id);
++	error = idr_get_new(&posix_timers_id, new_timer, &new_timer_id);
+ 	spin_unlock_irq(&idr_lock);
+ 	if (error) {
+ 		if (error == -EAGAIN)
+@@ -567,12 +566,12 @@ static struct k_itimer * lock_timer(timer_t timer_id, unsigned long *flags)
+ 	 */
+ 
+ 	spin_lock_irqsave(&idr_lock, *flags);
+-	timr = (struct k_itimer *) idr_find(&posix_timers_id, (int) timer_id);
++	timr = idr_find(&posix_timers_id, (int) timer_id);
+ 	if (timr) {
+ 		spin_lock(&timr->it_lock);
+ 
+-		if ((timr->it_id != timer_id) || !(timr->it_process) ||
+-				!same_thread_group(timr->it_process, current)) {
++		if (!timr->it_process ||
++		    !same_thread_group(timr->it_process, current)) {
+ 			spin_unlock(&timr->it_lock);
+ 			spin_unlock_irqrestore(&idr_lock, *flags);
+ 			timr = NULL;
+

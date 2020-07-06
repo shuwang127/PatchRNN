@@ -1,0 +1,195 @@
+commit 57d0a1c1ac9e6a836bbab4698ba2a2e03f64bf1b
+Author: Jesper Dangaard Brouer <brouer@redhat.com>
+Date:   Tue Apr 17 16:46:22 2018 +0200
+
+    xdp: allow page_pool as an allocator type in xdp_return_frame
+    
+    New allocator type MEM_TYPE_PAGE_POOL for page_pool usage.
+    
+    The registered allocator page_pool pointer is not available directly
+    from xdp_rxq_info, but it could be (if needed).  For now, the driver
+    should keep separate track of the page_pool pointer, which it should
+    use for RX-ring page allocation.
+    
+    As suggested by Saeed, to maintain a symmetric API it is the drivers
+    responsibility to allocate/create and free/destroy the page_pool.
+    Thus, after the driver have called xdp_rxq_info_unreg(), it is drivers
+    responsibility to free the page_pool, but with a RCU free call.  This
+    is done easily via the page_pool helper page_pool_destroy() (which
+    avoids touching any driver code during the RCU callback, which could
+    happen after the driver have been unloaded).
+    
+    V8: address issues found by kbuild test robot
+     - Address sparse should be static warnings
+     - Allow xdp.o to be compiled without page_pool.o
+    
+    V9: Remove inline from .c file, compiler knows best
+    
+    Signed-off-by: Jesper Dangaard Brouer <brouer@redhat.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/net/page_pool.h b/include/net/page_pool.h
+index 1fe77db59518..c79087153148 100644
+--- a/include/net/page_pool.h
++++ b/include/net/page_pool.h
+@@ -117,7 +117,12 @@ void __page_pool_put_page(struct page_pool *pool,
+ 
+ static inline void page_pool_put_page(struct page_pool *pool, struct page *page)
+ {
++	/* When page_pool isn't compiled-in, net/core/xdp.c doesn't
++	 * allow registering MEM_TYPE_PAGE_POOL, but shield linker.
++	 */
++#ifdef CONFIG_PAGE_POOL
+ 	__page_pool_put_page(pool, page, false);
++#endif
+ }
+ /* Very limited use-cases allow recycle direct */
+ static inline void page_pool_recycle_direct(struct page_pool *pool,
+@@ -126,4 +131,13 @@ static inline void page_pool_recycle_direct(struct page_pool *pool,
+ 	__page_pool_put_page(pool, page, true);
+ }
+ 
++static inline bool is_page_pool_compiled_in(void)
++{
++#ifdef CONFIG_PAGE_POOL
++	return true;
++#else
++	return false;
++#endif
++}
++
+ #endif /* _NET_PAGE_POOL_H */
+diff --git a/include/net/xdp.h b/include/net/xdp.h
+index 5f67c62540aa..d0ee437753dc 100644
+--- a/include/net/xdp.h
++++ b/include/net/xdp.h
+@@ -36,6 +36,7 @@
+ enum xdp_mem_type {
+ 	MEM_TYPE_PAGE_SHARED = 0, /* Split-page refcnt based model */
+ 	MEM_TYPE_PAGE_ORDER0,     /* Orig XDP full page model */
++	MEM_TYPE_PAGE_POOL,
+ 	MEM_TYPE_MAX,
+ };
+ 
+@@ -44,6 +45,8 @@ struct xdp_mem_info {
+ 	u32 id;
+ };
+ 
++struct page_pool;
++
+ struct xdp_rxq_info {
+ 	struct net_device *dev;
+ 	u32 queue_index;
+diff --git a/net/core/xdp.c b/net/core/xdp.c
+index 8b2cb79b5de0..33e382afbd95 100644
+--- a/net/core/xdp.c
++++ b/net/core/xdp.c
+@@ -8,6 +8,7 @@
+ #include <linux/slab.h>
+ #include <linux/idr.h>
+ #include <linux/rhashtable.h>
++#include <net/page_pool.h>
+ 
+ #include <net/xdp.h>
+ 
+@@ -27,7 +28,10 @@ static struct rhashtable *mem_id_ht;
+ 
+ struct xdp_mem_allocator {
+ 	struct xdp_mem_info mem;
+-	void *allocator;
++	union {
++		void *allocator;
++		struct page_pool *page_pool;
++	};
+ 	struct rhash_head node;
+ 	struct rcu_head rcu;
+ };
+@@ -74,7 +78,9 @@ static void __xdp_mem_allocator_rcu_free(struct rcu_head *rcu)
+ 	/* Allow this ID to be reused */
+ 	ida_simple_remove(&mem_id_pool, xa->mem.id);
+ 
+-	/* TODO: Depending on allocator type/pointer free resources */
++	/* Notice, driver is expected to free the *allocator,
++	 * e.g. page_pool, and MUST also use RCU free.
++	 */
+ 
+ 	/* Poison memory */
+ 	xa->mem.id = 0xFFFF;
+@@ -225,6 +231,17 @@ static int __mem_id_cyclic_get(gfp_t gfp)
+ 	return id;
+ }
+ 
++static bool __is_supported_mem_type(enum xdp_mem_type type)
++{
++	if (type == MEM_TYPE_PAGE_POOL)
++		return is_page_pool_compiled_in();
++
++	if (type >= MEM_TYPE_MAX)
++		return false;
++
++	return true;
++}
++
+ int xdp_rxq_info_reg_mem_model(struct xdp_rxq_info *xdp_rxq,
+ 			       enum xdp_mem_type type, void *allocator)
+ {
+@@ -238,13 +255,16 @@ int xdp_rxq_info_reg_mem_model(struct xdp_rxq_info *xdp_rxq,
+ 		return -EFAULT;
+ 	}
+ 
+-	if (type >= MEM_TYPE_MAX)
+-		return -EINVAL;
++	if (!__is_supported_mem_type(type))
++		return -EOPNOTSUPP;
+ 
+ 	xdp_rxq->mem.type = type;
+ 
+-	if (!allocator)
++	if (!allocator) {
++		if (type == MEM_TYPE_PAGE_POOL)
++			return -EINVAL; /* Setup time check page_pool req */
+ 		return 0;
++	}
+ 
+ 	/* Delay init of rhashtable to save memory if feature isn't used */
+ 	if (!mem_id_init) {
+@@ -290,15 +310,31 @@ EXPORT_SYMBOL_GPL(xdp_rxq_info_reg_mem_model);
+ 
+ void xdp_return_frame(void *data, struct xdp_mem_info *mem)
+ {
+-	if (mem->type == MEM_TYPE_PAGE_SHARED) {
++	struct xdp_mem_allocator *xa;
++	struct page *page;
++
++	switch (mem->type) {
++	case MEM_TYPE_PAGE_POOL:
++		rcu_read_lock();
++		/* mem->id is valid, checked in xdp_rxq_info_reg_mem_model() */
++		xa = rhashtable_lookup(mem_id_ht, &mem->id, mem_id_rht_params);
++		page = virt_to_head_page(data);
++		if (xa)
++			page_pool_put_page(xa->page_pool, page);
++		else
++			put_page(page);
++		rcu_read_unlock();
++		break;
++	case MEM_TYPE_PAGE_SHARED:
+ 		page_frag_free(data);
+-		return;
+-	}
+-
+-	if (mem->type == MEM_TYPE_PAGE_ORDER0) {
+-		struct page *page = virt_to_page(data); /* Assumes order0 page*/
+-
++		break;
++	case MEM_TYPE_PAGE_ORDER0:
++		page = virt_to_page(data); /* Assumes order0 page*/
+ 		put_page(page);
++		break;
++	default:
++		/* Not possible, checked in xdp_rxq_info_reg_mem_model() */
++		break;
+ 	}
+ }
+ EXPORT_SYMBOL_GPL(xdp_return_frame);
+

@@ -1,0 +1,212 @@
+commit 597a711b69cfff95c4b8f6069037e7ad3fc71f56
+Author: NeilBrown <neilb@suse.de>
+Date:   Thu Jun 18 08:47:42 2009 +1000
+
+    md: remove unnecessary arguments from ->reconfig method.
+    
+    Passing the new layout and chunksize as args is not necessary as
+    the mddev has fields for new_check and new_layout.
+    
+    This is preparation for combining the check_reshape and reconfig
+    methods
+    
+    Signed-off-by: NeilBrown <neilb@suse.de>
+
+diff --git a/drivers/md/faulty.c b/drivers/md/faulty.c
+index 8695809b24b0..6513b7b3e379 100644
+--- a/drivers/md/faulty.c
++++ b/drivers/md/faulty.c
+@@ -255,14 +255,14 @@ static void status(struct seq_file *seq, mddev_t *mddev)
+ }
+ 
+ 
+-static int reconfig(mddev_t *mddev, int layout, int chunk_size)
++static int reconfig(mddev_t *mddev)
+ {
+-	int mode = layout & ModeMask;
+-	int count = layout >> ModeShift;
++	int mode = mddev->new_layout & ModeMask;
++	int count = mddev->new_layout >> ModeShift;
+ 	conf_t *conf = mddev->private;
+ 
+-	if (chunk_size != -1)
+-		return -EINVAL;
++	if (mddev->new_layout < 0)
++		return 0;
+ 
+ 	/* new layout */
+ 	if (mode == ClearFaults)
+@@ -279,6 +279,7 @@ static int reconfig(mddev_t *mddev, int layout, int chunk_size)
+ 		atomic_set(&conf->counters[mode], count);
+ 	} else
+ 		return -EINVAL;
++	mddev->new_layout = -1;
+ 	mddev->layout = -1; /* makes sure further changes come through */
+ 	return 0;
+ }
+@@ -315,7 +316,7 @@ static int run(mddev_t *mddev)
+ 	md_set_array_sectors(mddev, faulty_size(mddev, 0, 0));
+ 	mddev->private = conf;
+ 
+-	reconfig(mddev, mddev->layout, -1);
++	reconfig(mddev);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index f996d8342a85..5caa421c2367 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -2809,9 +2809,12 @@ layout_store(mddev_t *mddev, const char *buf, size_t len)
+ 		int err;
+ 		if (mddev->pers->reconfig == NULL)
+ 			return -EBUSY;
+-		err = mddev->pers->reconfig(mddev, n, -1);
+-		if (err)
++		mddev->new_layout = n;
++		err = mddev->pers->reconfig(mddev);
++		if (err) {
++			mddev->new_layout = mddev->layout;
+ 			return err;
++		}
+ 	} else {
+ 		mddev->new_layout = n;
+ 		if (mddev->reshape_position == MaxSector)
+@@ -2884,9 +2887,12 @@ chunk_size_store(mddev_t *mddev, const char *buf, size_t len)
+ 		int err;
+ 		if (mddev->pers->reconfig == NULL)
+ 			return -EBUSY;
+-		err = mddev->pers->reconfig(mddev, -1, n);
+-		if (err)
++		mddev->new_chunk_sectors = n >> 9;
++		err = mddev->pers->reconfig(mddev);
++		if (err) {
++			mddev->new_chunk_sectors = mddev->chunk_sectors;
+ 			return err;
++		}
+ 	} else {
+ 		mddev->new_chunk_sectors = n >> 9;
+ 		if (mddev->reshape_position == MaxSector)
+@@ -5220,8 +5226,13 @@ static int update_array_info(mddev_t *mddev, mdu_array_info_t *info)
+ 		 */
+ 		if (mddev->pers->reconfig == NULL)
+ 			return -EINVAL;
+-		else
+-			return mddev->pers->reconfig(mddev, info->layout, -1);
++		else {
++			mddev->new_layout = info->layout;
++			rv = mddev->pers->reconfig(mddev);
++			if (rv)
++				mddev->new_layout = mddev->layout;
++			return rv;
++		}
+ 	}
+ 	if (info->size >= 0 && mddev->dev_sectors / 2 != info->size)
+ 		rv = update_size(mddev, (sector_t)info->size * 2);
+diff --git a/drivers/md/md.h b/drivers/md/md.h
+index e0a2b8e3985d..815013f8da6c 100644
+--- a/drivers/md/md.h
++++ b/drivers/md/md.h
+@@ -326,7 +326,7 @@ struct mdk_personality
+ 	int (*check_reshape) (mddev_t *mddev);
+ 	int (*start_reshape) (mddev_t *mddev);
+ 	void (*finish_reshape) (mddev_t *mddev);
+-	int (*reconfig) (mddev_t *mddev, int layout, int chunk_size);
++	int (*reconfig) (mddev_t *mddev);
+ 	/* quiesce moves between quiescence states
+ 	 * 0 - fully active
+ 	 * 1 - no new requests allowed
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index b84766e347c3..136051bc6725 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -5165,7 +5165,7 @@ static void *raid5_takeover_raid6(mddev_t *mddev)
+ }
+ 
+ 
+-static int raid5_reconfig(mddev_t *mddev, int new_layout, int new_chunk)
++static int raid5_reconfig(mddev_t *mddev)
+ {
+ 	/* For a 2-drive array, the layout and chunk size can be changed
+ 	 * immediately as not restriping is needed.
+@@ -5173,15 +5173,16 @@ static int raid5_reconfig(mddev_t *mddev, int new_layout, int new_chunk)
+ 	 * to be used by a reshape pass.
+ 	 */
+ 	raid5_conf_t *conf = mddev->private;
++	int new_chunk = mddev->new_chunk_sectors;
+ 
+-	if (new_layout >= 0 && !algorithm_valid_raid5(new_layout))
++	if (mddev->new_layout >= 0 && !algorithm_valid_raid5(mddev->new_layout))
+ 		return -EINVAL;
+ 	if (new_chunk > 0) {
+ 		if (!is_power_of_2(new_chunk))
+ 			return -EINVAL;
+-		if (new_chunk < PAGE_SIZE)
++		if (new_chunk < (PAGE_SIZE>>9))
+ 			return -EINVAL;
+-		if (mddev->array_sectors & ((new_chunk>>9)-1))
++		if (mddev->array_sectors & (new_chunk-1))
+ 			/* not factor of array size */
+ 			return -EINVAL;
+ 	}
+@@ -5189,48 +5190,37 @@ static int raid5_reconfig(mddev_t *mddev, int new_layout, int new_chunk)
+ 	/* They look valid */
+ 
+ 	if (mddev->raid_disks == 2) {
+-
+-		if (new_layout >= 0) {
+-			conf->algorithm = new_layout;
+-			mddev->layout = mddev->new_layout = new_layout;
++		/* can make the change immediately */
++		if (mddev->new_layout >= 0) {
++			conf->algorithm = mddev->new_layout;
++			mddev->layout = mddev->new_layout;
+ 		}
+ 		if (new_chunk > 0) {
+-			conf->chunk_sectors = new_chunk >> 9;
+-			mddev->new_chunk_sectors = new_chunk >> 9;
+-			mddev->chunk_sectors = new_chunk >> 9;
++			conf->chunk_sectors = new_chunk ;
++			mddev->chunk_sectors = new_chunk;
+ 		}
+ 		set_bit(MD_CHANGE_DEVS, &mddev->flags);
+ 		md_wakeup_thread(mddev->thread);
+-	} else {
+-		if (new_layout >= 0)
+-			mddev->new_layout = new_layout;
+-		if (new_chunk > 0)
+-			mddev->new_chunk_sectors = new_chunk >> 9;
+ 	}
+ 	return 0;
+ }
+ 
+-static int raid6_reconfig(mddev_t *mddev, int new_layout, int new_chunk)
++static int raid6_reconfig(mddev_t *mddev)
+ {
+-	if (new_layout >= 0 && !algorithm_valid_raid6(new_layout))
++	int new_chunk = mddev->new_chunk_sectors;
++	if (mddev->new_layout >= 0 && !algorithm_valid_raid6(mddev->new_layout))
+ 		return -EINVAL;
+ 	if (new_chunk > 0) {
+ 		if (!is_power_of_2(new_chunk))
+ 			return -EINVAL;
+-		if (new_chunk < PAGE_SIZE)
++		if (new_chunk < (PAGE_SIZE >> 9))
+ 			return -EINVAL;
+-		if (mddev->array_sectors & ((new_chunk>>9)-1))
++		if (mddev->array_sectors & (new_chunk-1))
+ 			/* not factor of array size */
+ 			return -EINVAL;
+ 	}
+ 
+ 	/* They look valid */
+-
+-	if (new_layout >= 0)
+-		mddev->new_layout = new_layout;
+-	if (new_chunk > 0)
+-		mddev->new_chunk_sectors = new_chunk >> 9;
+-
+ 	return 0;
+ }
+ 
+

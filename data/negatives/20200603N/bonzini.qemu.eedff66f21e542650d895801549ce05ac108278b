@@ -1,0 +1,46 @@
+commit eedff66f21e542650d895801549ce05ac108278b
+Author: Max Reitz <mreitz@redhat.com>
+Date:   Sun Oct 20 20:28:20 2013 +0200
+
+    qcow2: Restore total_sectors value in save_vmstate
+    
+    Since df2a6f29a5, bdrv_co_do_writev increases the total_sectors value of
+    a growable block devices on writes after the current end. This leads to
+    the virtual disk apparently growing in qcow2_save_vmstate, which in turn
+    affects the disk size captured by the internal snapshot taken directly
+    afterwards through e.g. the HMP savevm command. Such a "grown" snapshot
+    cannot be loaded after reopening the qcow2 image, since its disk size
+    differs from the actual virtual disk size (writing a VM state does not
+    actually increase the virtual disk size).
+    
+    Fix this by restoring total_sectors at the end of qcow2_save_vmstate.
+    
+    Signed-off-by: Max Reitz <mreitz@redhat.com>
+    Reviewed-by: Eric Blake <eblake@redhat.com>
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+
+diff --git a/block/qcow2.c b/block/qcow2.c
+index c1abaffa19..4a3e8b45f8 100644
+--- a/block/qcow2.c
++++ b/block/qcow2.c
+@@ -1939,6 +1939,7 @@ static int qcow2_save_vmstate(BlockDriverState *bs, QEMUIOVector *qiov,
+                               int64_t pos)
+ {
+     BDRVQcowState *s = bs->opaque;
++    int64_t total_sectors = bs->total_sectors;
+     int growable = bs->growable;
+     int ret;
+ 
+@@ -1947,6 +1948,11 @@ static int qcow2_save_vmstate(BlockDriverState *bs, QEMUIOVector *qiov,
+     ret = bdrv_pwritev(bs, qcow2_vm_state_offset(s) + pos, qiov);
+     bs->growable = growable;
+ 
++    /* bdrv_co_do_writev will have increased the total_sectors value to include
++     * the VM state - the VM state is however not an actual part of the block
++     * device, therefore, we need to restore the old value. */
++    bs->total_sectors = total_sectors;
++
+     return ret;
+ }
+ 
+

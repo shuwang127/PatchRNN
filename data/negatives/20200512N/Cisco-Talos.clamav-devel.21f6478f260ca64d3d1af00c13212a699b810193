@@ -1,0 +1,226 @@
+commit 21f6478f260ca64d3d1af00c13212a699b810193
+Author: Kevin Lin <klin@sourcefire.com>
+Date:   Fri Jan 29 16:17:40 2016 -0500
+
+    add dconfs for XDP, MBR, GPT, APM, OOXML, MSXML, and HWP formats
+
+diff --git a/libclamav/dconf.c b/libclamav/dconf.c
+index 67faa6fb3..9883b1a44 100644
+--- a/libclamav/dconf.c
++++ b/libclamav/dconf.c
+@@ -103,6 +103,9 @@ static struct dconf_module modules[] = {
+     { "ARCHIVE",    "HFSPLUS",      ARCH_CONF_HFSPLUS,      1 },
+     { "ARCHIVE",    "XZ",       ARCH_CONF_XZ,       1 },
+     { "ARCHIVE",    "PASSWD",   ARCH_CONF_PASSWD,   1 },
++    { "ARCHIVE",    "MBR",      ARCH_CONF_MBR,      1 },
++    { "ARCHIVE",    "GPT",      ARCH_CONF_GPT,      1 },
++    { "ARCHIVE",    "APM",      ARCH_CONF_APM,      1 },
+ 
+     { "DOCUMENT",   "HTML",     DOC_CONF_HTML,      1 },
+     { "DOCUMENT",   "RTF",      DOC_CONF_RTF,       1 },
+@@ -111,6 +114,9 @@ static struct dconf_module modules[] = {
+     { "DOCUMENT",   "HTMLSKIPRAW",  DOC_CONF_HTML_SKIPRAW,  1 },
+     { "DOCUMENT",   "JSNORM",       DOC_CONF_JSNORM,        1 },
+     { "DOCUMENT",   "SWF",      DOC_CONF_SWF,       1 },
++    { "DOCUMENT",   "OOXML",    DOC_CONF_OOXML,     1 },
++    { "DOCUMENT",   "MSPML",    DOC_CONF_MSXML,     1 },
++    { "DOCUMENT",   "HWP",      DOC_CONF_HWP,       1 },
+ 
+     { "MAIL",       "MBOX",     MAIL_CONF_MBOX,     1 },
+     { "MAIL",       "TNEF",     MAIL_CONF_TNEF,     1 },
+diff --git a/libclamav/dconf.h b/libclamav/dconf.h
+index 94646239f..c29699ad4 100644
+--- a/libclamav/dconf.h
++++ b/libclamav/dconf.h
+@@ -91,6 +91,9 @@ struct cli_dconf {
+ #define ARCH_CONF_HFSPLUS   0x100000
+ #define ARCH_CONF_XZ        0x200000
+ #define ARCH_CONF_PASSWD    0x400000
++#define ARCH_CONF_MBR       0x800000
++#define ARCH_CONF_GPT       0x1000000
++#define ARCH_CONF_APM       0x2000000
+ 
+ /* Document flags */
+ #define DOC_CONF_HTML		0x1
+@@ -100,6 +103,9 @@ struct cli_dconf {
+ #define DOC_CONF_HTML_SKIPRAW	0x10
+ #define DOC_CONF_JSNORM         0x20
+ #define DOC_CONF_SWF		0x40
++#define DOC_CONF_MSXML		0x80
++#define DOC_CONF_OOXML		0x100
++#define DOC_CONF_HWP		0x200
+ 
+ /* Mail flags */
+ #define MAIL_CONF_MBOX	    0x1
+diff --git a/libclamav/scanners.c b/libclamav/scanners.c
+index 57e31fa23..1312f269f 100644
+--- a/libclamav/scanners.c
++++ b/libclamav/scanners.c
+@@ -2267,16 +2267,28 @@ static int cli_scanraw(cli_ctx *ctx, cli_file_t type, uint8_t typercg, cli_file_
+         while(fpt) {
+             if(fpt->offset) switch(fpt->type) {
+                 case CL_TYPE_XDP:
+-                    ret = cli_scanxdp(ctx);
++                    if(SCAN_PDF && (DCONF_DOC & DOC_CONF_PDF)) {
++                        cli_dbgmsg("XDP signature found at %u\n", (unsigned int) fpt->offset);
++                        ret = cli_scanxdp(ctx);
++                    }
+                     break;
+                 case CL_TYPE_XML_WORD:
+-                    ret = cli_scanmsxml(ctx);
++                    if(DCONF_DOC & DOC_CONF_MSXML) {
++                        cli_dbgmsg("XML-WORD signature found at %u\n", (unsigned int) fpt->offset);
++                        ret = cli_scanmsxml(ctx);
++                    }
+                     break;
+                 case CL_TYPE_XML_XL:
+-                    ret = cli_scanmsxml(ctx);
++                    if(DCONF_DOC & DOC_CONF_MSXML) {
++                        cli_dbgmsg("XML-XL signature found at %u\n", (unsigned int) fpt->offset);
++                        ret = cli_scanmsxml(ctx);
++                    }
+                     break;
+                 case CL_TYPE_XML_HWP:
+-                    ret = cli_scanhwpml(ctx);
++                    if(DCONF_DOC & DOC_CONF_HWP) {
++                        cli_dbgmsg("XML-HWP signature found at %u\n", (unsigned int) fpt->offset);
++                        ret = cli_scanhwpml(ctx);
++                    }
+                     break;
+                 case CL_TYPE_RARSFX:
+                     if(type != CL_TYPE_RAR && have_rar && SCAN_ARCHIVE && (DCONF_ARCH & ARCH_CONF_RAR)) {
+@@ -2387,24 +2399,24 @@ static int cli_scanraw(cli_ctx *ctx, cli_file_t type, uint8_t typercg, cli_file_
+                 case CL_TYPE_DMG:
+                     if(SCAN_ARCHIVE && (DCONF_ARCH & ARCH_CONF_DMG)) {
+                         ctx->container_type = CL_TYPE_DMG;
+-                        nret = cli_scandmg(ctx);
+                         cli_dbgmsg("DMG signature found at %u\n", (unsigned int) fpt->offset);
++                        nret = cli_scandmg(ctx);
+                     }
+                     break;
+ 
+                 case CL_TYPE_MBR:
+-                    {
++                    if(SCAN_ARCHIVE) {
+                         int iret = cli_mbr_check2(ctx, 0);
+-                        if (iret == CL_TYPE_GPT) {
++                        if ((iret == CL_TYPE_GPT) && (DCONF_ARCH & ARCH_CONF_GPT)) {
+                             cli_dbgmsg("Recognized GUID Partition Table file\n");
+                             ctx->container_type = CL_TYPE_GPT;
+-                            nret = cli_scangpt(ctx, 0);
+                             cli_dbgmsg("GPT signature found at %u\n", (unsigned int) fpt->offset);
++                            nret = cli_scangpt(ctx, 0);
+                         }
+-                        else if (iret == CL_CLEAN) {
++                        else if ((iret == CL_CLEAN) && (DCONF_ARCH & ARCH_CONF_MBR)) {
+                             ctx->container_type = CL_TYPE_MBR;
+-                            nret = cli_scanmbr(ctx, 0);
+                             cli_dbgmsg("MBR signature found at %u\n", (unsigned int) fpt->offset);
++                            nret = cli_scanmbr(ctx, 0);
+                         }
+                     }
+                     break;
+@@ -2845,29 +2857,35 @@ static int magic_scandesc(cli_ctx *ctx, cli_file_t type)
+ 	case CL_TYPE_IGNORED:
+ 	    break;
+ 
+-    case CL_TYPE_HWP3:
+-        ret = cli_scanhwp3(ctx);
+-        break;
++	case CL_TYPE_HWP3:
++	    if(DCONF_DOC & DOC_CONF_HWP)
++		ret = cli_scanhwp3(ctx);
++	    break;
+ 
+-    case CL_TYPE_HWPOLE2:
+-        ret = cli_scanhwpole2(ctx);
+-        break;
++	case CL_TYPE_HWPOLE2:
++	    if(SCAN_OLE2 && (DCONF_ARCH & ARCH_CONF_OLE2))
++		ret = cli_scanhwpole2(ctx);
++	    break;
+ 
+-    case CL_TYPE_XML_WORD:
+-        ret = cli_scanmsxml(ctx);
+-        break;
++	case CL_TYPE_XML_WORD:
++	    if(DCONF_DOC & DOC_CONF_MSXML)
++		ret = cli_scanmsxml(ctx);
++	    break;
+ 
+-    case CL_TYPE_XML_XL:
+-        ret = cli_scanmsxml(ctx);
+-        break;
++	case CL_TYPE_XML_XL:
++	    if(DCONF_DOC & DOC_CONF_MSXML)
++		ret = cli_scanmsxml(ctx);
++	    break;
+ 
+-    case CL_TYPE_XML_HWP:
+-        ret = cli_scanhwpml(ctx);
+-        break;
++	case CL_TYPE_XML_HWP:
++	    if(DCONF_DOC & DOC_CONF_HWP)
++		ret = cli_scanhwpml(ctx);
++	    break;
+ 
+-    case CL_TYPE_XDP:
+-        ret = cli_scanxdp(ctx);
+-        break;
++	case CL_TYPE_XDP:
++	    if(SCAN_PDF && (DCONF_DOC & DOC_CONF_PDF))
++		ret = cli_scanxdp(ctx);
++	    break;
+ 
+ 	case CL_TYPE_RAR:
+ 	    ctx->container_type = CL_TYPE_RAR;
+@@ -2896,17 +2914,22 @@ static int magic_scandesc(cli_ctx *ctx, cli_file_t type)
+ 	case CL_TYPE_OOXML_XL:
+ 	case CL_TYPE_OOXML_HWP:
+ #if HAVE_JSON
+-	    if ((ctx->options & CL_SCAN_FILE_PROPERTIES) && (ctx->wrkproperty != NULL)) {
+-		ret = cli_process_ooxml(ctx, type);
++	    if(DCONF_DOC & DOC_CONF_OOXML) {
++		if ((ctx->options & CL_SCAN_FILE_PROPERTIES) && (ctx->wrkproperty != NULL)) {
++		    ret = cli_process_ooxml(ctx, type);
+ 
+-		if (ret == CL_EMEM || ret == CL_ENULLARG) {
+-		    /* critical error */
+-		    break;
+-		}
+-		else if (ret != CL_SUCCESS) {
+-		    /* allow for the CL_TYPE_ZIP scan to occur; cli_process_ooxml other possible returns: */
+-		    /* CL_ETIMEOUT, CL_EMAXSIZE, CL_EMAXFILES, CL_EPARSE, CL_EFORMAT, CL_BREAK, CL_ESTAT  */
+-		    ret = CL_SUCCESS;
++		    if (ret == CL_EMEM || ret == CL_ENULLARG) {
++			/* critical error */
++			break;
++		    } else if (ret != CL_SUCCESS) {
++			/*
++			 * non-critical return => allow for the CL_TYPE_ZIP scan to occur
++			 * cli_process_ooxml other possible returns:
++			 *   CL_ETIMEOUT, CL_EMAXSIZE, CL_EMAXFILES, CL_EPARSE,
++			 *   CL_EFORMAT, CL_BREAK, CL_ESTAT
++			 */
++			ret = CL_SUCCESS;
++		    }
+ 		}
+ 	    }
+ #endif
+@@ -2932,11 +2955,13 @@ static int magic_scandesc(cli_ctx *ctx, cli_file_t type)
+ 	    break;
+ 
+ 	case CL_TYPE_GPT:
+-	    ret = cli_scangpt(ctx, 0);
++	    if(SCAN_ARCHIVE && (DCONF_ARCH & ARCH_CONF_GPT))
++		ret = cli_scangpt(ctx, 0);
+ 	    break;
+ 
+ 	case CL_TYPE_APM:
+-	    ret = cli_scanapm(ctx);
++	    if(SCAN_ARCHIVE && (DCONF_ARCH & ARCH_CONF_APM))
++		ret = cli_scanapm(ctx);
+ 	    break;
+ 
+ 	case CL_TYPE_ARJ:
+

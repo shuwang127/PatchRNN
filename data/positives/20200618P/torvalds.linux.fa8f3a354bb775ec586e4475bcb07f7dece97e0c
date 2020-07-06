@@ -1,0 +1,59 @@
+commit fa8f3a354bb775ec586e4475bcb07f7dece97e0c
+Author: Stefan Metzmacher <metze@samba.org>
+Date:   Tue May 3 10:52:30 2016 +0200
+
+    fs/cifs: correctly to anonymous authentication for the LANMAN authentication
+    
+    Only server which map unknown users to guest will allow
+    access using a non-null LMChallengeResponse.
+    
+    For Samba it's the "map to guest = bad user" option.
+    
+    BUG: https://bugzilla.samba.org/show_bug.cgi?id=11913
+    
+    Signed-off-by: Stefan Metzmacher <metze@samba.org>
+    CC: Stable <stable@vger.kernel.org>
+    Signed-off-by: Steve French <smfrench@gmail.com>
+
+diff --git a/fs/cifs/sess.c b/fs/cifs/sess.c
+index 09b0201d15d0..b9e2cc1437ef 100644
+--- a/fs/cifs/sess.c
++++ b/fs/cifs/sess.c
+@@ -678,20 +678,24 @@ sess_auth_lanman(struct sess_data *sess_data)
+ 
+ 	pSMB->req.hdr.Flags2 &= ~SMBFLG2_UNICODE;
+ 
+-	/* no capabilities flags in old lanman negotiation */
+-	pSMB->old_req.PasswordLength = cpu_to_le16(CIFS_AUTH_RESP_SIZE);
++	if (ses->user_name != NULL) {
++		/* no capabilities flags in old lanman negotiation */
++		pSMB->old_req.PasswordLength = cpu_to_le16(CIFS_AUTH_RESP_SIZE);
+ 
+-	/* Calculate hash with password and copy into bcc_ptr.
+-	 * Encryption Key (stored as in cryptkey) gets used if the
+-	 * security mode bit in Negottiate Protocol response states
+-	 * to use challenge/response method (i.e. Password bit is 1).
+-	 */
+-	rc = calc_lanman_hash(ses->password, ses->server->cryptkey,
+-			      ses->server->sec_mode & SECMODE_PW_ENCRYPT ?
+-			      true : false, lnm_session_key);
++		/* Calculate hash with password and copy into bcc_ptr.
++		 * Encryption Key (stored as in cryptkey) gets used if the
++		 * security mode bit in Negottiate Protocol response states
++		 * to use challenge/response method (i.e. Password bit is 1).
++		 */
++		rc = calc_lanman_hash(ses->password, ses->server->cryptkey,
++				      ses->server->sec_mode & SECMODE_PW_ENCRYPT ?
++				      true : false, lnm_session_key);
+ 
+-	memcpy(bcc_ptr, (char *)lnm_session_key, CIFS_AUTH_RESP_SIZE);
+-	bcc_ptr += CIFS_AUTH_RESP_SIZE;
++		memcpy(bcc_ptr, (char *)lnm_session_key, CIFS_AUTH_RESP_SIZE);
++		bcc_ptr += CIFS_AUTH_RESP_SIZE;
++	} else {
++		pSMB->old_req.PasswordLength = 0;
++	}
+ 
+ 	/*
+ 	 * can not sign if LANMAN negotiated so no need
+

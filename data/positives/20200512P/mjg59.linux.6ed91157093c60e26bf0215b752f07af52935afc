@@ -1,0 +1,60 @@
+commit 6ed91157093c60e26bf0215b752f07af52935afc
+Author: Clemens Ladisch <clemens@ladisch.de>
+Date:   Thu Feb 19 08:38:25 2009 +0100
+
+    sound: oxygen: allocate model_data dynamically
+    
+    Allocate the model-specific data dynamically instead of including it in
+    the memory block of the card structure.  This will allow us to determine
+    the actual model after the card creation.
+    
+    Signed-off-by: Clemens Ladisch <clemens@ladisch.de>
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+diff --git a/sound/pci/oxygen/oxygen_lib.c b/sound/pci/oxygen/oxygen_lib.c
+index b5560fa5a5e3..228f30800fd9 100644
+--- a/sound/pci/oxygen/oxygen_lib.c
++++ b/sound/pci/oxygen/oxygen_lib.c
+@@ -446,6 +446,7 @@ static void oxygen_card_free(struct snd_card *card)
+ 		free_irq(chip->irq, chip);
+ 	flush_scheduled_work();
+ 	chip->model.cleanup(chip);
++	kfree(chip->model_data);
+ 	mutex_destroy(&chip->mutex);
+ 	pci_release_regions(chip->pci);
+ 	pci_disable_device(chip->pci);
+@@ -460,8 +461,7 @@ int oxygen_pci_probe(struct pci_dev *pci, int index, char *id,
+ 	struct oxygen *chip;
+ 	int err;
+ 
+-	err = snd_card_create(index, id, owner,
+-			      sizeof(*chip) + model->model_data_size, &card);
++	err = snd_card_create(index, id, owner, sizeof(*chip), &card);
+ 	if (err < 0)
+ 		return err;
+ 
+@@ -470,7 +470,6 @@ int oxygen_pci_probe(struct pci_dev *pci, int index, char *id,
+ 	chip->pci = pci;
+ 	chip->irq = -1;
+ 	chip->model = *model;
+-	chip->model_data = chip + 1;
+ 	spin_lock_init(&chip->reg_lock);
+ 	mutex_init(&chip->mutex);
+ 	INIT_WORK(&chip->spdif_input_bits_work,
+@@ -496,6 +495,15 @@ int oxygen_pci_probe(struct pci_dev *pci, int index, char *id,
+ 	}
+ 	chip->addr = pci_resource_start(pci, 0);
+ 
++	if (chip->model.model_data_size) {
++		chip->model_data = kmalloc(chip->model.model_data_size,
++					   GFP_KERNEL);
++		if (!chip->model_data) {
++			err = -ENOMEM;
++			goto err_pci_regions;
++		}
++	}
++
+ 	pci_set_master(pci);
+ 	snd_card_set_dev(card, &pci->dev);
+ 	card->private_free = oxygen_card_free;
+

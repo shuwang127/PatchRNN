@@ -1,0 +1,167 @@
+commit 08e98fc6016c890c2f4ffba6decc0ca9d2d5d7f8
+Author: Ming Lei <ming.lei@canonical.com>
+Date:   Thu Sep 25 23:23:38 2014 +0800
+
+    blk-mq: handle failure path for initializing hctx
+    
+    Failure of initializing one hctx isn't handled, so this patch
+    introduces blk_mq_init_hctx() and its pair to handle it explicitly.
+    Also this patch makes code cleaner.
+    
+    Reviewed-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Ming Lei <ming.lei@canonical.com>
+    Signed-off-by: Jens Axboe <axboe@fb.com>
+
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index a3a80884ed95..66ef1fb79326 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -1509,6 +1509,20 @@ static int blk_mq_hctx_notify(void *data, unsigned long action,
+ 	return NOTIFY_OK;
+ }
+ 
++static void blk_mq_exit_hctx(struct request_queue *q,
++		struct blk_mq_tag_set *set,
++		struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
++{
++	blk_mq_tag_idle(hctx);
++
++	if (set->ops->exit_hctx)
++		set->ops->exit_hctx(hctx, hctx_idx);
++
++	blk_mq_unregister_cpu_notifier(&hctx->cpu_notifier);
++	kfree(hctx->ctxs);
++	blk_mq_free_bitmap(&hctx->ctx_map);
++}
++
+ static void blk_mq_exit_hw_queues(struct request_queue *q,
+ 		struct blk_mq_tag_set *set, int nr_queue)
+ {
+@@ -1518,17 +1532,8 @@ static void blk_mq_exit_hw_queues(struct request_queue *q,
+ 	queue_for_each_hw_ctx(q, hctx, i) {
+ 		if (i == nr_queue)
+ 			break;
+-
+-		blk_mq_tag_idle(hctx);
+-
+-		if (set->ops->exit_hctx)
+-			set->ops->exit_hctx(hctx, i);
+-
+-		blk_mq_unregister_cpu_notifier(&hctx->cpu_notifier);
+-		kfree(hctx->ctxs);
+-		blk_mq_free_bitmap(&hctx->ctx_map);
++		blk_mq_exit_hctx(q, set, hctx, i);
+ 	}
+-
+ }
+ 
+ static void blk_mq_free_hw_queues(struct request_queue *q,
+@@ -1543,53 +1548,72 @@ static void blk_mq_free_hw_queues(struct request_queue *q,
+ 	}
+ }
+ 
+-static int blk_mq_init_hw_queues(struct request_queue *q,
+-		struct blk_mq_tag_set *set)
++static int blk_mq_init_hctx(struct request_queue *q,
++		struct blk_mq_tag_set *set,
++		struct blk_mq_hw_ctx *hctx, unsigned hctx_idx)
+ {
+-	struct blk_mq_hw_ctx *hctx;
+-	unsigned int i;
++	int node;
++
++	node = hctx->numa_node;
++	if (node == NUMA_NO_NODE)
++		node = hctx->numa_node = set->numa_node;
++
++	INIT_DELAYED_WORK(&hctx->run_work, blk_mq_run_work_fn);
++	INIT_DELAYED_WORK(&hctx->delay_work, blk_mq_delay_work_fn);
++	spin_lock_init(&hctx->lock);
++	INIT_LIST_HEAD(&hctx->dispatch);
++	hctx->queue = q;
++	hctx->queue_num = hctx_idx;
++	hctx->flags = set->flags;
++	hctx->cmd_size = set->cmd_size;
++
++	blk_mq_init_cpu_notifier(&hctx->cpu_notifier,
++					blk_mq_hctx_notify, hctx);
++	blk_mq_register_cpu_notifier(&hctx->cpu_notifier);
++
++	hctx->tags = set->tags[hctx_idx];
+ 
+ 	/*
+-	 * Initialize hardware queues
++	 * Allocate space for all possible cpus to avoid allocation at
++	 * runtime
+ 	 */
+-	queue_for_each_hw_ctx(q, hctx, i) {
+-		int node;
++	hctx->ctxs = kmalloc_node(nr_cpu_ids * sizeof(void *),
++					GFP_KERNEL, node);
++	if (!hctx->ctxs)
++		goto unregister_cpu_notifier;
+ 
+-		node = hctx->numa_node;
+-		if (node == NUMA_NO_NODE)
+-			node = hctx->numa_node = set->numa_node;
++	if (blk_mq_alloc_bitmap(&hctx->ctx_map, node))
++		goto free_ctxs;
+ 
+-		INIT_DELAYED_WORK(&hctx->run_work, blk_mq_run_work_fn);
+-		INIT_DELAYED_WORK(&hctx->delay_work, blk_mq_delay_work_fn);
+-		spin_lock_init(&hctx->lock);
+-		INIT_LIST_HEAD(&hctx->dispatch);
+-		hctx->queue = q;
+-		hctx->queue_num = i;
+-		hctx->flags = set->flags;
+-		hctx->cmd_size = set->cmd_size;
++	hctx->nr_ctx = 0;
+ 
+-		blk_mq_init_cpu_notifier(&hctx->cpu_notifier,
+-						blk_mq_hctx_notify, hctx);
+-		blk_mq_register_cpu_notifier(&hctx->cpu_notifier);
++	if (set->ops->init_hctx &&
++	    set->ops->init_hctx(hctx, set->driver_data, hctx_idx))
++		goto free_bitmap;
+ 
+-		hctx->tags = set->tags[i];
++	return 0;
+ 
+-		/*
+-		 * Allocate space for all possible cpus to avoid allocation at
+-		 * runtime
+-		 */
+-		hctx->ctxs = kmalloc_node(nr_cpu_ids * sizeof(void *),
+-						GFP_KERNEL, node);
+-		if (!hctx->ctxs)
+-			break;
++ free_bitmap:
++	blk_mq_free_bitmap(&hctx->ctx_map);
++ free_ctxs:
++	kfree(hctx->ctxs);
++ unregister_cpu_notifier:
++	blk_mq_unregister_cpu_notifier(&hctx->cpu_notifier);
+ 
+-		if (blk_mq_alloc_bitmap(&hctx->ctx_map, node))
+-			break;
++	return -1;
++}
+ 
+-		hctx->nr_ctx = 0;
++static int blk_mq_init_hw_queues(struct request_queue *q,
++		struct blk_mq_tag_set *set)
++{
++	struct blk_mq_hw_ctx *hctx;
++	unsigned int i;
+ 
+-		if (set->ops->init_hctx &&
+-		    set->ops->init_hctx(hctx, set->driver_data, i))
++	/*
++	 * Initialize hardware queues
++	 */
++	queue_for_each_hw_ctx(q, hctx, i) {
++		if (blk_mq_init_hctx(q, set, hctx, i))
+ 			break;
+ 	}
+ 
+

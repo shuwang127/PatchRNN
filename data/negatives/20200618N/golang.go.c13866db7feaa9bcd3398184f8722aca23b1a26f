@@ -1,0 +1,75 @@
+commit c13866db7feaa9bcd3398184f8722aca23b1a26f
+Author: Rémy Oudompheng <oudomphe@phare.normalesup.org>
+Date:   Sat Jan 12 09:16:50 2013 +0100
+
+    cmd/5c: fix handling of side effects when assigning a struct literal.
+    
+    Also undo revision a5b96b602690 used to workaround the bug.
+    
+    Fixes #4643.
+    
+    R=rsc, golang-dev, dave, minux.ma, lucio.dere, bradfitz
+    CC=golang-dev
+    https://golang.org/cl/7090043
+
+diff --git a/src/cmd/5c/cgen.c b/src/cmd/5c/cgen.c
+index 9e74f515b0..5ff4f633d1 100644
+--- a/src/cmd/5c/cgen.c
++++ b/src/cmd/5c/cgen.c
+@@ -950,9 +950,9 @@ sugen(Node *n, Node *nn, int32 w)
+ 
+ 	case OSTRUCT:
+ 		/*
+-		 * rewrite so lhs has no fn call
++		 * rewrite so lhs has no side effect.
+ 		 */
+-		if(nn != Z && nn->complex >= FNX) {
++		if(nn != Z && side(nn)) {
+ 			nod1 = *n;
+ 			nod1.type = typ(TIND, n->type);
+ 			regret(&nod2, &nod1);
+diff --git a/src/pkg/runtime/mgc0.c b/src/pkg/runtime/mgc0.c
+index e39e10f93c..b612e6216a 100644
+--- a/src/pkg/runtime/mgc0.c
++++ b/src/pkg/runtime/mgc0.c
+@@ -338,8 +338,7 @@ flushptrbuf(PtrTarget *ptrbuf, PtrTarget **ptrbufpos, Obj **_wp, Workbuf **_wbuf
+ 			if((bits & (bitAllocated|bitMarked)) != bitAllocated)
+ 				continue;
+ 
+-			*bitbufpos = (BitTarget){obj, ti, bitp, shift};
+-			bitbufpos++;
++			*bitbufpos++ = (BitTarget){obj, ti, bitp, shift};
+ 		}
+ 
+ 		runtime·lock(&lock);
+@@ -542,8 +541,7 @@ scanblock(Workbuf *wbuf, Obj *wp, uintptr nobj, bool keepworking)
+ 			
+ 			// iface->tab
+ 			if((void*)iface->tab >= arena_start && (void*)iface->tab < arena_used) {
+-				*ptrbufpos = (PtrTarget){iface->tab, (uintptr)itabtype->gc};
+-				ptrbufpos++;
++				*ptrbufpos++ = (PtrTarget){iface->tab, (uintptr)itabtype->gc};
+ 				if(ptrbufpos == ptrbuf_end)
+ 					flushptrbuf(ptrbuf, &ptrbufpos, &wp, &wbuf, &nobj, bitbuf);
+ 			}
+@@ -570,8 +568,7 @@ scanblock(Workbuf *wbuf, Obj *wp, uintptr nobj, bool keepworking)
+ 				stack_top.b += PtrSize;
+ 				obj = *(byte**)i;
+ 				if(obj >= arena_start && obj < arena_used) {
+-					*ptrbufpos = (PtrTarget){obj, 0};
+-					ptrbufpos++;
++					*ptrbufpos++ = (PtrTarget){obj, 0};
+ 					if(ptrbufpos == ptrbuf_end)
+ 						flushptrbuf(ptrbuf, &ptrbufpos, &wp, &wbuf, &nobj, bitbuf);
+ 				}
+@@ -657,8 +654,7 @@ scanblock(Workbuf *wbuf, Obj *wp, uintptr nobj, bool keepworking)
+ 		}
+ 
+ 		if(obj >= arena_start && obj < arena_used) {
+-			*ptrbufpos = (PtrTarget){obj, objti};
+-			ptrbufpos++;
++			*ptrbufpos++ = (PtrTarget){obj, objti};
+ 			if(ptrbufpos == ptrbuf_end)
+ 				flushptrbuf(ptrbuf, &ptrbufpos, &wp, &wbuf, &nobj, bitbuf);
+ 		}
+

@@ -1,0 +1,61 @@
+commit 23f6b63af62b848207ed91e9e19d66eb7d25b213
+Author: Jilles Tjoelker <jilles@stack.nl>
+Date:   Fri Feb 17 00:09:39 2012 +0100
+
+    Send forward channel when bans are added/removed because of TS/bursts.
+    
+    If a netburst adds bans or a channel TS change removes bans, +b/-b modes
+    are generated. Make sure these contain the forward channel, if any.
+    
+    This appears also broken in ircd-seven.
+
+diff --git a/modules/core/m_join.c b/modules/core/m_join.c
+index 7b8193a7..1257fb58 100644
+--- a/modules/core/m_join.c
++++ b/modules/core/m_join.c
+@@ -1268,7 +1268,8 @@ remove_ban_list(struct Channel *chptr, struct Client *source_p,
+ 		banptr = ptr->data;
+ 
+ 		/* trailing space, and the mode letter itself */
+-		plen = strlen(banptr->banstr) + 2;
++		plen = strlen(banptr->banstr) +
++			(banptr->forward ? strlen(banptr->forward) + 1 : 0) + 2;
+ 
+ 		if(count >= MAXMODEPARAMS || (cur_len + plen) > BUFSIZE - 4)
+ 		{
+@@ -1286,7 +1287,10 @@ remove_ban_list(struct Channel *chptr, struct Client *source_p,
+ 
+ 		*mbuf++ = c;
+ 		cur_len += plen;
+-		pbuf += rb_sprintf(pbuf, "%s ", banptr->banstr);
++		if (banptr->forward)
++			pbuf += rb_sprintf(pbuf, "%s$%s ", banptr->banstr, banptr->forward);
++		else
++			pbuf += rb_sprintf(pbuf, "%s ", banptr->banstr);
+ 		count++;
+ 
+ 		free_ban(banptr);
+diff --git a/modules/core/m_mode.c b/modules/core/m_mode.c
+index f4b837bc..f89c2955 100644
+--- a/modules/core/m_mode.c
++++ b/modules/core/m_mode.c
+@@ -346,7 +346,7 @@ ms_bmask(struct Client *client_p, struct Client *source_p, int parc, const char
+ 		{
+ 			*forward++ = '\0';
+ 			if(*forward == '\0')
+-				forward = NULL;
++				tlen--, forward = NULL;
+ 		}
+ 
+ 		if(add_id(fakesource_p, chptr, s, forward, banlist, mode_type))
+@@ -366,6 +366,9 @@ ms_bmask(struct Client *client_p, struct Client *source_p, int parc, const char
+ 				plen = modecount = 0;
+ 			}
+ 
++			if (forward != NULL)
++				forward[-1] = '$';
++
+ 			*mbuf++ = parv[3][0];
+ 			arglen = rb_sprintf(pbuf, "%s ", s);
+ 			pbuf += arglen;
+

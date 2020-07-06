@@ -1,0 +1,167 @@
+commit e6140d90520eca4505d65557ea40369dcf0dec89
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+Date:   Tue Apr 4 22:39:59 2006 +0000
+
+    Don't use BLCKSZ for the physical length of the pg_control file, but
+    instead a dedicated symbol.  This probably makes no functional difference
+    for likely values of BLCKSZ, but it makes the intent clearer.
+    Simon Riggs, minor editorialization by Tom Lane.
+
+diff --git a/src/backend/access/transam/xlog.c b/src/backend/access/transam/xlog.c
+index a4ae78bcde..a29246ac23 100644
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -7,7 +7,7 @@
+  * Portions Copyright (c) 1996-2006, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+- * $PostgreSQL: pgsql/src/backend/access/transam/xlog.c,v 1.232 2006/04/03 23:35:03 tgl Exp $
++ * $PostgreSQL: pgsql/src/backend/access/transam/xlog.c,v 1.233 2006/04/04 22:39:59 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -3391,7 +3391,7 @@ static void
+ WriteControlFile(void)
+ {
+ 	int			fd;
+-	char		buffer[BLCKSZ]; /* need not be aligned */
++	char		buffer[PG_CONTROL_SIZE]; /* need not be aligned */
+ 	char	   *localeptr;
+ 
+ 	/*
+@@ -3437,17 +3437,16 @@ WriteControlFile(void)
+ 	FIN_CRC32(ControlFile->crc);
+ 
+ 	/*
+-	 * We write out BLCKSZ bytes into pg_control, zero-padding the excess over
+-	 * sizeof(ControlFileData).  This reduces the odds of premature-EOF errors
+-	 * when reading pg_control.  We'll still fail when we check the contents
+-	 * of the file, but hopefully with a more specific error than "couldn't
+-	 * read pg_control".
++	 * We write out PG_CONTROL_SIZE bytes into pg_control, zero-padding the
++	 * excess over sizeof(ControlFileData).  This reduces the odds of
++	 * premature-EOF errors when reading pg_control.  We'll still fail when we
++	 * check the contents of the file, but hopefully with a more specific
++	 * error than "couldn't read pg_control".
+ 	 */
+-	if (sizeof(ControlFileData) > BLCKSZ)
+-		ereport(PANIC,
+-				(errmsg("sizeof(ControlFileData) is larger than BLCKSZ; fix either one")));
++	if (sizeof(ControlFileData) > PG_CONTROL_SIZE)
++		elog(PANIC, "sizeof(ControlFileData) is larger than PG_CONTROL_SIZE; fix either one");
+ 
+-	memset(buffer, 0, BLCKSZ);
++	memset(buffer, 0, PG_CONTROL_SIZE);
+ 	memcpy(buffer, ControlFile, sizeof(ControlFileData));
+ 
+ 	fd = BasicOpenFile(XLOG_CONTROL_FILE,
+@@ -3460,7 +3459,7 @@ WriteControlFile(void)
+ 						XLOG_CONTROL_FILE)));
+ 
+ 	errno = 0;
+-	if (write(fd, buffer, BLCKSZ) != BLCKSZ)
++	if (write(fd, buffer, PG_CONTROL_SIZE) != PG_CONTROL_SIZE)
+ 	{
+ 		/* if write didn't set errno, assume problem is no disk space */
+ 		if (errno == 0)
+diff --git a/src/bin/pg_resetxlog/pg_resetxlog.c b/src/bin/pg_resetxlog/pg_resetxlog.c
+index c680ecdbb2..89ba857a78 100644
+--- a/src/bin/pg_resetxlog/pg_resetxlog.c
++++ b/src/bin/pg_resetxlog/pg_resetxlog.c
+@@ -23,7 +23,7 @@
+  * Portions Copyright (c) 1996-2006, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+- * $PostgreSQL: pgsql/src/bin/pg_resetxlog/pg_resetxlog.c,v 1.41 2006/04/03 23:35:04 tgl Exp $
++ * $PostgreSQL: pgsql/src/bin/pg_resetxlog/pg_resetxlog.c,v 1.42 2006/04/04 22:39:59 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -365,9 +365,9 @@ ReadControlFile(void)
+ 	}
+ 
+ 	/* Use malloc to ensure we have a maxaligned buffer */
+-	buffer = (char *) malloc(BLCKSZ);
++	buffer = (char *) malloc(PG_CONTROL_SIZE);
+ 
+-	len = read(fd, buffer, BLCKSZ);
++	len = read(fd, buffer, PG_CONTROL_SIZE);
+ 	if (len < 0)
+ 	{
+ 		fprintf(stderr, _("%s: could not read file \"%s\": %s\n"),
+@@ -546,7 +546,7 @@ static void
+ RewriteControlFile(void)
+ {
+ 	int			fd;
+-	char		buffer[BLCKSZ]; /* need not be aligned */
++	char		buffer[PG_CONTROL_SIZE]; /* need not be aligned */
+ 
+ 	/*
+ 	 * Adjust fields as needed to force an empty XLOG starting at the next
+@@ -587,21 +587,21 @@ RewriteControlFile(void)
+ 	FIN_CRC32(ControlFile.crc);
+ 
+ 	/*
+-	 * We write out BLCKSZ bytes into pg_control, zero-padding the excess over
+-	 * sizeof(ControlFileData).  This reduces the odds of premature-EOF errors
+-	 * when reading pg_control.  We'll still fail when we check the contents
+-	 * of the file, but hopefully with a more specific error than "couldn't
+-	 * read pg_control".
++	 * We write out PG_CONTROL_SIZE bytes into pg_control, zero-padding the
++	 * excess over sizeof(ControlFileData).  This reduces the odds of
++	 * premature-EOF errors when reading pg_control.  We'll still fail when we
++	 * check the contents of the file, but hopefully with a more specific
++	 * error than "couldn't read pg_control".
+ 	 */
+-	if (sizeof(ControlFileData) > BLCKSZ)
++	if (sizeof(ControlFileData) > PG_CONTROL_SIZE)
+ 	{
+ 		fprintf(stderr,
+-				_("%s: internal error -- sizeof(ControlFileData) is too large ... fix xlog.c\n"),
++				_("%s: internal error -- sizeof(ControlFileData) is too large ... fix PG_CONTROL_SIZE\n"),
+ 				progname);
+ 		exit(1);
+ 	}
+ 
+-	memset(buffer, 0, BLCKSZ);
++	memset(buffer, 0, PG_CONTROL_SIZE);
+ 	memcpy(buffer, &ControlFile, sizeof(ControlFileData));
+ 
+ 	unlink(XLOG_CONTROL_FILE);
+@@ -617,7 +617,7 @@ RewriteControlFile(void)
+ 	}
+ 
+ 	errno = 0;
+-	if (write(fd, buffer, BLCKSZ) != BLCKSZ)
++	if (write(fd, buffer, PG_CONTROL_SIZE) != PG_CONTROL_SIZE)
+ 	{
+ 		/* if write didn't set errno, assume problem is no disk space */
+ 		if (errno == 0)
+diff --git a/src/include/catalog/pg_control.h b/src/include/catalog/pg_control.h
+index ba54fdc8e6..02c51dd9f3 100644
+--- a/src/include/catalog/pg_control.h
++++ b/src/include/catalog/pg_control.h
+@@ -8,7 +8,7 @@
+  * Portions Copyright (c) 1996-2006, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+- * $PostgreSQL: pgsql/src/include/catalog/pg_control.h,v 1.28 2006/04/03 23:35:05 tgl Exp $
++ * $PostgreSQL: pgsql/src/include/catalog/pg_control.h,v 1.29 2006/04/04 22:39:59 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -147,4 +147,13 @@ typedef struct ControlFileData
+ 	pg_crc32	crc;
+ } ControlFileData;
+ 
++/*
++ * Physical size of the pg_control file.  Note that this is considerably
++ * bigger than the actually used size (ie, sizeof(ControlFileData)).
++ * The idea is to keep the physical size constant independent of format
++ * changes, so that ReadControlFile will deliver a suitable wrong-version
++ * message instead of a read error if it's looking at an incompatible file.
++ */
++#define PG_CONTROL_SIZE		8192
++
+ #endif   /* PG_CONTROL_H */
+

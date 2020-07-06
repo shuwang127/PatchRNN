@@ -1,0 +1,272 @@
+commit 24b8bdfdf831b3bc017514ff76260aa386ee59f2
+Author: Marti Maria <info@littlecms.com>
+Date:   Tue May 22 20:51:20 2012 +0200
+
+    Include contributed extra checks
+
+diff --git a/src/cmscgats.c b/src/cmscgats.c
+index 5f482a1..152eef5 100644
+--- a/src/cmscgats.c
++++ b/src/cmscgats.c
+@@ -612,7 +612,7 @@ cmsFloat64Number ParseFloatNumber(const char *Buffer)
+     }
+ 
+ 
+-    while (*Buffer && isdigit(*Buffer)) {
++    while (*Buffer && isdigit((int) *Buffer)) {
+ 
+         dnum = dnum * 10.0 + (*Buffer - '0');
+         if (*Buffer) Buffer++;
+@@ -625,7 +625,7 @@ cmsFloat64Number ParseFloatNumber(const char *Buffer)
+ 
+         if (*Buffer) Buffer++; 
+ 
+-        while (*Buffer && isdigit(*Buffer)) {
++        while (*Buffer && isdigit((int) *Buffer)) {
+ 
+             frac = frac * 10.0 + (*Buffer - '0');
+             prec++;
+@@ -657,7 +657,7 @@ cmsFloat64Number ParseFloatNumber(const char *Buffer)
+             }
+ 
+             e = 0;
+-            while (*Buffer && isdigit(*Buffer)) {
++            while (*Buffer && isdigit((int) *Buffer)) {
+ 
+                 if ((cmsFloat64Number) e * 10L < INT_MAX)
+                     e = e * 10 + (*Buffer - '0');
+diff --git a/src/cmslut.c b/src/cmslut.c
+index 8f1febf..bcbfe72 100644
+--- a/src/cmslut.c
++++ b/src/cmslut.c
+@@ -284,6 +284,7 @@ cmsStage* CMSEXPORT cmsStageAllocToneCurves(cmsContext ContextID, cmsUInt32Numbe
+             cmsStageFree(NewMPE); 
+             return NULL;
+         }
++
+     }
+ 
+    return NewMPE;
+diff --git a/src/cmsopt.c b/src/cmsopt.c
+index 7b99c5e..1347e3d 100644
+--- a/src/cmsopt.c
++++ b/src/cmsopt.c
+@@ -465,6 +465,8 @@ cmsBool FixWhiteMisalignment(cmsPipeline* Lut, cmsColorSpaceSignature EntryColor
+         &WhitePointOut, NULL, &nOuts)) return FALSE;
+ 
+     // It needs to be fixed?
++    if (Lut ->InputChannels != nIns) return FALSE;
++    if (Lut ->OutputChannels != nOuts) return FALSE;
+ 
+     cmsPipelineEval16(WhitePointIn, ObtainedOut, Lut);
+ 
+diff --git a/src/cmstypes.c b/src/cmstypes.c
+index 7a8c5c8..2d4d2b2 100644
+--- a/src/cmstypes.c
++++ b/src/cmstypes.c
+@@ -1106,6 +1106,9 @@ void *Type_Curve_Read(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, cm
+ 
+            default:  // Curve
+ 
++               if (Count > 0x7FFF) 
++                   return NULL; // This is to prevent bad guys for doing bad things
++
+                NewGamma = cmsBuildTabulatedToneCurve16(self ->ContextID, Count, NULL);
+                if (!NewGamma) return NULL;
+ 
+@@ -1692,7 +1695,7 @@ cmsBool Write8bitTables(cmsContext ContextID, cmsIOHANDLER* io, cmsUInt32Number
+ 
+ // Check overflow
+ static
+-unsigned int uipow(cmsUInt32Number n, cmsUInt32Number a, cmsUInt32Number b) 
++size_t uipow(cmsUInt32Number n, cmsUInt32Number a, cmsUInt32Number b) 
+ {
+     cmsUInt32Number rv = 1, rc;
+ 
+@@ -1704,13 +1707,13 @@ unsigned int uipow(cmsUInt32Number n, cmsUInt32Number a, cmsUInt32Number b)
+         rv *= a;
+ 
+         // Check for overflow
+-        if (rv > UINT_MAX / a) return 0;
++        if (rv > UINT_MAX / a) return (size_t) -1;
+ 
+     }
+     
+     rc = rv * n;
+ 
+-    if (rv != rc / n) return 0;
++    if (rv != rc / n) return (size_t) -1;
+     return rc;
+ }
+ 
+@@ -1772,6 +1775,7 @@ void *Type_LUT8_Read(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, cms
+     
+     // Get 3D CLUT. Check the overflow....
+     nTabSize = uipow(OutputChannels, CLUTpoints, InputChannels);
++    if (nTabSize == (size_t) -1) goto Error;
+     if (nTabSize > 0) {
+ 
+         cmsUInt16Number *PtrW, *T;
+@@ -1899,6 +1903,7 @@ cmsBool  Type_LUT8_Write(struct _cms_typehandler_struct* self, cmsIOHANDLER* io,
+     if (!Write8bitTables(self ->ContextID, io, NewLUT ->InputChannels, PreMPE)) return FALSE;
+ 
+     nTabSize = uipow(NewLUT->OutputChannels, clutPoints, NewLUT ->InputChannels);
++    if (nTabSize == (size_t) -1) return FALSE;
+     if (nTabSize > 0) {
+ 
+         // The 3D CLUT.
+@@ -2055,7 +2060,6 @@ void *Type_LUT16_Read(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, cm
+ 
+ 
+     // Only operates on 3 channels
+-
+     if ((InputChannels == 3) && !_cmsMAT3isIdentity((cmsMAT3*) Matrix)) {
+ 
+         mpemat = cmsStageAllocMatrix(self ->ContextID, 3, 3, Matrix, NULL);
+@@ -2063,15 +2067,18 @@ void *Type_LUT16_Read(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, cm
+         cmsPipelineInsertStage(NewLUT, cmsAT_END, mpemat);
+     }
+ 
+-    if (!_cmsReadUInt16Number(io, &InputEntries)) return NULL;
+-    if (!_cmsReadUInt16Number(io, &OutputEntries)) return NULL; 
++    if (!_cmsReadUInt16Number(io, &InputEntries)) goto Error;
++    if (!_cmsReadUInt16Number(io, &OutputEntries)) goto Error; 
++
++    if (InputEntries > 0x7FFF || OutputEntries > 0x7FFF) goto Error;
++    if (CLUTpoints == 1) goto Error; // Impossible value, 0 for no CLUT and then 2 at least
+ 
+-    
+     // Get input tables
+     if (!Read16bitTables(self ->ContextID, io,  NewLUT, InputChannels, InputEntries)) goto Error;
+ 
+     // Get 3D CLUT
+     nTabSize = uipow(OutputChannels, CLUTpoints, InputChannels);
++    if (nTabSize == (size_t) -1) goto Error;
+     if (nTabSize > 0) {
+ 
+         cmsUInt16Number *T;
+@@ -2212,7 +2219,7 @@ cmsBool  Type_LUT16_Write(struct _cms_typehandler_struct* self, cmsIOHANDLER* io
+     }
+ 
+     nTabSize = uipow(OutputChannels, clutPoints, InputChannels);
+-
++    if (nTabSize == (size_t) -1) return FALSE;
+     if (nTabSize > 0) {
+         // The 3D CLUT.
+         if (clut != NULL) {
+@@ -2304,8 +2311,12 @@ cmsStage* ReadCLUT(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, cmsUI
+     if (!io -> Seek(io, Offset)) return NULL;
+     if (io -> Read(io, gridPoints8, cmsMAXCHANNELS, 1) != 1) return NULL;
+ 
+-    for (i=0; i < cmsMAXCHANNELS; i++)
++
++    for (i=0; i < cmsMAXCHANNELS; i++) {
++
++        if (gridPoints8[i] == 1) return NULL; // Impossible value, 0 for no CLUT and then 2 at least
+         GridPoints[i] = gridPoints8[i];
++    }
+ 
+     if (!_cmsReadUInt8Number(io, &Precision)) return NULL;
+ 
+@@ -2391,6 +2402,7 @@ cmsStage* ReadSetOfCurves(struct _cms_typehandler_struct* self, cmsIOHANDLER* io
+         Curves[i] = ReadEmbeddedCurve(self, io);                     
+         if (Curves[i] == NULL) goto Error;
+         if (!_cmsReadAlignment(io)) goto Error;   
++
+     }
+ 
+     Lin = cmsStageAllocToneCurves(self ->ContextID, nCurves, Curves);
+@@ -2458,27 +2470,32 @@ void* Type_LUTA2B_Read(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, c
+ 
+     if (offsetA!= 0) {
+         mpe = ReadSetOfCurves(self, io, BaseOffset + offsetA, inputChan);
++        if (mpe == NULL) { cmsPipelineFree(NewLUT); return NULL; }
+         cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
+     }
+ 
+     if (offsetC != 0) {
+         mpe = ReadCLUT(self, io, BaseOffset + offsetC, inputChan, outputChan);
+-        if (mpe != NULL) cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
++        if (mpe == NULL) { cmsPipelineFree(NewLUT); return NULL; }
++        cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
+     }
+ 
+     if (offsetM != 0) {
+         mpe = ReadSetOfCurves(self, io, BaseOffset + offsetM, outputChan);
+-        if (mpe != NULL) cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
++        if (mpe == NULL) { cmsPipelineFree(NewLUT); return NULL; }
++        cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
+     }
+ 
+     if (offsetMat != 0) {           
+         mpe = ReadMatrix(self, io, BaseOffset + offsetMat);
+-        if (mpe != NULL) cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
++        if (mpe == NULL) { cmsPipelineFree(NewLUT); return NULL; }
++        cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
+     }
+ 
+     if (offsetB != 0) {                                        
+         mpe = ReadSetOfCurves(self, io, BaseOffset + offsetB, outputChan);
+-        if (mpe != NULL) cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
++        if (mpe == NULL) { cmsPipelineFree(NewLUT); return NULL; }
++        cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
+     }
+       
+     *nItems = 1;
+@@ -2773,27 +2790,32 @@ void* Type_LUTB2A_Read(struct _cms_typehandler_struct* self, cmsIOHANDLER* io, c
+     
+     if (offsetB != 0) {                                        
+         mpe = ReadSetOfCurves(self, io, BaseOffset + offsetB, inputChan);
+-        if (mpe != NULL) cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
++        if (mpe == NULL) { cmsPipelineFree(NewLUT); return NULL; }
++        cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
+     }
+ 
+     if (offsetMat != 0) {           
+         mpe = ReadMatrix(self, io, BaseOffset + offsetMat);
+-        if (mpe != NULL) cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
++        if (mpe == NULL) { cmsPipelineFree(NewLUT); return NULL; }
++        cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
+     }
+ 
+     if (offsetM != 0) {
+         mpe = ReadSetOfCurves(self, io, BaseOffset + offsetM, inputChan);
+-        if (mpe != NULL) cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
++        if (mpe == NULL) { cmsPipelineFree(NewLUT); return NULL; }
++        cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
+     }
+ 
+     if (offsetC != 0) {
+         mpe = ReadCLUT(self, io, BaseOffset + offsetC, inputChan, outputChan);
+-        if (mpe != NULL) cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
++        if (mpe == NULL) { cmsPipelineFree(NewLUT); return NULL; }
++        cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
+     }
+ 
+     if (offsetA!= 0) {
+         mpe = ReadSetOfCurves(self, io, BaseOffset + offsetA, outputChan);
+-        if (mpe != NULL) cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
++        if (mpe == NULL) { cmsPipelineFree(NewLUT); return NULL; }
++        cmsPipelineInsertStage(NewLUT, cmsAT_END, mpe);
+     }
+ 
+     *nItems = 1;
+diff --git a/src/cmsxform.c b/src/cmsxform.c
+index aa6b41c..73db5e2 100644
+--- a/src/cmsxform.c
++++ b/src/cmsxform.c
+@@ -644,6 +644,13 @@ cmsHTRANSFORM CMSEXPORT cmsCreateExtendedTransform(cmsContext ContextID,
+         return NULL;
+     }
+ 
++    // Check channel count
++    if ((cmsChannelsOf(EntryColorSpace) != cmsPipelineInputChannels(Lut)) ||
++        (cmsChannelsOf(ExitColorSpace)  != cmsPipelineOutputChannels(Lut))) {
++        cmsSignalError(ContextID, cmsERROR_NOT_SUITABLE, "Channel count doesn't match. Profile is corrupted");   
++        return NULL;    
++    }
++
+    
+     // All seems ok
+     xform = AllocEmptyTransform(ContextID, Lut, LastIntent, &InputFormat, &OutputFormat, &dwFlags);
+

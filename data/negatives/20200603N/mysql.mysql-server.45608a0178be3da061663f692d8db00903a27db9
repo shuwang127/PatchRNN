@@ -1,0 +1,73 @@
+commit 45608a0178be3da061663f692d8db00903a27db9
+Author: jonas@perch.ndb.mysql.com <>
+Date:   Thu Feb 23 14:20:47 2006 +0100
+
+    ndb dd - bug#17536
+    Fix incorrect assumption that sync(lsn) will be in order
+      keep track of max sync(lsn)
+
+diff --git a/storage/ndb/src/kernel/blocks/lgman.cpp b/storage/ndb/src/kernel/blocks/lgman.cpp
+index 906c4408d3b..879d09689c4 100644
+--- a/storage/ndb/src/kernel/blocks/lgman.cpp
++++ b/storage/ndb/src/kernel/blocks/lgman.cpp
+@@ -839,6 +839,7 @@ Lgman::Logfile_group::Logfile_group(const CreateFilegroupImplReq* req)
+   m_last_lsn = 0;
+   m_last_synced_lsn = 0;
+   m_last_sync_req_lsn = 0;
++  m_max_sync_req_lsn = 0;
+   m_last_read_lsn = 0;
+   m_file_pos[0].m_ptr_i= m_file_pos[1].m_ptr_i = RNIL;
+ 
+@@ -1049,8 +1050,11 @@ Logfile_client::sync_lsn(Signal* signal,
+       wait.p->m_sync_lsn= lsn;
+       memcpy(&wait.p->m_callback, &req->m_callback, 
+ 	     sizeof(SimulatedBlock::Callback));
+-    }
+ 
++      ptr.p->m_max_sync_req_lsn = lsn > ptr.p->m_max_sync_req_lsn ?
++	lsn : ptr.p->m_max_sync_req_lsn;
++    }
++    
+     if(ptr.p->m_last_sync_req_lsn < lsn && 
+        ! (ptr.p->m_state & Lgman::Logfile_group::LG_FORCE_SYNC_THREAD))
+     { 
+@@ -1111,16 +1115,16 @@ Lgman::force_log_sync(Signal* signal,
+   }
+ 
+   
+-  Ptr<Lgman::Log_waiter> last;
+-  if(list.last(last) && 
+-     last.p->m_sync_lsn > force_lsn && 
+-     ptr.p->m_last_sync_req_lsn < last.p->m_sync_lsn)
++  
++  Uint64 max_req_lsn = ptr.p->m_max_sync_req_lsn;
++  if(max_req_lsn > force_lsn && 
++     max_req_lsn > ptr.p->m_last_sync_req_lsn)
+   {
+     ndbrequire(ptr.p->m_state & Lgman::Logfile_group::LG_FORCE_SYNC_THREAD);
+     signal->theData[0] = LgmanContinueB::FORCE_LOG_SYNC;
+     signal->theData[1] = ptr.i;
+-    signal->theData[2] = last.p->m_sync_lsn >> 32;
+-    signal->theData[3] = last.p->m_sync_lsn & 0xFFFFFFFF;    
++    signal->theData[2] = max_req_lsn >> 32;
++    signal->theData[3] = max_req_lsn & 0xFFFFFFFF;    
+     sendSignalWithDelay(reference(), GSN_CONTINUEB, signal, 10, 4);
+   }
+   else
+diff --git a/storage/ndb/src/kernel/blocks/lgman.hpp b/storage/ndb/src/kernel/blocks/lgman.hpp
+index 143f5c8ca1c..2a20bc01df1 100644
+--- a/storage/ndb/src/kernel/blocks/lgman.hpp
++++ b/storage/ndb/src/kernel/blocks/lgman.hpp
+@@ -183,8 +183,9 @@ public:
+                                   Logfile_group::LG_FLUSH_THREAD;
+     
+     Uint64 m_last_lsn;
+-    Uint64 m_last_sync_req_lsn;
+-    Uint64 m_last_synced_lsn;
++    Uint64 m_last_sync_req_lsn; // Outstanding
++    Uint64 m_last_synced_lsn;   // 
++    Uint64 m_max_sync_req_lsn;  // User requested lsn
+     union {
+       Uint64 m_last_read_lsn;
+       Uint64 m_last_lcp_lsn;
+

@@ -1,0 +1,147 @@
+commit 3b59b6beb423267e8fe2ef3596d98aba0b910341
+Author: Tony Lindgren <tony@atomide.com>
+Date:   Sun Jul 10 19:58:09 2005 +0100
+
+    [PATCH] ARM: 2800/1: OMAP update 3/11: Move OMAP1 core code into mach-omap1 directory
+    
+    Patch from Tony Lindgren
+    
+    This patch by Paul Mundt and other OMAP developers
+    moves OMAP1 specific IRQ, time, and FPGA code into
+    mach-omap1 directory.
+    
+    Signed-off-by: Tony Lindgren <tony@atomide.com>
+    Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+
+diff --git a/arch/arm/mach-omap/fpga.c b/arch/arm/mach-omap1/fpga.c
+similarity index 100%
+rename from arch/arm/mach-omap/fpga.c
+rename to arch/arm/mach-omap1/fpga.c
+diff --git a/arch/arm/mach-omap/irq.c b/arch/arm/mach-omap1/irq.c
+similarity index 94%
+rename from arch/arm/mach-omap/irq.c
+rename to arch/arm/mach-omap1/irq.c
+index f01c99266a86..a11b6d807352 100644
+--- a/arch/arm/mach-omap/irq.c
++++ b/arch/arm/mach-omap1/irq.c
+@@ -56,6 +56,7 @@
+ struct omap_irq_bank {
+ 	unsigned long base_reg;
+ 	unsigned long trigger_map;
++	unsigned long wake_enable;
+ };
+ 
+ static unsigned int irq_bank_count = 0;
+@@ -105,6 +106,19 @@ static void omap_mask_ack_irq(unsigned int irq)
+ 	omap_ack_irq(irq);
+ }
+ 
++static int omap_wake_irq(unsigned int irq, unsigned int enable)
++{
++	int bank = IRQ_BANK(irq);
++
++	if (enable)
++		irq_banks[bank].wake_enable |= IRQ_BIT(irq);
++	else
++		irq_banks[bank].wake_enable &= ~IRQ_BIT(irq);
++
++	return 0;
++}
++
++
+ /*
+  * Allows tuning the IRQ type and priority
+  *
+@@ -145,7 +159,7 @@ static struct omap_irq_bank omap1510_irq_banks[] = {
+ static struct omap_irq_bank omap1610_irq_banks[] = {
+ 	{ .base_reg = OMAP_IH1_BASE, 		.trigger_map = 0xb3fefe8f },
+ 	{ .base_reg = OMAP_IH2_BASE, 		.trigger_map = 0xfdb7c1fd },
+-	{ .base_reg = OMAP_IH2_BASE + 0x100,	.trigger_map = 0xfffff7ff },
++	{ .base_reg = OMAP_IH2_BASE + 0x100,	.trigger_map = 0xffffb7ff },
+ 	{ .base_reg = OMAP_IH2_BASE + 0x200,	.trigger_map = 0xffffffff },
+ };
+ #endif
+@@ -154,6 +168,7 @@ static struct irqchip omap_irq_chip = {
+ 	.ack    = omap_mask_ack_irq,
+ 	.mask   = omap_mask_irq,
+ 	.unmask = omap_unmask_irq,
++	.wake	= omap_wake_irq,
+ };
+ 
+ void __init omap_init_irq(void)
+diff --git a/arch/arm/mach-omap/time.c b/arch/arm/mach-omap1/time.c
+similarity index 95%
+rename from arch/arm/mach-omap/time.c
+rename to arch/arm/mach-omap1/time.c
+index dd34e9f4c413..d540539c9bbb 100644
+--- a/arch/arm/mach-omap/time.c
++++ b/arch/arm/mach-omap1/time.c
+@@ -1,5 +1,5 @@
+ /*
+- * linux/arch/arm/mach-omap/time.c
++ * linux/arch/arm/mach-omap1/time.c
+  *
+  * OMAP Timers
+  *
+@@ -58,17 +58,9 @@ struct sys_timer omap_timer;
+  * MPU timer
+  * ---------------------------------------------------------------------------
+  */
+-#define OMAP_MPU_TIMER1_BASE		(0xfffec500)
+-#define OMAP_MPU_TIMER2_BASE		(0xfffec600)
+-#define OMAP_MPU_TIMER3_BASE		(0xfffec700)
+ #define OMAP_MPU_TIMER_BASE		OMAP_MPU_TIMER1_BASE
+ #define OMAP_MPU_TIMER_OFFSET		0x100
+ 
+-#define MPU_TIMER_FREE			(1 << 6)
+-#define MPU_TIMER_CLOCK_ENABLE		(1 << 5)
+-#define MPU_TIMER_AR			(1 << 1)
+-#define MPU_TIMER_ST			(1 << 0)
+-
+ /* cycles to nsec conversions taken from arch/i386/kernel/timers/timer_tsc.c,
+  * converted to use kHz by Kevin Hilman */
+ /* convert from cycles(64bits) => nanoseconds (64bits)
+@@ -255,6 +247,13 @@ unsigned long long sched_clock(void)
+ #define OMAP_32K_TIMER_TCR		0x04
+ 
+ #define OMAP_32K_TICKS_PER_HZ		(32768 / HZ)
++#if (32768 % HZ) != 0
++/* We cannot ignore modulo.
++ * Potential error can be as high as several percent.
++ */
++#define OMAP_32K_TICK_MODULO		(32768 % HZ)
++static unsigned modulo_count = 0; /* Counts 1/HZ units */
++#endif
+ 
+ /*
+  * TRM says 1 / HZ = ( TVR + 1) / 32768, so TRV = (32768 / HZ) - 1
+@@ -331,6 +330,19 @@ static irqreturn_t omap_32k_timer_interrupt(int irq, void *dev_id,
+ 	now = omap_32k_sync_timer_read();
+ 
+ 	while (now - omap_32k_last_tick >= OMAP_32K_TICKS_PER_HZ) {
++#ifdef OMAP_32K_TICK_MODULO
++		/* Modulo addition may put omap_32k_last_tick ahead of now
++		 * and cause unwanted repetition of the while loop.
++		 */
++		if (unlikely(now - omap_32k_last_tick == ~0))
++			break;
++
++		modulo_count += OMAP_32K_TICK_MODULO;
++		if (modulo_count > HZ) {
++			++omap_32k_last_tick;
++			modulo_count -= HZ;
++		}
++#endif
+ 		omap_32k_last_tick += OMAP_32K_TICKS_PER_HZ;
+ 		timer_tick(regs);
+ 	}
+@@ -407,7 +419,7 @@ static __init void omap_init_32k_timer(void)
+  * Timer initialization
+  * ---------------------------------------------------------------------------
+  */
+-void __init omap_timer_init(void)
++static void __init omap_timer_init(void)
+ {
+ #if defined(CONFIG_OMAP_MPU_TIMER)
+ 	omap_init_mpu_timer();
+

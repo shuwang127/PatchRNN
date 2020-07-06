@@ -1,0 +1,104 @@
+commit 32b62f446827f696cc474a6d83cea93693c5ed49
+Author: Peter Zijlstra <peterz@infradead.org>
+Date:   Fri Mar 25 15:52:35 2016 +0100
+
+    perf/x86/amd: Cleanup Fam10h NB event constraints
+    
+    Avoid allocating the AMD NB event constraints data structure when not
+    needed. This gets rid of x86_max_cores usage and avoids allocating
+    this on AMD Core Perfctr supporting hardware (which has separate MSRs
+    for NB events).
+    
+    Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+    Signed-off-by: Borislav Petkov <bp@suse.de>
+    Cc: aherrmann@suse.com
+    Cc: Rui Huang <ray.huang@amd.com>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: jencce.kernel@gmail.com
+    Link: http://lkml.kernel.org/r/20160320124629.GY6375@twins.programming.kicks-ass.net
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/arch/x86/events/amd/core.c b/arch/x86/events/amd/core.c
+index 049ada8d4e9c..86a9bec18dab 100644
+--- a/arch/x86/events/amd/core.c
++++ b/arch/x86/events/amd/core.c
+@@ -369,7 +369,7 @@ static int amd_pmu_cpu_prepare(int cpu)
+ 
+ 	WARN_ON_ONCE(cpuc->amd_nb);
+ 
+-	if (boot_cpu_data.x86_max_cores < 2)
++	if (!x86_pmu.amd_nb_constraints)
+ 		return NOTIFY_OK;
+ 
+ 	cpuc->amd_nb = amd_alloc_nb(cpu);
+@@ -388,7 +388,7 @@ static void amd_pmu_cpu_starting(int cpu)
+ 
+ 	cpuc->perf_ctr_virt_mask = AMD64_EVENTSEL_HOSTONLY;
+ 
+-	if (boot_cpu_data.x86_max_cores < 2)
++	if (!x86_pmu.amd_nb_constraints)
+ 		return;
+ 
+ 	nb_id = amd_get_nb_id(cpu);
+@@ -414,7 +414,7 @@ static void amd_pmu_cpu_dead(int cpu)
+ {
+ 	struct cpu_hw_events *cpuhw;
+ 
+-	if (boot_cpu_data.x86_max_cores < 2)
++	if (!x86_pmu.amd_nb_constraints)
+ 		return;
+ 
+ 	cpuhw = &per_cpu(cpu_hw_events, cpu);
+@@ -648,6 +648,8 @@ static __initconst const struct x86_pmu amd_pmu = {
+ 	.cpu_prepare		= amd_pmu_cpu_prepare,
+ 	.cpu_starting		= amd_pmu_cpu_starting,
+ 	.cpu_dead		= amd_pmu_cpu_dead,
++
++	.amd_nb_constraints	= 1,
+ };
+ 
+ static int __init amd_core_pmu_init(void)
+@@ -674,6 +676,11 @@ static int __init amd_core_pmu_init(void)
+ 	x86_pmu.eventsel	= MSR_F15H_PERF_CTL;
+ 	x86_pmu.perfctr		= MSR_F15H_PERF_CTR;
+ 	x86_pmu.num_counters	= AMD64_NUM_COUNTERS_CORE;
++	/*
++	 * AMD Core perfctr has separate MSRs for the NB events, see
++	 * the amd/uncore.c driver.
++	 */
++	x86_pmu.amd_nb_constraints = 0;
+ 
+ 	pr_cont("core perfctr, ");
+ 	return 0;
+@@ -693,6 +700,14 @@ __init int amd_pmu_init(void)
+ 	if (ret)
+ 		return ret;
+ 
++	if (num_possible_cpus() == 1) {
++		/*
++		 * No point in allocating data structures to serialize
++		 * against other CPUs, when there is only the one CPU.
++		 */
++		x86_pmu.amd_nb_constraints = 0;
++	}
++
+ 	/* Events are common for all AMDs */
+ 	memcpy(hw_cache_event_ids, amd_hw_cache_event_ids,
+ 	       sizeof(hw_cache_event_ids));
+diff --git a/arch/x86/events/perf_event.h b/arch/x86/events/perf_event.h
+index ba6ef18528c9..716d0482f5db 100644
+--- a/arch/x86/events/perf_event.h
++++ b/arch/x86/events/perf_event.h
+@@ -607,6 +607,11 @@ struct x86_pmu {
+ 	 */
+ 	atomic_t	lbr_exclusive[x86_lbr_exclusive_max];
+ 
++	/*
++	 * AMD bits
++	 */
++	unsigned int	amd_nb_constraints : 1;
++
+ 	/*
+ 	 * Extra registers for events
+ 	 */
+

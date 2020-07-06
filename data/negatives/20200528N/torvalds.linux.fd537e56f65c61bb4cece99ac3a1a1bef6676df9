@@ -1,0 +1,86 @@
+commit fd537e56f65c61bb4cece99ac3a1a1bef6676df9
+Author: Srivatsa S. Bhat <srivatsa.bhat@linux.vnet.ibm.com>
+Date:   Tue Mar 11 02:08:09 2014 +0530
+
+    x86, intel, rapl: Fix CPU hotplug callback registration
+    
+    Subsystems that want to register CPU hotplug callbacks, as well as perform
+    initialization for the CPUs that are already online, often do it as shown
+    below:
+    
+            get_online_cpus();
+    
+            for_each_online_cpu(cpu)
+                    init_cpu(cpu);
+    
+            register_cpu_notifier(&foobar_cpu_notifier);
+    
+            put_online_cpus();
+    
+    This is wrong, since it is prone to ABBA deadlocks involving the
+    cpu_add_remove_lock and the cpu_hotplug.lock (when running concurrently
+    with CPU hotplug operations).
+    
+    Instead, the correct and race-free way of performing the callback
+    registration is:
+    
+            cpu_notifier_register_begin();
+    
+            for_each_online_cpu(cpu)
+                    init_cpu(cpu);
+    
+            /* Note the use of the double underscored version of the API */
+            __register_cpu_notifier(&foobar_cpu_notifier);
+    
+            cpu_notifier_register_done();
+    
+    Fix the intel rapl code in x86 by using this latter form of callback
+    registration.
+    
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Cc: Ingo Molnar <mingo@kernel.org>
+    Cc: Arnaldo Carvalho de Melo <acme@ghostprotocols.net>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: "H. Peter Anvin" <hpa@zytor.com>
+    Signed-off-by: Srivatsa S. Bhat <srivatsa.bhat@linux.vnet.ibm.com>
+    Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+
+diff --git a/arch/x86/kernel/cpu/perf_event_intel_rapl.c b/arch/x86/kernel/cpu/perf_event_intel_rapl.c
+index 5ad35ad94d0f..059218ed5208 100644
+--- a/arch/x86/kernel/cpu/perf_event_intel_rapl.c
++++ b/arch/x86/kernel/cpu/perf_event_intel_rapl.c
+@@ -646,19 +646,20 @@ static int __init rapl_pmu_init(void)
+ 		/* unsupported */
+ 		return 0;
+ 	}
+-	get_online_cpus();
++
++	cpu_notifier_register_begin();
+ 
+ 	for_each_online_cpu(cpu) {
+ 		rapl_cpu_prepare(cpu);
+ 		rapl_cpu_init(cpu);
+ 	}
+ 
+-	perf_cpu_notifier(rapl_cpu_notifier);
++	__perf_cpu_notifier(rapl_cpu_notifier);
+ 
+ 	ret = perf_pmu_register(&rapl_pmu_class, "power", -1);
+ 	if (WARN_ON(ret)) {
+ 		pr_info("RAPL PMU detected, registration failed (%d), RAPL PMU disabled\n", ret);
+-		put_online_cpus();
++		cpu_notifier_register_done();
+ 		return -1;
+ 	}
+ 
+@@ -672,7 +673,7 @@ static int __init rapl_pmu_init(void)
+ 		hweight32(rapl_cntr_mask),
+ 		ktime_to_ms(pmu->timer_interval));
+ 
+-	put_online_cpus();
++	cpu_notifier_register_done();
+ 
+ 	return 0;
+ }
+

@@ -1,0 +1,51 @@
+commit c6112bd86bc8f727bb732a47f2133e0ff12beda9
+Author: Mark Lord <liml@rtr.ca>
+Date:   Wed Jun 18 12:13:02 2008 -0400
+
+    sata_mv: warn on PIO with multiple DRQs
+    
+    Chip errata sometimes prevents reliable use of PIO commands which involve
+    more than a single DRQ (data request).  In normal operation, libata should
+    not generate such PIO commands (uses DMA instead), but they could be sent
+    in via SG_IO from userspace.
+    
+    A full workaround might be to break up such commands into sequences
+    of single DRQ ones, but that's just way too complex for something
+    that doesn't normally happen in real life.
+    
+    So, allow the attempt (it often works, despite the errata),
+    but log the event for reference when somebody screams.
+    
+    Signed-off-by: Mark Lord <mlord@pobox.com>
+    Signed-off-by: Jeff Garzik <jgarzik@redhat.com>
+
+diff --git a/drivers/ata/sata_mv.c b/drivers/ata/sata_mv.c
+index 75fde48e1a73..28092bc50146 100644
+--- a/drivers/ata/sata_mv.c
++++ b/drivers/ata/sata_mv.c
+@@ -1595,6 +1595,24 @@ static unsigned int mv_qc_issue(struct ata_queued_cmd *qc)
+ 
+ 	if ((qc->tf.protocol != ATA_PROT_DMA) &&
+ 	    (qc->tf.protocol != ATA_PROT_NCQ)) {
++		static int limit_warnings = 10;
++		/*
++		 * Errata SATA#16, SATA#24: warn if multiple DRQs expected.
++		 *
++		 * Someday, we might implement special polling workarounds
++		 * for these, but it all seems rather unnecessary since we
++		 * normally use only DMA for commands which transfer more
++		 * than a single block of data.
++		 *
++		 * Much of the time, this could just work regardless.
++		 * So for now, just log the incident, and allow the attempt.
++		 */
++		if (limit_warnings && (qc->nbytes / qc->sect_size) > 1) {
++			--limit_warnings;
++			ata_link_printk(qc->dev->link, KERN_WARNING, DRV_NAME
++					": attempting PIO w/multiple DRQ: "
++					"this may fail due to h/w errata\n");
++		}
+ 		/*
+ 		 * We're about to send a non-EDMA capable command to the
+ 		 * port.  Turn off EDMA so there won't be problems accessing
+

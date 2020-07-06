@@ -1,0 +1,88 @@
+commit 006a851b10a395955c153a145ad8241494d43688
+Author: Steven J. Hill <sjhill@mips.com>
+Date:   Tue Jun 26 04:11:03 2012 +0000
+
+    MIPS: Add support for the 1074K core.
+    
+    Signed-off-by: Steven J. Hill <sjhill@mips.com>
+
+diff --git a/arch/mips/include/asm/cpu.h b/arch/mips/include/asm/cpu.h
+index f21b7c04e95a..20c27501b2a8 100644
+--- a/arch/mips/include/asm/cpu.h
++++ b/arch/mips/include/asm/cpu.h
+@@ -94,6 +94,7 @@
+ #define PRID_IMP_24KE		0x9600
+ #define PRID_IMP_74K		0x9700
+ #define PRID_IMP_1004K		0x9900
++#define PRID_IMP_1074K		0x9a00
+ #define PRID_IMP_M14KC		0x9c00
+ 
+ /*
+diff --git a/arch/mips/include/asm/mipsregs.h b/arch/mips/include/asm/mipsregs.h
+index 7f87d824eeb0..60731ff40f41 100644
+--- a/arch/mips/include/asm/mipsregs.h
++++ b/arch/mips/include/asm/mipsregs.h
+@@ -596,6 +596,8 @@
+ #define MIPS_CONF4_MMUEXTDEF	(_ULCAST_(3) << 14)
+ #define MIPS_CONF4_MMUEXTDEF_MMUSIZEEXT (_ULCAST_(1) << 14)
+ 
++#define MIPS_CONF6_SYND		(_ULCAST_(1) << 13)
++
+ #define MIPS_CONF7_WII		(_ULCAST_(1) << 31)
+ 
+ #define MIPS_CONF7_RPS		(_ULCAST_(1) << 2)
+diff --git a/arch/mips/kernel/cpu-probe.c b/arch/mips/kernel/cpu-probe.c
+index 1b51046191e8..ed3eaf6409b4 100644
+--- a/arch/mips/kernel/cpu-probe.c
++++ b/arch/mips/kernel/cpu-probe.c
+@@ -857,6 +857,10 @@ static inline void cpu_probe_mips(struct cpuinfo_mips *c, unsigned int cpu)
+ 		c->cputype = CPU_1004K;
+ 		__cpu_name[cpu] = "MIPS 1004Kc";
+ 		break;
++	case PRID_IMP_1074K:
++		c->cputype = CPU_74K;
++		__cpu_name[cpu] = "MIPS 1074Kc";
++		break;
+ 	}
+ 
+ 	spram_config();
+diff --git a/arch/mips/mm/c-r4k.c b/arch/mips/mm/c-r4k.c
+index f092c265dc63..4c32ede464b5 100644
+--- a/arch/mips/mm/c-r4k.c
++++ b/arch/mips/mm/c-r4k.c
+@@ -786,6 +786,25 @@ static inline void rm7k_erratum31(void)
+ 	}
+ }
+ 
++static inline void alias_74k_erratum(struct cpuinfo_mips *c)
++{
++	/*
++	 * Early versions of the 74K do not update the cache tags on a
++	 * vtag miss/ptag hit which can occur in the case of KSEG0/KUSEG
++	 * aliases. In this case it is better to treat the cache as always
++	 * having aliases.
++	 */
++	if ((c->processor_id & 0xff) <= PRID_REV_ENCODE_332(2, 4, 0))
++		c->dcache.flags |= MIPS_CACHE_VTAG;
++	if ((c->processor_id & 0xff) == PRID_REV_ENCODE_332(2, 4, 0))
++		write_c0_config6(read_c0_config6() | MIPS_CONF6_SYND);
++	if (((c->processor_id & 0xff00) == PRID_IMP_1074K) &&
++	    ((c->processor_id & 0xff) <= PRID_REV_ENCODE_332(1, 1, 0))) {
++		c->dcache.flags |= MIPS_CACHE_VTAG;
++		write_c0_config6(read_c0_config6() | MIPS_CONF6_SYND);
++	}
++}
++
+ static char *way_string[] __cpuinitdata = { NULL, "direct mapped", "2-way",
+ 	"3-way", "4-way", "5-way", "6-way", "7-way", "8-way"
+ };
+@@ -1056,6 +1075,8 @@ static void __cpuinit probe_pcache(void)
+ 	case CPU_34K:
+ 	case CPU_74K:
+ 	case CPU_1004K:
++		if (c->cputype == CPU_74K)
++			alias_74k_erratum(c);
+ 		if ((read_c0_config7() & (1 << 16))) {
+ 			/* effectively physically indexed dcache,
+ 			   thus no virtual aliases. */
+

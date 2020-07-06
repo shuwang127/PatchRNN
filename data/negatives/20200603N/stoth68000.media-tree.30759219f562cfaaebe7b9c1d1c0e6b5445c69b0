@@ -1,0 +1,38 @@
+commit 30759219f562cfaaebe7b9c1d1c0e6b5445c69b0
+Author: Michal Kubeček <mkubecek@suse.cz>
+Date:   Fri May 27 17:53:52 2016 +0200
+
+    net: disable fragment reassembly if high_thresh is zero
+    
+    Before commit 6d7b857d541e ("net: use lib/percpu_counter API for
+    fragmentation mem accounting"), setting the reassembly high threshold
+    to 0 prevented fragment reassembly as first fragment would be always
+    evicted before second could be added to the queue. While inefficient,
+    some users apparently relied on this method.
+    
+    Since the commit mentioned above, a percpu counter is used for
+    reassembly memory accounting and high batch size avoids taking slow path
+    in most common scenarios. As a result, a whole full sized packet can be
+    reassembled without the percpu counter's main counter changing its value
+    so that even with high_thresh set to 0, fragmented packets can be still
+    reassembled and processed.
+    
+    Add explicit check preventing reassembly if high threshold is zero.
+    
+    Signed-off-by: Michal Kubecek <mkubecek@suse.cz>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv4/inet_fragment.c b/net/ipv4/inet_fragment.c
+index 3a88b0c73797..b5e9317eaf9e 100644
+--- a/net/ipv4/inet_fragment.c
++++ b/net/ipv4/inet_fragment.c
+@@ -355,7 +355,7 @@ static struct inet_frag_queue *inet_frag_alloc(struct netns_frags *nf,
+ {
+ 	struct inet_frag_queue *q;
+ 
+-	if (frag_mem_limit(nf) > nf->high_thresh) {
++	if (!nf->high_thresh || frag_mem_limit(nf) > nf->high_thresh) {
+ 		inet_frag_schedule_worker(f);
+ 		return NULL;
+ 	}
+

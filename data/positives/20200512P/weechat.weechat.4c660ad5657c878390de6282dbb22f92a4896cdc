@@ -1,0 +1,207 @@
+commit 4c660ad5657c878390de6282dbb22f92a4896cdc
+Author: Sebastien Helleu <flashcode@flashtux.org>
+Date:   Sat Jul 10 12:29:20 2004 +0000
+
+    Free all buffers when exiting from WeeChat
+
+diff --git a/src/gui/gui-common.c b/src/gui/gui-common.c
+index 877ded5e4..ea5aa61bc 100644
+--- a/src/gui/gui-common.c
++++ b/src/gui/gui-common.c
+@@ -346,7 +346,7 @@ gui_line_free (t_gui_line *line)
+  */
+ 
+ void
+-gui_buffer_free (t_gui_buffer *buffer)
++gui_buffer_free (t_gui_buffer *buffer, int switch_to_another)
+ {
+     t_gui_window *ptr_win;
+     t_gui_buffer *ptr_buffer;
+@@ -355,11 +355,14 @@ gui_buffer_free (t_gui_buffer *buffer)
+     
+     create_new = (buffer->server || buffer->channel);
+     
+-    for (ptr_win = gui_windows; ptr_win; ptr_win = ptr_win->next_window)
++    if (switch_to_another)
+     {
+-        if ((buffer == ptr_win->buffer) &&
+-            ((buffer->next_buffer) || (buffer->prev_buffer)))
+-            gui_switch_to_previous_buffer (ptr_win);
++        for (ptr_win = gui_windows; ptr_win; ptr_win = ptr_win->next_window)
++        {
++            if ((buffer == ptr_win->buffer) &&
++                ((buffer->next_buffer) || (buffer->prev_buffer)))
++                gui_switch_to_previous_buffer (ptr_win);
++        }
+     }
+     
+     /* decrease buffer number for all next buffers */
+@@ -393,7 +396,7 @@ gui_buffer_free (t_gui_buffer *buffer)
+     free (buffer);
+     
+     /* always at least one buffer */
+-    if (!gui_buffers && create_new)
++    if (!gui_buffers && create_new && switch_to_another)
+         (void) gui_buffer_new (gui_windows, NULL, NULL, 1);
+ }
+ 
+diff --git a/src/gui/gui.h b/src/gui/gui.h
+index 65b5b9d33..9b5ca6ad2 100644
+--- a/src/gui/gui.h
++++ b/src/gui/gui.h
+@@ -230,6 +230,7 @@ extern void gui_buffer_clear (t_gui_buffer *);
+ extern void gui_buffer_clear_all ();
+ extern void gui_infobar_printf (int, int, char *, ...);
+ extern void gui_infobar_remove ();
++extern void gui_buffer_free (t_gui_buffer *, int);
+ extern t_gui_line *gui_new_line (t_gui_buffer *);
+ extern t_gui_message *gui_new_message (t_gui_buffer *);
+ extern void gui_optimize_input_buffer_size (t_gui_buffer *);
+@@ -264,7 +265,6 @@ extern void gui_pre_init (int *, char **[]);
+ extern void gui_init_colors ();
+ extern void gui_set_window_title ();
+ extern void gui_init ();
+-extern void gui_buffer_free (t_gui_buffer *);
+ extern void gui_end ();
+ extern void gui_printf_color_type (/*@null@*/ t_gui_buffer *, int, int, char *, ...);
+ extern void gui_main_loop ();
+diff --git a/src/irc/irc-recv.c b/src/irc/irc-recv.c
+index 45b9e5d2f..0fb2313d4 100644
+--- a/src/irc/irc-recv.c
++++ b/src/irc/irc-recv.c
+@@ -818,7 +818,7 @@ irc_cmd_recv_part (t_irc_server *server, char *host, char *arguments)
+             if (strcmp (ptr_nick->nick, server->nick) == 0)
+             {
+                 /* part request was issued by local client */
+-                gui_buffer_free (ptr_channel->buffer);
++                gui_buffer_free (ptr_channel->buffer, 1);
+                 channel_free (server, ptr_channel);
+                 gui_draw_buffer_status (gui_current_window->buffer, 1);
+                 gui_draw_buffer_input (gui_current_window->buffer, 1);
+diff --git a/src/irc/irc-send.c b/src/irc/irc-send.c
+index d31ae8f62..9dfde6d54 100644
+--- a/src/irc/irc-send.c
++++ b/src/irc/irc-send.c
+@@ -686,7 +686,7 @@ irc_cmd_send_part (t_irc_server *server, char *arguments)
+         if (BUFFER_IS_PRIVATE(gui_current_window->buffer))
+         {
+             ptr_channel = CHANNEL(gui_current_window->buffer);
+-            gui_buffer_free (ptr_channel->buffer);
++            gui_buffer_free (ptr_channel->buffer, 1);
+             channel_free (server, ptr_channel);
+             gui_draw_buffer_status (gui_current_window->buffer, 1);
+             gui_draw_buffer_input (gui_current_window->buffer, 1);
+diff --git a/src/irc/irc-server.c b/src/irc/irc-server.c
+index 1d37b023a..375770c25 100644
+--- a/src/irc/irc-server.c
++++ b/src/irc/irc-server.c
+@@ -270,8 +270,6 @@ server_free (t_irc_server *server)
+         (server->next_server)->prev_server = server->prev_server;
+     
+     server_destroy (server);
+-    if (server->buffer)
+-        gui_buffer_free (server->buffer);
+     free (server);
+     irc_servers = new_irc_servers;
+ }
+diff --git a/weechat/src/gui/gui-common.c b/weechat/src/gui/gui-common.c
+index 877ded5e4..ea5aa61bc 100644
+--- a/weechat/src/gui/gui-common.c
++++ b/weechat/src/gui/gui-common.c
+@@ -346,7 +346,7 @@ gui_line_free (t_gui_line *line)
+  */
+ 
+ void
+-gui_buffer_free (t_gui_buffer *buffer)
++gui_buffer_free (t_gui_buffer *buffer, int switch_to_another)
+ {
+     t_gui_window *ptr_win;
+     t_gui_buffer *ptr_buffer;
+@@ -355,11 +355,14 @@ gui_buffer_free (t_gui_buffer *buffer)
+     
+     create_new = (buffer->server || buffer->channel);
+     
+-    for (ptr_win = gui_windows; ptr_win; ptr_win = ptr_win->next_window)
++    if (switch_to_another)
+     {
+-        if ((buffer == ptr_win->buffer) &&
+-            ((buffer->next_buffer) || (buffer->prev_buffer)))
+-            gui_switch_to_previous_buffer (ptr_win);
++        for (ptr_win = gui_windows; ptr_win; ptr_win = ptr_win->next_window)
++        {
++            if ((buffer == ptr_win->buffer) &&
++                ((buffer->next_buffer) || (buffer->prev_buffer)))
++                gui_switch_to_previous_buffer (ptr_win);
++        }
+     }
+     
+     /* decrease buffer number for all next buffers */
+@@ -393,7 +396,7 @@ gui_buffer_free (t_gui_buffer *buffer)
+     free (buffer);
+     
+     /* always at least one buffer */
+-    if (!gui_buffers && create_new)
++    if (!gui_buffers && create_new && switch_to_another)
+         (void) gui_buffer_new (gui_windows, NULL, NULL, 1);
+ }
+ 
+diff --git a/weechat/src/gui/gui.h b/weechat/src/gui/gui.h
+index 65b5b9d33..9b5ca6ad2 100644
+--- a/weechat/src/gui/gui.h
++++ b/weechat/src/gui/gui.h
+@@ -230,6 +230,7 @@ extern void gui_buffer_clear (t_gui_buffer *);
+ extern void gui_buffer_clear_all ();
+ extern void gui_infobar_printf (int, int, char *, ...);
+ extern void gui_infobar_remove ();
++extern void gui_buffer_free (t_gui_buffer *, int);
+ extern t_gui_line *gui_new_line (t_gui_buffer *);
+ extern t_gui_message *gui_new_message (t_gui_buffer *);
+ extern void gui_optimize_input_buffer_size (t_gui_buffer *);
+@@ -264,7 +265,6 @@ extern void gui_pre_init (int *, char **[]);
+ extern void gui_init_colors ();
+ extern void gui_set_window_title ();
+ extern void gui_init ();
+-extern void gui_buffer_free (t_gui_buffer *);
+ extern void gui_end ();
+ extern void gui_printf_color_type (/*@null@*/ t_gui_buffer *, int, int, char *, ...);
+ extern void gui_main_loop ();
+diff --git a/weechat/src/irc/irc-recv.c b/weechat/src/irc/irc-recv.c
+index 45b9e5d2f..0fb2313d4 100644
+--- a/weechat/src/irc/irc-recv.c
++++ b/weechat/src/irc/irc-recv.c
+@@ -818,7 +818,7 @@ irc_cmd_recv_part (t_irc_server *server, char *host, char *arguments)
+             if (strcmp (ptr_nick->nick, server->nick) == 0)
+             {
+                 /* part request was issued by local client */
+-                gui_buffer_free (ptr_channel->buffer);
++                gui_buffer_free (ptr_channel->buffer, 1);
+                 channel_free (server, ptr_channel);
+                 gui_draw_buffer_status (gui_current_window->buffer, 1);
+                 gui_draw_buffer_input (gui_current_window->buffer, 1);
+diff --git a/weechat/src/irc/irc-send.c b/weechat/src/irc/irc-send.c
+index d31ae8f62..9dfde6d54 100644
+--- a/weechat/src/irc/irc-send.c
++++ b/weechat/src/irc/irc-send.c
+@@ -686,7 +686,7 @@ irc_cmd_send_part (t_irc_server *server, char *arguments)
+         if (BUFFER_IS_PRIVATE(gui_current_window->buffer))
+         {
+             ptr_channel = CHANNEL(gui_current_window->buffer);
+-            gui_buffer_free (ptr_channel->buffer);
++            gui_buffer_free (ptr_channel->buffer, 1);
+             channel_free (server, ptr_channel);
+             gui_draw_buffer_status (gui_current_window->buffer, 1);
+             gui_draw_buffer_input (gui_current_window->buffer, 1);
+diff --git a/weechat/src/irc/irc-server.c b/weechat/src/irc/irc-server.c
+index 1d37b023a..375770c25 100644
+--- a/weechat/src/irc/irc-server.c
++++ b/weechat/src/irc/irc-server.c
+@@ -270,8 +270,6 @@ server_free (t_irc_server *server)
+         (server->next_server)->prev_server = server->prev_server;
+     
+     server_destroy (server);
+-    if (server->buffer)
+-        gui_buffer_free (server->buffer);
+     free (server);
+     irc_servers = new_irc_servers;
+ }
+

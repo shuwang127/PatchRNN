@@ -1,0 +1,41 @@
+commit 969ceffb6696ac361db9dbc33c83f855dbdb1528
+Author: David Milburn <dmilburn@redhat.com>
+Date:   Fri Jan 25 12:16:18 2008 -0600
+
+    [SCSI] aic7xxx: fix ahc_done check SCB_ACTIVE for tagged transactions
+    
+    The driver only needs to check the SCB_ACTIVE flag if the SCB is not
+    in the untagged queue.
+    
+    If the driver is in error recovery, you may end panic'ing on a TUR
+    that is in the untagged queue.
+    
+    Attempting to queue an ABORT message
+    CDB: 0x0 0x0 0x0 0x0 0x0 0x0
+    SCB 3 done'd twice
+    
+    This patch is included in Adaptec's 6.3.11 driver on their website.
+    
+    Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+
+diff --git a/drivers/scsi/aic7xxx/aic7xxx_osm.c b/drivers/scsi/aic7xxx/aic7xxx_osm.c
+index e310e414067f..bff7f8c59856 100644
+--- a/drivers/scsi/aic7xxx/aic7xxx_osm.c
++++ b/drivers/scsi/aic7xxx/aic7xxx_osm.c
+@@ -1658,9 +1658,12 @@ ahc_done(struct ahc_softc *ahc, struct scb *scb)
+ 		untagged_q = &(ahc->untagged_queues[target_offset]);
+ 		TAILQ_REMOVE(untagged_q, scb, links.tqe);
+ 		BUG_ON(!TAILQ_EMPTY(untagged_q));
+-	}
+-
+-	if ((scb->flags & SCB_ACTIVE) == 0) {
++	} else if ((scb->flags & SCB_ACTIVE) == 0) {
++		/*
++		 * Transactions aborted from the untagged queue may
++		 * not have been dispatched to the controller, so
++		 * only check the SCB_ACTIVE flag for tagged transactions.
++		 */
+ 		printf("SCB %d done'd twice\n", scb->hscb->tag);
+ 		ahc_dump_card_state(ahc);
+ 		panic("Stopping for safety");
+

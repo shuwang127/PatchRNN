@@ -1,0 +1,63 @@
+commit a650fdd9427f1f5236f83d2d8137bea9b452fa53
+Author: Guo Zeng <Guo.Zeng@csr.com>
+Date:   Thu Sep 17 05:23:21 2015 +0000
+
+    regmap: irq: add ack_invert flag for chips using cleared bits as ack
+    
+    An user will be CSR SiRFSoC ARM chips.
+    
+    Signed-off-by: Guo Zeng <Guo.Zeng@csr.com>
+    Signed-off-by: Barry Song <Baohua.Song@csr.com>
+    Signed-off-by: Mark Brown <broonie@kernel.org>
+
+diff --git a/drivers/base/regmap/regmap-irq.c b/drivers/base/regmap/regmap-irq.c
+index e65eec2e7def..8d16db533527 100644
+--- a/drivers/base/regmap/regmap-irq.c
++++ b/drivers/base/regmap/regmap-irq.c
+@@ -133,7 +133,11 @@ static void regmap_irq_sync_unlock(struct irq_data *data)
+ 		if (d->mask_buf[i] && (d->chip->ack_base || d->chip->use_ack)) {
+ 			reg = d->chip->ack_base +
+ 				(i * map->reg_stride * d->irq_reg_stride);
+-			ret = regmap_write(map, reg, d->mask_buf[i]);
++			/* some chips ack by write 0 */
++			if (d->chip->ack_invert)
++				ret = regmap_write(map, reg, ~d->mask_buf[i]);
++			else
++				ret = regmap_write(map, reg, d->mask_buf[i]);
+ 			if (ret != 0)
+ 				dev_err(d->map->dev, "Failed to ack 0x%x: %d\n",
+ 					reg, ret);
+@@ -470,7 +474,11 @@ int regmap_add_irq_chip(struct regmap *map, int irq, int irq_flags,
+ 		if (d->status_buf[i] && (chip->ack_base || chip->use_ack)) {
+ 			reg = chip->ack_base +
+ 				(i * map->reg_stride * d->irq_reg_stride);
+-			ret = regmap_write(map, reg,
++			if (chip->ack_invert)
++				ret = regmap_write(map, reg,
++					~(d->status_buf[i] & d->mask_buf[i]));
++			else
++				ret = regmap_write(map, reg,
+ 					d->status_buf[i] & d->mask_buf[i]);
+ 			if (ret != 0) {
+ 				dev_err(map->dev, "Failed to ack 0x%x: %d\n",
+diff --git a/include/linux/regmap.h b/include/linux/regmap.h
+index f98fe9f5faa2..f36c9f96d32d 100644
+--- a/include/linux/regmap.h
++++ b/include/linux/regmap.h
+@@ -809,6 +809,7 @@ struct regmap_irq {
+  * @init_ack_masked: Ack all masked interrupts once during initalization.
+  * @mask_invert: Inverted mask register: cleared bits are masked out.
+  * @use_ack:     Use @ack register even if it is zero.
++ * @ack_invert:  Inverted ack register: cleared bits for ack.
+  * @wake_invert: Inverted wake register: cleared bits are wake enabled.
+  * @runtime_pm:  Hold a runtime PM lock on the device when accessing it.
+  *
+@@ -829,6 +830,7 @@ struct regmap_irq_chip {
+ 	bool init_ack_masked:1;
+ 	bool mask_invert:1;
+ 	bool use_ack:1;
++	bool ack_invert:1;
+ 	bool wake_invert:1;
+ 	bool runtime_pm:1;
+ 
+

@@ -1,0 +1,198 @@
+commit 5ff8de7322ae55f00efd0e4ac023164d66eab192
+Author: Vlad Brezae <brezaevlad@gmail.com>
+Date:   Fri Jun 23 23:09:05 2017 +0300
+
+    [sgen] Improve card table parallelization
+    
+    Improve caching by scanning consecutive blocks and avoiding full block list travesal.
+
+diff --git a/mono/sgen/sgen-gc.c b/mono/sgen/sgen-gc.c
+index bafb50b0f6a..49c630f03f3 100644
+--- a/mono/sgen/sgen-gc.c
++++ b/mono/sgen/sgen-gc.c
+@@ -1363,6 +1363,7 @@ typedef struct {
+ typedef struct {
+ 	ScanJob scan_job;
+ 	int job_index, job_split_count;
++	int data;
+ } ParallelScanJob;
+ 
+ static ScanCopyContext
+@@ -1446,7 +1447,7 @@ job_scan_major_card_table (void *worker_data_untyped, SgenThreadPoolJob *job)
+ 	ScanCopyContext ctx = scan_copy_context_for_scan_job (worker_data_untyped, (ScanJob*)job_data);
+ 
+ 	SGEN_TV_GETTIME (atv);
+-	major_collector.scan_card_table (CARDTABLE_SCAN_GLOBAL, ctx, job_data->job_index, job_data->job_split_count);
++	major_collector.scan_card_table (CARDTABLE_SCAN_GLOBAL, ctx, job_data->job_index, job_data->job_split_count, job_data->data);
+ 	SGEN_TV_GETTIME (btv);
+ 	time_minor_scan_major_blocks += SGEN_TV_ELAPSED (atv, btv);
+ 
+@@ -1481,7 +1482,7 @@ job_scan_major_mod_union_card_table (void *worker_data_untyped, SgenThreadPoolJo
+ 
+ 	g_assert (concurrent_collection_in_progress);
+ 	SGEN_TV_GETTIME (atv);
+-	major_collector.scan_card_table (CARDTABLE_SCAN_MOD_UNION, ctx, job_data->job_index, job_data->job_split_count);
++	major_collector.scan_card_table (CARDTABLE_SCAN_MOD_UNION, ctx, job_data->job_index, job_data->job_split_count, job_data->data);
+ 	SGEN_TV_GETTIME (btv);
+ 	time_major_scan_mod_union_blocks += SGEN_TV_ELAPSED (atv, btv);
+ 
+@@ -1517,7 +1518,7 @@ job_major_mod_union_preclean (void *worker_data_untyped, SgenThreadPoolJob *job)
+ 
+ 	g_assert (concurrent_collection_in_progress);
+ 	SGEN_TV_GETTIME (atv);
+-	major_collector.scan_card_table (CARDTABLE_SCAN_MOD_UNION_PRECLEAN, ctx, job_data->job_index, job_data->job_split_count);
++	major_collector.scan_card_table (CARDTABLE_SCAN_MOD_UNION_PRECLEAN, ctx, job_data->job_index, job_data->job_split_count, job_data->data);
+ 	SGEN_TV_GETTIME (btv);
+ 
+ 	g_assert (worker_data_untyped);
+@@ -1557,6 +1558,7 @@ workers_finish_callback (void)
+ {
+ 	ParallelScanJob *psj;
+ 	ScanJob *sj;
++	size_t num_major_sections = major_collector.get_num_major_sections ();
+ 	int split_count = sgen_workers_get_job_split_count (GENERATION_OLD);
+ 	int i;
+ 	/* Mod union preclean jobs */
+@@ -1565,6 +1567,7 @@ workers_finish_callback (void)
+ 		psj->scan_job.gc_thread_gray_queue = NULL;
+ 		psj->job_index = i;
+ 		psj->job_split_count = split_count;
++		psj->data = num_major_sections / split_count;
+ 		sgen_workers_enqueue_job (GENERATION_OLD, &psj->scan_job.job, TRUE);
+ 	}
+ 
+@@ -1591,6 +1594,7 @@ static void
+ enqueue_scan_remembered_set_jobs (SgenGrayQueue *gc_thread_gray_queue, SgenObjectOperations *ops, gboolean enqueue)
+ {
+ 	int i, split_count = sgen_workers_get_job_split_count (GENERATION_NURSERY);
++	size_t num_major_sections = major_collector.get_num_major_sections ();
+ 	ScanJob *sj;
+ 
+ 	sj = (ScanJob*)sgen_thread_pool_job_alloc ("scan wbroots", job_scan_wbroots, sizeof (ScanJob));
+@@ -1606,6 +1610,7 @@ enqueue_scan_remembered_set_jobs (SgenGrayQueue *gc_thread_gray_queue, SgenObjec
+ 		psj->scan_job.gc_thread_gray_queue = gc_thread_gray_queue;
+ 		psj->job_index = i;
+ 		psj->job_split_count = split_count;
++		psj->data = num_major_sections / split_count;
+ 		sgen_workers_enqueue_job (GENERATION_NURSERY, &psj->scan_job.job, enqueue);
+ 
+ 		psj = (ParallelScanJob*)sgen_thread_pool_job_alloc ("scan LOS remsets", job_scan_los_card_table, sizeof (ParallelScanJob));
+@@ -2084,6 +2089,7 @@ major_copy_or_mark_from_roots (SgenGrayQueue *gc_thread_gray_queue, size_t *old_
+ 
+ 	if (mode == COPY_OR_MARK_FROM_ROOTS_FINISH_CONCURRENT) {
+ 		int i, split_count = sgen_workers_get_job_split_count (GENERATION_OLD);
++		size_t num_major_sections = major_collector.get_num_major_sections ();
+ 		gboolean parallel = object_ops_par != NULL;
+ 
+ 		/* If we're not parallel we finish the collection on the gc thread */
+@@ -2099,6 +2105,7 @@ major_copy_or_mark_from_roots (SgenGrayQueue *gc_thread_gray_queue, size_t *old_
+ 			psj->scan_job.gc_thread_gray_queue = gc_thread_gray_queue;
+ 			psj->job_index = i;
+ 			psj->job_split_count = split_count;
++			psj->data = num_major_sections / split_count;
+ 			sgen_workers_enqueue_job (GENERATION_OLD, &psj->scan_job.job, parallel);
+ 
+ 			psj = (ParallelScanJob*)sgen_thread_pool_job_alloc ("scan LOS mod union cardtable", job_scan_los_mod_union_card_table, sizeof (ParallelScanJob));
+diff --git a/mono/sgen/sgen-gc.h b/mono/sgen/sgen-gc.h
+index 2faad109d1e..3e2620b219f 100644
+--- a/mono/sgen/sgen-gc.h
++++ b/mono/sgen/sgen-gc.h
+@@ -650,7 +650,7 @@ struct _SgenMajorCollector {
+ 	void (*free_non_pinned_object) (GCObject *obj, size_t size);
+ 	void (*pin_objects) (SgenGrayQueue *queue);
+ 	void (*pin_major_object) (GCObject *obj, SgenGrayQueue *queue);
+-	void (*scan_card_table) (CardTableScanType scan_type, ScanCopyContext ctx, int job_index, int job_split_count);
++	void (*scan_card_table) (CardTableScanType scan_type, ScanCopyContext ctx, int job_index, int job_split_count, int block_count);
+ 	void (*iterate_live_block_ranges) (sgen_cardtable_block_callback callback);
+ 	void (*iterate_block_ranges) (sgen_cardtable_block_callback callback);
+ 	void (*update_cardtable_mod_union) (void);
+diff --git a/mono/sgen/sgen-marksweep.c b/mono/sgen/sgen-marksweep.c
+index 2d1bc5b2799..edefa9e1e08 100644
+--- a/mono/sgen/sgen-marksweep.c
++++ b/mono/sgen/sgen-marksweep.c
+@@ -234,6 +234,16 @@ static size_t num_empty_blocks = 0;
+ 		(bl) = BLOCK_UNTAG ((bl));
+ #define END_FOREACH_BLOCK_NO_LOCK	} SGEN_ARRAY_LIST_END_FOREACH_SLOT; }
+ 
++#define FOREACH_BLOCK_RANGE_HAS_REFERENCES_NO_LOCK(bl,begin,end,index,hr) {	\
++	volatile gpointer *slot;					\
++	SGEN_ARRAY_LIST_FOREACH_SLOT_RANGE (&allocated_blocks, begin, end, slot, index) { \
++		(bl) = (MSBlockInfo *) (*slot);				\
++		if (!(bl))						\
++			continue;					\
++		(hr) = BLOCK_IS_TAGGED_HAS_REFERENCES ((bl));		\
++		(bl) = BLOCK_UNTAG ((bl));
++#define END_FOREACH_BLOCK_RANGE_NO_LOCK	} SGEN_ARRAY_LIST_END_FOREACH_SLOT_RANGE; }
++
+ static volatile size_t num_major_sections = 0;
+ /*
+  * One free block list for each block object size.  We add and remove blocks from these
+@@ -2603,10 +2613,24 @@ scan_card_table_for_block (MSBlockInfo *block, CardTableScanType scan_type, Scan
+ }
+ 
+ static void
+-major_scan_card_table (CardTableScanType scan_type, ScanCopyContext ctx, int job_index, int job_split_count)
++major_scan_card_table (CardTableScanType scan_type, ScanCopyContext ctx, int job_index, int job_split_count, int block_count)
+ {
+ 	MSBlockInfo *block;
+ 	gboolean has_references, was_sweeping, skip_scan;
++	int first_block, last_block, index;
++
++	/*
++	 * The last_block's index is at least (num_major_sections - 1) since we
++	 * can have nulls in the allocated_blocks list. The last worker will
++	 * scan the left-overs of the list. We expect few null entries in the
++	 * allocated_blocks list, therefore using num_major_sections for computing
++	 * block_count shouldn't affect work distribution.
++	 */
++	first_block = block_count * job_index;
++	if (job_index == job_split_count - 1)
++		last_block = allocated_blocks.next_slot;
++	else
++		last_block = block_count * (job_index + 1);
+ 
+ 	if (!concurrent_mark)
+ 		g_assert (scan_type == CARDTABLE_SCAN_GLOBAL);
+@@ -2616,11 +2640,9 @@ major_scan_card_table (CardTableScanType scan_type, ScanCopyContext ctx, int job
+ 	was_sweeping = sweep_in_progress ();
+ 
+ 	binary_protocol_major_card_table_scan_start (sgen_timestamp (), scan_type & CARDTABLE_SCAN_MOD_UNION);
+-	FOREACH_BLOCK_HAS_REFERENCES_NO_LOCK (block, has_references) {
+-		if (__index % job_split_count != job_index)
+-			continue;
++	FOREACH_BLOCK_RANGE_HAS_REFERENCES_NO_LOCK (block, first_block, last_block, index, has_references) {
+ #ifdef PREFETCH_CARDS
+-		int prefetch_index = __index + 6 * job_split_count;
++		int prefetch_index = index + 6;
+ 		if (prefetch_index < allocated_blocks.next_slot) {
+ 			MSBlockInfo *prefetch_block = BLOCK_UNTAG (*sgen_array_list_get_slot (&allocated_blocks, prefetch_index));
+ 			PREFETCH_READ (prefetch_block);
+@@ -2631,7 +2653,6 @@ major_scan_card_table (CardTableScanType scan_type, ScanCopyContext ctx, int job
+ 			}
+                 }
+ #endif
+-
+ 		if (!has_references)
+ 			continue;
+ 		skip_scan = FALSE;
+@@ -2655,16 +2676,16 @@ major_scan_card_table (CardTableScanType scan_type, ScanCopyContext ctx, int job
+ 				 * sweep start since we are in a nursery collection. Also avoid CAS-ing
+ 				 */
+ 				if (sweep_in_progress ()) {
+-					skip_scan = !ensure_block_is_checked_for_sweeping (__index, TRUE, NULL);
++					skip_scan = !ensure_block_is_checked_for_sweeping (index, TRUE, NULL);
+ 				} else if (was_sweeping) {
+ 					/* Recheck in case sweep finished after dereferencing the slot */
+-					skip_scan = *sgen_array_list_get_slot (&allocated_blocks, __index) == 0;
++					skip_scan = *sgen_array_list_get_slot (&allocated_blocks, index) == 0;
+ 				}
+ 			}
+ 		}
+ 		if (!skip_scan)
+ 			scan_card_table_for_block (block, scan_type, ctx);
+-	} END_FOREACH_BLOCK_NO_LOCK;
++	} END_FOREACH_BLOCK_RANGE_NO_LOCK;
+ 	binary_protocol_major_card_table_scan_end (sgen_timestamp (), scan_type & CARDTABLE_SCAN_MOD_UNION);
+ }
+ 
+

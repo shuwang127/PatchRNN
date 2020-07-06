@@ -1,0 +1,111 @@
+commit 81bdcbc1d5a8db0ab11846d08419071320469043
+Author: mikeb <mikeb@openbsd.org>
+Date:   Mon Jul 2 13:03:24 2012 +0000
+
+    Don't close IKE SA immediately after creating a new one when rekeying.
+    Instead set a timeout that will shut it down in case we don't get an SA
+    delete notification.
+
+diff --git a/sbin/iked/config.c b/sbin/iked/config.c
+index 2141b4eb37b..51665c739e0 100644
+--- a/sbin/iked/config.c
++++ b/sbin/iked/config.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: config.c,v 1.14 2012/06/22 16:28:20 mikeb Exp $	*/
++/*	$OpenBSD: config.c,v 1.15 2012/07/02 13:03:24 mikeb Exp $	*/
+ /*	$vantronix: config.c,v 1.30 2010/05/28 15:34:35 reyk Exp $	*/
+ 
+ /*
+@@ -89,6 +89,8 @@ config_free_sa(struct iked *env, struct iked_sa *sa)
+ {
+ 	(void)RB_REMOVE(iked_sas, &env->sc_sas, sa);
+ 
++	timer_deregister(env, &sa->sa_timer);
++
+ 	config_free_proposals(&sa->sa_proposals, 0);
+ 	config_free_childsas(env, &sa->sa_childsas, NULL, NULL);
+ 	sa_free_flows(env, &sa->sa_flows);
+diff --git a/sbin/iked/iked.h b/sbin/iked/iked.h
+index 969c9c8c74c..7cc747b5dc9 100644
+--- a/sbin/iked/iked.h
++++ b/sbin/iked/iked.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: iked.h,v 1.51 2012/06/29 15:05:49 mikeb Exp $	*/
++/*	$OpenBSD: iked.h,v 1.52 2012/07/02 13:03:24 mikeb Exp $	*/
+ /*	$vantronix: iked.h,v 1.61 2010/06/03 07:57:33 reyk Exp $	*/
+ 
+ /*
+@@ -401,6 +401,9 @@ struct iked_sa {
+ 	struct iked_childsas		 sa_childsas;	/* IPSec Child SAs */
+ 	struct iked_saflows		 sa_flows;	/* IPSec flows */
+ 
++	struct iked_timer		 sa_timer;	/* SA timeouts */
++#define IKED_IKE_SA_REKEY_TIMEOUT	 300		/* 5 minutes */
++
+ 	struct iked_msgqueue		 sa_requests;	/* request queue */
+ #define IKED_RETRANSMIT_TIMEOUT		 2		/* 2 seconds */
+ 
+@@ -457,7 +460,6 @@ struct iked_message {
+ 				 msg_entry;
+ 	int			 msg_tries;	/* retransmits sent */
+ #define IKED_RETRANSMIT_TRIES	 5		/* try 5 times */
+-
+ };
+ 
+ struct iked_user {
+diff --git a/sbin/iked/ikev2.c b/sbin/iked/ikev2.c
+index 8373d02f8fb..24a20da4c19 100644
+--- a/sbin/iked/ikev2.c
++++ b/sbin/iked/ikev2.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ikev2.c,v 1.71 2012/07/02 09:49:30 mikeb Exp $	*/
++/*	$OpenBSD: ikev2.c,v 1.72 2012/07/02 13:03:24 mikeb Exp $	*/
+ /*	$vantronix: ikev2.c,v 1.101 2010/06/03 07:57:33 reyk Exp $	*/
+ 
+ /*
+@@ -77,6 +77,7 @@ int	 ikev2_send_create_child_sa(struct iked *, struct iked_sa *,
+ 	    struct iked_spi *, u_int8_t);
+ int	 ikev2_init_create_child_sa(struct iked *, struct iked_message *);
+ int	 ikev2_resp_create_child_sa(struct iked *, struct iked_message *);
++void	 ikev2_ike_sa_timeout(struct iked *env, void *);
+ 
+ int	 ikev2_sa_initiator(struct iked *, struct iked_sa *,
+ 	    struct iked_message *);
+@@ -2487,22 +2488,29 @@ ikev2_resp_create_child_sa(struct iked *env, struct iked_message *msg)
+ 		}
+ 
+ 		log_debug("%s: activating new IKE SA", __func__);
+-		sa_state(env, sa, IKEV2_STATE_CLOSED);
+ 		sa_state(env, nsa, IKEV2_STATE_ESTABLISHED);
++
++		timer_initialize(env, &sa->sa_timer, ikev2_ike_sa_timeout, sa);
++		timer_register(env, &sa->sa_timer, IKED_IKE_SA_REKEY_TIMEOUT);
+ 	} else
+ 		ret = ikev2_childsa_enable(env, sa);
+ 
+  done:
+-	if (ret) {
+-		if (protoid == IKEV2_SAPROTO_IKE)
+-			sa_free(env, nsa);
+-		else
+-			ikev2_childsa_delete(env, sa, 0, 0, NULL, 1);
+-	}
++	if (ret && protoid != IKEV2_SAPROTO_IKE)
++		ikev2_childsa_delete(env, sa, 0, 0, NULL, 1);
+ 	ibuf_release(e);
+ 	return (ret);
+ }
+ 
++void
++ikev2_ike_sa_timeout(struct iked *env, void *arg)
++{
++	struct iked_sa			*sa = arg;
++
++	log_debug("%s: closing SA", __func__);
++	sa_free(env, sa);
++}
++
+ int
+ ikev2_send_informational(struct iked *env, struct iked_message *msg)
+ {
+

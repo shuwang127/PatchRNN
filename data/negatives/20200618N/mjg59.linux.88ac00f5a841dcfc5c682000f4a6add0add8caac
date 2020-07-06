@@ -1,0 +1,803 @@
+commit 88ac00f5a841dcfc5c682000f4a6add0add8caac
+Author: Robert Moore <robert.moore@intel.com>
+Date:   Thu May 26 00:00:00 2005 -0400
+
+    ACPICA 20050526 from Bob Moore <robert.moore@intel.com>
+    
+    Implemented support to execute Type 1 and Type 2 AML
+    opcodes appearing at the module level (not within a control
+    method.)  These opcodes are executed exactly once at the
+    time the table is loaded. This type of code was legal up
+    until the release of ACPI 2.0B (2002) and is now supported
+    within ACPI CA in order to provide backwards compatibility
+    with earlier BIOS implementations. This eliminates the
+    "Encountered executable code at module level" warning that
+    was previously generated upon detection of such code.
+    
+    Fixed a problem in the interpreter where an AE_NOT_FOUND
+    exception could inadvertently be generated during the
+    lookup of namespace objects in the second pass parse of
+    ACPI tables and control methods. It appears that this
+    problem could occur during the resolution of forward
+    references to namespace objects.
+    
+    Added the ACPI_MUTEX_DEBUG #ifdef to the
+    acpi_ut_release_mutex function, corresponding to the same
+    the deadlock detection debug code to be compiled out in
+    the normal case, improving mutex performance (and overall
+    subsystem performance) considerably.  As suggested by
+    Alexey Starikovskiy.
+    
+    Implemented a handful of miscellaneous fixes for possible
+    memory leaks on error conditions and error handling
+    control paths. These fixes were suggested by FreeBSD and
+    the Coverity Prevent source code analysis tool.
+    
+    Added a check for a null RSDT pointer in
+    acpi_get_firmware_table (tbxfroot.c) to prevent a fault
+    in this error case.
+    
+    Signed-off-by Len Brown <len.brown@intel.com>
+
+diff --git a/drivers/acpi/dispatcher/dsmethod.c b/drivers/acpi/dispatcher/dsmethod.c
+index 9fc3f4c033eb..c9d9a6c45ae3 100644
+--- a/drivers/acpi/dispatcher/dsmethod.c
++++ b/drivers/acpi/dispatcher/dsmethod.c
+@@ -139,7 +139,8 @@ acpi_ds_parse_method (
+ 
+ 	walk_state = acpi_ds_create_walk_state (owner_id, NULL, NULL, NULL);
+ 	if (!walk_state) {
+-		return_ACPI_STATUS (AE_NO_MEMORY);
++		status = AE_NO_MEMORY;
++		goto cleanup;
+ 	}
+ 
+ 	status = acpi_ds_init_aml_walk (walk_state, op, node,
+@@ -147,7 +148,7 @@ acpi_ds_parse_method (
+ 			  obj_desc->method.aml_length, NULL, 1);
+ 	if (ACPI_FAILURE (status)) {
+ 		acpi_ds_delete_walk_state (walk_state);
+-		return_ACPI_STATUS (status);
++		goto cleanup;
+ 	}
+ 
+ 	/*
+@@ -161,13 +162,14 @@ acpi_ds_parse_method (
+ 	 */
+ 	status = acpi_ps_parse_aml (walk_state);
+ 	if (ACPI_FAILURE (status)) {
+-		return_ACPI_STATUS (status);
++		goto cleanup;
+ 	}
+ 
+ 	ACPI_DEBUG_PRINT ((ACPI_DB_PARSE,
+ 		"**** [%4.4s] Parsed **** named_obj=%p Op=%p\n",
+ 		acpi_ut_get_node_name (obj_handle), obj_handle, op));
+ 
++cleanup:
+ 	acpi_ps_delete_parse_tree (op);
+ 	return_ACPI_STATUS (status);
+ }
+diff --git a/drivers/acpi/dispatcher/dsopcode.c b/drivers/acpi/dispatcher/dsopcode.c
+index ba13bca28bee..750bdb1ac344 100644
+--- a/drivers/acpi/dispatcher/dsopcode.c
++++ b/drivers/acpi/dispatcher/dsopcode.c
+@@ -119,14 +119,15 @@ acpi_ds_execute_arguments (
+ 
+ 	walk_state = acpi_ds_create_walk_state (0, NULL, NULL, NULL);
+ 	if (!walk_state) {
+-		return_ACPI_STATUS (AE_NO_MEMORY);
++		status = AE_NO_MEMORY;
++		goto cleanup;
+ 	}
+ 
+ 	status = acpi_ds_init_aml_walk (walk_state, op, NULL, aml_start,
+ 			  aml_length, NULL, 1);
+ 	if (ACPI_FAILURE (status)) {
+ 		acpi_ds_delete_walk_state (walk_state);
+-		return_ACPI_STATUS (status);
++		goto cleanup;
+ 	}
+ 
+ 	/* Mark this parse as a deferred opcode */
+@@ -138,8 +139,7 @@ acpi_ds_execute_arguments (
+ 
+ 	status = acpi_ps_parse_aml (walk_state);
+ 	if (ACPI_FAILURE (status)) {
+-		acpi_ps_delete_parse_tree (op);
+-		return_ACPI_STATUS (status);
++		goto cleanup;
+ 	}
+ 
+ 	/* Get and init the Op created above */
+@@ -160,7 +160,8 @@ acpi_ds_execute_arguments (
+ 
+ 	walk_state = acpi_ds_create_walk_state (0, NULL, NULL, NULL);
+ 	if (!walk_state) {
+-		return_ACPI_STATUS (AE_NO_MEMORY);
++		status = AE_NO_MEMORY;
++		goto cleanup;
+ 	}
+ 
+ 	/* Execute the opcode and arguments */
+@@ -169,13 +170,15 @@ acpi_ds_execute_arguments (
+ 			  aml_length, NULL, 3);
+ 	if (ACPI_FAILURE (status)) {
+ 		acpi_ds_delete_walk_state (walk_state);
+-		return_ACPI_STATUS (status);
++		goto cleanup;
+ 	}
+ 
+ 	/* Mark this execution as a deferred opcode */
+ 
+ 	walk_state->deferred_node = node;
+ 	status = acpi_ps_parse_aml (walk_state);
++
++cleanup:
+ 	acpi_ps_delete_parse_tree (op);
+ 	return_ACPI_STATUS (status);
+ }
+diff --git a/drivers/acpi/dispatcher/dswload.c b/drivers/acpi/dispatcher/dswload.c
+index 1ac197ccfc80..e2e0a855be2c 100644
+--- a/drivers/acpi/dispatcher/dswload.c
++++ b/drivers/acpi/dispatcher/dswload.c
+@@ -145,15 +145,6 @@ acpi_ds_load1_begin_op (
+ 
+ 	if (op) {
+ 		if (!(walk_state->op_info->flags & AML_NAMED)) {
+-#if 0
+-			if ((walk_state->op_info->class == AML_CLASS_EXECUTE) ||
+-				(walk_state->op_info->class == AML_CLASS_CONTROL)) {
+-				acpi_os_printf ("\n\n***EXECUTABLE OPCODE %s***\n\n",
+-					walk_state->op_info->name);
+-				*out_op = op;
+-				return (AE_CTRL_SKIP);
+-			}
+-#endif
+ 			*out_op = op;
+ 			return (AE_OK);
+ 		}
+@@ -486,6 +477,15 @@ acpi_ds_load2_begin_op (
+ 	ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH, "Op=%p State=%p\n", op, walk_state));
+ 
+ 	if (op) {
++		if ((walk_state->control_state) &&
++			(walk_state->control_state->common.state ==
++				ACPI_CONTROL_CONDITIONAL_EXECUTING)) {
++			/* We are executing a while loop outside of a method */
++
++			status = acpi_ds_exec_begin_op (walk_state, out_op);
++			return_ACPI_STATUS (status);
++		}
++
+ 		/* We only care about Namespace opcodes here */
+ 
+ 		if ((!(walk_state->op_info->flags & AML_NSOPCODE) &&
+@@ -493,9 +493,14 @@ acpi_ds_load2_begin_op (
+ 			(!(walk_state->op_info->flags & AML_NAMED))) {
+ 			if ((walk_state->op_info->class == AML_CLASS_EXECUTE) ||
+ 				(walk_state->op_info->class == AML_CLASS_CONTROL)) {
+-				ACPI_REPORT_WARNING ((
+-					"Encountered executable code at module level, [%s]\n",
+-					acpi_ps_get_opcode_name (walk_state->opcode)));
++				ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH,
++					"Begin/EXEC: %s (fl %8.8X)\n", walk_state->op_info->name,
++					walk_state->op_info->flags));
++
++				/* Executing a type1 or type2 opcode outside of a method */
++
++				status = acpi_ds_exec_begin_op (walk_state, out_op);
++				return_ACPI_STATUS (status);
+ 			}
+ 			return_ACPI_STATUS (AE_OK);
+ 		}
+@@ -657,8 +662,10 @@ acpi_ds_load2_begin_op (
+ 			break;
+ 		}
+ 
++		/* Add new entry into namespace */
++
+ 		status = acpi_ns_lookup (walk_state->scope_info, buffer_ptr, object_type,
+-				  ACPI_IMODE_EXECUTE, ACPI_NS_NO_UPSEARCH,
++				  ACPI_IMODE_LOAD_PASS2, ACPI_NS_NO_UPSEARCH,
+ 				  walk_state, &(node));
+ 		break;
+ 	}
+@@ -668,7 +675,6 @@ acpi_ds_load2_begin_op (
+ 		return_ACPI_STATUS (status);
+ 	}
+ 
+-
+ 	if (!op) {
+ 		/* Create a new op */
+ 
+@@ -682,9 +688,7 @@ acpi_ds_load2_begin_op (
+ 		if (node) {
+ 			op->named.name = node->name.integer;
+ 		}
+-		if (out_op) {
+-			*out_op = op;
+-		}
++		*out_op = op;
+ 	}
+ 
+ 	/*
+@@ -731,9 +735,24 @@ acpi_ds_load2_end_op (
+ 	ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH, "Opcode [%s] Op %p State %p\n",
+ 			walk_state->op_info->name, op, walk_state));
+ 
+-	/* Only interested in opcodes that have namespace objects */
++	/* Check if opcode had an associated namespace object */
+ 
+ 	if (!(walk_state->op_info->flags & AML_NSOBJECT)) {
++#ifndef ACPI_NO_METHOD_EXECUTION
++		/* No namespace object. Executable opcode? */
++
++		if ((walk_state->op_info->class == AML_CLASS_EXECUTE) ||
++			(walk_state->op_info->class == AML_CLASS_CONTROL)) {
++			ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH,
++				"End/EXEC:   %s (fl %8.8X)\n", walk_state->op_info->name,
++				walk_state->op_info->flags));
++
++			/* Executing a type1 or type2 opcode outside of a method */
++
++			status = acpi_ds_exec_end_op (walk_state);
++			return_ACPI_STATUS (status);
++		}
++#endif
+ 		return_ACPI_STATUS (AE_OK);
+ 	}
+ 
+@@ -742,7 +761,6 @@ acpi_ds_load2_end_op (
+ 			"Ending scope Op=%p State=%p\n", op, walk_state));
+ 	}
+ 
+-
+ 	object_type = walk_state->op_info->object_type;
+ 
+ 	/*
+diff --git a/drivers/acpi/dispatcher/dswstate.c b/drivers/acpi/dispatcher/dswstate.c
+index 4ef0e85c677b..cc45d52225d6 100644
+--- a/drivers/acpi/dispatcher/dswstate.c
++++ b/drivers/acpi/dispatcher/dswstate.c
+@@ -762,6 +762,7 @@ acpi_ds_init_aml_walk (
+ 	/* The next_op of the next_walk will be the beginning of the method */
+ 
+ 	walk_state->next_op = NULL;
++	walk_state->pass_number = (u8) pass_number;
+ 
+ 	if (info) {
+ 		if (info->parameter_type == ACPI_PARAM_GPE) {
+diff --git a/drivers/acpi/executer/exconfig.c b/drivers/acpi/executer/exconfig.c
+index 734b2f24af48..8bfa6effaa0c 100644
+--- a/drivers/acpi/executer/exconfig.c
++++ b/drivers/acpi/executer/exconfig.c
+@@ -376,16 +376,22 @@ acpi_ex_load_op (
+ 		 */
+ 		status = acpi_ex_read_data_from_field (walk_state, obj_desc, &buffer_desc);
+ 		if (ACPI_FAILURE (status)) {
+-			goto cleanup;
++			return_ACPI_STATUS (status);
+ 		}
+ 
+ 		table_ptr = ACPI_CAST_PTR (struct acpi_table_header,
+ 				  buffer_desc->buffer.pointer);
+ 
+-		 /* Sanity check the table length */
++		/* All done with the buffer_desc, delete it */
++
++		buffer_desc->buffer.pointer = NULL;
++		acpi_ut_remove_reference (buffer_desc);
++
++		/* Sanity check the table length */
+ 
+ 		if (table_ptr->length < sizeof (struct acpi_table_header)) {
+-			return_ACPI_STATUS (AE_BAD_HEADER);
++			status = AE_BAD_HEADER;
++			goto cleanup;
+ 		}
+ 		break;
+ 
+@@ -413,7 +419,9 @@ acpi_ex_load_op (
+ 
+ 	status = acpi_ex_add_table (table_ptr, acpi_gbl_root_node, &ddb_handle);
+ 	if (ACPI_FAILURE (status)) {
+-		goto cleanup;
++		/* On error, table_ptr was deallocated above */
++
++		return_ACPI_STATUS (status);
+ 	}
+ 
+ 	/* Store the ddb_handle into the Target operand */
+@@ -421,17 +429,14 @@ acpi_ex_load_op (
+ 	status = acpi_ex_store (ddb_handle, target, walk_state);
+ 	if (ACPI_FAILURE (status)) {
+ 		(void) acpi_ex_unload_table (ddb_handle);
+-	}
+ 
+-	return_ACPI_STATUS (status);
++		/* table_ptr was deallocated above */
+ 
++		return_ACPI_STATUS (status);
++	}
+ 
+ cleanup:
+-
+-	if (buffer_desc) {
+-		acpi_ut_remove_reference (buffer_desc);
+-	}
+-	else {
++	if (ACPI_FAILURE (status)) {
+ 		ACPI_MEM_FREE (table_ptr);
+ 	}
+ 	return_ACPI_STATUS (status);
+diff --git a/drivers/acpi/executer/exfield.c b/drivers/acpi/executer/exfield.c
+index 22c8fa480f60..a690c9250990 100644
+--- a/drivers/acpi/executer/exfield.c
++++ b/drivers/acpi/executer/exfield.c
+@@ -87,6 +87,9 @@ acpi_ex_read_data_from_field (
+ 	if (!obj_desc) {
+ 		return_ACPI_STATUS (AE_AML_NO_OPERAND);
+ 	}
++	if (!ret_buffer_desc) {
++		return_ACPI_STATUS (AE_BAD_PARAMETER);
++	}
+ 
+ 	if (ACPI_GET_OBJECT_TYPE (obj_desc) == ACPI_TYPE_BUFFER_FIELD) {
+ 		/*
+@@ -182,7 +185,7 @@ exit:
+ 	if (ACPI_FAILURE (status)) {
+ 		acpi_ut_remove_reference (buffer_desc);
+ 	}
+-	else if (ret_buffer_desc) {
++	else {
+ 		*ret_buffer_desc = buffer_desc;
+ 	}
+ 
+diff --git a/drivers/acpi/executer/exnames.c b/drivers/acpi/executer/exnames.c
+index 639f0bd3f6d8..b6ba1a7a677a 100644
+--- a/drivers/acpi/executer/exnames.c
++++ b/drivers/acpi/executer/exnames.c
+@@ -438,6 +438,13 @@ acpi_ex_get_name_string (
+ 		status = AE_AML_BAD_NAME;
+ 	}
+ 
++	if (ACPI_FAILURE (status)) {
++		if (name_string) {
++			ACPI_MEM_FREE (name_string);
++		}
++		return_ACPI_STATUS (status);
++	}
++
+ 	*out_name_string = name_string;
+ 	*out_name_length = (u32) (aml_address - in_aml_address);
+ 
+diff --git a/drivers/acpi/executer/exoparg1.c b/drivers/acpi/executer/exoparg1.c
+index dbdf8262ba00..ffc61ddeb659 100644
+--- a/drivers/acpi/executer/exoparg1.c
++++ b/drivers/acpi/executer/exoparg1.c
+@@ -127,15 +127,16 @@ acpi_ex_opcode_0A_0T_1R (
+ 
+ cleanup:
+ 
+-	if (!walk_state->result_obj) {
+-		walk_state->result_obj = return_desc;
+-	}
+-
+ 	/* Delete return object on error */
+ 
+-	if (ACPI_FAILURE (status)) {
++	if ((ACPI_FAILURE (status)) || walk_state->result_obj) {
+ 		acpi_ut_remove_reference (return_desc);
+ 	}
++	else {
++		/* Save the return value */
++
++		walk_state->result_obj = return_desc;
++	}
+ 
+ 	return_ACPI_STATUS (status);
+ }
+diff --git a/drivers/acpi/namespace/nsparse.c b/drivers/acpi/namespace/nsparse.c
+index a0e13e8d3764..f81b836e77f1 100644
+--- a/drivers/acpi/namespace/nsparse.c
++++ b/drivers/acpi/namespace/nsparse.c
+@@ -146,6 +146,7 @@ acpi_ns_parse_table (
+ 	 * to service the entire parse.  The second pass of the parse then
+ 	 * performs another complete parse of the AML..
+ 	 */
++	ACPI_DEBUG_PRINT ((ACPI_DB_PARSE, "**** Start pass 1\n"));
+ 	status = acpi_ns_one_complete_parse (1, table_desc);
+ 	if (ACPI_FAILURE (status)) {
+ 		return_ACPI_STATUS (status);
+@@ -160,6 +161,7 @@ acpi_ns_parse_table (
+ 	 * overhead of this is compensated for by the fact that the
+ 	 * parse objects are all cached.
+ 	 */
++	ACPI_DEBUG_PRINT ((ACPI_DB_PARSE, "**** Start pass 2\n"));
+ 	status = acpi_ns_one_complete_parse (2, table_desc);
+ 	if (ACPI_FAILURE (status)) {
+ 		return_ACPI_STATUS (status);
+diff --git a/drivers/acpi/parser/psparse.c b/drivers/acpi/parser/psparse.c
+index bbfdc1a58c27..bdbe0d99486f 100644
+--- a/drivers/acpi/parser/psparse.c
++++ b/drivers/acpi/parser/psparse.c
+@@ -66,7 +66,7 @@ static u32                          acpi_gbl_depth = 0;
+ 
+ /* Local prototypes */
+ 
+-static void
++static acpi_status
+ acpi_ps_complete_this_op (
+ 	struct acpi_walk_state          *walk_state,
+ 	union acpi_parse_object         *op);
+@@ -152,13 +152,13 @@ acpi_ps_peek_opcode (
+  * PARAMETERS:  walk_state      - Current State
+  *              Op              - Op to complete
+  *
+- * RETURN:      None.
++ * RETURN:      Status
+  *
+  * DESCRIPTION: Perform any cleanup at the completion of an Op.
+  *
+  ******************************************************************************/
+ 
+-static void
++static acpi_status
+ acpi_ps_complete_this_op (
+ 	struct acpi_walk_state          *walk_state,
+ 	union acpi_parse_object         *op)
+@@ -175,19 +175,26 @@ acpi_ps_complete_this_op (
+ 	/* Check for null Op, can happen if AML code is corrupt */
+ 
+ 	if (!op) {
+-		return_VOID;
++		return_ACPI_STATUS (AE_OK);  /* OK for now */
+ 	}
+ 
+ 	/* Delete this op and the subtree below it if asked to */
+ 
+ 	if (((walk_state->parse_flags & ACPI_PARSE_TREE_MASK) != ACPI_PARSE_DELETE_TREE) ||
+ 		 (walk_state->op_info->class == AML_CLASS_ARGUMENT)) {
+-		return_VOID;
++		return_ACPI_STATUS (AE_OK);
+ 	}
+ 
+ 	/* Make sure that we only delete this subtree */
+ 
+ 	if (op->common.parent) {
++		prev = op->common.parent->common.value.arg;
++		if (!prev) {
++			/* Nothing more to do */
++
++			goto cleanup;
++		}
++
+ 		/*
+ 		 * Check if we need to replace the operator and its subtree
+ 		 * with a return value op (placeholder op)
+@@ -206,7 +213,7 @@ acpi_ps_complete_this_op (
+ 			 */
+ 			replacement_op = acpi_ps_alloc_op (AML_INT_RETURN_VALUE_OP);
+ 			if (!replacement_op) {
+-				goto cleanup;
++				goto allocate_error;
+ 			}
+ 			break;
+ 
+@@ -223,18 +230,17 @@ acpi_ps_complete_this_op (
+ 				(op->common.parent->common.aml_opcode == AML_VAR_PACKAGE_OP)) {
+ 				replacement_op = acpi_ps_alloc_op (AML_INT_RETURN_VALUE_OP);
+ 				if (!replacement_op) {
+-					goto cleanup;
++					goto allocate_error;
+ 				}
+ 			}
+-
+-			if ((op->common.parent->common.aml_opcode == AML_NAME_OP) &&
+-				(walk_state->descending_callback != acpi_ds_exec_begin_op)) {
++			else if ((op->common.parent->common.aml_opcode == AML_NAME_OP) &&
++					 (walk_state->pass_number <= ACPI_IMODE_LOAD_PASS2)) {
+ 				if ((op->common.aml_opcode == AML_BUFFER_OP) ||
+ 					(op->common.aml_opcode == AML_PACKAGE_OP) ||
+ 					(op->common.aml_opcode == AML_VAR_PACKAGE_OP)) {
+ 					replacement_op = acpi_ps_alloc_op (op->common.aml_opcode);
+ 					if (!replacement_op) {
+-						goto cleanup;
++						goto allocate_error;
+ 					}
+ 
+ 					replacement_op->named.data = op->named.data;
+@@ -244,15 +250,15 @@ acpi_ps_complete_this_op (
+ 			break;
+ 
+ 		default:
++
+ 			replacement_op = acpi_ps_alloc_op (AML_INT_RETURN_VALUE_OP);
+ 			if (!replacement_op) {
+-				goto cleanup;
++				goto allocate_error;
+ 			}
+ 		}
+ 
+ 		/* We must unlink this op from the parent tree */
+ 
+-		prev = op->common.parent->common.value.arg;
+ 		if (prev == op) {
+ 			/* This op is the first in the list */
+ 
+@@ -298,7 +304,15 @@ cleanup:
+ 	/* Now we can actually delete the subtree rooted at Op */
+ 
+ 	acpi_ps_delete_parse_tree (op);
+-	return_VOID;
++	return_ACPI_STATUS (AE_OK);
++
++
++allocate_error:
++
++	/* Always delete the subtree, even on error */
++
++	acpi_ps_delete_parse_tree (op);
++	return_ACPI_STATUS (AE_NO_MEMORY);
+ }
+ 
+ 
+@@ -443,6 +457,7 @@ acpi_ps_parse_loop (
+ 	struct acpi_walk_state          *walk_state)
+ {
+ 	acpi_status                     status = AE_OK;
++	acpi_status                     status2;
+ 	union acpi_parse_object         *op = NULL;     /* current op */
+ 	union acpi_parse_object         *arg = NULL;
+ 	union acpi_parse_object         *pre_op = NULL;
+@@ -744,7 +759,6 @@ acpi_ps_parse_loop (
+ 				break;
+ 
+ 			default:
+-
+ 				/*
+ 				 * Op is not a constant or string, append each argument
+ 				 * to the Op
+@@ -770,6 +784,23 @@ acpi_ps_parse_loop (
+ 
+ 				/* Special processing for certain opcodes */
+ 
++				if (walk_state->pass_number <= ACPI_IMODE_LOAD_PASS1) {
++					switch (op->common.aml_opcode) {
++					case AML_IF_OP:
++					case AML_ELSE_OP:
++					case AML_WHILE_OP:
++
++						/* Skip body of if/else/while in pass 1 */
++
++						parser_state->aml   = parser_state->pkg_end;
++						walk_state->arg_count = 0;
++						break;
++
++					default:
++						break;
++					}
++				}
++
+ 				switch (op->common.aml_opcode) {
+ 				case AML_METHOD_OP:
+ 
+@@ -796,7 +827,7 @@ acpi_ps_parse_loop (
+ 
+ 					if ((op->common.parent) &&
+ 						(op->common.parent->common.aml_opcode == AML_NAME_OP) &&
+-						(walk_state->descending_callback != acpi_ds_exec_begin_op)) {
++						(walk_state->pass_number <= ACPI_IMODE_LOAD_PASS2)) {
+ 						/*
+ 						 * Skip parsing of Buffers and Packages
+ 						 * because we don't have enough info in the first pass
+@@ -900,15 +931,21 @@ close_this_op:
+ 		 */
+ 		parser_state->scope->parse_scope.arg_count--;
+ 
+-		/* Close this Op (will result in parse subtree deletion) */
++		/* Finished with pre_op */
+ 
+-		acpi_ps_complete_this_op (walk_state, op);
+-		op = NULL;
+ 		if (pre_op) {
+ 			acpi_ps_free_op (pre_op);
+ 			pre_op = NULL;
+ 		}
+ 
++		/* Close this Op (will result in parse subtree deletion) */
++
++		status2 = acpi_ps_complete_this_op (walk_state, op);
++		if (ACPI_FAILURE (status2)) {
++			return_ACPI_STATUS (status2);
++		}
++		op = NULL;
++
+ 		switch (status) {
+ 		case AE_OK:
+ 			break;
+@@ -936,7 +973,10 @@ close_this_op:
+ 				status = walk_state->ascending_callback (walk_state);
+ 				status = acpi_ps_next_parse_state (walk_state, op, status);
+ 
+-				acpi_ps_complete_this_op (walk_state, op);
++				status2 = acpi_ps_complete_this_op (walk_state, op);
++				if (ACPI_FAILURE (status2)) {
++					return_ACPI_STATUS (status2);
++				}
+ 				op = NULL;
+ 			}
+ 			status = AE_OK;
+@@ -962,7 +1002,10 @@ close_this_op:
+ 			status = walk_state->ascending_callback (walk_state);
+ 			status = acpi_ps_next_parse_state (walk_state, op, status);
+ 
+-			acpi_ps_complete_this_op (walk_state, op);
++			status2 = acpi_ps_complete_this_op (walk_state, op);
++			if (ACPI_FAILURE (status2)) {
++				return_ACPI_STATUS (status2);
++			}
+ 			op = NULL;
+ 
+ 			status = AE_OK;
+@@ -976,7 +1019,10 @@ close_this_op:
+ 			/* Clean up */
+ 			do {
+ 				if (op) {
+-					acpi_ps_complete_this_op (walk_state, op);
++					status2 = acpi_ps_complete_this_op (walk_state, op);
++					if (ACPI_FAILURE (status2)) {
++						return_ACPI_STATUS (status2);
++					}
+ 				}
+ 				acpi_ps_pop_scope (parser_state, &op,
+ 					&walk_state->arg_types, &walk_state->arg_count);
+@@ -990,7 +1036,10 @@ close_this_op:
+ 
+ 			do {
+ 				if (op) {
+-					acpi_ps_complete_this_op (walk_state, op);
++					status2 = acpi_ps_complete_this_op (walk_state, op);
++					if (ACPI_FAILURE (status2)) {
++						return_ACPI_STATUS (status2);
++					}
+ 				}
+ 				acpi_ps_pop_scope (parser_state, &op,
+ 					&walk_state->arg_types, &walk_state->arg_count);
+@@ -1053,7 +1102,10 @@ close_this_op:
+ 					/* Clean up */
+ 					do {
+ 						if (op) {
+-							acpi_ps_complete_this_op (walk_state, op);
++							status2 = acpi_ps_complete_this_op (walk_state, op);
++							if (ACPI_FAILURE (status2)) {
++								return_ACPI_STATUS (status2);
++							}
+ 						}
+ 
+ 						acpi_ps_pop_scope (parser_state, &op,
+@@ -1065,12 +1117,17 @@ close_this_op:
+ 				}
+ 
+ 				else if (ACPI_FAILURE (status)) {
+-					acpi_ps_complete_this_op (walk_state, op);
++					/* First error is most important */
++
++					(void) acpi_ps_complete_this_op (walk_state, op);
+ 					return_ACPI_STATUS (status);
+ 				}
+ 			}
+ 
+-			acpi_ps_complete_this_op (walk_state, op);
++			status2 = acpi_ps_complete_this_op (walk_state, op);
++			if (ACPI_FAILURE (status2)) {
++				return_ACPI_STATUS (status2);
++			}
+ 		}
+ 
+ 		acpi_ps_pop_scope (parser_state, &op, &walk_state->arg_types,
+diff --git a/drivers/acpi/tables/tbxfroot.c b/drivers/acpi/tables/tbxfroot.c
+index dc3c3f6a9f62..198997aa7fbe 100644
+--- a/drivers/acpi/tables/tbxfroot.c
++++ b/drivers/acpi/tables/tbxfroot.c
+@@ -331,8 +331,10 @@ acpi_get_firmware_table (
+ 
+ 
+ cleanup:
+-	acpi_os_unmap_memory (rsdt_info->pointer,
+-		(acpi_size) rsdt_info->pointer->length);
++	if (rsdt_info->pointer) {
++		acpi_os_unmap_memory (rsdt_info->pointer,
++			(acpi_size) rsdt_info->pointer->length);
++	}
+ 	ACPI_MEM_FREE (rsdt_info);
+ 
+ 	if (header) {
+diff --git a/drivers/acpi/utilities/utmisc.c b/drivers/acpi/utilities/utmisc.c
+index f6de4ed3d527..bb658777fa88 100644
+--- a/drivers/acpi/utilities/utmisc.c
++++ b/drivers/acpi/utilities/utmisc.c
+@@ -787,7 +787,6 @@ acpi_ut_release_mutex (
+ 	acpi_mutex_handle               mutex_id)
+ {
+ 	acpi_status                     status;
+-	u32                             i;
+ 	u32                             this_thread_id;
+ 
+ 
+@@ -814,25 +813,32 @@ acpi_ut_release_mutex (
+ 		return (AE_NOT_ACQUIRED);
+ 	}
+ 
+-	/*
+-	 * Deadlock prevention.  Check if this thread owns any mutexes of value
+-	 * greater than this one.  If so, the thread has violated the mutex
+-	 * ordering rule.  This indicates a coding error somewhere in
+-	 * the ACPI subsystem code.
+-	 */
+-	for (i = mutex_id; i < MAX_MUTEX; i++) {
+-		if (acpi_gbl_mutex_info[i].owner_id == this_thread_id) {
+-			if (i == mutex_id) {
+-				continue;
+-			}
++#ifdef ACPI_MUTEX_DEBUG
++	{
++		u32                             i;
++		/*
++		 * Mutex debug code, for internal debugging only.
++		 *
++		 * Deadlock prevention.  Check if this thread owns any mutexes of value
++		 * greater than this one.  If so, the thread has violated the mutex
++		 * ordering rule.  This indicates a coding error somewhere in
++		 * the ACPI subsystem code.
++		 */
++		for (i = mutex_id; i < MAX_MUTEX; i++) {
++			if (acpi_gbl_mutex_info[i].owner_id == this_thread_id) {
++				if (i == mutex_id) {
++					continue;
++				}
+ 
+-			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
+-				"Invalid release order: owns [%s], releasing [%s]\n",
+-				acpi_ut_get_mutex_name (i), acpi_ut_get_mutex_name (mutex_id)));
++				ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
++					"Invalid release order: owns [%s], releasing [%s]\n",
++					acpi_ut_get_mutex_name (i), acpi_ut_get_mutex_name (mutex_id)));
+ 
+-			return (AE_RELEASE_DEADLOCK);
++				return (AE_RELEASE_DEADLOCK);
++			}
+ 		}
+ 	}
++#endif
+ 
+ 	/* Mark unlocked FIRST */
+ 
+diff --git a/include/acpi/acconfig.h b/include/acpi/acconfig.h
+index a268c4ae1877..6babcb104930 100644
+--- a/include/acpi/acconfig.h
++++ b/include/acpi/acconfig.h
+@@ -64,7 +64,7 @@
+ 
+ /* Version string */
+ 
+-#define ACPI_CA_VERSION                 0x20050513
++#define ACPI_CA_VERSION                 0x20050526
+ 
+ /*
+  * OS name, used for the _OS object.  The _OS object is essentially obsolete,
+diff --git a/include/acpi/acstruct.h b/include/acpi/acstruct.h
+index e6b9e36a2eda..4e926457bd2f 100644
+--- a/include/acpi/acstruct.h
++++ b/include/acpi/acstruct.h
+@@ -78,7 +78,7 @@ struct acpi_walk_state
+ 	u8                                  return_used;
+ 	u16                                 opcode;                             /* Current AML opcode */
+ 	u8                                  scope_depth;
+-	u8                                  reserved1;
++	u8                                  pass_number;                        /* Parse pass during table load */
+ 	u32                                 arg_count;                          /* push for fixed or var args */
+ 	u32                                 aml_offset;
+ 	u32                                 arg_types;
+

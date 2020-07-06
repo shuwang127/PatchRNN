@@ -1,0 +1,100 @@
+commit 7d2d641c44269656bf72381c72e2eb50b18a8404
+Author: Li Jun <jun.li@freescale.com>
+Date:   Mon Aug 31 16:20:49 2015 +0800
+
+    usb: otg: don't set a_alt_hnp_support feature for OTG 2.0 device
+    
+    Since a_alt_hnp_support is obsolete in OTG 2.0, HNP capable host should
+    send this set feature request only if the otg device is connecting to a
+    non-HNP port and it's compliant with OTG 1.x revision. This is done by
+    checking its otg descriptor length, OTG 2.0 uses usb_otg20_descriptor
+    which has different length than OTG 1.x using usb_otg_descriptor.
+    
+    Signed-off-by: Li Jun <jun.li@freescale.com>
+    Acked-by: Peter Chen <peter.chen@freescale.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index 52427267e2a8..bdeadc112d29 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -2239,39 +2239,49 @@ static int usb_enumerate_device_otg(struct usb_device *udev)
+ 			&& udev->parent == udev->bus->root_hub) {
+ 		struct usb_otg_descriptor	*desc = NULL;
+ 		struct usb_bus			*bus = udev->bus;
++		unsigned			port1 = udev->portnum;
+ 
+ 		/* descriptor may appear anywhere in config */
+-		if (__usb_get_extra_descriptor(udev->rawdescriptors[0],
+-					le16_to_cpu(udev->config[0].desc.wTotalLength),
+-					USB_DT_OTG, (void **) &desc) == 0) {
+-			if (desc->bmAttributes & USB_OTG_HNP) {
+-				unsigned		port1 = udev->portnum;
++		err = __usb_get_extra_descriptor(udev->rawdescriptors[0],
++				le16_to_cpu(udev->config[0].desc.wTotalLength),
++				USB_DT_OTG, (void **) &desc);
++		if (err || !(desc->bmAttributes & USB_OTG_HNP))
++			return 0;
+ 
+-				dev_info(&udev->dev,
+-					"Dual-Role OTG device on %sHNP port\n",
+-					(port1 == bus->otg_port)
+-						? "" : "non-");
+-
+-				/* enable HNP before suspend, it's simpler */
+-				if (port1 == bus->otg_port)
+-					bus->b_hnp_enable = 1;
+-				err = usb_control_msg(udev,
+-					usb_sndctrlpipe(udev, 0),
+-					USB_REQ_SET_FEATURE, 0,
+-					bus->b_hnp_enable
+-						? USB_DEVICE_B_HNP_ENABLE
+-						: USB_DEVICE_A_ALT_HNP_SUPPORT,
+-					0, NULL, 0, USB_CTRL_SET_TIMEOUT);
+-				if (err < 0) {
+-					/* OTG MESSAGE: report errors here,
+-					 * customize to match your product.
+-					 */
+-					dev_info(&udev->dev,
+-						"can't set HNP mode: %d\n",
+-						err);
+-					bus->b_hnp_enable = 0;
+-				}
++		dev_info(&udev->dev, "Dual-Role OTG device on %sHNP port\n",
++					(port1 == bus->otg_port) ? "" : "non-");
++
++		/* enable HNP before suspend, it's simpler */
++		if (port1 == bus->otg_port) {
++			bus->b_hnp_enable = 1;
++			err = usb_control_msg(udev,
++				usb_sndctrlpipe(udev, 0),
++				USB_REQ_SET_FEATURE, 0,
++				USB_DEVICE_B_HNP_ENABLE,
++				0, NULL, 0,
++				USB_CTRL_SET_TIMEOUT);
++			if (err < 0) {
++				/*
++				 * OTG MESSAGE: report errors here,
++				 * customize to match your product.
++				 */
++				dev_err(&udev->dev, "can't set HNP mode: %d\n",
++									err);
++				bus->b_hnp_enable = 0;
+ 			}
++		} else if (desc->bLength == sizeof
++				(struct usb_otg_descriptor)) {
++			/* Set a_alt_hnp_support for legacy otg device */
++			err = usb_control_msg(udev,
++				usb_sndctrlpipe(udev, 0),
++				USB_REQ_SET_FEATURE, 0,
++				USB_DEVICE_A_ALT_HNP_SUPPORT,
++				0, NULL, 0,
++				USB_CTRL_SET_TIMEOUT);
++			if (err < 0)
++				dev_err(&udev->dev,
++					"set a_alt_hnp_support failed: %d\n",
++					err);
+ 		}
+ 	}
+ #endif
+

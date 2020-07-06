@@ -1,0 +1,71 @@
+commit 5400da7dc0862d73523691038c044535f518a57f
+Author: Brian Foster <bfoster@redhat.com>
+Date:   Thu Jul 24 19:40:22 2014 +1000
+
+    xfs: add scan owner field to xfs_eofblocks
+    
+    From: Brian Foster <bfoster@redhat.com>
+    
+    The scan owner field represents an optional inode number that is
+    responsible for the current scan. The purpose is to identify that an
+    inode is under iolock and as such, the iolock shouldn't be attempted
+    when trimming eofblocks. This is an internal only field.
+    
+    Signed-off-by: Brian Foster <bfoster@redhat.com>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+    Signed-off-by: Dave Chinner <david@fromorbit.com>
+
+diff --git a/fs/xfs/xfs_icache.c b/fs/xfs/xfs_icache.c
+index 08ba4c6e1359..6e522ff5a006 100644
+--- a/fs/xfs/xfs_icache.c
++++ b/fs/xfs/xfs_icache.c
+@@ -1211,6 +1211,9 @@ xfs_inode_free_eofblocks(
+ {
+ 	int ret;
+ 	struct xfs_eofblocks *eofb = args;
++	bool need_iolock = true;
++
++	ASSERT(!eofb || (eofb && eofb->eof_scan_owner != 0));
+ 
+ 	if (!xfs_can_free_eofblocks(ip, false)) {
+ 		/* inode could be preallocated or append-only */
+@@ -1235,9 +1238,17 @@ xfs_inode_free_eofblocks(
+ 		if (eofb->eof_flags & XFS_EOF_FLAGS_MINFILESIZE &&
+ 		    XFS_ISIZE(ip) < eofb->eof_min_file_size)
+ 			return 0;
++
++		/*
++		 * A scan owner implies we already hold the iolock. Skip it in
++		 * xfs_free_eofblocks() to avoid deadlock. This also eliminates
++		 * the possibility of EAGAIN being returned.
++		 */
++		if (eofb->eof_scan_owner == ip->i_ino)
++			need_iolock = false;
+ 	}
+ 
+-	ret = xfs_free_eofblocks(ip->i_mount, ip, true);
++	ret = xfs_free_eofblocks(ip->i_mount, ip, need_iolock);
+ 
+ 	/* don't revisit the inode if we're not waiting */
+ 	if (ret == -EAGAIN && !(flags & SYNC_WAIT))
+diff --git a/fs/xfs/xfs_icache.h b/fs/xfs/xfs_icache.h
+index 6250430d609c..98687af6a99d 100644
+--- a/fs/xfs/xfs_icache.h
++++ b/fs/xfs/xfs_icache.h
+@@ -27,6 +27,7 @@ struct xfs_eofblocks {
+ 	kgid_t		eof_gid;
+ 	prid_t		eof_prid;
+ 	__u64		eof_min_file_size;
++	xfs_ino_t	eof_scan_owner;
+ };
+ 
+ #define SYNC_WAIT		0x0001	/* wait for i/o to complete */
+@@ -84,6 +85,7 @@ xfs_fs_eofblocks_from_user(
+ 	dst->eof_flags = src->eof_flags;
+ 	dst->eof_prid = src->eof_prid;
+ 	dst->eof_min_file_size = src->eof_min_file_size;
++	dst->eof_scan_owner = NULLFSINO;
+ 
+ 	dst->eof_uid = INVALID_UID;
+ 	if (src->eof_flags & XFS_EOF_FLAGS_UID) {
+

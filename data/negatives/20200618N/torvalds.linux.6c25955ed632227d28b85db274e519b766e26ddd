@@ -1,0 +1,62 @@
+commit 6c25955ed632227d28b85db274e519b766e26ddd
+Author: Andrzej Pietrasiewicz <andrzej.p@samsung.com>
+Date:   Wed Dec 10 12:34:01 2014 +0100
+
+    usb: gadget: uvc: verify descriptors presence
+    
+    If the caller of uvc_alloc() does not provide enough
+    descriptors, binding the function should fail, so appropriate
+    code is returned from uvc_copy_descriptors().
+    
+    uvc_function_bind() is modified accordingly to account for possible
+    errors from uvc_copy_descriptors().
+    
+    Signed-off-by: Andrzej Pietrasiewicz <andrzej.p@samsung.com>
+    Acked-by: Laurent Pinchart <laurent.pinchart@ideasonboard.com>
+    Signed-off-by: Felipe Balbi <balbi@ti.com>
+
+diff --git a/drivers/usb/gadget/function/f_uvc.c b/drivers/usb/gadget/function/f_uvc.c
+index 5b4ab39cce44..62ca0c5c7f6e 100644
+--- a/drivers/usb/gadget/function/f_uvc.c
++++ b/drivers/usb/gadget/function/f_uvc.c
+@@ -509,6 +509,9 @@ uvc_copy_descriptors(struct uvc_device *uvc, enum usb_device_speed speed)
+ 		break;
+ 	}
+ 
++	if (!uvc_control_desc || !uvc_streaming_cls)
++		return ERR_PTR(-ENODEV);
++
+ 	/* Descriptors layout
+ 	 *
+ 	 * uvc_iad
+@@ -700,10 +703,27 @@ uvc_function_bind(struct usb_configuration *c, struct usb_function *f)
+ 
+ 	/* Copy descriptors */
+ 	f->fs_descriptors = uvc_copy_descriptors(uvc, USB_SPEED_FULL);
+-	if (gadget_is_dualspeed(cdev->gadget))
++	if (IS_ERR(f->fs_descriptors)) {
++		ret = PTR_ERR(f->fs_descriptors);
++		f->fs_descriptors = NULL;
++		goto error;
++	}
++	if (gadget_is_dualspeed(cdev->gadget)) {
+ 		f->hs_descriptors = uvc_copy_descriptors(uvc, USB_SPEED_HIGH);
+-	if (gadget_is_superspeed(c->cdev->gadget))
++		if (IS_ERR(f->hs_descriptors)) {
++			ret = PTR_ERR(f->hs_descriptors);
++			f->hs_descriptors = NULL;
++			goto error;
++		}
++	}
++	if (gadget_is_superspeed(c->cdev->gadget)) {
+ 		f->ss_descriptors = uvc_copy_descriptors(uvc, USB_SPEED_SUPER);
++		if (IS_ERR(f->ss_descriptors)) {
++			ret = PTR_ERR(f->ss_descriptors);
++			f->ss_descriptors = NULL;
++			goto error;
++		}
++	}
+ 
+ 	/* Preallocate control endpoint request. */
+ 	uvc->control_req = usb_ep_alloc_request(cdev->gadget->ep0, GFP_KERNEL);
+

@@ -1,0 +1,305 @@
+commit c779da9f09b5323f9a52787d43077482b6460e9c
+Author: Anca Vamanu <anca@voice-system.ro>
+Date:   Wed Feb 20 11:32:31 2008 +0000
+
+    - fixed a bug in getting presentity uri from Publish request uri (reported by Eric PTAK <eric.ptak.fr@gmail.com>)
+    --Ths line, and those below, will be ignored--
+    
+    M    presence/publish.c
+    M    presence/presentity.c
+    M    presence/notify.c
+    M    presence/notify.h
+    M    presence/hash.c
+    
+    
+    git-svn-id: https://openser.svn.sourceforge.net/svnroot/openser/trunk@3735 689a6050-402a-0410-94f2-e92a70836424
+
+diff --git a/modules_k/presence/hash.c b/modules_k/presence/hash.c
+index 8c696a5be..e6f51ba89 100644
+--- a/modules_k/presence/hash.c
++++ b/modules_k/presence/hash.c
+@@ -368,6 +368,7 @@ pres_entry_t* search_phtable(str* pres_uri,int event, unsigned int hash_code)
+ {
+ 	pres_entry_t* p;
+ 
++	LM_DBG("pres_uri= %.*s\n", pres_uri->len,  pres_uri->s);
+ 	p= pres_htable[hash_code].entries->next;
+ 	while(p)
+ 	{
+diff --git a/modules_k/presence/notify.c b/modules_k/presence/notify.c
+index 3100919f0..da757a9e4 100644
+--- a/modules_k/presence/notify.c
++++ b/modules_k/presence/notify.c
+@@ -619,7 +619,7 @@ db_query:
+ 	if (pa_dbf.query (pa_db, query_cols, 0, query_vals,
+ 		 result_cols, n_query_cols, n_result_cols, &query_str ,  &result) < 0) 
+ 	{
+-		LM_ERR("querying presentity\n");
++		LM_ERR("failed to query %.*s table\n", presentity_table.len, presentity_table.s);
+ 		if(result)
+ 			pa_dbf.free_result(pa_db, result);
+ 		return NULL;
+@@ -1204,19 +1204,12 @@ error:
+ 	
+ }
+ 
+-int publ_notify(presentity_t* p, str* body, str* offline_etag, str* rules_doc)
++int publ_notify(presentity_t* p, str pres_uri, str* body, str* offline_etag, str* rules_doc)
+ {
+ 	str* notify_body = NULL;
+ 	subs_t* subs_array= NULL, *s= NULL;
+-	str pres_uri;
+ 	int ret_code= -1;
+ 
+-	if(uandd_to_uri(p->user, p->domain, &pres_uri)< 0)
+-	{
+-		LM_ERR("constructing uri from user and domain\n");
+-		return -1;
+-	}
+-	
+ 	subs_array= get_subs_dialog(&pres_uri, p->event , p->sender);
+ 	if(subs_array == NULL)
+ 	{
+@@ -1263,7 +1256,6 @@ done:
+ 		}
+ 		pkg_free(notify_body);
+ 	}
+-	pkg_free(pres_uri.s);	
+ 	return ret_code;
+ }	
+ 
+diff --git a/modules_k/presence/notify.h b/modules_k/presence/notify.h
+index 3114363e2..a3758511a 100644
+--- a/modules_k/presence/notify.h
++++ b/modules_k/presence/notify.h
+@@ -95,9 +95,10 @@ void printf_subs(subs_t* subs);
+ 
+ int query_db_notify(str* pres_uri,pres_ev_t* event, subs_t* watcher_subs );
+ 
+-int publ_notify(presentity_t* p, str* body, str* offline_etag, str* rules_doc);
++int publ_notify(presentity_t* p, str pres_uri, str* body, str* offline_etag,
++		str* rules_doc);
+ 
+-int notify(subs_t* subs, subs_t* watcher_subs, str* n_body, int force_null_body);
++int notify(subs_t* subs, subs_t* watcher_subs, str* n_body,int force_null_body);
+ 
+ int send_notify_request(subs_t* subs, subs_t * watcher_subs,
+ 		str* n_body,int force_null_body);
+diff --git a/modules_k/presence/presentity.c b/modules_k/presence/presentity.c
+index cd9e4f3da..e49566461 100644
+--- a/modules_k/presence/presentity.c
++++ b/modules_k/presence/presentity.c
+@@ -235,6 +235,7 @@ int update_presentity(struct sip_msg* msg, presentity_t* presentity, str* body,
+ 	str etag= {0, 0};
+ 	str cur_etag= {0, 0};
+ 	str* rules_doc= NULL;
++	str pres_uri= {0, 0};
+ 
+ 	*sent_reply= 0;
+ 	if(presentity->event->req_auth)
+@@ -247,6 +248,13 @@ int update_presentity(struct sip_msg* msg, presentity_t* presentity, str* body,
+ 			goto error;
+ 		}
+ 	}
++	
++	if(uandd_to_uri(presentity->user, presentity->domain, &pres_uri)< 0)
++	{
++		LM_ERR("constructing uri from user and domain\n");
++		goto error;
++	}
++
+ 
+ 	query_cols[n_query_cols] = &str_domain_col;
+ 	query_ops[n_query_cols] = OP_EQ;
+@@ -281,9 +289,8 @@ int update_presentity(struct sip_msg* msg, presentity_t* presentity, str* body,
+ 	if(new_t) 
+ 	{
+ 		/* insert new record in hash_table */
+-		
+-		if(insert_phtable(&msg->first_line.u.request.uri, 
+-					presentity->event->evp->parsed)< 0)
++	
++		if(insert_phtable(&pres_uri, presentity->event->evp->parsed)< 0)
+ 		{
+ 			LM_ERR("inserting record in hash table\n");
+ 			goto error;
+@@ -360,7 +367,7 @@ int update_presentity(struct sip_msg* msg, presentity_t* presentity, str* body,
+ 					goto error;
+ 				}
+ 				*sent_reply= 1;
+-				if( publ_notify( presentity, body, &presentity->etag, rules_doc)< 0 )
++				if( publ_notify( presentity, pres_uri, body, &presentity->etag, rules_doc)< 0 )
+ 				{
+ 					LM_ERR("while sending notify\n");
+ 					goto error;
+@@ -383,8 +390,7 @@ int update_presentity(struct sip_msg* msg, presentity_t* presentity, str* body,
+ 
+ 				/* delete from hash table */
+ 	
+-				if(delete_phtable(&msg->first_line.u.request.uri,
+-							presentity->event->evp->parsed)< 0)
++				if(delete_phtable(&pres_uri, presentity->event->evp->parsed)< 0)
+ 				{
+ 					LM_ERR("deleting record from hash table\n");
+ 					goto error;
+@@ -501,7 +507,7 @@ int update_presentity(struct sip_msg* msg, presentity_t* presentity, str* body,
+ send_notify:
+ 			
+ 	/* send notify with presence information */
+-	if (publ_notify(presentity, body, NULL, rules_doc)<0)
++	if (publ_notify(presentity, pres_uri, body, NULL, rules_doc)<0)
+ 	{
+ 		LM_ERR("while sending Notify requests to watchers\n");
+ 		goto error;
+@@ -514,6 +520,8 @@ done:
+ 			pkg_free(rules_doc->s);
+ 		pkg_free(rules_doc);
+ 	}
++	if(pres_uri.s)
++		pkg_free(pres_uri.s);
+ 
+ 	return 0;
+ 
+@@ -528,6 +536,9 @@ error:
+ 			pkg_free(rules_doc->s);
+ 		pkg_free(rules_doc);
+ 	}
++	if(pres_uri.s)
++		pkg_free(pres_uri.s);
++
+ 	return -1;
+ 
+ }
+diff --git a/modules_k/presence/publish.c b/modules_k/presence/publish.c
+index 59384488a..6bec065e9 100644
+--- a/modules_k/presence/publish.c
++++ b/modules_k/presence/publish.c
+@@ -51,6 +51,12 @@ static str pu_400b_rpl = str_init("Invalid request");
+ static str pu_500_rpl  = str_init("Server Internal Error");
+ static str pu_489_rpl  = str_init("Bad Event");
+ 
++struct p_modif
++{
++	presentity_t* p;
++	str uri;
++};
++
+ void msg_presentity_clean(unsigned int ticks,void *param)
+ {
+ 	db_key_t db_keys[2];
+@@ -61,16 +67,16 @@ void msg_presentity_clean(unsigned int ticks,void *param)
+ 	db_row_t *row ;	
+ 	db_val_t *row_vals ;
+ 	int i =0, size= 0;
+-	presentity_t** p= NULL;
++	struct p_modif* p= NULL;
+ 	presentity_t* pres= NULL;
+ 	int n= 0;
+ 	int event_col, etag_col, user_col, domain_col;
+ 	event_t ev;
+ 	str user, domain, etag, event;
+ 	int n_result_cols= 0;
+-	str pres_uri;
+ 	str* rules_doc= NULL;
+ 
++
+ 	if (pa_dbf.use_table(pa_db, &presentity_table) < 0) 
+ 	{
+ 		LM_ERR("in use_table\n");
+@@ -111,12 +117,12 @@ void msg_presentity_clean(unsigned int ticks,void *param)
+ 
+ 	n= result->n;
+ 	
+-	p= (presentity_t**)pkg_malloc(n* sizeof(presentity_t*));
++	p= (struct p_modif*)pkg_malloc(n* sizeof(struct p_modif));
+ 	if(p== NULL)
+ 	{
+ 		ERR_MEM(PKG_MEM_STR);	
+ 	}
+-	memset(p, 0, n* sizeof(presentity_t*));
++	memset(p, 0, n* sizeof(struct p_modif));
+ 
+ 	for(i = 0; i< n; i++)
+ 	{	
+@@ -167,24 +173,22 @@ void msg_presentity_clean(unsigned int ticks,void *param)
+ 			free_event_params(ev.params, PKG_MEM_TYPE);
+ 			goto error;
+ 		}	
+-		p[i]= pres;
+-
+-		/* delete from hash table */
+-		if(uandd_to_uri(user, domain, &pres_uri)< 0)
++	
++		p[i].p= pres;
++		if(uandd_to_uri(user, domain, &p[i].uri)< 0)
+ 		{
+ 			LM_ERR("constructing uri\n");
+ 			free_event_params(ev.params, PKG_MEM_TYPE);
+ 			goto error;
+ 		}
+-
+-		if(delete_phtable(&pres_uri, ev.parsed)< 0)
++		
++		/* delete from hash table */
++		if(delete_phtable(&p[i].uri, ev.parsed)< 0)
+ 		{
+ 			LM_ERR("deleting from pres hash table\n");
+-			pkg_free(pres_uri.s);
+ 			free_event_params(ev.params, PKG_MEM_TYPE);
+ 			goto error;
+ 		}
+-		pkg_free(pres_uri.s);
+ 		free_event_params(ev.params, PKG_MEM_TYPE);
+ 
+ 	}
+@@ -194,17 +198,17 @@ void msg_presentity_clean(unsigned int ticks,void *param)
+ 	for(i= 0; i<n ; i++)
+ 	{
+ 		LM_DBG("found expired publish for [user]=%.*s  [domanin]=%.*s\n",
+-			p[i]->user.len,p[i]->user.s, p[i]->domain.len, p[i]->domain.s);
++			p[i].p->user.len,p[i].p->user.s, p[i].p->domain.len, p[i].p->domain.s);
+ 		
+ 		rules_doc= NULL;
+ 		
+-		if(p[i]->event->get_rules_doc && 
+-		p[i]->event->get_rules_doc(&p[i]->user, &p[i]->domain, &rules_doc)< 0)
++		if(p[i].p->event->get_rules_doc && 
++		p[i].p->event->get_rules_doc(&p[i].p->user, &p[i].p->domain, &rules_doc)< 0)
+ 		{
+ 			LM_ERR("getting rules doc\n");
+ 			goto error;
+ 		}
+-		if(publ_notify( p[i], NULL, &p[i]->etag, rules_doc)< 0)
++		if(publ_notify( p[i].p, p[i].uri, NULL, &p[i].p->etag, rules_doc)< 0)
+ 		{
+ 			LM_ERR("sending Notify request\n");
+ 			goto error;
+@@ -229,8 +233,11 @@ void msg_presentity_clean(unsigned int ticks,void *param)
+ 	
+ 	for(i= 0; i< n; i++)
+ 	{
+-		if(p[i])
+-			pkg_free(p[i]);
++		if(p[i].p)
++			pkg_free(p[i].p);
++		if(p[i].uri.s)
++			pkg_free(p[i].uri.s);
++
+ 	}
+ 	pkg_free(p);
+ 
+@@ -243,8 +250,11 @@ error:
+ 	{
+ 		for(i= 0; i< n; i++)
+ 		{
+-			if(p[i])
+-				pkg_free(p[i]);
++			
++			if(p[i].p)
++				pkg_free(p[i].p);
++			if(p[i].uri.s)
++				pkg_free(p[i].uri.s);
+ 			else
+ 				break;
+ 		}
+

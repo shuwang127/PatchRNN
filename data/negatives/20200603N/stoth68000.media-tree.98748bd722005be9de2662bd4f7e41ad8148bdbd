@@ -1,0 +1,63 @@
+commit 98748bd722005be9de2662bd4f7e41ad8148bdbd
+Author: Michal Hocko <mhocko@suse.com>
+Date:   Fri May 20 16:57:24 2016 -0700
+
+    oom: consider multi-threaded tasks in task_will_free_mem
+    
+    task_will_free_mem is a misnomer for a more complex PF_EXITING test for
+    early break out from the oom killer because it is believed that such a
+    task would release its memory shortly and so we do not have to select an
+    oom victim and perform a disruptive action.
+    
+    Currently we make sure that the given task is not participating in the
+    core dumping because it might get blocked for a long time - see commit
+    d003f371b270 ("oom: don't assume that a coredumping thread will exit
+    soon").
+    
+    The check can still do better though.  We shouldn't consider the task
+    unless the whole thread group is going down.  This is rather unlikely
+    but not impossible.  A single exiting thread would surely leave all the
+    address space behind.  If we are really unlucky it might get stuck on
+    the exit path and keep its TIF_MEMDIE and so block the oom killer.
+    
+    Link: http://lkml.kernel.org/r/1460452756-15491-1-git-send-email-mhocko@kernel.org
+    Signed-off-by: Michal Hocko <mhocko@suse.com>
+    Cc: Oleg Nesterov <oleg@redhat.com>
+    Cc: David Rientjes <rientjes@google.com>
+    Cc: Tetsuo Handa <penguin-kernel@i-love.sakura.ne.jp>
+    Cc: Joonsoo Kim <iamjoonsoo.kim@lge.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/linux/oom.h b/include/linux/oom.h
+index 83b9c39bd8b7..d3f533f2f481 100644
+--- a/include/linux/oom.h
++++ b/include/linux/oom.h
+@@ -110,13 +110,24 @@ extern struct task_struct *find_lock_task_mm(struct task_struct *p);
+ 
+ static inline bool task_will_free_mem(struct task_struct *task)
+ {
++	struct signal_struct *sig = task->signal;
++
+ 	/*
+ 	 * A coredumping process may sleep for an extended period in exit_mm(),
+ 	 * so the oom killer cannot assume that the process will promptly exit
+ 	 * and release memory.
+ 	 */
+-	return (task->flags & PF_EXITING) &&
+-		!(task->signal->flags & SIGNAL_GROUP_COREDUMP);
++	if (sig->flags & SIGNAL_GROUP_COREDUMP)
++		return false;
++
++	if (!(task->flags & PF_EXITING))
++		return false;
++
++	/* Make sure that the whole thread group is going down */
++	if (!thread_group_empty(task) && !(sig->flags & SIGNAL_GROUP_EXIT))
++		return false;
++
++	return true;
+ }
+ 
+ /* sysctls */
+

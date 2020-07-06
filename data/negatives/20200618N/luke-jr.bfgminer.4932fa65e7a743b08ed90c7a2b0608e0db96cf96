@@ -1,0 +1,105 @@
+commit 4932fa65e7a743b08ed90c7a2b0608e0db96cf96
+Author: Luke Dashjr <luke-jr+git@utopios.org>
+Date:   Sun Jul 6 21:44:44 2014 +0000
+
+    jingtian: Explicitly configure SPI device while opening
+
+diff --git a/driver-jingtian.c b/driver-jingtian.c
+index 23935469..a87d560c 100644
+--- a/driver-jingtian.c
++++ b/driver-jingtian.c
+@@ -18,6 +18,10 @@
+ #include <fcntl.h>
+ #include <unistd.h>
+ 
++#include <sys/ioctl.h>
++#include <linux/types.h>
++#include <linux/spi/spidev.h>
++
+ #include "deviceapi.h"
+ #include "driver-aan.h"
+ #include "logging.h"
+@@ -135,8 +139,13 @@ bool jingtian_detect_one(const char * const devpath)
+ 	
+ 	jingtian_common_init();
+ 	
+-	const int fd = open(devpath, O_RDWR);
+-	if (fd < 0)
++	struct spi_port spi_cfg;
++	memset(&spi_cfg, 0, sizeof(spi_cfg));
++	spi_cfg.speed = 4000000;
++	spi_cfg.delay = 0;
++	spi_cfg.mode = SPI_MODE_1;
++	spi_cfg.bits = 8;
++	if (spi_open(&spi_cfg, devpath) < 0)
+ 		applogr(false, LOG_DEBUG, "%s: Failed to open %s", jingtian_drv.dname, devpath);
+ 	
+ 	struct cgpu_info *cgpu, *prev_cgpu = NULL;
+@@ -151,15 +160,11 @@ bool jingtian_detect_one(const char * const devpath)
+ 	for (int i = 0; i < jingtian_max_cs; ++i)
+ 	{
+ 		spi = spi_a[i] = calloc(sizeof(*spi), 1);
++		memcpy(spi, &spi_cfg, sizeof(*spi));
+ 		spi->repr = malloc(devpath_len + 0x10);
+ 		sprintf((void*)spi->repr, "%s(cs%d)", devpath, i);
+ 		spi->txrx = jingtian_spi_txrx;
+ 		spi->userp = &jingtian_hooks;
+-		spi->fd = fd;
+-		spi->speed = 4000000;
+-		spi->delay = 0;
+-		spi->mode = 1;
+-		spi->bits = 8;
+ 		spi->chipselect = i;
+ 		spi->chipselect_current = chipselect_current;
+ 	}
+@@ -191,7 +196,7 @@ bool jingtian_detect_one(const char * const devpath)
+ 		found += chips;
+ 	}
+ 	
+-	close(fd);
++	close(spi_cfg.fd);
+ 	if (!found)
+ 		free(chipselect_current);
+ 	return found;
+diff --git a/lowl-spi.c b/lowl-spi.c
+index 53958821..3911117e 100644
+--- a/lowl-spi.c
++++ b/lowl-spi.c
+@@ -85,6 +85,24 @@ void spi_init(void)
+ 
+ #ifdef HAVE_LINUX_SPI
+ 
++int spi_open(struct spi_port * const spi, const char * const devpath)
++{
++	const int fd = open(devpath, O_RDWR);
++	if (fd < 0)
++		return fd;
++	
++	if (ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &spi->speed) < 0
++	 || ioctl(fd, SPI_IOC_WR_MODE, &spi->mode) < 0
++	 || ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &spi->bits) < 0)
++	{
++		close(fd);
++		return -1;
++	}
++	
++	spi->fd = fd;
++	return fd;
++}
++
+ #define INP_GPIO(g) *(gpio+((g)/10)) &= ~(7<<(((g)%10)*3))
+ #define OUT_GPIO(g) *(gpio+((g)/10)) |=  (1<<(((g)%10)*3))
+ #define SET_GPIO_ALT(g,a) *(gpio+(((g)/10))) |= (((a)<=3?(a)+4:(a)==4?3:2)<<(((g)%10)*3))
+diff --git a/lowl-spi.h b/lowl-spi.h
+index 9012f570..36c4998d 100644
+--- a/lowl-spi.h
++++ b/lowl-spi.h
+@@ -88,6 +88,7 @@ bool spi_txrx(struct spi_port *port)
+ 	return port->txrx(port);
+ }
+ 
++extern int spi_open(struct spi_port *, const char *);
+ extern bool sys_spi_txrx(struct spi_port *);
+ extern bool linux_spi_txrx(struct spi_port *);
+ 
+

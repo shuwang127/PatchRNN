@@ -1,0 +1,116 @@
+commit a1f0869798161f533696acacca3c0df7b245a21b
+Author: Andrew Cagney <cagney@gnu.org>
+Date:   Wed Mar 1 19:38:32 2017 -0500
+
+    pluto: try to clearly debug-log 'new' symkeys
+    
+    make tracking them easier
+
+diff --git a/programs/pluto/crypt_symkey.c b/programs/pluto/crypt_symkey.c
+index 110ec685a..439e1d838 100644
+--- a/programs/pluto/crypt_symkey.c
++++ b/programs/pluto/crypt_symkey.c
+@@ -229,7 +229,7 @@ static PK11SymKey *merge_symkey_bytes(lset_t debug, PK11SymKey *base_key,
+ 		PEXPECT_LOG("%s: NSS failed with error %d(0x%x) (0 means error unknown)",
+ 			    prefix, PORT_GetError(), PORT_GetError());
+ 	}
+-	DBG(debug, DBG_symkey(prefix, "result", result))
++	DBG(debug, DBG_symkey(prefix, "new result", result))
+ 	return result;
+ }
+ 
+@@ -271,7 +271,7 @@ static PK11SymKey *merge_symkey_symkey(lset_t debug, PK11SymKey *base_key,
+ 		PEXPECT_LOG("%s: NSS failed with error %d(0x%x) (0 means error unknown)",
+ 			    prefix, PORT_GetError(), PORT_GetError());
+ 	}
+-	DBG(debug, DBG_symkey(prefix, "result", result));
++	DBG(debug, DBG_symkey(prefix, "new result", result));
+ 	return result;
+ }
+ 
+@@ -314,7 +314,7 @@ static PK11SymKey *symkey_from_symkey(lset_t debug,
+ 		PEXPECT_LOG("%s: NSS failed with error %d(0x%x) (0 means error unknown)",
+ 			    prefix, PORT_GetError(), PORT_GetError());
+ 	}
+-	DBG(debug, DBG_symkey(prefix, "result", result));
++	DBG(debug, DBG_symkey(prefix, "new result", result));
+ 	return result;
+ }
+ 
+@@ -361,10 +361,11 @@ chunk_t chunk_from_symkey(const char *name, lset_t debug,
+ 	}
+ 	if (DBGP(debug)) {
+ 	    if (slot_key == symkey) {
+-		    DBG_log("%s: slot-key@%p references sym-key@%p",
++		    /* output should mimic reference_symkey() */
++		    DBG_log("%s: slot-key@%p: reference sym-key@%p",
+ 			    name, slot_key, symkey);
+ 	    } else {
+-		    DBG_symkey(name, "slot-key", slot_key);
++		    DBG_symkey(name, "new slot", slot_key);
+ 	    }
+ 	}
+ 
+diff --git a/programs/pluto/crypt_symkey.h b/programs/pluto/crypt_symkey.h
+index 504bb6be7..17716eb80 100644
+--- a/programs/pluto/crypt_symkey.h
++++ b/programs/pluto/crypt_symkey.h
+@@ -97,6 +97,9 @@ PK11SymKey *symkey_from_symkey_bytes(const char *name, lset_t debug,
+  */
+ chunk_t chunk_from_symkey(const char *prefix, lset_t debug,
+ 			  PK11SymKey *symkey);
++chunk_t chunk_from_symkey_bytes(const char *prefix, lset_t debug,
++				PK11SymKey *symkey,
++				size_t chunk_start, size_t sizeof_chunk);
+ 
+ /*
+  * Create a key suitable for ALG.
+diff --git a/programs/pluto/ike_alg_nss_ecp.c b/programs/pluto/ike_alg_nss_ecp.c
+index d8916ca20..3bebb12e9 100644
+--- a/programs/pluto/ike_alg_nss_ecp.c
++++ b/programs/pluto/ike_alg_nss_ecp.c
+@@ -142,6 +142,8 @@ static PK11SymKey *nss_ecp_calc_g_ir(const struct oakley_group_desc *group UNUSE
+ 						 /* KDF */ CKD_NULL,
+ 						 /* shared data */ NULL,
+ 						 /* ctx */ lsw_return_nss_password_file_info());
++	DBG(DBG_CRYPT, DBG_symkey(__func__, "new temp", temp));
++
+ 	/*
+ 	 * The key returned above doesn't play well with PK11_Derive()
+ 	 * - "softokn" fails to extract its value when trying to
+diff --git a/programs/pluto/ike_alg_nss_hash_ops.c b/programs/pluto/ike_alg_nss_hash_ops.c
+index 2caa38219..ef3e8d2a1 100644
+--- a/programs/pluto/ike_alg_nss_hash_ops.c
++++ b/programs/pluto/ike_alg_nss_hash_ops.c
+@@ -151,7 +151,7 @@ static PK11SymKey *symkey_to_symkey(const struct hash_desc *hash_desc,
+ 	PK11SymKey *result = PK11_Derive(symkey, derive, param, target,
+ 					 operation, key_size);
+ 	if (DBGP(debug)) {
+-	  DBG_symkey(name, "result", result);
++		DBG_symkey(name, "new result", result);
+ 	}
+ 	return result;
+ }
+diff --git a/programs/pluto/ike_alg_nss_modp.c b/programs/pluto/ike_alg_nss_modp.c
+index 90c3a9353..097bc0348 100644
+--- a/programs/pluto/ike_alg_nss_modp.c
++++ b/programs/pluto/ike_alg_nss_modp.c
+@@ -27,8 +27,8 @@
+ #include "lswlog.h"
+ 
+ #include "ike_alg.h"
+-
+ #include "ike_alg_nss_modp.h"
++#include "crypt_symkey.h"
+ 
+ static void nss_modp_calc_ke(const struct oakley_group_desc *group,
+ 			     SECKEYPrivateKey **privk,
+@@ -116,6 +116,7 @@ static PK11SymKey *nss_modp_calc_g_ir(const struct oakley_group_desc *group,
+ 					  CKM_CONCATENATE_DATA_AND_BASE,
+ 					  CKA_DERIVE, group->bytes,
+ 					  lsw_return_nss_password_file_info());
++	DBG(DBG_CRYPT, DBG_symkey(__func__, "new g_ir", g_ir));
+ 
+ 	return g_ir;
+ }
+

@@ -1,0 +1,138 @@
+commit 2477462866b245a7d0bfd253a13823c111e77d84
+Author: Moe Jette <jette1@llnl.gov>
+Date:   Fri Aug 29 15:54:08 2008 +0000
+
+    Don't power down a node in completing state.
+    Don't allocate nodes to a job step until it is responding (as before) AND
+      the node is no longer in power save mode.
+
+diff --git a/src/slurmctld/power_save.c b/src/slurmctld/power_save.c
+index c9d825a1a7..ee2d0244aa 100644
+--- a/src/slurmctld/power_save.c
++++ b/src/slurmctld/power_save.c
+@@ -84,7 +84,7 @@ static void _do_power_work(void)
+ 	static time_t last_log = 0, last_work_scan = 0;
+ 	int i, wake_cnt = 0, sleep_cnt = 0, susp_total = 0;
+ 	time_t now = time(NULL), delta_t;
+-	uint16_t base_state, susp_state;
++	uint16_t base_state, comp_state, susp_state;
+ 	bitstr_t *wake_node_bitmap = NULL, *sleep_node_bitmap = NULL;
+ 	struct node_record *node_ptr;
+ 
+@@ -105,6 +105,7 @@ static void _do_power_work(void)
+ 		node_ptr = &node_record_table_ptr[i];
+ 		base_state = node_ptr->node_state & NODE_STATE_BASE;
+ 		susp_state = node_ptr->node_state & NODE_STATE_POWER_SAVE;
++		comp_state = node_ptr->node_state & JOB_COMPLETING;
+ 
+ 		if (susp_state)
+ 			susp_total++;
+@@ -123,6 +124,7 @@ static void _do_power_work(void)
+ 		if ((susp_state == 0)
+ 		&&  ((resume_rate == 0) || (resume_cnt <= resume_rate))
+ 		&&  (base_state == NODE_STATE_IDLE)
++		&&  (comp_state == 0)
+ 		&&  (node_ptr->last_idle < (now - idle_time))
+ 		&&  ((exc_node_bitmap == NULL) || 
+ 		     (bit_test(exc_node_bitmap, i) == 0))) {
+@@ -274,10 +276,14 @@ static pid_t _run_prog(char *prog, char *arg)
+ 			child_pid[i] = child;
+ 			break;
+ 		}
++		if (i == PID_CNT)
++			error("power_save: filled child_pid array");
+ 	}
+ 	return child;
+ }
+ 
++/* reap child processes previously forked to modify node state.
++ * return the count of empty slots in the child_pid array */
+ static int  _reap_procs(void)
+ {
+ 	int empties = 0, i, rc, status;
+@@ -291,6 +297,9 @@ static int  _reap_procs(void)
+ 		if (rc == 0)
+ 			continue;
+ 		child_pid[i] = 0;
++		rc = WEXITSTATUS(status);
++		if (rc != 0)
++			error("power_save: program exit status of %d", rc);
+ 	}
+ 	return empties;
+ }
+@@ -444,7 +453,7 @@ extern void *init_power_save(void *arg)
+ 	while (slurmctld_config.shutdown_time == 0) {
+ 		sleep(1);
+ 
+-		if (_reap_procs() < 3) {
++		if (_reap_procs() < 2) {
+ 			error("power_save programs not completing quickly");
+ 			continue;
+ 		}
+diff --git a/src/slurmctld/step_mgr.c b/src/slurmctld/step_mgr.c
+index 95b6156be9..2a1f37aabd 100644
+--- a/src/slurmctld/step_mgr.c
++++ b/src/slurmctld/step_mgr.c
+@@ -1,8 +1,8 @@
+ /*****************************************************************************\
+  *  step_mgr.c - manage the job step information of slurm
+- *  $Id$
+  *****************************************************************************
+  *  Copyright (C) 2002-2007 The Regents of the University of California.
++ *  Copyright (C) 2008 Lawrence Livermore National Security.
+  *  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+  *  Written by Morris Jette <jette1@llnl.gov>, et. al.
+  *  LLNL-CODE-402394.
+@@ -435,7 +435,6 @@ _pick_step_nodes (struct job_record  *job_ptr,
+ 		  job_step_create_request_msg_t *step_spec,
+ 		  bool batch_step, int *return_code)
+ {
+-
+ 	bitstr_t *nodes_avail = NULL, *nodes_idle = NULL;
+ 	bitstr_t *nodes_picked = NULL, *node_tmp = NULL;
+ 	int error_code, nodes_picked_cnt=0, cpus_picked_cnt = 0, i;
+@@ -456,10 +455,28 @@ _pick_step_nodes (struct job_record  *job_ptr,
+ 		fatal("bit_copy malloc failure");
+ 	bit_and (nodes_avail, up_node_bitmap);
+ 
++	if (job_ptr->next_step_id == 0) {
++		for (i=bit_ffs(job_ptr->node_bitmap); i<node_record_count; 
++		     i++) {
++			if (!bit_test(job_ptr->node_bitmap, i))
++				continue;
++			if ((node_record_table_ptr[i].node_state &
++			     NODE_STATE_POWER_SAVE) ||
++			    (node_record_table_ptr[i].node_state &
++			     NODE_STATE_NO_RESPOND)) {
++				/* Node is/was powered down. Need to wait 
++				 * for it to start responding again. */
++				FREE_NULL_BITMAP(nodes_avail);
++				*return_code = ESLURM_NODES_BUSY;
++				return NULL;
++			}
++		}
++	}
++
+ 	/* In exclusive mode, just satisfy the processor count.
+ 	 * Do not use nodes that have no unused CPUs */
+ 	if (step_spec->exclusive) {
+-		int i, j=0, avail, tot_cpus = 0;
++		int j=0, avail, tot_cpus = 0;
+ 		for (i=bit_ffs(job_ptr->node_bitmap); i<node_record_count; 
+ 		     i++) {
+ 			if (!bit_test(job_ptr->node_bitmap, i))
+diff --git a/src/srun/allocate.c b/src/srun/allocate.c
+index a06e51886e..5b5c53bd55 100644
+--- a/src/srun/allocate.c
++++ b/src/srun/allocate.c
+@@ -574,7 +574,8 @@ create_job_step(srun_job_t *job)
+ 		}
+ 		
+ 		if (i == 0) {
+-			info("Job step creation temporarily disabled, retrying");	
++			info("Job step creation temporarily disabled, "
++			     "retrying");
+ 			ointf  = xsignal(SIGINT,  _intr_handler);
+ 			otermf  = xsignal(SIGTERM, _intr_handler);
+ 			oquitf  = xsignal(SIGQUIT, _intr_handler);
+

@@ -1,0 +1,68 @@
+commit 2d2c67e3ed30e7d9850447826b2cc968f28ae681
+Author: Steve Holme <steve_holme@hotmail.com>
+Date:   Sun Apr 3 11:15:03 2016 +0100
+
+    krb5: Only generate a SPN when its not known
+    
+    Prior to this change, we were generating the SPN in the SSPI code when
+    the credentials were NULL and in the GSS-API code when the context was
+    empty. It is better to decouple the SPN generation from these checks
+    and only generate it when the SPN itself is NULL.
+    
+    This also brings this part of the Kerberos 5 code in line with the
+    Negotiate code.
+
+diff --git a/lib/vauth/krb5_gssapi.c b/lib/vauth/krb5_gssapi.c
+index e68053503..18c6dbb46 100644
+--- a/lib/vauth/krb5_gssapi.c
++++ b/lib/vauth/krb5_gssapi.c
+@@ -88,7 +88,7 @@ CURLcode Curl_auth_create_gssapi_user_message(struct SessionHandle *data,
+   (void) userp;
+   (void) passwdp;
+ 
+-  if(krb5->context == GSS_C_NO_CONTEXT) {
++  if(!krb5->spn) {
+     /* Generate our SPN */
+     char *spn = Curl_auth_build_gssapi_spn(service, host);
+     if(!spn)
+@@ -112,7 +112,8 @@ CURLcode Curl_auth_create_gssapi_user_message(struct SessionHandle *data,
+ 
+     free(spn);
+   }
+-  else {
++
++  if(krb5->context != GSS_C_NO_CONTEXT) {
+     /* Decode the base-64 encoded challenge message */
+     if(strlen(chlg64) && *chlg64 != '=') {
+       result = Curl_base64_decode(chlg64, &chlg, &chlglen);
+diff --git a/lib/vauth/krb5_sspi.c b/lib/vauth/krb5_sspi.c
+index 6afd83dde..da08f8f03 100644
+--- a/lib/vauth/krb5_sspi.c
++++ b/lib/vauth/krb5_sspi.c
+@@ -85,6 +85,13 @@ CURLcode Curl_auth_create_gssapi_user_message(struct SessionHandle *data,
+   unsigned long attrs;
+   TimeStamp expiry; /* For Windows 9x compatibility of SSPI calls */
+ 
++  if(!krb5->spn) {
++    /* Generate our SPN */
++    krb5->spn = Curl_auth_build_spn(service, host);
++    if(!krb5->spn)
++      return CURLE_OUT_OF_MEMORY;
++  }
++
+   if(!krb5->credentials) {
+     /* Query the security package for Kerberos */
+     status = s_pSecFn->QuerySecurityPackageInfo((TCHAR *)
+@@ -104,11 +111,6 @@ CURLcode Curl_auth_create_gssapi_user_message(struct SessionHandle *data,
+     if(!krb5->output_token)
+       return CURLE_OUT_OF_MEMORY;
+ 
+-    /* Generate our SPN */
+-    krb5->spn = Curl_auth_build_spn(service, host);
+-    if(!krb5->spn)
+-      return CURLE_OUT_OF_MEMORY;
+-
+     if(userp && *userp) {
+       /* Populate our identity structure */
+       result = Curl_create_sspi_identity(userp, passwdp, &krb5->identity);
+

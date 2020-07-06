@@ -1,0 +1,139 @@
+commit 43bac99868b3b9a6463c8d9a9b3b3d456633b91f
+Author: Johannes Schultz <sagamusix@openmpt.org>
+Date:   Sun Sep 6 16:07:48 2015 +0000
+
+    [Imp] Add Pitch Bend messages to MIDI macro generator.
+    [Mod] Add Harbinger to credits list for his work on the manual
+    [Ref] Use FLAC__MAX_SAMPLE_RATE constant instead of hardcoding the FLAC sample rate limit.
+    
+    git-svn-id: https://source.openmpt.org/svn/openmpt/trunk/OpenMPT@5562 56274372-70c3-4bfc-bfc3-4c3a0b034d27
+
+diff --git a/common/version.cpp b/common/version.cpp
+index c9d94c904..50e0e1850 100644
+--- a/common/version.cpp
++++ b/common/version.cpp
+@@ -564,8 +564,8 @@ mpt::ustring GetFullCreditsString()
+ 		"in the form of ideas, testing and support;\n"
+ 		"thanks particularly to:\n"
+ 		"33, 8bitbubsy, Anboi, BooT-SectoR-ViruZ, Bvanoudtshoorn\n"
+-		"christofori, Diamond, Ganja, Georg, Goor00, jmkz,\n"
+-		"KrazyKatz, LPChip, Nofold, Rakib, Sam Zen\n"
++		"christofori, Diamond, Ganja, Georg, Goor00, Harbinger,\n"
++		"jmkz, KrazyKatz, LPChip, Nofold, Rakib, Sam Zen\n"
+ 		"Skaven, Skilletaudio, Snu, Squirrel Havoc, Waxhead\n"
+ 		"\n"
+ #ifndef NO_VST
+diff --git a/soundlib/MIDIMacros.cpp b/soundlib/MIDIMacros.cpp
+index 2bfd5d74a..4b3d6e4b3 100644
+--- a/soundlib/MIDIMacros.cpp
++++ b/soundlib/MIDIMacros.cpp
+@@ -83,7 +83,7 @@ fixedMacroType MIDIMacroConfig::GetFixedMacroType() const
+ #elif MPT_COMPILER_CLANG
+ #pragma clang diagnostic push
+ #if MPT_CLANG_AT_LEAST(3,3,0)
+-#pragma clang diagnostic ignored "-Wswitch"     
++#pragma clang diagnostic ignored "-Wswitch"
+ #else
+ #pragma clang diagnostic ignored "-Wswitch-enum"
+ #endif
+@@ -113,7 +113,7 @@ void MIDIMacroConfig::CreateParameteredMacro(char (&parameteredMacro)[MACRO_LENG
+ 		sprintf(parameteredMacro, "Bc%02Xz", (subType & 0x7F));
+ 		break;
+ 	case sfx_plug:
+-		sprintf(parameteredMacro, "F0F%03Xz", MIN(subType, 0x17F) + 0x80);
++		sprintf(parameteredMacro, "F0F%03Xz", std::min(subType, 0x17F) + 0x80);
+ 		break;
+ 	case sfx_channelAT:
+ 		strcpy(parameteredMacro, "Dcz");
+@@ -121,6 +121,9 @@ void MIDIMacroConfig::CreateParameteredMacro(char (&parameteredMacro)[MACRO_LENG
+ 	case sfx_polyAT:
+ 		strcpy(parameteredMacro, "Acnz");
+ 		break;
++	case sfx_pitch:
++		strcpy(parameteredMacro, "Ec00z");
++		break;
+ 	}
+ }
+ 
+@@ -141,7 +144,7 @@ void MIDIMacroConfig::CreateParameteredMacro(char (&parameteredMacro)[MACRO_LENG
+ #elif MPT_COMPILER_CLANG
+ #pragma clang diagnostic push
+ #if MPT_CLANG_AT_LEAST(3,3,0)
+-#pragma clang diagnostic ignored "-Wswitch"     
++#pragma clang diagnostic ignored "-Wswitch"
+ #else
+ #pragma clang diagnostic ignored "-Wswitch-enum"
+ #endif
+@@ -196,6 +199,11 @@ void MIDIMacroConfig::CreateFixedMacro(char (&fixedMacros)[128][MACRO_LENGTH], f
+ 			// Type 7 - Z80 - ZFF controls Poly Aftertouch
+ 			sprintf(fixedMacros[i], "Acn%02X", i);
+ 			break;
++
++		case zxx_pitch:
++			// Type 7 - Z80 - ZFF controls Pitch Bend
++			sprintf(fixedMacros[i], "Ec00%02X", i);
++			break;
+ 		}
+ 	}
+ }
+@@ -282,6 +290,8 @@ CString MIDIMacroConfig::GetParameteredMacroName(parameteredMacroType macroType)
+ 		return _T("Channel Aftertouch");
+ 	case sfx_polyAT:
+ 		return _T("Polyphonic Aftertouch");
++	case sfx_pitch:
++		return _T("Pitch Bend");
+ 	case sfx_custom:
+ 	default:
+ 		return _T("Custom");
+@@ -311,6 +321,8 @@ CString MIDIMacroConfig::GetFixedMacroName(fixedMacroType macroType) const
+ 		return _T("Z80 - ZFF controls Channel Aftertouch");
+ 	case zxx_polyAT:
+ 		return _T("Z80 - ZFF controls Polyphonic Aftertouch");
++	case zxx_pitch:
++		return _T("Z80 - ZFF controls Pitch Bend");
+ 	case zxx_custom:
+ 	default:
+ 		return _T("Custom");
+diff --git a/soundlib/MIDIMacros.h b/soundlib/MIDIMacros.h
+index 1238ade85..47adc8e63 100644
+--- a/soundlib/MIDIMacros.h
++++ b/soundlib/MIDIMacros.h
+@@ -38,6 +38,7 @@ enum parameteredMacroType
+ 	sfx_cc,				// Type 6 - Z00 - Z7F controls MIDI CC
+ 	sfx_channelAT,		// Type 7 - Z00 - Z7F controls Channel Aftertouch
+ 	sfx_polyAT,			// Type 8 - Z00 - Z7F controls Poly Aftertouch
++	sfx_pitch,			// Type 9 - Z00 - Z7F controls Pitch Bend
+ 	sfx_custom,
+ 
+ 	sfx_max
+@@ -55,6 +56,7 @@ enum fixedMacroType
+ 	zxx_resomode,		// Type 5 - Z80 - Z9F controls resonance + filter mode
+ 	zxx_channelAT,		// Type 6 - Z80 - ZFF controls Channel Aftertouch
+ 	zxx_polyAT,			// Type 7 - Z80 - ZFF controls Poly Aftertouch
++	zxx_pitch,			// Type 8 - Z80 - ZFF controls Pitch Bend
+ 	zxx_custom,
+ 
+ 	zxx_max
+diff --git a/soundlib/SampleFormats.cpp b/soundlib/SampleFormats.cpp
+index d854a8f98..8f4992cea 100644
+--- a/soundlib/SampleFormats.cpp
++++ b/soundlib/SampleFormats.cpp
+@@ -2335,7 +2335,7 @@ bool CSoundFile::SaveFLACSample(SAMPLEINDEX nSample, const mpt::PathString &file
+ 		FLAC__metadata_object_vorbiscomment_append_comment(metadata[0], entry, false);
+ 		FLAC__metadata_object_vorbiscomment_entry_from_name_value_pair(&entry, "ENCODER", MptVersion::GetOpenMPTVersionStr().c_str());
+ 		FLAC__metadata_object_vorbiscomment_append_comment(metadata[0], entry, false);
+-		if(sampleRate > 655350)
++		if(sampleRate > FLAC__MAX_SAMPLE_RATE)
+ 		{
+ 			// FLAC only supports a sample rate of up to 655350 Hz.
+ 			// Store the real sample rate in a custom Vorbis comment.
+@@ -2432,7 +2432,7 @@ bool CSoundFile::SaveFLACSample(SAMPLEINDEX nSample, const mpt::PathString &file
+ 
+ 	// FLAC allows a maximum sample rate of 655350 Hz.
+ 	// If the real rate is higher, we store it in a Vorbis comment above.
+-	LimitMax(sampleRate, 655350u);
++	LimitMax(sampleRate, FLAC__MAX_SAMPLE_RATE);
+ 	if(!FLAC__format_sample_rate_is_subset(sampleRate))
+ 	{
+ 		// FLAC only supports 10 Hz granularity for frequencies above 65535 Hz if the streamable subset is chosen.
+

@@ -1,0 +1,85 @@
+commit 9e634cae725680905098747f6d972525daaf857e
+Author: Linus Walleij <linus.walleij@linaro.org>
+Date:   Thu Jun 2 16:10:06 2016 +0200
+
+    ARM: ux500: simplify secondary boot
+    
+    Inline the wakeup_secondary() static function, and keep the
+    backupram remapping around: it is reused when resuming from
+    suspend so no point in remapping it every time.
+    
+    Signed-off-by: Linus Walleij <linus.walleij@linaro.org>
+
+diff --git a/arch/arm/mach-ux500/platsmp.c b/arch/arm/mach-ux500/platsmp.c
+index 8f2f615ff958..e0ee139fdebf 100644
+--- a/arch/arm/mach-ux500/platsmp.c
++++ b/arch/arm/mach-ux500/platsmp.c
+@@ -31,10 +31,14 @@
+ #define UX500_CPU1_JUMPADDR_OFFSET 0x1FF4
+ #define UX500_CPU1_WAKEMAGIC_OFFSET 0x1FF0
+ 
+-static void wakeup_secondary(void)
++static void __iomem *backupram;
++
++static void __init ux500_smp_prepare_cpus(unsigned int max_cpus)
+ {
+ 	struct device_node *np;
+-	static void __iomem *backupram;
++	static void __iomem *scu_base;
++	unsigned int ncores;
++	int i;
+ 
+ 	np = of_find_compatible_node(NULL, NULL, "ste,dbx500-backupram");
+ 	if (!np) {
+@@ -48,29 +52,6 @@ static void wakeup_secondary(void)
+ 		return;
+ 	}
+ 
+-	/*
+-	 * write the address of secondary startup into the backup ram register
+-	 * at offset 0x1FF4, then write the magic number 0xA1FEED01 to the
+-	 * backup ram register at offset 0x1FF0, which is what boot rom code
+-	 * is waiting for. This will wake up the secondary core from WFE.
+-	 */
+-	writel(virt_to_phys(secondary_startup),
+-	       backupram + UX500_CPU1_JUMPADDR_OFFSET);
+-	writel(0xA1FEED01,
+-	       backupram + UX500_CPU1_WAKEMAGIC_OFFSET);
+-
+-	/* make sure write buffer is drained */
+-	mb();
+-	iounmap(backupram);
+-}
+-
+-static void __init ux500_smp_prepare_cpus(unsigned int max_cpus)
+-{
+-	struct device_node *np;
+-	static void __iomem *scu_base;
+-	unsigned int ncores;
+-	int i;
+-
+ 	np = of_find_compatible_node(NULL, NULL, "arm,cortex-a9-scu");
+ 	if (!np) {
+ 		pr_err("No SCU base address\n");
+@@ -92,7 +73,19 @@ static void __init ux500_smp_prepare_cpus(unsigned int max_cpus)
+ 
+ static int ux500_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ {
+-	wakeup_secondary();
++	/*
++	 * write the address of secondary startup into the backup ram register
++	 * at offset 0x1FF4, then write the magic number 0xA1FEED01 to the
++	 * backup ram register at offset 0x1FF0, which is what boot rom code
++	 * is waiting for. This will wake up the secondary core from WFE.
++	 */
++	writel(virt_to_phys(secondary_startup),
++	       backupram + UX500_CPU1_JUMPADDR_OFFSET);
++	writel(0xA1FEED01,
++	       backupram + UX500_CPU1_WAKEMAGIC_OFFSET);
++
++	/* make sure write buffer is drained */
++	mb();
+ 	arch_send_wakeup_ipi_mask(cpumask_of(cpu));
+ 	return 0;
+ }
+

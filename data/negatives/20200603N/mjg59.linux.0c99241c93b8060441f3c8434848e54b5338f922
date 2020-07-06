@@ -1,0 +1,94 @@
+commit 0c99241c93b8060441f3c8434848e54b5338f922
+Author: Ingo Molnar <mingo@kernel.org>
+Date:   Thu Apr 16 12:38:30 2015 +0200
+
+    perf/x86/intel/pt: Fix and clean up error handling in pt_event_add()
+    
+    Dan Carpenter reported that pt_event_add() has buggy
+    error handling logic: it returns 0 instead of -EBUSY when
+    it fails to start a newly added event.
+    
+    Furthermore, the control flow in this function is messy,
+    with cleanup labels mixed with direct returns.
+    
+    Fix the bug and clean up the code by converting it to
+    a straight fast path for the regular non-failing case,
+    plus a clear sequence of cascading goto labels to do
+    all cleanup.
+    
+    NOTE: I materially changed the existing clean up logic in the
+    pt_event_start() failure case to use the direct
+    perf_aux_output_end() path, not pt_event_del(), because
+    perf_aux_output_end() is enough here.
+    
+    Reported-by: Dan Carpenter <dan.carpenter@oracle.com>
+    Acked-by: Alexander Shishkin <alexander.shishkin@linux.intel.com>
+    Cc: Arnaldo Carvalho de Melo <acme@kernel.org>
+    Cc: Julia Lawall <julia.lawall@lip6.fr>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Link: http://lkml.kernel.org/r/20150416103830.GB7847@gmail.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/kernel/cpu/perf_event_intel_pt.c b/arch/x86/kernel/cpu/perf_event_intel_pt.c
+index f2770641c0fd..ffe666c2c6b5 100644
+--- a/arch/x86/kernel/cpu/perf_event_intel_pt.c
++++ b/arch/x86/kernel/cpu/perf_event_intel_pt.c
+@@ -988,39 +988,36 @@ static int pt_event_add(struct perf_event *event, int mode)
+ 	int ret = -EBUSY;
+ 
+ 	if (pt->handle.event)
+-		goto out;
++		goto fail;
+ 
+ 	buf = perf_aux_output_begin(&pt->handle, event);
+-	if (!buf) {
+-		ret = -EINVAL;
+-		goto out;
+-	}
++	ret = -EINVAL;
++	if (!buf)
++		goto fail_stop;
+ 
+ 	pt_buffer_reset_offsets(buf, pt->handle.head);
+ 	if (!buf->snapshot) {
+ 		ret = pt_buffer_reset_markers(buf, &pt->handle);
+-		if (ret) {
+-			perf_aux_output_end(&pt->handle, 0, true);
+-			goto out;
+-		}
++		if (ret)
++			goto fail_end_stop;
+ 	}
+ 
+ 	if (mode & PERF_EF_START) {
+ 		pt_event_start(event, 0);
+-		if (hwc->state == PERF_HES_STOPPED) {
+-			pt_event_del(event, 0);
+-			ret = -EBUSY;
+-		}
++		ret = -EBUSY;
++		if (hwc->state == PERF_HES_STOPPED)
++			goto fail_end_stop;
+ 	} else {
+ 		hwc->state = PERF_HES_STOPPED;
+ 	}
+ 
+-	ret = 0;
+-out:
+-
+-	if (ret)
+-		hwc->state = PERF_HES_STOPPED;
++	return 0;
+ 
++fail_end_stop:
++	perf_aux_output_end(&pt->handle, 0, true);
++fail_stop:
++	hwc->state = PERF_HES_STOPPED;
++fail:
+ 	return ret;
+ }
+ 
+

@@ -1,0 +1,130 @@
+commit c39d2e7e35f6f357e59c7313dab8e90f7d1ff93e
+Author: Michal Wajdeczko <michal.wajdeczko@intel.com>
+Date:   Thu Jun 28 14:15:20 2018 +0000
+
+    drm/i915/guc: Use intel_guc_init_misc to hide GuC internals
+    
+    We will add more init steps to misc phase and there is no need
+    to expose them separately for use in uc_init_misc function.
+    
+    Signed-off-by: Michal Wajdeczko <michal.wajdeczko@intel.com>
+    Cc: Michel Thierry <michel.thierry@intel.com>
+    Reviewed-by: Michel Thierry <michel.thierry@intel.com>
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20180628141522.62788-1-michal.wajdeczko@intel.com
+
+diff --git a/drivers/gpu/drm/i915/intel_guc.c b/drivers/gpu/drm/i915/intel_guc.c
+index f651e57b4c61..0b06f27d3e1a 100644
+--- a/drivers/gpu/drm/i915/intel_guc.c
++++ b/drivers/gpu/drm/i915/intel_guc.c
+@@ -27,6 +27,8 @@
+ #include "intel_guc_submission.h"
+ #include "i915_drv.h"
+ 
++static void guc_init_ggtt_pin_bias(struct intel_guc *guc);
++
+ static void gen8_guc_raise_irq(struct intel_guc *guc)
+ {
+ 	struct drm_i915_private *dev_priv = guc_to_i915(guc);
+@@ -73,7 +75,7 @@ void intel_guc_init_early(struct intel_guc *guc)
+ 	guc->notify = gen8_guc_raise_irq;
+ }
+ 
+-int intel_guc_init_wq(struct intel_guc *guc)
++static int guc_init_wq(struct intel_guc *guc)
+ {
+ 	struct drm_i915_private *dev_priv = guc_to_i915(guc);
+ 
+@@ -124,7 +126,7 @@ int intel_guc_init_wq(struct intel_guc *guc)
+ 	return 0;
+ }
+ 
+-void intel_guc_fini_wq(struct intel_guc *guc)
++static void guc_fini_wq(struct intel_guc *guc)
+ {
+ 	struct drm_i915_private *dev_priv = guc_to_i915(guc);
+ 
+@@ -135,6 +137,24 @@ void intel_guc_fini_wq(struct intel_guc *guc)
+ 	destroy_workqueue(guc->log.relay.flush_wq);
+ }
+ 
++int intel_guc_init_misc(struct intel_guc *guc)
++{
++	int ret;
++
++	guc_init_ggtt_pin_bias(guc);
++
++	ret = guc_init_wq(guc);
++	if (ret)
++		return ret;
++
++	return 0;
++}
++
++void intel_guc_fini_misc(struct intel_guc *guc)
++{
++	guc_fini_wq(guc);
++}
++
+ static int guc_shared_data_create(struct intel_guc *guc)
+ {
+ 	struct i915_vma *vma;
+@@ -582,13 +602,13 @@ int intel_guc_resume(struct intel_guc *guc)
+  */
+ 
+ /**
+- * intel_guc_init_ggtt_pin_bias() - Initialize the GuC ggtt_pin_bias value.
++ * guc_init_ggtt_pin_bias() - Initialize the GuC ggtt_pin_bias value.
+  * @guc: intel_guc structure.
+  *
+  * This function will calculate and initialize the ggtt_pin_bias value based on
+  * overall WOPCM size and GuC WOPCM size.
+  */
+-void intel_guc_init_ggtt_pin_bias(struct intel_guc *guc)
++static void guc_init_ggtt_pin_bias(struct intel_guc *guc)
+ {
+ 	struct drm_i915_private *i915 = guc_to_i915(guc);
+ 
+diff --git a/drivers/gpu/drm/i915/intel_guc.h b/drivers/gpu/drm/i915/intel_guc.h
+index f1265e122d30..4121928a495e 100644
+--- a/drivers/gpu/drm/i915/intel_guc.h
++++ b/drivers/gpu/drm/i915/intel_guc.h
+@@ -151,11 +151,10 @@ static inline u32 intel_guc_ggtt_offset(struct intel_guc *guc,
+ void intel_guc_init_early(struct intel_guc *guc);
+ void intel_guc_init_send_regs(struct intel_guc *guc);
+ void intel_guc_init_params(struct intel_guc *guc);
+-void intel_guc_init_ggtt_pin_bias(struct intel_guc *guc);
+-int intel_guc_init_wq(struct intel_guc *guc);
+-void intel_guc_fini_wq(struct intel_guc *guc);
++int intel_guc_init_misc(struct intel_guc *guc);
+ int intel_guc_init(struct intel_guc *guc);
+ void intel_guc_fini(struct intel_guc *guc);
++void intel_guc_fini_misc(struct intel_guc *guc);
+ int intel_guc_send_nop(struct intel_guc *guc, const u32 *action, u32 len,
+ 		       u32 *response_buf, u32 response_buf_size);
+ int intel_guc_send_mmio(struct intel_guc *guc, const u32 *action, u32 len,
+diff --git a/drivers/gpu/drm/i915/intel_uc.c b/drivers/gpu/drm/i915/intel_uc.c
+index 94e8863bd97c..cd49b4f510f0 100644
+--- a/drivers/gpu/drm/i915/intel_uc.c
++++ b/drivers/gpu/drm/i915/intel_uc.c
+@@ -257,9 +257,7 @@ int intel_uc_init_misc(struct drm_i915_private *i915)
+ 	if (!USES_GUC(i915))
+ 		return 0;
+ 
+-	intel_guc_init_ggtt_pin_bias(guc);
+-
+-	ret = intel_guc_init_wq(guc);
++	ret = intel_guc_init_misc(guc);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -273,7 +271,7 @@ void intel_uc_fini_misc(struct drm_i915_private *i915)
+ 	if (!USES_GUC(i915))
+ 		return;
+ 
+-	intel_guc_fini_wq(guc);
++	intel_guc_fini_misc(guc);
+ }
+ 
+ int intel_uc_init(struct drm_i915_private *i915)
+

@@ -1,0 +1,66 @@
+commit c2e4ef092bb4c0bf1165e97a0e4c4aac4bb42a22
+Author: unknown <tomas@poseidon.ndb.mysql.com>
+Date:   Fri Mar 24 10:12:34 2006 +0100
+
+    - corrected bug causing hang in getTable when using blob tables
+    - make sure cluster/schema table is always created first
+    
+    
+    sql/ha_ndbcluster_binlog.cc:
+      make sure cluster/schema table is always created first
+    storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp:
+      corrected bug causing hang in getTable when using blob tables
+
+diff --git a/sql/ha_ndbcluster_binlog.cc b/sql/ha_ndbcluster_binlog.cc
+index b1d78bb2011..ca3dcf605b0 100644
+--- a/sql/ha_ndbcluster_binlog.cc
++++ b/sql/ha_ndbcluster_binlog.cc
+@@ -765,25 +765,28 @@ static int ndbcluster_create_schema_table(THD *thd)
+ void ndbcluster_setup_binlog_table_shares(THD *thd)
+ {
+   int done_find_all_files= 0;
+-  if (!apply_status_share &&
+-      ndbcluster_check_apply_status_share() == 0)
++  if (!schema_share &&
++      ndbcluster_check_schema_share() == 0)
+   {
+     if (!done_find_all_files)
+     {
+       ndbcluster_find_all_files(thd);
+       done_find_all_files= 1;
+     }
+-    ndbcluster_create_apply_status_table(thd);
++    ndbcluster_create_schema_table(thd);
++    // always make sure we create the 'schema' first
++    if (!schema_share)
++      return;
+   }
+-  if (!schema_share &&
+-      ndbcluster_check_schema_share() == 0)
++  if (!apply_status_share &&
++      ndbcluster_check_apply_status_share() == 0)
+   {
+     if (!done_find_all_files)
+     {
+       ndbcluster_find_all_files(thd);
+       done_find_all_files= 1;
+     }
+-    ndbcluster_create_schema_table(thd);
++    ndbcluster_create_apply_status_table(thd);
+   }
+ }
+ 
+diff --git a/storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp b/storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp
+index 442d5da6180..faf52b65cee 100644
+--- a/storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp
++++ b/storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp
+@@ -1303,7 +1303,7 @@ NdbDictionaryImpl::fetchGlobalTableImpl(const BaseString& internalTableName)
+       int ret = getBlobTables(*impl);
+       if (ret != 0) {
+         delete impl;
+-        return 0;
++        impl = 0;
+       }
+     }
+ 
+

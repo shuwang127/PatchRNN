@@ -1,0 +1,53 @@
+commit 001dac87052903d6850c064737bab004bed94789
+Author: David Herrmann <dh.herrmann@gmail.com>
+Date:   Tue Apr 2 19:58:34 2013 +0200
+
+    HID: wiimote: use unique battery names
+    
+    Battery device names must be unique, otherwise registration fails if
+    multiple Wii Remotes are connected.
+    
+    This breaks the sysfs API, but there is no known application that uses the
+    Wii Remote battery that I know of so we should go ahead and apply this.
+    
+    Signed-off-by: David Herrmann <dh.herrmann@gmail.com>
+    Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+diff --git a/drivers/hid/hid-wiimote-core.c b/drivers/hid/hid-wiimote-core.c
+index 0fb8ab93db68..f1c7a113b614 100644
+--- a/drivers/hid/hid-wiimote-core.c
++++ b/drivers/hid/hid-wiimote-core.c
+@@ -1160,6 +1160,7 @@ static void wiimote_destroy(struct wiimote_data *wdata)
+ 	wiimote_leds_destroy(wdata);
+ 
+ 	power_supply_unregister(&wdata->battery);
++	kfree(wdata->battery.name);
+ 	input_unregister_device(wdata->accel);
+ 	input_unregister_device(wdata->ir);
+ 	input_unregister_device(wdata->input);
+@@ -1216,9 +1217,14 @@ static int wiimote_hid_probe(struct hid_device *hdev,
+ 	wdata->battery.properties = wiimote_battery_props;
+ 	wdata->battery.num_properties = ARRAY_SIZE(wiimote_battery_props);
+ 	wdata->battery.get_property = wiimote_battery_get_property;
+-	wdata->battery.name = "wiimote_battery";
+ 	wdata->battery.type = POWER_SUPPLY_TYPE_BATTERY;
+ 	wdata->battery.use_for_apm = 0;
++	wdata->battery.name = kasprintf(GFP_KERNEL, "wiimote_battery_%s",
++					wdata->hdev->uniq);
++	if (!wdata->battery.name) {
++		ret = -ENOMEM;
++		goto err_battery_name;
++	}
+ 
+ 	ret = power_supply_register(&wdata->hdev->dev, &wdata->battery);
+ 	if (ret) {
+@@ -1254,6 +1260,8 @@ err_free:
+ 	return ret;
+ 
+ err_battery:
++	kfree(wdata->battery.name);
++err_battery_name:
+ 	input_unregister_device(wdata->input);
+ 	wdata->input = NULL;
+ err_input:
+

@@ -1,0 +1,53 @@
+commit adf412b9ec7292e0c83aaf9ab93e08c2c8bd524a
+Author: Tom Gundersen <teg@jklm.no>
+Date:   Tue Oct 29 17:38:31 2013 +0100
+
+    rtnl: complain if used after fork
+
+diff --git a/src/libsystemd-rtnl/rtnl-internal.h b/src/libsystemd-rtnl/rtnl-internal.h
+index f9c08e1a9..c24d12b90 100644
+--- a/src/libsystemd-rtnl/rtnl-internal.h
++++ b/src/libsystemd-rtnl/rtnl-internal.h
+@@ -32,6 +32,7 @@ struct sd_rtnl {
+         } sockaddr;
+ 
+         unsigned serial;
++        pid_t original_pid;
+ };
+ 
+ #define RTNL_DEFAULT_TIMEOUT ((usec_t) (10 * USEC_PER_SEC))
+diff --git a/src/libsystemd-rtnl/sd-rtnl.c b/src/libsystemd-rtnl/sd-rtnl.c
+index b11a813df..9c1f40e48 100644
+--- a/src/libsystemd-rtnl/sd-rtnl.c
++++ b/src/libsystemd-rtnl/sd-rtnl.c
+@@ -43,10 +43,21 @@ static int sd_rtnl_new(sd_rtnl **ret) {
+ 
+         rtnl->sockaddr.nl.nl_family = AF_NETLINK;
+ 
++        rtnl->original_pid = getpid();
++
+         *ret = rtnl;
+         return 0;
+ }
+ 
++static bool rtnl_pid_changed(sd_rtnl *rtnl) {
++        assert(rtnl);
++
++        /* We don't support people creating an rtnl connection and
++         * keeping it around over a fork(). Let's complain. */
++
++        return rtnl->original_pid != getpid();
++}
++
+ int sd_rtnl_open(uint32_t groups, sd_rtnl **ret) {
+         _cleanup_sd_rtnl_unref_ sd_rtnl *rtnl = NULL;
+         int r;
+@@ -98,6 +109,7 @@ int sd_rtnl_send_with_reply_and_block(sd_rtnl *nl,
+         int r, serial;
+ 
+         assert_return(nl, -EINVAL);
++        assert_return(!rtnl_pid_changed(nl), -ECHILD);
+         assert_return(message, -EINVAL);
+ 
+         r = message_seal(nl, message);
+

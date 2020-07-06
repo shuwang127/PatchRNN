@@ -1,0 +1,64 @@
+commit e5878a5d2a8ce9ec88a96ab5ccc8ce76111a0898
+Author: nicm <nicm@openbsd.org>
+Date:   Sat Mar 17 17:36:03 2012 +0000
+
+    Revert screen-write.c r1.54 and fix the bug properly. After wrapping a
+    line in a pane, the cursor needs to move to the next line unless it
+    scrolled.
+
+diff --git a/usr.bin/tmux/screen-write.c b/usr.bin/tmux/screen-write.c
+index a98a303923c..16811758576 100644
+--- a/usr.bin/tmux/screen-write.c
++++ b/usr.bin/tmux/screen-write.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: screen-write.c,v 1.54 2012/03/14 23:29:07 nicm Exp $ */
++/* $OpenBSD: screen-write.c,v 1.55 2012/03/17 17:36:03 nicm Exp $ */
+ 
+ /*
+  * Copyright (c) 2007 Nicholas Marriott <nicm@users.sourceforge.net>
+@@ -1071,8 +1071,11 @@ screen_write_cell(struct screen_write_ctx *ctx,
+ 		return;
+ 	}
+ 
++	/* Initialise the redraw context, saving the last cell. */
++	screen_write_initctx(ctx, &ttyctx, 1);
++
+ 	/* If in insert mode, make space for the cells. */
+-	if (s->mode & MODE_INSERT && s->cx <= screen_size_x(s) - width) {
++	if ((s->mode & MODE_INSERT) && s->cx <= screen_size_x(s) - width) {
+ 		xx = screen_size_x(s) - s->cx - width;
+ 		grid_move_cells(s->grid, s->cx + width, s->cx, s->cy, xx);
+ 		insert = 1;
+@@ -1084,9 +1087,6 @@ screen_write_cell(struct screen_write_ctx *ctx,
+ 		s->cx = 0;	/* carriage return */
+ 	}
+ 
+-	/* Initialise the redraw context, saving the last cell. */
+-	screen_write_initctx(ctx, &ttyctx, 1);
+-
+ 	/* Sanity checks. */
+ 	if (((s->mode & MODE_WRAP) && s->cx > screen_size_x(s) - width)
+ 	    || s->cy > screen_size_y(s) - 1)
+diff --git a/usr.bin/tmux/tty.c b/usr.bin/tmux/tty.c
+index 12810623524..135d22bde50 100644
+--- a/usr.bin/tmux/tty.c
++++ b/usr.bin/tmux/tty.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: tty.c,v 1.121 2012/03/15 10:36:00 nicm Exp $ */
++/* $OpenBSD: tty.c,v 1.122 2012/03/17 17:36:03 nicm Exp $ */
+ 
+ /*
+  * Copyright (c) 2007 Nicholas Marriott <nicm@users.sourceforge.net>
+@@ -1000,7 +1000,10 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
+ 			 * The pane doesn't fill the entire line, the linefeed
+ 			 * will already have happened, so just move the cursor.
+ 			 */
+-			tty_cursor_pane(tty, ctx, 0, ctx->ocy + 1);
++			if (ctx->ocy != wp->yoff + wp->sy)
++				tty_cursor_pane(tty, ctx, 0, ctx->ocy + 1);
++			else
++				tty_cursor_pane(tty, ctx, 0, ctx->ocy);
+ 		} else if (tty->cx < tty->sx) {
+ 			/*
+ 			 * The cursor isn't in the last position already, so
+

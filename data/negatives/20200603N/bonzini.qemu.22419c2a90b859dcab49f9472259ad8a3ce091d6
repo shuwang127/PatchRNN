@@ -1,0 +1,50 @@
+commit 22419c2a90b859dcab49f9472259ad8a3ce091d6
+Author: David Gibson <david@gibson.dropbear.id.au>
+Date:   Tue Sep 8 11:21:31 2015 +1000
+
+    pseries: Fix incorrect calculation of threads per socket for chip-id
+    
+    The device tree presented to pseries machine type guests includes an
+    ibm,chip-id property which gives essentially the socket number of each
+    vcpu core (individual vcpu threads don't get a node in the device
+    tree).
+    
+    To calculate this, it uses a vcpus_per_socket variable computed as
+    (smp_cpus / #sockets).  This is correct for the usual case where
+    smp_cpus == smp_threads * smp_cores * #sockets.
+    
+    However, you can start QEMU with the number of cores and threads
+    mismatching the total number of vcpus (whether that _should_ be
+    permitted is a topic for another day).  It's a bit hard to say what
+    the "real" number of vcpus per socket here is, but for most purposes
+    (smp_threads * smp_cores) will more meaningfully match how QEMU
+    behaves with respect to socket boundaries.
+    
+    Signed-off-by: David Gibson <david@gibson.dropbear.id.au>
+    Reviewed-by: Alexey Kardashevskiy <aik@ozlabs.ru>
+
+diff --git a/hw/ppc/spapr.c b/hw/ppc/spapr.c
+index a69d7e4754..ac0d2fe892 100644
+--- a/hw/ppc/spapr.c
++++ b/hw/ppc/spapr.c
+@@ -630,9 +630,7 @@ static void spapr_populate_cpu_dt(CPUState *cs, void *fdt, int offset,
+     uint32_t cpufreq = kvm_enabled() ? kvmppc_get_clockfreq() : 1000000000;
+     uint32_t page_sizes_prop[64];
+     size_t page_sizes_prop_size;
+-    QemuOpts *opts = qemu_opts_find(qemu_find_opts("smp-opts"), NULL);
+-    unsigned sockets = opts ? qemu_opt_get_number(opts, "sockets", 0) : 0;
+-    uint32_t cpus_per_socket = sockets ? (smp_cpus / sockets) : 1;
++    uint32_t vcpus_per_socket = smp_threads * smp_cores;
+     uint32_t pft_size_prop[] = {0, cpu_to_be32(spapr->htab_shift)};
+ 
+     _FDT((fdt_setprop_cell(fdt, offset, "reg", index)));
+@@ -701,7 +699,7 @@ static void spapr_populate_cpu_dt(CPUState *cs, void *fdt, int offset,
+     }
+ 
+     _FDT((fdt_setprop_cell(fdt, offset, "ibm,chip-id",
+-                           cs->cpu_index / cpus_per_socket)));
++                           cs->cpu_index / vcpus_per_socket)));
+ 
+     _FDT((fdt_setprop(fdt, offset, "ibm,pft-size",
+                       pft_size_prop, sizeof(pft_size_prop))));
+

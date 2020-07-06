@@ -1,0 +1,88 @@
+commit eeacf1477b4460e2dbc37c9164bb46a65ab8f084
+Author: Mauro Carvalho Chehab <mchehab@redhat.com>
+Date:   Thu Dec 22 08:56:48 2011 -0300
+
+    [media] dvb-core: allow demods to specify the supported delsys
+    
+    The dvb were originally written for DVB-T/C/S and ATSC. So,
+    the original frontend struct has fields to describe only those three
+    standards.
+    
+    While 2nd gen standards are similar to these, new standards
+    like DSS, ISDB and CTTB don't fit on any of the above types.
+    
+    While there's a way for the drivers to explicitly change whatever
+    default DELSYS were filled inside the core, still a fake value is
+    needed there, and a "compat" code to allow DVBv3 applications to
+    work with those delivery systems is needed. This is good for a
+    short term solution, while applications aren't using DVBv5 directly.
+    
+    However, at long term, this is bad, as the compat code runs even
+    if the application is using DVBv5. Also, the compat code is not
+    perfect, and only works when the frontend is capable of auto-detecting
+    the parameters that aren't visible by the faked delivery systems.
+    
+    So, let the frontend fill the supported delivery systems at the
+    device properties directly.
+    
+    The future plan is that the drivers will stop filling ops->info.type,
+    filling, instead, ops->delsys. This will allow multi-frontend
+    devices like drx-k to use just one frontend structure for all supported
+    delivery systems.
+    
+    Of course, the core will keep using it, in order to keep allowing
+    DVBv3 calls.
+    
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+
+diff --git a/drivers/media/dvb/dvb-core/dvb_frontend.c b/drivers/media/dvb/dvb-core/dvb_frontend.c
+index 7ea79dffa970..001804744d45 100644
+--- a/drivers/media/dvb/dvb-core/dvb_frontend.c
++++ b/drivers/media/dvb/dvb-core/dvb_frontend.c
+@@ -1252,6 +1252,19 @@ static void dtv_set_default_delivery_caps(const struct dvb_frontend *fe, struct
+ 	const struct dvb_frontend_info *info = &fe->ops.info;
+ 	u32 ncaps = 0;
+ 
++	/*
++	 * If the frontend explicitly sets a list, use it, instead of
++	 * filling based on the info->type
++	 */
++	if (fe->ops.delsys[ncaps]) {
++		while (fe->ops.delsys[ncaps] && ncaps < MAX_DELSYS) {
++			p->u.buffer.data[ncaps] = fe->ops.delsys[ncaps];
++			ncaps++;
++		}
++		p->u.buffer.len = ncaps;
++		return;
++	}
++
+ 	switch (info->type) {
+ 	case FE_QPSK:
+ 		p->u.buffer.data[ncaps++] = SYS_DVBS;
+diff --git a/drivers/media/dvb/dvb-core/dvb_frontend.h b/drivers/media/dvb/dvb-core/dvb_frontend.h
+index 895f88f06f5b..95f2134a1622 100644
+--- a/drivers/media/dvb/dvb-core/dvb_frontend.h
++++ b/drivers/media/dvb/dvb-core/dvb_frontend.h
+@@ -42,6 +42,12 @@
+ 
+ #include "dvbdev.h"
+ 
++/*
++ * Maximum number of Delivery systems per frontend. It
++ * should be smaller or equal to 32
++ */
++#define MAX_DELSYS	8
++
+ struct dvb_frontend_tune_settings {
+ 	int min_delay_ms;
+ 	int step_size;
+@@ -254,6 +260,8 @@ struct dvb_frontend_ops {
+ 
+ 	struct dvb_frontend_info info;
+ 
++	u8 delsys[MAX_DELSYS];
++
+ 	void (*release)(struct dvb_frontend* fe);
+ 	void (*release_sec)(struct dvb_frontend* fe);
+ 
+

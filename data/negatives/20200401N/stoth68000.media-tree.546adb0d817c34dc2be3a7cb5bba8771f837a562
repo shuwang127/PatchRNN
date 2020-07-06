@@ -1,0 +1,116 @@
+commit 546adb0d817c34dc2be3a7cb5bba8771f837a562
+Author: Jan Schmidt <list.btrfs@jan-o-sch.net>
+Date:   Thu Jun 14 16:37:44 2012 +0200
+
+    Btrfs: hooks for qgroup to record delayed refs
+    
+    Hooks into qgroup code to record refs and into transaction commit.
+    This is the main entry point for qgroup. Basically every change in
+    extent backrefs got accounted to the appropriate qgroups.
+    
+    Signed-off-by: Arne Jansen <sensille@gmx.net>
+    Signed-off-by: Jan Schmidt <list.btrfs@jan-o-sch.net>
+
+diff --git a/fs/btrfs/delayed-ref.c b/fs/btrfs/delayed-ref.c
+index 21a757717637..da7419ed01bb 100644
+--- a/fs/btrfs/delayed-ref.c
++++ b/fs/btrfs/delayed-ref.c
+@@ -529,8 +529,8 @@ static noinline void add_delayed_tree_ref(struct btrfs_fs_info *fs_info,
+ 	ref->is_head = 0;
+ 	ref->in_tree = 1;
+ 
+-	if (is_fstree(ref_root))
+-		seq = btrfs_inc_tree_mod_seq(fs_info);
++	if (need_ref_seq(for_cow, ref_root))
++		seq = btrfs_get_tree_mod_seq(fs_info, &trans->delayed_ref_elem);
+ 	ref->seq = seq;
+ 
+ 	full_ref = btrfs_delayed_node_to_tree_ref(ref);
+@@ -588,8 +588,8 @@ static noinline void add_delayed_data_ref(struct btrfs_fs_info *fs_info,
+ 	ref->is_head = 0;
+ 	ref->in_tree = 1;
+ 
+-	if (is_fstree(ref_root))
+-		seq = btrfs_inc_tree_mod_seq(fs_info);
++	if (need_ref_seq(for_cow, ref_root))
++		seq = btrfs_get_tree_mod_seq(fs_info, &trans->delayed_ref_elem);
+ 	ref->seq = seq;
+ 
+ 	full_ref = btrfs_delayed_node_to_data_ref(ref);
+@@ -662,10 +662,12 @@ int btrfs_add_delayed_tree_ref(struct btrfs_fs_info *fs_info,
+ 	add_delayed_tree_ref(fs_info, trans, &ref->node, bytenr,
+ 				   num_bytes, parent, ref_root, level, action,
+ 				   for_cow);
+-	if (!is_fstree(ref_root) &&
++	if (!need_ref_seq(for_cow, ref_root) &&
+ 	    waitqueue_active(&fs_info->tree_mod_seq_wait))
+ 		wake_up(&fs_info->tree_mod_seq_wait);
+ 	spin_unlock(&delayed_refs->lock);
++	if (need_ref_seq(for_cow, ref_root))
++		btrfs_qgroup_record_ref(trans, &ref->node, extent_op);
+ 
+ 	return 0;
+ }
+@@ -711,10 +713,12 @@ int btrfs_add_delayed_data_ref(struct btrfs_fs_info *fs_info,
+ 	add_delayed_data_ref(fs_info, trans, &ref->node, bytenr,
+ 				   num_bytes, parent, ref_root, owner, offset,
+ 				   action, for_cow);
+-	if (!is_fstree(ref_root) &&
++	if (!need_ref_seq(for_cow, ref_root) &&
+ 	    waitqueue_active(&fs_info->tree_mod_seq_wait))
+ 		wake_up(&fs_info->tree_mod_seq_wait);
+ 	spin_unlock(&delayed_refs->lock);
++	if (need_ref_seq(for_cow, ref_root))
++		btrfs_qgroup_record_ref(trans, &ref->node, extent_op);
+ 
+ 	return 0;
+ }
+diff --git a/fs/btrfs/delayed-ref.h b/fs/btrfs/delayed-ref.h
+index 2b5cb27f9861..0d7c90c366b6 100644
+--- a/fs/btrfs/delayed-ref.h
++++ b/fs/btrfs/delayed-ref.h
+@@ -179,6 +179,25 @@ int btrfs_check_delayed_seq(struct btrfs_fs_info *fs_info,
+ 			    struct btrfs_delayed_ref_root *delayed_refs,
+ 			    u64 seq);
+ 
++/*
++ * delayed refs with a ref_seq > 0 must be held back during backref walking.
++ * this only applies to items in one of the fs-trees. for_cow items never need
++ * to be held back, so they won't get a ref_seq number.
++ */
++static inline int need_ref_seq(int for_cow, u64 rootid)
++{
++	if (for_cow)
++		return 0;
++
++	if (rootid == BTRFS_FS_TREE_OBJECTID)
++		return 1;
++
++	if ((s64)rootid >= (s64)BTRFS_FIRST_FREE_OBJECTID)
++		return 1;
++
++	return 0;
++}
++
+ /*
+  * a node might live in a head or a regular ref, this lets you
+  * test for the proper type to use.
+diff --git a/fs/btrfs/transaction.c b/fs/btrfs/transaction.c
+index d20d2e24f8d2..21c768cb443f 100644
+--- a/fs/btrfs/transaction.c
++++ b/fs/btrfs/transaction.c
+@@ -795,6 +795,13 @@ static noinline int commit_cowonly_roots(struct btrfs_trans_handle *trans,
+ 	ret = btrfs_run_dev_stats(trans, root->fs_info);
+ 	BUG_ON(ret);
+ 
++	ret = btrfs_run_qgroups(trans, root->fs_info);
++	BUG_ON(ret);
++
++	/* run_qgroups might have added some more refs */
++	ret = btrfs_run_delayed_refs(trans, root, (unsigned long)-1);
++	BUG_ON(ret);
++
+ 	while (!list_empty(&fs_info->dirty_cowonly_roots)) {
+ 		next = fs_info->dirty_cowonly_roots.next;
+ 		list_del_init(next);
+

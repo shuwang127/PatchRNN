@@ -1,0 +1,343 @@
+commit dd75fdc8c69587c91bd68a6ed7c726b5e70f9399
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Wed Sep 25 17:34:57 2013 +0100
+
+    drm/i915: Tweak RPS thresholds to more aggressively downclock
+    
+    After applying wait-boost we often find ourselves stuck at higher clocks
+    than required. The current threshold value requires the GPU to be
+    continuously and completely idle for 313ms before it is dropped by one
+    bin. Conversely, we require the GPU to be busy for an average of 90% over
+    a 84ms period before we upclock. So the current thresholds almost never
+    downclock the GPU, and respond very slowly to sudden demands for more
+    power. It is easy to observe that we currently lock into the wrong bin
+    and both underperform in benchmarks and consume more power than optimal
+    (just by repeating the task and measuring the different results).
+    
+    An alternative approach, as discussed in the bspec, is to use a
+    continuous threshold for upclocking, and an average value for downclocking.
+    This is good for quickly detecting and reacting to state changes within a
+    frame, however it fails with the common throttling method of waiting
+    upon the outstanding frame - at least it is difficult to choose a
+    threshold that works well at 15,000fps and at 60fps. So continue to use
+    average busy/idle loads to determine frequency change.
+    
+    v2: Use 3 power zones to keep frequencies low in steady-state mostly
+    idle (e.g. scrolling, interactive 2D drawing), and frequencies high
+    for demanding games. In between those end-states, we use a
+    fast-reclocking algorithm to converge more quickly on the desired bin.
+    
+    v3: Bug fixes - make sure we reset adj after switching power zones.
+    
+    v4: Tune - drop the continuous busy thresholds as it prevents us from
+    choosing the right frequency for glxgears style swap benchmarks. Instead
+    the goal is to be able to find the right clocks irrespective of the
+    wait-boost.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Kenneth Graunke <kenneth@whitecape.org>
+    Cc: Stéphane Marchesin <stephane.marchesin@gmail.com>
+    Cc: Owen Taylor <otaylor@redhat.com>
+    Cc: "Meng, Mengmeng" <mengmeng.meng@intel.com>
+    Cc: "Zhuang, Lena" <lena.zhuang@intel.com>
+    Reviewed-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index d1c6b92edae0..5118ac300c42 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -850,8 +850,13 @@ struct intel_gen6_power_mgmt {
+ 	u8 min_delay;
+ 	u8 max_delay;
+ 	u8 rpe_delay;
++	u8 rp1_delay;
++	u8 rp0_delay;
+ 	u8 hw_max;
+ 
++	int last_adj;
++	enum { LOW_POWER, BETWEEN, HIGH_POWER } power;
++
+ 	struct delayed_work delayed_resume_work;
+ 
+ 	/*
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 6ee557280e11..418ad642c742 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -818,7 +818,7 @@ static void gen6_pm_rps_work(struct work_struct *work)
+ 	drm_i915_private_t *dev_priv = container_of(work, drm_i915_private_t,
+ 						    rps.work);
+ 	u32 pm_iir;
+-	u8 new_delay;
++	int new_delay, adj;
+ 
+ 	spin_lock_irq(&dev_priv->irq_lock);
+ 	pm_iir = dev_priv->rps.pm_iir;
+@@ -835,29 +835,49 @@ static void gen6_pm_rps_work(struct work_struct *work)
+ 
+ 	mutex_lock(&dev_priv->rps.hw_lock);
+ 
++	adj = dev_priv->rps.last_adj;
+ 	if (pm_iir & GEN6_PM_RP_UP_THRESHOLD) {
+-		new_delay = dev_priv->rps.cur_delay + 1;
++		if (adj > 0)
++			adj *= 2;
++		else
++			adj = 1;
++		new_delay = dev_priv->rps.cur_delay + adj;
+ 
+ 		/*
+ 		 * For better performance, jump directly
+ 		 * to RPe if we're below it.
+ 		 */
+-		if (IS_VALLEYVIEW(dev_priv->dev) &&
+-		    dev_priv->rps.cur_delay < dev_priv->rps.rpe_delay)
++		if (new_delay < dev_priv->rps.rpe_delay)
++			new_delay = dev_priv->rps.rpe_delay;
++	} else if (pm_iir & GEN6_PM_RP_DOWN_TIMEOUT) {
++		if (dev_priv->rps.cur_delay > dev_priv->rps.rpe_delay)
+ 			new_delay = dev_priv->rps.rpe_delay;
+-	} else
+-		new_delay = dev_priv->rps.cur_delay - 1;
++		else
++			new_delay = dev_priv->rps.min_delay;
++		adj = 0;
++	} else if (pm_iir & GEN6_PM_RP_DOWN_THRESHOLD) {
++		if (adj < 0)
++			adj *= 2;
++		else
++			adj = -1;
++		new_delay = dev_priv->rps.cur_delay + adj;
++	} else { /* unknown event */
++		new_delay = dev_priv->rps.cur_delay;
++	}
+ 
+ 	/* sysfs frequency interfaces may have snuck in while servicing the
+ 	 * interrupt
+ 	 */
+-	if (new_delay >= dev_priv->rps.min_delay &&
+-	    new_delay <= dev_priv->rps.max_delay) {
+-		if (IS_VALLEYVIEW(dev_priv->dev))
+-			valleyview_set_rps(dev_priv->dev, new_delay);
+-		else
+-			gen6_set_rps(dev_priv->dev, new_delay);
+-	}
++	if (new_delay < (int)dev_priv->rps.min_delay)
++		new_delay = dev_priv->rps.min_delay;
++	if (new_delay > (int)dev_priv->rps.max_delay)
++		new_delay = dev_priv->rps.max_delay;
++	dev_priv->rps.last_adj = new_delay - dev_priv->rps.cur_delay;
++
++	if (IS_VALLEYVIEW(dev_priv->dev))
++		valleyview_set_rps(dev_priv->dev, new_delay);
++	else
++		gen6_set_rps(dev_priv->dev, new_delay);
+ 
+ 	mutex_unlock(&dev_priv->rps.hw_lock);
+ }
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 96fd2ce6aa02..daaabe788f21 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -4687,7 +4687,7 @@
+ #define   GEN6_RP_UP_IDLE_MIN			(0x1<<3)
+ #define   GEN6_RP_UP_BUSY_AVG			(0x2<<3)
+ #define   GEN6_RP_UP_BUSY_CONT			(0x4<<3)
+-#define   GEN7_RP_DOWN_IDLE_AVG			(0x2<<0)
++#define   GEN6_RP_DOWN_IDLE_AVG			(0x2<<0)
+ #define   GEN6_RP_DOWN_IDLE_CONT		(0x1<<0)
+ #define GEN6_RP_UP_THRESHOLD			0xA02C
+ #define GEN6_RP_DOWN_THRESHOLD			0xA030
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index ca063c25ad32..b08a96cd9c94 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -3312,6 +3312,98 @@ static u32 gen6_rps_limits(struct drm_i915_private *dev_priv, u8 *val)
+ 	return limits;
+ }
+ 
++static void gen6_set_rps_thresholds(struct drm_i915_private *dev_priv, u8 val)
++{
++	int new_power;
++
++	new_power = dev_priv->rps.power;
++	switch (dev_priv->rps.power) {
++	case LOW_POWER:
++		if (val > dev_priv->rps.rpe_delay + 1 && val > dev_priv->rps.cur_delay)
++			new_power = BETWEEN;
++		break;
++
++	case BETWEEN:
++		if (val <= dev_priv->rps.rpe_delay && val < dev_priv->rps.cur_delay)
++			new_power = LOW_POWER;
++		else if (val >= dev_priv->rps.rp0_delay && val > dev_priv->rps.cur_delay)
++			new_power = HIGH_POWER;
++		break;
++
++	case HIGH_POWER:
++		if (val < (dev_priv->rps.rp1_delay + dev_priv->rps.rp0_delay) >> 1 && val < dev_priv->rps.cur_delay)
++			new_power = BETWEEN;
++		break;
++	}
++	/* Max/min bins are special */
++	if (val == dev_priv->rps.min_delay)
++		new_power = LOW_POWER;
++	if (val == dev_priv->rps.max_delay)
++		new_power = HIGH_POWER;
++	if (new_power == dev_priv->rps.power)
++		return;
++
++	/* Note the units here are not exactly 1us, but 1280ns. */
++	switch (new_power) {
++	case LOW_POWER:
++		/* Upclock if more than 95% busy over 16ms */
++		I915_WRITE(GEN6_RP_UP_EI, 12500);
++		I915_WRITE(GEN6_RP_UP_THRESHOLD, 11800);
++
++		/* Downclock if less than 85% busy over 32ms */
++		I915_WRITE(GEN6_RP_DOWN_EI, 25000);
++		I915_WRITE(GEN6_RP_DOWN_THRESHOLD, 21250);
++
++		I915_WRITE(GEN6_RP_CONTROL,
++			   GEN6_RP_MEDIA_TURBO |
++			   GEN6_RP_MEDIA_HW_NORMAL_MODE |
++			   GEN6_RP_MEDIA_IS_GFX |
++			   GEN6_RP_ENABLE |
++			   GEN6_RP_UP_BUSY_AVG |
++			   GEN6_RP_DOWN_IDLE_AVG);
++		break;
++
++	case BETWEEN:
++		/* Upclock if more than 90% busy over 13ms */
++		I915_WRITE(GEN6_RP_UP_EI, 10250);
++		I915_WRITE(GEN6_RP_UP_THRESHOLD, 9225);
++
++		/* Downclock if less than 75% busy over 32ms */
++		I915_WRITE(GEN6_RP_DOWN_EI, 25000);
++		I915_WRITE(GEN6_RP_DOWN_THRESHOLD, 18750);
++
++		I915_WRITE(GEN6_RP_CONTROL,
++			   GEN6_RP_MEDIA_TURBO |
++			   GEN6_RP_MEDIA_HW_NORMAL_MODE |
++			   GEN6_RP_MEDIA_IS_GFX |
++			   GEN6_RP_ENABLE |
++			   GEN6_RP_UP_BUSY_AVG |
++			   GEN6_RP_DOWN_IDLE_AVG);
++		break;
++
++	case HIGH_POWER:
++		/* Upclock if more than 85% busy over 10ms */
++		I915_WRITE(GEN6_RP_UP_EI, 8000);
++		I915_WRITE(GEN6_RP_UP_THRESHOLD, 6800);
++
++		/* Downclock if less than 60% busy over 32ms */
++		I915_WRITE(GEN6_RP_DOWN_EI, 25000);
++		I915_WRITE(GEN6_RP_DOWN_THRESHOLD, 15000);
++
++		I915_WRITE(GEN6_RP_CONTROL,
++			   GEN6_RP_MEDIA_TURBO |
++			   GEN6_RP_MEDIA_HW_NORMAL_MODE |
++			   GEN6_RP_MEDIA_IS_GFX |
++			   GEN6_RP_ENABLE |
++			   GEN6_RP_UP_BUSY_AVG |
++			   GEN6_RP_DOWN_IDLE_AVG);
++		break;
++	}
++
++	dev_priv->rps.power = new_power;
++	dev_priv->rps.last_adj = 0;
++}
++
+ void gen6_set_rps(struct drm_device *dev, u8 val)
+ {
+ 	struct drm_i915_private *dev_priv = dev->dev_private;
+@@ -3324,6 +3416,8 @@ void gen6_set_rps(struct drm_device *dev, u8 val)
+ 	if (val == dev_priv->rps.cur_delay)
+ 		return;
+ 
++	gen6_set_rps_thresholds(dev_priv, val);
++
+ 	if (IS_HASWELL(dev))
+ 		I915_WRITE(GEN6_RPNSWREQ,
+ 			   HSW_FREQUENCY(val));
+@@ -3352,6 +3446,7 @@ void gen6_rps_idle(struct drm_i915_private *dev_priv)
+ 		valleyview_set_rps(dev_priv->dev, dev_priv->rps.min_delay);
+ 	else
+ 		gen6_set_rps(dev_priv->dev, dev_priv->rps.min_delay);
++	dev_priv->rps.last_adj = 0;
+ 	mutex_unlock(&dev_priv->rps.hw_lock);
+ }
+ 
+@@ -3362,6 +3457,7 @@ void gen6_rps_boost(struct drm_i915_private *dev_priv)
+ 		valleyview_set_rps(dev_priv->dev, dev_priv->rps.max_delay);
+ 	else
+ 		gen6_set_rps(dev_priv->dev, dev_priv->rps.max_delay);
++	dev_priv->rps.last_adj = 0;
+ 	mutex_unlock(&dev_priv->rps.hw_lock);
+ }
+ 
+@@ -3546,7 +3642,10 @@ static void gen6_enable_rps(struct drm_device *dev)
+ 
+ 	/* In units of 50MHz */
+ 	dev_priv->rps.hw_max = dev_priv->rps.max_delay = rp_state_cap & 0xff;
+-	dev_priv->rps.min_delay = (rp_state_cap & 0xff0000) >> 16;
++	dev_priv->rps.min_delay = (rp_state_cap >> 16) & 0xff;
++	dev_priv->rps.rp1_delay = (rp_state_cap >>  8) & 0xff;
++	dev_priv->rps.rp0_delay = (rp_state_cap >>  0) & 0xff;
++	dev_priv->rps.rpe_delay = dev_priv->rps.rp1_delay;
+ 	dev_priv->rps.cur_delay = 0;
+ 
+ 	/* disable the counters and set deterministic thresholds */
+@@ -3594,38 +3693,9 @@ static void gen6_enable_rps(struct drm_device *dev)
+ 		   GEN6_RC_CTL_EI_MODE(1) |
+ 		   GEN6_RC_CTL_HW_ENABLE);
+ 
+-	if (IS_HASWELL(dev)) {
+-		I915_WRITE(GEN6_RPNSWREQ,
+-			   HSW_FREQUENCY(10));
+-		I915_WRITE(GEN6_RC_VIDEO_FREQ,
+-			   HSW_FREQUENCY(12));
+-	} else {
+-		I915_WRITE(GEN6_RPNSWREQ,
+-			   GEN6_FREQUENCY(10) |
+-			   GEN6_OFFSET(0) |
+-			   GEN6_AGGRESSIVE_TURBO);
+-		I915_WRITE(GEN6_RC_VIDEO_FREQ,
+-			   GEN6_FREQUENCY(12));
+-	}
+-
+-	I915_WRITE(GEN6_RP_DOWN_TIMEOUT, 1000000);
+-	I915_WRITE(GEN6_RP_INTERRUPT_LIMITS,
+-		   dev_priv->rps.max_delay << 24 |
+-		   dev_priv->rps.min_delay << 16);
+-
+-	I915_WRITE(GEN6_RP_UP_THRESHOLD, 59400);
+-	I915_WRITE(GEN6_RP_DOWN_THRESHOLD, 245000);
+-	I915_WRITE(GEN6_RP_UP_EI, 66000);
+-	I915_WRITE(GEN6_RP_DOWN_EI, 350000);
+-
++	/* Power down if completely idle for over 50ms */
++	I915_WRITE(GEN6_RP_DOWN_TIMEOUT, 50000);
+ 	I915_WRITE(GEN6_RP_IDLE_HYSTERSIS, 10);
+-	I915_WRITE(GEN6_RP_CONTROL,
+-		   GEN6_RP_MEDIA_TURBO |
+-		   GEN6_RP_MEDIA_HW_NORMAL_MODE |
+-		   GEN6_RP_MEDIA_IS_GFX |
+-		   GEN6_RP_ENABLE |
+-		   GEN6_RP_UP_BUSY_AVG |
+-		   (IS_HASWELL(dev) ? GEN7_RP_DOWN_IDLE_AVG : GEN6_RP_DOWN_IDLE_CONT));
+ 
+ 	ret = sandybridge_pcode_write(dev_priv, GEN6_PCODE_WRITE_MIN_FREQ_TABLE, 0);
+ 	if (!ret) {
+@@ -3641,7 +3711,8 @@ static void gen6_enable_rps(struct drm_device *dev)
+ 		DRM_DEBUG_DRIVER("Failed to set the min frequency\n");
+ 	}
+ 
+-	gen6_set_rps(dev_priv->dev, (gt_perf_status & 0xff00) >> 8);
++	dev_priv->rps.power = HIGH_POWER; /* force a reset */
++	gen6_set_rps(dev_priv->dev, dev_priv->rps.min_delay);
+ 
+ 	gen6_enable_rps_interrupts(dev);
+ 
+

@@ -1,0 +1,62 @@
+commit 210f035316f545e6f507e7d61e191495ba983e27
+Author: David Howells <dhowells@redhat.com>
+Date:   Thu Jan 5 10:38:36 2017 +0000
+
+    rxrpc: Allow listen(sock, 0) to be used to disable listening
+    
+    Allow listen() with a backlog of 0 to be used to disable listening on an
+    AF_RXRPC socket.  This also releases any preallocation, thereby making it
+    easier for a kernel service to account for all allocated call structures
+    when shutting down the service.
+    
+    The socket cannot thereafter have listening reenabled, but must rather be
+    closed and reopened.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+
+diff --git a/net/rxrpc/af_rxrpc.c b/net/rxrpc/af_rxrpc.c
+index 5f63f6dcaabb..199b46e93e64 100644
+--- a/net/rxrpc/af_rxrpc.c
++++ b/net/rxrpc/af_rxrpc.c
+@@ -224,6 +224,14 @@ static int rxrpc_listen(struct socket *sock, int backlog)
+ 		else
+ 			sk->sk_max_ack_backlog = old;
+ 		break;
++	case RXRPC_SERVER_LISTENING:
++		if (backlog == 0) {
++			rx->sk.sk_state = RXRPC_SERVER_LISTEN_DISABLED;
++			sk->sk_max_ack_backlog = 0;
++			rxrpc_discard_prealloc(rx);
++			ret = 0;
++			break;
++		}
+ 	default:
+ 		ret = -EBUSY;
+ 		break;
+diff --git a/net/rxrpc/ar-internal.h b/net/rxrpc/ar-internal.h
+index 84927c7b5fdf..12be432be9b2 100644
+--- a/net/rxrpc/ar-internal.h
++++ b/net/rxrpc/ar-internal.h
+@@ -60,6 +60,7 @@ enum {
+ 	RXRPC_CLIENT_BOUND,		/* client local address bound */
+ 	RXRPC_SERVER_BOUND,		/* server local address bound */
+ 	RXRPC_SERVER_LISTENING,		/* server listening for connections */
++	RXRPC_SERVER_LISTEN_DISABLED,	/* server listening disabled */
+ 	RXRPC_CLOSE,			/* socket is being closed */
+ };
+ 
+diff --git a/net/rxrpc/call_accept.c b/net/rxrpc/call_accept.c
+index 832d854c2d5c..7c4c64ab8da2 100644
+--- a/net/rxrpc/call_accept.c
++++ b/net/rxrpc/call_accept.c
+@@ -349,7 +349,8 @@ struct rxrpc_call *rxrpc_new_incoming_call(struct rxrpc_local *local,
+ 
+ found_service:
+ 	spin_lock(&rx->incoming_lock);
+-	if (rx->sk.sk_state == RXRPC_CLOSE) {
++	if (rx->sk.sk_state == RXRPC_SERVER_LISTEN_DISABLED ||
++	    rx->sk.sk_state == RXRPC_CLOSE) {
+ 		trace_rxrpc_abort("CLS", sp->hdr.cid, sp->hdr.callNumber,
+ 				  sp->hdr.seq, RX_INVALID_OPERATION, ESHUTDOWN);
+ 		skb->mark = RXRPC_SKB_MARK_LOCAL_ABORT;
+

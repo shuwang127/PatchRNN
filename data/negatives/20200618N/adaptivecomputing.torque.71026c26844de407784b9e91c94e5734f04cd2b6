@@ -1,0 +1,210 @@
+commit 71026c26844de407784b9e91c94e5734f04cd2b6
+Author: glen <glen@8f940c70-5916-0410-ac46-d1fa2fa6ea29>
+Date:   Sat Jul 15 01:18:56 2006 +0000
+
+    patches to fix bugzilla bug #87
+
+diff --git a/src/include/attribute.h b/src/include/attribute.h
+index c31546f99..a35bcf1fb 100644
+--- a/src/include/attribute.h
++++ b/src/include/attribute.h
+@@ -281,6 +281,7 @@ typedef struct attribute_def attribute_def;
+ #define ATR_ACTION_ALTER     2
+ #define ATR_ACTION_RECOV     3
+ #define ATR_ACTION_FREE      4
++#define ATR_ACTION_ACL_REMOVE 5
+ 
+ /*
+  * values for the mode parameter to at_encode(), determines:
+diff --git a/src/include/pbs_error.h b/src/include/pbs_error.h
+index d65725193..9d9d4e456 100644
+--- a/src/include/pbs_error.h
++++ b/src/include/pbs_error.h
+@@ -160,6 +160,7 @@
+ #define PBSE_NORELYMOM	15070		/* could not contact Mom */
+ #define PBSE_NOTSNODE	15071		/* no time-shared nodes */
+ #define PBSE_JOBTYPE	15072		/* wrong job type (batch or interactive) */
++#define PBSE_BADACLHOST	15073		/* bad entry in ACL host list */
+ 
+ /*
+ ** 	Resource monitor specific
+diff --git a/src/include/server.h b/src/include/server.h
+index 26b6e584b..88345733c 100644
+--- a/src/include/server.h
++++ b/src/include/server.h
+@@ -196,6 +196,7 @@ extern struct server server;
+ #define SVR_HOT_CYCLE	15	/* retry mom every n sec on hot start     */
+ #define SVR_HOT_LIMIT	300	/* after n seconds, drop out of hot start */
+ 
++
+ /* function prototypes */
+ 
+ extern int svr_recov A_((char *));
+diff --git a/src/lib/Liblog/pbs_messages.c b/src/lib/Liblog/pbs_messages.c
+index ed53fd388..5bc5bed41 100644
+--- a/src/lib/Liblog/pbs_messages.c
++++ b/src/lib/Liblog/pbs_messages.c
+@@ -321,6 +321,7 @@ char *msg_siscomm       = "sister could not communicate";
+ char *msg_sisreject     = "sister rejected";
+ char *msg_toomany       = "Too many submit retries";
+ char *msg_jobtype       = "Wrong job type";
++char *msg_badaclhost	= "Bad ACL entry in host list";
+ 
+ /*
+  * The following table connects error numbers with text
+@@ -406,6 +407,7 @@ struct pbs_err_to_txt pbs_err_to_txt[] = {
+         { PBSE_SISREJECT, &msg_sisreject },
+         { PBSE_TOOMANY, &msg_toomany },
+ 	{ PBSE_JOBTYPE, &msg_jobtype },
++        { PBSE_BADACLHOST, &msg_badaclhost },
+         { PBSE_NONE, &msg_none },
+ 	{ 0, (char **)0 }		/* MUST be the last entry */
+ };
+diff --git a/src/server/req_manager.c b/src/server/req_manager.c
+index 2aa8e0eaf..49d0d97d9 100644
+--- a/src/server/req_manager.c
++++ b/src/server/req_manager.c
+@@ -381,6 +381,11 @@ static int mgr_set_attr(
+        *  new value.  If the action fails, undo everything.
+        */
+ 
++/* if we are removing an existing manager entry the at action will be 
++   slightly different */
++if (plist->al_op == DECR && strcmp(plist->al_name, ATTR_managers) == 0)
++   mode = ATR_ACTION_ACL_REMOVE;
++
+       if ((pdef + index)->at_action) 
+         {
+         if ((rc = (pdef + index)->at_action(new + index,parent,mode))) 
+@@ -1004,6 +1009,7 @@ void mgr_server_set(
+   svrattrl *plist;
+   int	    rc;
+ 
++
+   plist = (svrattrl *)GET_NEXT(preq->rq_ind.rq_manager.rq_attr);
+ 
+   rc = mgr_set_attr(
+@@ -1016,7 +1022,60 @@ void mgr_server_set(
+     (void *)&server,
+     ATR_ACTION_ALTER);
+ 
+-  if (rc != 0)
++  /* PBSE_BADACLHOST - lets show the user the first bad host in the ACL  */
++  if (rc == PBSE_BADACLHOST)
++    {
++    char     *bad_host;
++    char     *host_entry;
++    char      hostname[PBS_MAXHOSTNAME + 1];
++    attribute temp;
++    int       index;
++    int       i;
++    struct    array_strings *pstr;
++
++
++    index = find_attr(svr_attr_def, plist->al_name, SRV_ATR_LAST); 
++
++    bad_host = (char*)malloc(sizeof(char) * (PBS_MAXHOSTNAME + 17));
++    clear_attr(&temp, &svr_attr_def[index]);
++    svr_attr_def[index].at_decode(&temp,plist->al_name,plist->al_resc,plist->al_value); 
++
++    pstr = temp.at_val.at_arst;
++    
++    bad_host[0] = (char)NULL;
++    
++    /* loop over all hosts and perform same check as manager_oper_chk*/
++    for (i = 0; i < pstr->as_usedptr; ++i)
++      {
++
++      host_entry = strchr(pstr->as_string[i], (int)'@');
++ 
++      /* if wildcard, we can't check */
++      if (host_entry[1] != '*')
++        {
++        if (get_fullhostname(host_entry,hostname,PBS_MAXHOSTNAME) ||
++            strncmp(host_entry,hostname,PBS_MAXHOSTNAME))
++          {
++          sprintf(bad_host, "First bad host: %s", host_entry+1);;
++          break;
++          }
++
++        }
++
++      }
++
++     if (bad_host != NULL) /* we found a fully qualified host that was bad */
++       {
++       req_reject(PBSE_BADACLHOST, 0, preq, NULL, bad_host); 
++       }
++    else /* this shouldn't happen (return PBSE_BADACLHOST, but now we can't find the bad host) */
++       {
++       reply_badattr(PBSE_BADHOST, bad_attr, plist, preq);
++       }
++
++    return;
++    } /* end PBSE_BADACLHOST */
++  else if (rc != 0)
+     {
+     reply_badattr(rc,bad_attr,plist,preq);
+  
+@@ -1981,8 +2040,6 @@ void req_manager(
+ 
+ 
+ 
+-
+-
+ /*
+  * manager_oper_chk - check the @host part of a manager or operator acl
+  *	entry to insure it is fully qualified.  This is to prevent
+@@ -2009,6 +2066,16 @@ int manager_oper_chk(
+     return(0);	/* no checking on free */
+     }
+ 
++  /* no check when removing - You should always be able
++     to remove entries even if there are other invalid entries
++     in the existing list.  The only way that can happen is if there
++     are hosts that no longer exist. 
++   */
++  if (actmode == ATR_ACTION_ACL_REMOVE)
++    {
++    return 0;
++    }
++
+   pstr = pattr->at_val.at_arst;
+ 
+   if (pstr == NULL)
+@@ -2043,13 +2110,20 @@ int manager_oper_chk(
+           sprintf(log_buffer,"bad entry in acl: %s",
+             pstr->as_string[i]);
+ 
+-          log_err(PBSE_BADHOST, 
++          log_err(PBSE_BADACLHOST, 
+             "manager_oper_chk",
+             log_buffer);
+           } 
+         else 
+           {
+-          err = PBSE_BADHOST;
++          sprintf(log_buffer,"bad entry in acl: %s",
++            pstr->as_string[i]);
++
++          log_err(PBSE_BADACLHOST,
++            "manager_oper_chk",
++            log_buffer);
++
++          err = PBSE_BADACLHOST;
+           }
+         }
+       }
+diff --git a/src/server/svr_attr_def.c b/src/server/svr_attr_def.c
+index 99c869240..aab00c809 100644
+--- a/src/server/svr_attr_def.c
++++ b/src/server/svr_attr_def.c
+@@ -92,6 +92,7 @@
+ extern int manager_oper_chk A_((attribute *pattr, void *pobject, int actmode));
+ extern int servername_chk A_((attribute *pattr, void *pobject, int actmode));
+ extern int schiter_chk A_((attribute *pattr, void *pobject, int actmode));
++
+ extern int poke_scheduler A_((attribute *pattr, void *pobject, int actmode));
+ 
+ extern int encode_svrstate A_((attribute *pattr, list_head *phead, char *aname,
+

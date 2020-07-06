@@ -1,0 +1,443 @@
+commit 0df63e44c3e315ec0fe427ae62558231864108bd
+Author: Takashi Iwai <tiwai@suse.de>
+Date:   Fri Apr 28 15:13:41 2006 +0200
+
+    [ALSA] Add O_APPEND flag support to PCM
+    
+    Added O_APPEND flag support to PCM to enable shared substreams
+    among multiple processes.  This mechanism is used by dmix and
+    dsnoop plugins.
+    
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+diff --git a/include/sound/asound.h b/include/sound/asound.h
+index 9cc021c7ee11..41885f48ad91 100644
+--- a/include/sound/asound.h
++++ b/include/sound/asound.h
+@@ -137,7 +137,7 @@ enum {
+  *                                                                           *
+  *****************************************************************************/
+ 
+-#define SNDRV_PCM_VERSION		SNDRV_PROTOCOL_VERSION(2, 0, 7)
++#define SNDRV_PCM_VERSION		SNDRV_PROTOCOL_VERSION(2, 0, 8)
+ 
+ typedef unsigned long snd_pcm_uframes_t;
+ typedef signed long snd_pcm_sframes_t;
+diff --git a/include/sound/pcm.h b/include/sound/pcm.h
+index 998bacefc8f8..cebf0310a8dc 100644
+--- a/include/sound/pcm.h
++++ b/include/sound/pcm.h
+@@ -368,7 +368,8 @@ struct snd_pcm_substream {
+ 	struct snd_pcm_group *group;		/* pointer to current group */
+ 	/* -- assigned files -- */
+ 	void *file;
+-	struct file *ffile;
++	int ref_count;
++	unsigned int f_flags;
+ 	void (*pcm_release)(struct snd_pcm_substream *);
+ #if defined(CONFIG_SND_PCM_OSS) || defined(CONFIG_SND_PCM_OSS_MODULE)
+ 	/* -- OSS things -- */
+@@ -387,7 +388,7 @@ struct snd_pcm_substream {
+ 	unsigned int hw_opened: 1;
+ };
+ 
+-#define SUBSTREAM_BUSY(substream) ((substream)->file != NULL)
++#define SUBSTREAM_BUSY(substream) ((substream)->ref_count > 0)
+ 
+ 
+ struct snd_pcm_str {
+diff --git a/sound/core/oss/pcm_oss.c b/sound/core/oss/pcm_oss.c
+index d8b7416ee003..9803a6ce3d46 100644
+--- a/sound/core/oss/pcm_oss.c
++++ b/sound/core/oss/pcm_oss.c
+@@ -1331,7 +1331,7 @@ static ssize_t snd_pcm_oss_write1(struct snd_pcm_substream *substream, const cha
+ 				if (runtime->oss.period_ptr == 0 ||
+ 				    runtime->oss.period_ptr == runtime->oss.buffer_used)
+ 					runtime->oss.buffer_used = 0;
+-				else if ((substream->ffile->f_flags & O_NONBLOCK) != 0)
++				else if ((substream->f_flags & O_NONBLOCK) != 0)
+ 					return xfer > 0 ? xfer : -EAGAIN;
+ 			}
+ 		} else {
+@@ -1344,7 +1344,7 @@ static ssize_t snd_pcm_oss_write1(struct snd_pcm_substream *substream, const cha
+ 			buf += tmp;
+ 			bytes -= tmp;
+ 			xfer += tmp;
+-			if ((substream->ffile->f_flags & O_NONBLOCK) != 0 &&
++			if ((substream->f_flags & O_NONBLOCK) != 0 &&
+ 			    tmp != runtime->oss.period_bytes)
+ 				break;
+ 		}
+@@ -1582,10 +1582,10 @@ static int snd_pcm_oss_sync(struct snd_pcm_oss_file *pcm_oss_file)
+ 		 * finish sync: drain the buffer
+ 		 */
+ 	      __direct:
+-		saved_f_flags = substream->ffile->f_flags;
+-		substream->ffile->f_flags &= ~O_NONBLOCK;
++		saved_f_flags = substream->f_flags;
++		substream->f_flags &= ~O_NONBLOCK;
+ 		err = snd_pcm_kernel_ioctl(substream, SNDRV_PCM_IOCTL_DRAIN, NULL);
+-		substream->ffile->f_flags = saved_f_flags;
++		substream->f_flags = saved_f_flags;
+ 		if (err < 0)
+ 			return err;
+ 		runtime->oss.prepare = 1;
+@@ -2164,9 +2164,9 @@ static void snd_pcm_oss_init_substream(struct snd_pcm_substream *substream,
+ 	substream->oss.oss = 1;
+ 	substream->oss.setup = *setup;
+ 	if (setup->nonblock)
+-		substream->ffile->f_flags |= O_NONBLOCK;
++		substream->f_flags |= O_NONBLOCK;
+ 	else if (setup->block)
+-		substream->ffile->f_flags &= ~O_NONBLOCK;
++		substream->f_flags &= ~O_NONBLOCK;
+ 	runtime = substream->runtime;
+ 	runtime->oss.params = 1;
+ 	runtime->oss.trigger = 1;
+@@ -2223,6 +2223,7 @@ static int snd_pcm_oss_open_file(struct file *file,
+ 	    (pcm->info_flags & SNDRV_PCM_INFO_HALF_DUPLEX))
+ 		f_mode = FMODE_WRITE;
+ 
++	file->f_flags &= ~O_APPEND;
+ 	for (idx = 0; idx < 2; idx++) {
+ 		if (setup[idx].disable)
+ 			continue;
+@@ -2540,6 +2541,7 @@ static ssize_t snd_pcm_oss_read(struct file *file, char __user *buf, size_t coun
+ 	substream = pcm_oss_file->streams[SNDRV_PCM_STREAM_CAPTURE];
+ 	if (substream == NULL)
+ 		return -ENXIO;
++	substream->f_flags = file->f_flags & O_NONBLOCK;
+ #ifndef OSS_DEBUG
+ 	return snd_pcm_oss_read1(substream, buf, count);
+ #else
+@@ -2561,6 +2563,7 @@ static ssize_t snd_pcm_oss_write(struct file *file, const char __user *buf, size
+ 	substream = pcm_oss_file->streams[SNDRV_PCM_STREAM_PLAYBACK];
+ 	if (substream == NULL)
+ 		return -ENXIO;
++	substream->f_flags = file->f_flags & O_NONBLOCK;
+ 	result = snd_pcm_oss_write1(substream, buf, count);
+ #ifdef OSS_DEBUG
+ 	printk("pcm_oss: write %li bytes (wrote %li bytes)\n", (long)count, (long)result);
+diff --git a/sound/core/pcm.c b/sound/core/pcm.c
+index 4f5204175d37..8136be2e6066 100644
+--- a/sound/core/pcm.c
++++ b/sound/core/pcm.c
+@@ -829,6 +829,26 @@ int snd_pcm_attach_substream(struct snd_pcm *pcm, int stream,
+ 		return -EINVAL;
+ 	}
+ 
++	if (file->f_flags & O_APPEND) {
++		if (prefer_subdevice < 0) {
++			if (pstr->substream_count > 1)
++				return -EINVAL; /* must be unique */
++			substream = pstr->substream;
++		} else {
++			for (substream = pstr->substream; substream;
++			     substream = substream->next)
++				if (substream->number == prefer_subdevice)
++					break;
++		}
++		if (! substream)
++			return -ENODEV;
++		if (! SUBSTREAM_BUSY(substream))
++			return -EBADFD;
++		substream->ref_count++;
++		*rsubstream = substream;
++		return 0;
++	}
++
+ 	if (prefer_subdevice >= 0) {
+ 		for (substream = pstr->substream; substream; substream = substream->next)
+ 			if (!SUBSTREAM_BUSY(substream) && substream->number == prefer_subdevice)
+@@ -873,7 +893,8 @@ int snd_pcm_attach_substream(struct snd_pcm *pcm, int stream,
+ 
+ 	substream->runtime = runtime;
+ 	substream->private_data = pcm->private_data;
+-	substream->ffile = file;
++	substream->ref_count = 1;
++	substream->f_flags = file->f_flags;
+ 	pstr->substream_opened++;
+ 	*rsubstream = substream;
+ 	return 0;
+@@ -882,7 +903,7 @@ int snd_pcm_attach_substream(struct snd_pcm *pcm, int stream,
+ void snd_pcm_detach_substream(struct snd_pcm_substream *substream)
+ {
+ 	struct snd_pcm_runtime *runtime;
+-	substream->file = NULL;
++
+ 	runtime = substream->runtime;
+ 	snd_assert(runtime != NULL, return);
+ 	if (runtime->private_free != NULL)
+diff --git a/sound/core/pcm_compat.c b/sound/core/pcm_compat.c
+index e5133033de5e..2b8aab6fd6cd 100644
+--- a/sound/core/pcm_compat.c
++++ b/sound/core/pcm_compat.c
+@@ -497,9 +497,9 @@ static long snd_pcm_ioctl_compat(struct file *file, unsigned int cmd, unsigned l
+ 	case SNDRV_PCM_IOCTL_LINK:
+ 	case SNDRV_PCM_IOCTL_UNLINK:
+ 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+-			return snd_pcm_playback_ioctl1(substream, cmd, argp);
++			return snd_pcm_playback_ioctl1(file, substream, cmd, argp);
+ 		else
+-			return snd_pcm_capture_ioctl1(substream, cmd, argp);
++			return snd_pcm_capture_ioctl1(file, substream, cmd, argp);
+ 	case SNDRV_PCM_IOCTL_HW_REFINE32:
+ 		return snd_pcm_ioctl_hw_params_compat(substream, 1, argp);
+ 	case SNDRV_PCM_IOCTL_HW_PARAMS32:
+diff --git a/sound/core/pcm_lib.c b/sound/core/pcm_lib.c
+index a21aa0050e4d..0bb142a28539 100644
+--- a/sound/core/pcm_lib.c
++++ b/sound/core/pcm_lib.c
+@@ -1782,7 +1782,7 @@ snd_pcm_sframes_t snd_pcm_lib_write(struct snd_pcm_substream *substream, const v
+ 	if (runtime->status->state == SNDRV_PCM_STATE_OPEN)
+ 		return -EBADFD;
+ 
+-	nonblock = !!(substream->ffile->f_flags & O_NONBLOCK);
++	nonblock = !!(substream->f_flags & O_NONBLOCK);
+ 
+ 	if (runtime->access != SNDRV_PCM_ACCESS_RW_INTERLEAVED &&
+ 	    runtime->channels > 1)
+@@ -1847,7 +1847,7 @@ snd_pcm_sframes_t snd_pcm_lib_writev(struct snd_pcm_substream *substream,
+ 	if (runtime->status->state == SNDRV_PCM_STATE_OPEN)
+ 		return -EBADFD;
+ 
+-	nonblock = !!(substream->ffile->f_flags & O_NONBLOCK);
++	nonblock = !!(substream->f_flags & O_NONBLOCK);
+ 
+ 	if (runtime->access != SNDRV_PCM_ACCESS_RW_NONINTERLEAVED)
+ 		return -EINVAL;
+@@ -2059,7 +2059,7 @@ snd_pcm_sframes_t snd_pcm_lib_read(struct snd_pcm_substream *substream, void __u
+ 	if (runtime->status->state == SNDRV_PCM_STATE_OPEN)
+ 		return -EBADFD;
+ 
+-	nonblock = !!(substream->ffile->f_flags & O_NONBLOCK);
++	nonblock = !!(substream->f_flags & O_NONBLOCK);
+ 	if (runtime->access != SNDRV_PCM_ACCESS_RW_INTERLEAVED)
+ 		return -EINVAL;
+ 	return snd_pcm_lib_read1(substream, (unsigned long)buf, size, nonblock, snd_pcm_lib_read_transfer);
+@@ -2118,7 +2118,7 @@ snd_pcm_sframes_t snd_pcm_lib_readv(struct snd_pcm_substream *substream,
+ 	if (runtime->status->state == SNDRV_PCM_STATE_OPEN)
+ 		return -EBADFD;
+ 
+-	nonblock = !!(substream->ffile->f_flags & O_NONBLOCK);
++	nonblock = !!(substream->f_flags & O_NONBLOCK);
+ 	if (runtime->access != SNDRV_PCM_ACCESS_RW_NONINTERLEAVED)
+ 		return -EINVAL;
+ 	return snd_pcm_lib_read1(substream, (unsigned long)bufs, frames, nonblock, snd_pcm_lib_readv_transfer);
+diff --git a/sound/core/pcm_native.c b/sound/core/pcm_native.c
+index 7b5729c4b213..36d6765618a4 100644
+--- a/sound/core/pcm_native.c
++++ b/sound/core/pcm_native.c
+@@ -1284,13 +1284,16 @@ static int snd_pcm_reset(struct snd_pcm_substream *substream)
+ /*
+  * prepare ioctl
+  */
+-static int snd_pcm_pre_prepare(struct snd_pcm_substream *substream, int state)
++/* we use the second argument for updating f_flags */
++static int snd_pcm_pre_prepare(struct snd_pcm_substream *substream,
++			       int f_flags)
+ {
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	if (runtime->status->state == SNDRV_PCM_STATE_OPEN)
+ 		return -EBADFD;
+ 	if (snd_pcm_running(substream))
+ 		return -EBUSY;
++	substream->f_flags = f_flags;
+ 	return 0;
+ }
+ 
+@@ -1319,17 +1322,26 @@ static struct action_ops snd_pcm_action_prepare = {
+ /**
+  * snd_pcm_prepare
+  * @substream: the PCM substream instance
++ * @file: file to refer f_flags
+  *
+  * Prepare the PCM substream to be triggerable.
+  */
+-static int snd_pcm_prepare(struct snd_pcm_substream *substream)
++static int snd_pcm_prepare(struct snd_pcm_substream *substream,
++			   struct file *file)
+ {
+ 	int res;
+ 	struct snd_card *card = substream->pcm->card;
++	int f_flags;
++
++	if (file)
++		f_flags = file->f_flags;
++	else
++		f_flags = substream->f_flags;
+ 
+ 	snd_power_lock(card);
+ 	if ((res = snd_power_wait(card, SNDRV_CTL_POWER_D0)) >= 0)
+-		res = snd_pcm_action_nonatomic(&snd_pcm_action_prepare, substream, 0);
++		res = snd_pcm_action_nonatomic(&snd_pcm_action_prepare,
++					       substream, f_flags);
+ 	snd_power_unlock(card);
+ 	return res;
+ }
+@@ -1340,7 +1352,7 @@ static int snd_pcm_prepare(struct snd_pcm_substream *substream)
+ 
+ static int snd_pcm_pre_drain_init(struct snd_pcm_substream *substream, int state)
+ {
+-	if (substream->ffile->f_flags & O_NONBLOCK)
++	if (substream->f_flags & O_NONBLOCK)
+ 		return -EAGAIN;
+ 	substream->runtime->trigger_master = substream;
+ 	return 0;
+@@ -2015,6 +2027,10 @@ static void pcm_release_private(struct snd_pcm_substream *substream)
+ 
+ void snd_pcm_release_substream(struct snd_pcm_substream *substream)
+ {
++	substream->ref_count--;
++	if (substream->ref_count > 0)
++		return;
++
+ 	snd_pcm_drop(substream);
+ 	if (substream->hw_opened) {
+ 		if (substream->ops->hw_free != NULL)
+@@ -2041,6 +2057,11 @@ int snd_pcm_open_substream(struct snd_pcm *pcm, int stream,
+ 	err = snd_pcm_attach_substream(pcm, stream, file, &substream);
+ 	if (err < 0)
+ 		return err;
++	if (substream->ref_count > 1) {
++		*rsubstream = substream;
++		return 0;
++	}
++
+ 	substream->no_mmap_ctrl = 0;
+ 	err = snd_pcm_hw_constraints_init(substream);
+ 	if (err < 0) {
+@@ -2086,17 +2107,20 @@ static int snd_pcm_open_file(struct file *file,
+ 	if (err < 0)
+ 		return err;
+ 
+-	pcm_file = kzalloc(sizeof(*pcm_file), GFP_KERNEL);
+-	if (pcm_file == NULL) {
+-		snd_pcm_release_substream(substream);
+-		return -ENOMEM;
++	if (substream->ref_count > 1)
++		pcm_file = substream->file;
++	else {
++		pcm_file = kzalloc(sizeof(*pcm_file), GFP_KERNEL);
++		if (pcm_file == NULL) {
++			snd_pcm_release_substream(substream);
++			return -ENOMEM;
++		}
++		str = substream->pstr;
++		substream->file = pcm_file;
++		substream->pcm_release = pcm_release_private;
++		pcm_file->substream = substream;
++		snd_pcm_add_file(str, pcm_file);
+ 	}
+-	str = substream->pstr;
+-	substream->file = pcm_file;
+-	substream->pcm_release = pcm_release_private;
+-	pcm_file->substream = substream;
+-	snd_pcm_add_file(str, pcm_file);
+-
+ 	file->private_data = pcm_file;
+ 	*rpcm_file = pcm_file;
+ 	return 0;
+@@ -2506,7 +2530,8 @@ static int snd_pcm_sync_ptr(struct snd_pcm_substream *substream,
+ 	return 0;
+ }
+ 		
+-static int snd_pcm_common_ioctl1(struct snd_pcm_substream *substream,
++static int snd_pcm_common_ioctl1(struct file *file,
++				 struct snd_pcm_substream *substream,
+ 				 unsigned int cmd, void __user *arg)
+ {
+ 	snd_assert(substream != NULL, return -ENXIO);
+@@ -2531,7 +2556,7 @@ static int snd_pcm_common_ioctl1(struct snd_pcm_substream *substream,
+ 	case SNDRV_PCM_IOCTL_CHANNEL_INFO:
+ 		return snd_pcm_channel_info_user(substream, arg);
+ 	case SNDRV_PCM_IOCTL_PREPARE:
+-		return snd_pcm_prepare(substream);
++		return snd_pcm_prepare(substream, file);
+ 	case SNDRV_PCM_IOCTL_RESET:
+ 		return snd_pcm_reset(substream);
+ 	case SNDRV_PCM_IOCTL_START:
+@@ -2573,7 +2598,8 @@ static int snd_pcm_common_ioctl1(struct snd_pcm_substream *substream,
+ 	return -ENOTTY;
+ }
+ 
+-static int snd_pcm_playback_ioctl1(struct snd_pcm_substream *substream,
++static int snd_pcm_playback_ioctl1(struct file *file,
++				   struct snd_pcm_substream *substream,
+ 				   unsigned int cmd, void __user *arg)
+ {
+ 	snd_assert(substream != NULL, return -ENXIO);
+@@ -2649,10 +2675,11 @@ static int snd_pcm_playback_ioctl1(struct snd_pcm_substream *substream,
+ 		return result < 0 ? result : 0;
+ 	}
+ 	}
+-	return snd_pcm_common_ioctl1(substream, cmd, arg);
++	return snd_pcm_common_ioctl1(file, substream, cmd, arg);
+ }
+ 
+-static int snd_pcm_capture_ioctl1(struct snd_pcm_substream *substream,
++static int snd_pcm_capture_ioctl1(struct file *file,
++				  struct snd_pcm_substream *substream,
+ 				  unsigned int cmd, void __user *arg)
+ {
+ 	snd_assert(substream != NULL, return -ENXIO);
+@@ -2728,7 +2755,7 @@ static int snd_pcm_capture_ioctl1(struct snd_pcm_substream *substream,
+ 		return result < 0 ? result : 0;
+ 	}
+ 	}
+-	return snd_pcm_common_ioctl1(substream, cmd, arg);
++	return snd_pcm_common_ioctl1(file, substream, cmd, arg);
+ }
+ 
+ static long snd_pcm_playback_ioctl(struct file *file, unsigned int cmd,
+@@ -2741,7 +2768,8 @@ static long snd_pcm_playback_ioctl(struct file *file, unsigned int cmd,
+ 	if (((cmd >> 8) & 0xff) != 'A')
+ 		return -ENOTTY;
+ 
+-	return snd_pcm_playback_ioctl1(pcm_file->substream, cmd, (void __user *)arg);
++	return snd_pcm_playback_ioctl1(file, pcm_file->substream, cmd,
++				       (void __user *)arg);
+ }
+ 
+ static long snd_pcm_capture_ioctl(struct file *file, unsigned int cmd,
+@@ -2754,7 +2782,8 @@ static long snd_pcm_capture_ioctl(struct file *file, unsigned int cmd,
+ 	if (((cmd >> 8) & 0xff) != 'A')
+ 		return -ENOTTY;
+ 
+-	return snd_pcm_capture_ioctl1(pcm_file->substream, cmd, (void __user *)arg);
++	return snd_pcm_capture_ioctl1(file, pcm_file->substream, cmd,
++				      (void __user *)arg);
+ }
+ 
+ int snd_pcm_kernel_ioctl(struct snd_pcm_substream *substream,
+@@ -2766,12 +2795,12 @@ int snd_pcm_kernel_ioctl(struct snd_pcm_substream *substream,
+ 	fs = snd_enter_user();
+ 	switch (substream->stream) {
+ 	case SNDRV_PCM_STREAM_PLAYBACK:
+-		result = snd_pcm_playback_ioctl1(substream,
+-						 cmd, (void __user *)arg);
++		result = snd_pcm_playback_ioctl1(NULL, substream, cmd,
++						 (void __user *)arg);
+ 		break;
+ 	case SNDRV_PCM_STREAM_CAPTURE:
+-		result = snd_pcm_capture_ioctl1(substream,
+-						cmd, (void __user *)arg);
++		result = snd_pcm_capture_ioctl1(NULL, substream, cmd,
++						(void __user *)arg);
+ 		break;
+ 	default:
+ 		result = -EINVAL;
+diff --git a/sound/usb/usx2y/usx2yhwdeppcm.c b/sound/usb/usx2y/usx2yhwdeppcm.c
+index fe67a92e2a1a..88b72b52590f 100644
+--- a/sound/usb/usx2y/usx2yhwdeppcm.c
++++ b/sound/usb/usx2y/usx2yhwdeppcm.c
+@@ -632,7 +632,7 @@ static int usX2Y_pcms_lock_check(struct snd_card *card)
+ 		for (s = 0; s < 2; ++s) {
+ 			struct snd_pcm_substream *substream;
+ 			substream = pcm->streams[s].substream;
+-			if (substream && substream->ffile != NULL)
++			if (SUBSTREAM_BUSY(substream))
+ 				err = -EBUSY;
+ 		}
+ 	}
+

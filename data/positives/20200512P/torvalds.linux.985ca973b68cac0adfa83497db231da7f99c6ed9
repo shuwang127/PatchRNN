@@ -1,0 +1,47 @@
+commit 985ca973b68cac0adfa83497db231da7f99c6ed9
+Author: NeilBrown <neilb@suse.com>
+Date:   Mon Jul 6 12:26:57 2015 +1000
+
+    md: close some races between setting and checking sync_action.
+    
+    When checking sync_action in a script, we want to be sure it is
+    as accurate as possible.
+    As resync/reshape etc doesn't always start immediately (a separate
+    thread is scheduled to do it), it is best if 'action_show'
+    checks if MD_RECOVER_NEEDED is set (which it does) and in that
+    case reports what is likely to start soon (which it only sometimes
+    does).
+    
+    So:
+     - report 'reshape' if reshape_position suggests one might start.
+     - set MD_RECOVERY_RECOVER in raid1_reshape(), because that is very
+       likely to happen next.
+    
+    Signed-off-by: NeilBrown <neilb@suse.com>
+
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index 689be615d7be..324f9df4e429 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -4210,6 +4210,8 @@ action_show(struct mddev *mddev, char *page)
+ 				type = "repair";
+ 		} else if (test_bit(MD_RECOVERY_RECOVER, &recovery))
+ 			type = "recover";
++		else if (mddev->reshape_position != MaxSector)
++			type = "reshape";
+ 	}
+ 	return sprintf(page, "%s\n", type);
+ }
+diff --git a/drivers/md/raid1.c b/drivers/md/raid1.c
+index 967a4ed73929..742b50794dfd 100644
+--- a/drivers/md/raid1.c
++++ b/drivers/md/raid1.c
+@@ -3113,6 +3113,7 @@ static int raid1_reshape(struct mddev *mddev)
+ 
+ 	unfreeze_array(conf);
+ 
++	set_bit(MD_RECOVERY_RECOVER, &mddev->recovery);
+ 	set_bit(MD_RECOVERY_NEEDED, &mddev->recovery);
+ 	md_wakeup_thread(mddev->thread);
+ 
+

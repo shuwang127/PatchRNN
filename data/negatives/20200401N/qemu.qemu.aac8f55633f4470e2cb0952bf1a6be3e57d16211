@@ -1,0 +1,62 @@
+commit aac8f55633f4470e2cb0952bf1a6be3e57d16211
+Author: Peter Maydell <peter.maydell@linaro.org>
+Date:   Thu Apr 12 15:02:22 2018 +0100
+
+    linux-user/signal.c: Put AArch64 frame record in the right place
+    
+    AArch64 stack frames include a 'frame record' which holds a pointer
+    to the next frame record in the chain and the LR on entry to the
+    function. The procedure calling standard doesn't mandate where
+    exactly this frame record is in the stack frame, but for signal
+    frames the kernel puts it right at the top. We used to put it
+    there too, but in commit 7f0f4208b3a96f22 we accidentally put
+    the "enlarge to the 4K reserved space minimum" check after the
+    "allow for the frame record" code, rather than before it, with
+    the effect that the frame record would be inside the reserved
+    space and immediately after the last used part of it.
+    
+    Move the frame record back out of the reserved space to where
+    we used to put it.
+    
+    This bug shouldn't break any sensible guest code, but test
+    programs that deliberately look at the internal details
+    of the signal frame layout will not find what they are
+    expecting to see.
+    
+    Fixes: 7f0f4208b3a96f22
+    Signed-off-by: Peter Maydell <peter.maydell@linaro.org>
+    Reviewed-by: Richard Henderson <richard.henderson@linaro.org>
+    Reviewed-by: Laurent Vivier <laurent@vivier.eu>
+    Message-id: 20180412140222.2096-1-peter.maydell@linaro.org
+
+diff --git a/linux-user/signal.c b/linux-user/signal.c
+index 8d9e6e8410..e6dfe0adfd 100644
+--- a/linux-user/signal.c
++++ b/linux-user/signal.c
+@@ -1843,6 +1843,12 @@ static void target_setup_frame(int usig, struct target_sigaction *ka,
+         layout.total_size += sizeof(struct target_aarch64_ctx);
+     }
+ 
++    /* We must always provide at least the standard 4K reserved space,
++     * even if we don't use all of it (this is part of the ABI)
++     */
++    layout.total_size = MAX(layout.total_size,
++                            sizeof(struct target_rt_sigframe));
++
+     /* Reserve space for the return code.  On a real system this would
+      * be within the VDSO.  So, despite the name this is not a "real"
+      * record within the frame.
+@@ -1850,12 +1856,6 @@ static void target_setup_frame(int usig, struct target_sigaction *ka,
+     fr_ofs = layout.total_size;
+     layout.total_size += sizeof(struct target_rt_frame_record);
+ 
+-    /* We must always provide at least the standard 4K reserved space,
+-     * even if we don't use all of it (this is part of the ABI)
+-     */
+-    layout.total_size = MAX(layout.total_size,
+-                            sizeof(struct target_rt_sigframe));
+-
+     frame_addr = get_sigframe(ka, env, layout.total_size);
+     trace_user_setup_frame(env, frame_addr);
+     if (!lock_user_struct(VERIFY_WRITE, frame, frame_addr, 0)) {
+

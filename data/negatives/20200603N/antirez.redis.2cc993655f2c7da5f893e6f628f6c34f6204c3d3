@@ -1,0 +1,129 @@
+commit 2cc993655f2c7da5f893e6f628f6c34f6204c3d3
+Author: antirez <antirez@gmail.com>
+Date:   Mon Feb 28 09:56:48 2011 +0100
+
+    save zipmap encoded hashes as blobs. Work in progress.
+
+diff --git a/src/rdb.c b/src/rdb.c
+index 02317fda..06d72a99 100644
+--- a/src/rdb.c
++++ b/src/rdb.c
+@@ -139,7 +139,7 @@ writeerr:
+ }
+ 
+ /* Save a string objet as [len][data] on disk. If the object is a string
+- * representation of an integer value we try to safe it in a special form */
++ * representation of an integer value we try to save it in a special form */
+ int rdbSaveRawString(FILE *fp, unsigned char *s, size_t len) {
+     int enclen;
+     int n, nwritten = 0;
+@@ -347,20 +347,10 @@ int rdbSaveObject(FILE *fp, robj *o) {
+     } else if (o->type == REDIS_HASH) {
+         /* Save a hash value */
+         if (o->encoding == REDIS_ENCODING_ZIPMAP) {
+-            unsigned char *p = zipmapRewind(o->ptr);
+-            unsigned int count = zipmapLen(o->ptr);
+-            unsigned char *key, *val;
+-            unsigned int klen, vlen;
++            size_t l = zipmapBlobLen((unsigned char*)o->ptr);
+ 
+-            if ((n = rdbSaveLen(fp,count)) == -1) return -1;
++            if ((n = rdbSaveRawString(fp,o->ptr,l)) == -1) return -1;
+             nwritten += n;
+-
+-            while((p = zipmapNext(p,&key,&klen,&val,&vlen)) != NULL) {
+-                if ((n = rdbSaveRawString(fp,key,klen)) == -1) return -1;
+-                nwritten += n;
+-                if ((n = rdbSaveRawString(fp,val,vlen)) == -1) return -1;
+-                nwritten += n;
+-            }
+         } else {
+             dictIterator *di = dictGetIterator(o->ptr);
+             dictEntry *de;
+@@ -402,6 +392,8 @@ off_t rdbSavedObjectLen(robj *o) {
+ int rdbSaveKeyValuePair(FILE *fp, robj *key, robj *val,
+                         time_t expiretime, time_t now)
+ {
++    int vtype;
++
+     /* Save the expire time */
+     if (expiretime != -1) {
+         /* If this key is already expired skip it */
+@@ -409,6 +401,11 @@ int rdbSaveKeyValuePair(FILE *fp, robj *key, robj *val,
+         if (rdbSaveType(fp,REDIS_EXPIRETIME) == -1) return -1;
+         if (rdbSaveTime(fp,expiretime) == -1) return -1;
+     }
++    /* Fix the object type if needed, to support saving zipmaps, ziplists,
++     * and intsets, directly as blobs of bytes: they are already serialized. */
++    vtype = val->type;
++    if (vtype == REDIS_HASH && val->encoding == REDIS_ENCODING_ZIPMAP)
++        vtype = REDIS_HASH_ZIPMAP;
+     /* Save type, key, value */
+     if (rdbSaveType(fp,val->type) == -1) return -1;
+     if (rdbSaveStringObject(fp,key) == -1) return -1;
+@@ -832,6 +829,16 @@ robj *rdbLoadObject(int type, FILE *fp) {
+                 dictAdd((dict*)o->ptr,key,val);
+             }
+         }
++    } else if (type == REDIS_HASH_ZIPMAP) {
++        robj *aux = rdbLoadStringObject(fp);
++
++        if (aux == NULL) return NULL;
++        o = createHashObject();
++        o->encoding = REDIS_ENCODING_ZIPMAP;
++        o->ptr = zmalloc(sdslen(aux->ptr));
++        memcpy(o->ptr,aux->ptr,sdslen(aux->ptr));
++        decrRefCount(aux);
++        /* FIXME: conver the object if needed */
+     } else {
+         redisPanic("Unknown object type");
+     }
+diff --git a/src/redis.h b/src/redis.h
+index 800f03f8..b0491e40 100644
+--- a/src/redis.h
++++ b/src/redis.h
+@@ -70,6 +70,8 @@
+ #define REDIS_ZSET 3
+ #define REDIS_HASH 4
+ #define REDIS_VMPOINTER 8
++/* Object types only used for persistence in .rdb files */
++#define REDIS_HASH_ZIPMAP 9
+ 
+ /* Objects encoding. Some kind of objects like Strings and Hashes can be
+  * internally represented in multiple ways. The 'encoding' field of the object
+diff --git a/src/zipmap.c b/src/zipmap.c
+index be780a82..9f663fda 100644
+--- a/src/zipmap.c
++++ b/src/zipmap.c
+@@ -360,6 +360,18 @@ unsigned int zipmapLen(unsigned char *zm) {
+     return len;
+ }
+ 
++/* Return the raw size in bytes of a zipmap, so that we can serialize
++ * the zipmap on disk (or everywhere is needed) just writing the returned
++ * amount of bytes of the C array starting at the zipmap pointer. */
++size_t zipmapBlobLen(unsigned char *zm) {
++    unsigned char *p = zipmapRewind(zm);
++    unsigned char *old = p;
++    while((p = zipmapNext(p,NULL,NULL,NULL,NULL)) != NULL) {
++        old = p;
++    }
++    return (old-zm)+1;
++}
++
+ void zipmapRepr(unsigned char *p) {
+     unsigned int l;
+ 
+diff --git a/src/zipmap.h b/src/zipmap.h
+index e5f6c9f2..acb25d67 100644
+--- a/src/zipmap.h
++++ b/src/zipmap.h
+@@ -43,6 +43,7 @@ unsigned char *zipmapNext(unsigned char *zm, unsigned char **key, unsigned int *
+ int zipmapGet(unsigned char *zm, unsigned char *key, unsigned int klen, unsigned char **value, unsigned int *vlen);
+ int zipmapExists(unsigned char *zm, unsigned char *key, unsigned int klen);
+ unsigned int zipmapLen(unsigned char *zm);
++size_t zipmapBlobLen(unsigned char *zm);
+ void zipmapRepr(unsigned char *p);
+ 
+ #endif
+

@@ -1,0 +1,54 @@
+commit 9a29dd85a09d825cb28dcaacd36ed0ee0be49699
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Fri Mar 24 16:35:38 2017 +0000
+
+    drm/i915: Fixup intel_write_status_page() for old CPUs without clflush
+    
+    Not all of our target platforms have clflush. For those without, just
+    assume the status page is sufficiently coherent that we do not need our
+    paranoia.
+    
+    Reported-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+    Fixes: 14a6bbf9e535 ("drm/i915: Replace irq_seqno_barrier on hws write with a clflush")
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Mika Kuoppala <mika.kuoppala@intel.com>
+    Cc: Ville Syrjälä <ville.syrjala@linux.intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/20170324163540.31981-1-chris@chris-wilson.co.uk
+    Tested-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+    Reviewed-by: Mika Kuoppala <mika.kuoppala@intel.com>
+
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index 2ecb41788fb6..35da008dc70c 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -454,14 +454,22 @@ intel_read_status_page(struct intel_engine_cs *engine, int reg)
+ }
+ 
+ static inline void
+-intel_write_status_page(struct intel_engine_cs *engine,
+-			int reg, u32 value)
++intel_write_status_page(struct intel_engine_cs *engine, int reg, u32 value)
+ {
+-	mb();
+-	clflush(&engine->status_page.page_addr[reg]);
+-	engine->status_page.page_addr[reg] = value;
+-	clflush(&engine->status_page.page_addr[reg]);
+-	mb();
++	/* Writing into the status page should be done sparingly. Since
++	 * we do when we are uncertain of the device state, we take a bit
++	 * of extra paranoia to try and ensure that the HWS takes the value
++	 * we give and that it doesn't end up trapped inside the CPU!
++	 */
++	if (static_cpu_has(X86_FEATURE_CLFLUSH)) {
++		mb();
++		clflush(&engine->status_page.page_addr[reg]);
++		engine->status_page.page_addr[reg] = value;
++		clflush(&engine->status_page.page_addr[reg]);
++		mb();
++	} else {
++		WRITE_ONCE(engine->status_page.page_addr[reg], value);
++	}
+ }
+ 
+ /*
+

@@ -1,0 +1,37 @@
+commit dbd46ab412b8fb395f2b0ff6f6a7eec9df311550
+Author: Alexander Drozdov <al.drozdov@gmail.com>
+Date:   Tue Jul 28 13:57:01 2015 +0300
+
+    packet: tpacket_snd(): fix signed/unsigned comparison
+    
+    tpacket_fill_skb() can return a negative value (-errno) which
+    is stored in tp_len variable. In that case the following
+    condition will be (but shouldn't be) true:
+    
+    tp_len > dev->mtu + dev->hard_header_len
+    
+    as dev->mtu and dev->hard_header_len are both unsigned.
+    
+    That may lead to just returning an incorrect EMSGSIZE errno
+    to the user.
+    
+    Fixes: 52f1454f629fa ("packet: allow to transmit +4 byte in TX_RING slot for VLAN case")
+    Signed-off-by: Alexander Drozdov <al.drozdov@gmail.com>
+    Acked-by: Daniel Borkmann <daniel@iogearbox.net>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/packet/af_packet.c b/net/packet/af_packet.c
+index c7c42eb617ef..ed458b315ef4 100644
+--- a/net/packet/af_packet.c
++++ b/net/packet/af_packet.c
+@@ -2403,7 +2403,8 @@ static int tpacket_snd(struct packet_sock *po, struct msghdr *msg)
+ 		}
+ 		tp_len = tpacket_fill_skb(po, skb, ph, dev, size_max, proto,
+ 					  addr, hlen);
+-		if (tp_len > dev->mtu + dev->hard_header_len) {
++		if (likely(tp_len >= 0) &&
++		    tp_len > dev->mtu + dev->hard_header_len) {
+ 			struct ethhdr *ehdr;
+ 			/* Earlier code assumed this would be a VLAN pkt,
+ 			 * double-check this now that we have the actual
+

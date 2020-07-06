@@ -1,0 +1,48 @@
+commit 38deb6a74c920f7a3b5e277cfc1e5c51c9bcad28
+Author: Marko Mäkelä <marko.makela@oracle.com>
+Date:   Mon Aug 17 13:46:03 2015 +0300
+
+    Bug#21640085 RECV_PARSE_LOG_REC VIOLATES ITS CONTRACT RE. INCOMPLETE RECS
+    FOR MLOG_CHECKPOINT
+    
+    When recv_parse_log_rec() encounters an incomplete redo log record,
+    it should return 0 instead of the length of the redo log record.
+    This was being violated for the MLOG_CHECKPOINT record.
+    
+    This is a regression from the Bug#17798076 fix, which increased
+    SIZE_OF_MLOG_CHECKPOINT from 1 to 9 bytes.
+    
+    recv_parse_log_rec(): Return 0 if an incomplete MLOG_CHECKPOINT record
+    is encountered.
+    
+    recv_parse_log_recs(): Remove the check for incomplete MLOG_CHECKPOINT
+    records. We will already have returned if recv_parse_log_rec() returned 0.
+    
+    RB: 9949
+    Reviewed-by: Sunny Bains <sunny.bains@oracle.com>
+
+diff --git a/storage/innobase/log/log0recv.cc b/storage/innobase/log/log0recv.cc
+index 38cbe41ec2a..03e44d95aa2 100644
+--- a/storage/innobase/log/log0recv.cc
++++ b/storage/innobase/log/log0recv.cc
+@@ -2472,6 +2472,9 @@ recv_parse_log_rec(
+ 		*type = static_cast<mlog_id_t>(*ptr);
+ 		return(1);
+ 	case MLOG_CHECKPOINT:
++		if (end_ptr < ptr + SIZE_OF_MLOG_CHECKPOINT) {
++			return(0);
++		}
+ 		*type = static_cast<mlog_id_t>(*ptr);
+ 		return(SIZE_OF_MLOG_CHECKPOINT);
+ 	case MLOG_MULTI_REC_END | MLOG_SINGLE_REC_FLAG:
+@@ -2691,9 +2694,6 @@ loop:
+ 			/* Do nothing */
+ 			break;
+ 		case MLOG_CHECKPOINT:
+-			if (end_ptr < ptr + SIZE_OF_MLOG_CHECKPOINT) {
+-				return(false);
+-			}
+ #if SIZE_OF_MLOG_CHECKPOINT != 1 + 8
+ # error SIZE_OF_MLOG_CHECKPOINT != 1 + 8
+ #endif
+

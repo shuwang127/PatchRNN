@@ -1,0 +1,52 @@
+commit 8eaf28dc42c8228f9418c31bc04df58186963545
+Author: dimitry <dimitry@google.com>
+Date:   Wed Oct 11 10:04:14 2017 +0200
+
+    ns_anonymous test: Make it work for natively bridged environment
+    
+    The executable flag might not be present for the executable segment
+    if the code is being handled by native bridge implementation. This
+    commit changes the test to restore executable flag for first segment
+    if it was removed.
+    
+    Test: bionic-unit-tests
+    Change-Id: Ie930539135edc4db3245574b5cbe476aa1ad49c7
+
+diff --git a/tests/dlext_test.cpp b/tests/dlext_test.cpp
+index 0dc54d0b7..7028ca77e 100644
+--- a/tests/dlext_test.cpp
++++ b/tests/dlext_test.cpp
+@@ -1635,6 +1635,7 @@ TEST(dlext, ns_anonymous) {
+ 
+   uintptr_t addr_start = 0;
+   uintptr_t addr_end = 0;
++  bool has_executable_segment = false;
+   std::vector<map_record> maps_to_copy;
+ 
+   for (const auto& rec : maps) {
+@@ -1643,6 +1644,7 @@ TEST(dlext, ns_anonymous) {
+         addr_start = rec.addr_start;
+       }
+       addr_end = rec.addr_end;
++      has_executable_segment = has_executable_segment || (rec.perms & PROT_EXEC) != 0;
+ 
+       maps_to_copy.push_back(rec);
+     }
+@@ -1655,6 +1657,16 @@ TEST(dlext, ns_anonymous) {
+   ASSERT_TRUE(ns_get_dlopened_string_addr > addr_start);
+   ASSERT_TRUE(ns_get_dlopened_string_addr < addr_end);
+ 
++  if (!has_executable_segment) {
++    // For some natively bridged environments this code might be missing
++    // the executable flag. This is because the guest code is not supposed
++    // to be executed directly and making it non-executable is more secure.
++    // If this is the case we assume that the first segment is the one that
++    // has this flag.
++    ASSERT_TRUE((maps_to_copy[0].perms & PROT_WRITE) == 0);
++    maps_to_copy[0].perms |= PROT_EXEC;
++  }
++
+   // copy
+   uintptr_t reserved_addr = reinterpret_cast<uintptr_t>(mmap(nullptr, addr_end - addr_start,
+                                                              PROT_NONE, MAP_ANON | MAP_PRIVATE,
+

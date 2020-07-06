@@ -1,0 +1,71 @@
+commit a3feb08639e7982f47c3981fea79d527d3dfc0ac
+Author: Markus Armbruster <armbru@redhat.com>
+Date:   Tue Mar 15 19:34:42 2016 +0100
+
+    ivshmem: Rely on server sending the ID right after the version
+    
+    The protocol specification (ivshmem-spec.txt, formerly
+    ivshmem_device_spec.txt) has always required the ID message to be sent
+    right at the beginning, and ivshmem-server has always complied.  The
+    device, however, accepts it out of order.  If an interrupt setup
+    arrived before it, though, it would be misinterpreted as connect
+    notification.  Fix the latent bug by relying on the spec and
+    ivshmem-server's actual behavior.
+    
+    Signed-off-by: Markus Armbruster <armbru@redhat.com>
+    Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+    Message-Id: <1458066895-20632-28-git-send-email-armbru@redhat.com>
+
+diff --git a/hw/misc/ivshmem.c b/hw/misc/ivshmem.c
+index 7f439c3b04..da32a74004 100644
+--- a/hw/misc/ivshmem.c
++++ b/hw/misc/ivshmem.c
+@@ -653,8 +653,6 @@ static void process_msg(IVShmemState *s, int64_t msg, int fd, Error **errp)
+ 
+     if (fd >= 0) {
+         process_msg_connect(s, msg, fd, errp);
+-    } else if (s->vm_id == -1) {
+-        s->vm_id = msg;
+     } else {
+         process_msg_disconnect(s, msg, errp);
+     }
+@@ -721,6 +719,30 @@ static void ivshmem_recv_setup(IVShmemState *s, Error **errp)
+         return;
+     }
+ 
++    /*
++     * ivshmem-server sends the remaining initial messages in a fixed
++     * order, but the device has always accepted them in any order.
++     * Stay as compatible as practical, just in case people use
++     * servers that behave differently.
++     */
++
++    /*
++     * ivshmem_device_spec.txt has always required the ID message
++     * right here, and ivshmem-server has always complied.  However,
++     * older versions of the device accepted it out of order, but
++     * broke when an interrupt setup message arrived before it.
++     */
++    msg = ivshmem_recv_msg(s, &fd, &err);
++    if (err) {
++        error_propagate(errp, err);
++        return;
++    }
++    if (fd != -1 || msg < 0 || msg > IVSHMEM_MAX_PEERS) {
++        error_setg(errp, "server sent invalid ID message");
++        return;
++    }
++    s->vm_id = msg;
++
+     /*
+      * Receive more messages until we got shared memory.
+      */
+@@ -956,7 +978,6 @@ static void pci_ivshmem_realize(PCIDevice *dev, Error **errp)
+ 
+         /* we allocate enough space for 16 peers and grow as needed */
+         resize_peers(s, 16);
+-        s->vm_id = -1;
+ 
+         pci_register_bar(dev, 2, attr, &s->bar);
+ 
+

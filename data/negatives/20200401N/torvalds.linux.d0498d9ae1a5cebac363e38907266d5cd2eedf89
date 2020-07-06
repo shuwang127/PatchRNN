@@ -1,0 +1,40 @@
+commit d0498d9ae1a5cebac363e38907266d5cd2eedf89
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Wed Apr 16 02:17:42 2008 -0700
+
+    [NET]: Do not allocate unneeded memory for dev->priv alignment.
+    
+    The alloc_netdev_mq() tries to produce 32-bytes alignment for both
+    the net_device itself and its private data. The second alignment is
+    achieved by adding the NETDEV_ALIGN_CONST to the whole size of
+    the memory to be allocated.
+    
+    However, for those devices that do not need the private area, this
+    addition just makes the net_device weight 1024 + 32 = 1068 bytes,
+    i.e. consume twice as much memory.
+    
+    Since loopback device is such (sizeof_priv == 0 for it), and each
+    net namespace creates one, this can save a noticeable amount of
+    memory for kernel with net namespaces turned on.
+    
+    After this set the lo device is actually allocated from a size-1024
+    kmem cache on i386 box even with NETPOLL and WIRELESS_EXT turned on.
+    
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 77530e9a34fc..c16a07fde388 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -4000,7 +4000,8 @@ struct net_device *alloc_netdev_mq(int sizeof_priv, const char *name,
+ 	alloc_size = (sizeof(*dev) + NETDEV_ALIGN_CONST +
+ 		     (sizeof(struct net_device_subqueue) * (queue_count - 1))) &
+ 		     ~NETDEV_ALIGN_CONST;
+-	alloc_size += sizeof_priv + NETDEV_ALIGN_CONST;
++	if (sizeof_priv)
++		alloc_size += sizeof_priv + NETDEV_ALIGN_CONST;
+ 
+ 	p = kzalloc(alloc_size, GFP_KERNEL);
+ 	if (!p) {
+

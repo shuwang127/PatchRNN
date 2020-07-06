@@ -1,0 +1,110 @@
+commit 4c53de72109759c931744734ca75f9cecb3baef1
+Author: Alan Stern <stern@rowland.harvard.edu>
+Date:   Wed Jul 11 11:21:32 2012 -0400
+
+    USB: EHCI: add symbolic constants for QHs
+    
+    This patch (as1568) introduces symbolic constants for some of the
+    less-frequently used bitfields in the QH structure.  This makes the
+    code a little easier to read and understand.
+    
+    Signed-off-by: Alan Stern <stern@rowland.harvard.edu>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/usb/host/ehci-dbg.c b/drivers/usb/host/ehci-dbg.c
+index 7561966fbdc4..97338abff296 100644
+--- a/drivers/usb/host/ehci-dbg.c
++++ b/drivers/usb/host/ehci-dbg.c
+@@ -404,9 +404,9 @@ struct debug_buffer {
+ 
+ #define speed_char(info1) ({ char tmp; \
+ 		switch (info1 & (3 << 12)) { \
+-		case 0 << 12: tmp = 'f'; break; \
+-		case 1 << 12: tmp = 'l'; break; \
+-		case 2 << 12: tmp = 'h'; break; \
++		case QH_FULL_SPEED: tmp = 'f'; break; \
++		case QH_LOW_SPEED:  tmp = 'l'; break; \
++		case QH_HIGH_SPEED: tmp = 'h'; break; \
+ 		default: tmp = '?'; break; \
+ 		}; tmp; })
+ 
+diff --git a/drivers/usb/host/ehci-hcd.c b/drivers/usb/host/ehci-hcd.c
+index 1f8f792eec86..cdb15769468a 100644
+--- a/drivers/usb/host/ehci-hcd.c
++++ b/drivers/usb/host/ehci-hcd.c
+@@ -667,7 +667,7 @@ static int ehci_init(struct usb_hcd *hcd)
+ 	hw->hw_next = QH_NEXT(ehci, ehci->async->qh_dma);
+ 	hw->hw_info1 = cpu_to_hc32(ehci, QH_HEAD);
+ #if defined(CONFIG_PPC_PS3)
+-	hw->hw_info1 |= cpu_to_hc32(ehci, (1 << 7));	/* I = 1 */
++	hw->hw_info1 |= cpu_to_hc32(ehci, QH_INACTIVATE);
+ #endif
+ 	hw->hw_token = cpu_to_hc32(ehci, QTD_STS_HALT);
+ 	hw->hw_qtd_next = EHCI_LIST_END(ehci);
+diff --git a/drivers/usb/host/ehci-q.c b/drivers/usb/host/ehci-q.c
+index 7d117bbffac1..156504787711 100644
+--- a/drivers/usb/host/ehci-q.c
++++ b/drivers/usb/host/ehci-q.c
+@@ -100,7 +100,7 @@ qh_update (struct ehci_hcd *ehci, struct ehci_qh *qh, struct ehci_qtd *qtd)
+ 	 * and set the pseudo-toggle in udev. Only usb_clear_halt() will
+ 	 * ever clear it.
+ 	 */
+-	if (!(hw->hw_info1 & cpu_to_hc32(ehci, 1 << 14))) {
++	if (!(hw->hw_info1 & cpu_to_hc32(ehci, QH_TOGGLE_CTL))) {
+ 		unsigned	is_out, epnum;
+ 
+ 		is_out = qh->is_out;
+@@ -886,7 +886,7 @@ qh_make (
+ 	/* using TT? */
+ 	switch (urb->dev->speed) {
+ 	case USB_SPEED_LOW:
+-		info1 |= (1 << 12);	/* EPS "low" */
++		info1 |= QH_LOW_SPEED;
+ 		/* FALL THROUGH */
+ 
+ 	case USB_SPEED_FULL:
+@@ -894,8 +894,8 @@ qh_make (
+ 		if (type != PIPE_INTERRUPT)
+ 			info1 |= (EHCI_TUNE_RL_TT << 28);
+ 		if (type == PIPE_CONTROL) {
+-			info1 |= (1 << 27);	/* for TT */
+-			info1 |= 1 << 14;	/* toggle from qtd */
++			info1 |= QH_CONTROL_EP;		/* for TT */
++			info1 |= QH_TOGGLE_CTL;		/* toggle from qtd */
+ 		}
+ 		info1 |= maxp << 16;
+ 
+@@ -920,11 +920,11 @@ qh_make (
+ 		break;
+ 
+ 	case USB_SPEED_HIGH:		/* no TT involved */
+-		info1 |= (2 << 12);	/* EPS "high" */
++		info1 |= QH_HIGH_SPEED;
+ 		if (type == PIPE_CONTROL) {
+ 			info1 |= (EHCI_TUNE_RL_HS << 28);
+ 			info1 |= 64 << 16;	/* usb2 fixed maxpacket */
+-			info1 |= 1 << 14;	/* toggle from qtd */
++			info1 |= QH_TOGGLE_CTL;	/* toggle from qtd */
+ 			info2 |= (EHCI_TUNE_MULT_HS << 30);
+ 		} else if (type == PIPE_BULK) {
+ 			info1 |= (EHCI_TUNE_RL_HS << 28);
+diff --git a/drivers/usb/host/ehci.h b/drivers/usb/host/ehci.h
+index f7a59f5d70c6..195449db1b18 100644
+--- a/drivers/usb/host/ehci.h
++++ b/drivers/usb/host/ehci.h
+@@ -324,7 +324,13 @@ union ehci_shadow {
+ struct ehci_qh_hw {
+ 	__hc32			hw_next;	/* see EHCI 3.6.1 */
+ 	__hc32			hw_info1;       /* see EHCI 3.6.2 */
+-#define	QH_HEAD		0x00008000
++#define	QH_CONTROL_EP	(1 << 27)	/* FS/LS control endpoint */
++#define	QH_HEAD		(1 << 15)	/* Head of async reclamation list */
++#define	QH_TOGGLE_CTL	(1 << 14)	/* Data toggle control */
++#define	QH_HIGH_SPEED	(2 << 12)	/* Endpoint speed */
++#define	QH_LOW_SPEED	(1 << 12)
++#define	QH_FULL_SPEED	(0 << 12)
++#define	QH_INACTIVATE	(1 << 7)	/* Inactivate on next transaction */
+ 	__hc32			hw_info2;        /* see EHCI 3.6.2 */
+ #define	QH_SMASK	0x000000ff
+ #define	QH_CMASK	0x0000ff00
+

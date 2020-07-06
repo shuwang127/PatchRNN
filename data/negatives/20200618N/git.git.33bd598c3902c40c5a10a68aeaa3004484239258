@@ -1,0 +1,125 @@
+commit 33bd598c3902c40c5a10a68aeaa3004484239258
+Author: Junio C Hamano <gitster@pobox.com>
+Date:   Mon Jul 2 10:32:11 2012 -0700
+
+    sha1_name.c: teach lookup context to get_sha1_with_context()
+    
+    The function takes user input string and returns the object name
+    (binary SHA-1) with mode bits and path when the object was looked
+    up in a tree.
+    
+    Additionally give hints to help disambiguation of abbreviated object
+    names when the caller knows what it is looking for.
+    
+    Signed-off-by: Junio C Hamano <gitster@pobox.com>
+
+diff --git a/builtin/cat-file.c b/builtin/cat-file.c
+index 07bd98408..c27268ff3 100644
+--- a/builtin/cat-file.c
++++ b/builtin/cat-file.c
+@@ -90,7 +90,7 @@ static int cat_one_file(int opt, const char *exp_type, const char *obj_name)
+ 	unsigned long size;
+ 	struct object_context obj_context;
+ 
+-	if (get_sha1_with_context(obj_name, sha1, &obj_context))
++	if (get_sha1_with_context(obj_name, 0, sha1, &obj_context))
+ 		die("Not a valid object name %s", obj_name);
+ 
+ 	buf = NULL;
+diff --git a/cache.h b/cache.h
+index 1508fdb77..e1fa63b31 100644
+--- a/cache.h
++++ b/cache.h
+@@ -814,10 +814,11 @@ struct object_context {
+ #define GET_SHA1_QUIETLY 01
+ #define GET_SHA1_COMMIT 02
+ #define GET_SHA1_COMMITTISH 04
++#define GET_SHA1_ONLY_TO_DIE 04000
+ 
+ extern int get_sha1(const char *str, unsigned char *sha1);
+ extern void maybe_die_on_misspelt_object_name(const char *name, const char *prefix);
+-extern int get_sha1_with_context(const char *str, unsigned char *sha1, struct object_context *orc);
++extern int get_sha1_with_context(const char *str, unsigned flags, unsigned char *sha1, struct object_context *orc);
+ 
+ /*
+  * Try to read a SHA1 in hexadecimal format from the 40 characters
+diff --git a/revision.c b/revision.c
+index 86a14c8af..7444f2eaa 100644
+--- a/revision.c
++++ b/revision.c
+@@ -1180,7 +1180,7 @@ int handle_revision_arg(const char *arg_, struct rev_info *revs,
+ 		local_flags = UNINTERESTING;
+ 		arg++;
+ 	}
+-	if (get_sha1_with_context(arg, sha1, &oc))
++	if (get_sha1_with_context(arg, 0, sha1, &oc))
+ 		return revs->ignore_missing ? 0 : -1;
+ 	if (!cant_be_filename)
+ 		verify_non_filename(revs->prefix, arg);
+@@ -1795,7 +1795,7 @@ int setup_revisions(int argc, const char **argv, struct rev_info *revs, struct s
+ 		unsigned char sha1[20];
+ 		struct object *object;
+ 		struct object_context oc;
+-		if (get_sha1_with_context(revs->def, sha1, &oc))
++		if (get_sha1_with_context(revs->def, 0, sha1, &oc))
+ 			die("bad default revision '%s'", revs->def);
+ 		object = get_reference(revs, revs->def, sha1, 0);
+ 		add_pending_object_with_mode(revs, object, revs->def, oc.mode);
+diff --git a/sha1_name.c b/sha1_name.c
+index 215bb016f..c045be8e1 100644
+--- a/sha1_name.c
++++ b/sha1_name.c
+@@ -996,7 +996,7 @@ int strbuf_check_branch_ref(struct strbuf *sb, const char *name)
+ int get_sha1(const char *name, unsigned char *sha1)
+ {
+ 	struct object_context unused;
+-	return get_sha1_with_context(name, sha1, &unused);
++	return get_sha1_with_context(name, 0, sha1, &unused);
+ }
+ 
+ /* Must be called only when object_name:filename doesn't exist. */
+@@ -1112,20 +1112,24 @@ static char *resolve_relative_path(const char *rel)
+ 			   rel);
+ }
+ 
+-static int get_sha1_with_context_1(const char *name, unsigned char *sha1,
+-				   struct object_context *oc,
+-				   int only_to_die, const char *prefix)
++static int get_sha1_with_context_1(const char *name,
++				   unsigned flags,
++				   const char *prefix,
++				   unsigned char *sha1,
++				   struct object_context *oc)
+ {
+ 	int ret, bracket_depth;
+ 	int namelen = strlen(name);
+ 	const char *cp;
++	int only_to_die = flags & GET_SHA1_ONLY_TO_DIE;
+ 
+ 	memset(oc, 0, sizeof(*oc));
+ 	oc->mode = S_IFINVALID;
+-	ret = get_sha1_1(name, namelen, sha1, 0);
++	ret = get_sha1_1(name, namelen, sha1, flags);
+ 	if (!ret)
+ 		return ret;
+-	/* sha1:path --> object name of path in ent sha1
++	/*
++	 * sha1:path --> object name of path in ent sha1
+ 	 * :path -> object name of absolute path in index
+ 	 * :./path -> object name of path relative to cwd in index
+ 	 * :[0-3]:path -> object name of path in index at stage
+@@ -1239,10 +1243,10 @@ void maybe_die_on_misspelt_object_name(const char *name, const char *prefix)
+ {
+ 	struct object_context oc;
+ 	unsigned char sha1[20];
+-	get_sha1_with_context_1(name, sha1, &oc, 1, prefix);
++	get_sha1_with_context_1(name, GET_SHA1_ONLY_TO_DIE, prefix, sha1, &oc);
+ }
+ 
+-int get_sha1_with_context(const char *str, unsigned char *sha1, struct object_context *orc)
++int get_sha1_with_context(const char *str, unsigned flags, unsigned char *sha1, struct object_context *orc)
+ {
+-	return get_sha1_with_context_1(str, sha1, orc, 0, NULL);
++	return get_sha1_with_context_1(str, flags, NULL, sha1, orc);
+ }
+

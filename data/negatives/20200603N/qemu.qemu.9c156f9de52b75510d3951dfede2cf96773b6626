@@ -1,0 +1,106 @@
+commit 9c156f9de52b75510d3951dfede2cf96773b6626
+Author: Igor Mammedov <imammedo@redhat.com>
+Date:   Thu Jun 23 17:30:14 2016 +0200
+
+    (kvm)apic: Add unrealize callbacks
+    
+    Callbacks will do necessary cleanups before APIC device is deleted
+    
+    Signed-off-by: Chen Fan <chen.fan.fnst@cn.fujitsu.com>
+    Signed-off-by: Gu Zheng <guz.fnst@cn.fujitsu.com>
+    Signed-off-by: Zhu Guihua <zhugh.fnst@cn.fujitsu.com>
+    Signed-off-by: Igor Mammedov <imammedo@redhat.com>
+    Reviewed-by: Michael S. Tsirkin <mst@redhat.com>
+    Signed-off-by: Eduardo Habkost <ehabkost@redhat.com>
+
+diff --git a/hw/i386/kvm/apic.c b/hw/i386/kvm/apic.c
+index 1f87e73d4d..2bd0de82b4 100644
+--- a/hw/i386/kvm/apic.c
++++ b/hw/i386/kvm/apic.c
+@@ -192,11 +192,16 @@ static void kvm_apic_realize(DeviceState *dev, Error **errp)
+     }
+ }
+ 
++static void kvm_apic_unrealize(DeviceState *dev, Error **errp)
++{
++}
++
+ static void kvm_apic_class_init(ObjectClass *klass, void *data)
+ {
+     APICCommonClass *k = APIC_COMMON_CLASS(klass);
+ 
+     k->realize = kvm_apic_realize;
++    k->unrealize = kvm_apic_unrealize;
+     k->reset = kvm_apic_reset;
+     k->set_base = kvm_apic_set_base;
+     k->set_tpr = kvm_apic_set_tpr;
+diff --git a/hw/intc/apic.c b/hw/intc/apic.c
+index f473572fb4..45887d99c0 100644
+--- a/hw/intc/apic.c
++++ b/hw/intc/apic.c
+@@ -887,11 +887,21 @@ static void apic_realize(DeviceState *dev, Error **errp)
+     msi_nonbroken = true;
+ }
+ 
++static void apic_unrealize(DeviceState *dev, Error **errp)
++{
++    APICCommonState *s = APIC_COMMON(dev);
++
++    timer_del(s->timer);
++    timer_free(s->timer);
++    local_apics[s->id] = NULL;
++}
++
+ static void apic_class_init(ObjectClass *klass, void *data)
+ {
+     APICCommonClass *k = APIC_COMMON_CLASS(klass);
+ 
+     k->realize = apic_realize;
++    k->unrealize = apic_unrealize;
+     k->set_base = apic_set_base;
+     k->set_tpr = apic_set_tpr;
+     k->get_tpr = apic_get_tpr;
+diff --git a/hw/intc/apic_common.c b/hw/intc/apic_common.c
+index fd425d1d3c..0bb9ad51fa 100644
+--- a/hw/intc/apic_common.c
++++ b/hw/intc/apic_common.c
+@@ -315,6 +315,18 @@ static void apic_common_realize(DeviceState *dev, Error **errp)
+ 
+ }
+ 
++static void apic_common_unrealize(DeviceState *dev, Error **errp)
++{
++    APICCommonState *s = APIC_COMMON(dev);
++    APICCommonClass *info = APIC_COMMON_GET_CLASS(s);
++
++    info->unrealize(dev, errp);
++
++    if (apic_report_tpr_access && info->enable_tpr_reporting) {
++        info->enable_tpr_reporting(s, false);
++    }
++}
++
+ static int apic_pre_load(void *opaque)
+ {
+     APICCommonState *s = APIC_COMMON(opaque);
+@@ -421,6 +433,7 @@ static void apic_common_class_init(ObjectClass *klass, void *data)
+     dc->reset = apic_reset_common;
+     dc->props = apic_properties_common;
+     dc->realize = apic_common_realize;
++    dc->unrealize = apic_common_unrealize;
+     /*
+      * Reason: APIC and CPU need to be wired up by
+      * x86_cpu_apic_create()
+diff --git a/include/hw/i386/apic_internal.h b/include/hw/i386/apic_internal.h
+index 8330592638..e549a62e7f 100644
+--- a/include/hw/i386/apic_internal.h
++++ b/include/hw/i386/apic_internal.h
+@@ -136,6 +136,7 @@ typedef struct APICCommonClass
+     DeviceClass parent_class;
+ 
+     DeviceRealize realize;
++    DeviceUnrealize unrealize;
+     void (*set_base)(APICCommonState *s, uint64_t val);
+     void (*set_tpr)(APICCommonState *s, uint8_t val);
+     uint8_t (*get_tpr)(APICCommonState *s);
+

@@ -1,0 +1,67 @@
+commit b005ab4ef8805dc4604848c9d2ccca9d71f8fc46
+Author: Pavel Emelyanov <xemul@parallels.com>
+Date:   Fri Dec 9 06:21:53 2011 +0000
+
+    inet_diag: Export inet diag cookie checking routine
+    
+    The netlink diag susbsys stores sk address bits in the nl message
+    as a "cookie" and uses one when dumps details about particular
+    socket.
+    
+    The same will be required for udp diag module, so introduce a heler
+    in inet_diag module
+    
+    Signed-off-by: Pavel Emelyanov <xemul@parallels.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/linux/inet_diag.h b/include/linux/inet_diag.h
+index 851feff0747f..503674738368 100644
+--- a/include/linux/inet_diag.h
++++ b/include/linux/inet_diag.h
+@@ -144,6 +144,8 @@ struct inet_diag_handler {
+ 	__u16                   idiag_type;
+ };
+ 
++int inet_diag_check_cookie(struct sock *sk, struct inet_diag_req *req);
++
+ extern int  inet_diag_register(const struct inet_diag_handler *handler);
+ extern void inet_diag_unregister(const struct inet_diag_handler *handler);
+ #endif /* __KERNEL__ */
+diff --git a/net/ipv4/inet_diag.c b/net/ipv4/inet_diag.c
+index bd3f661803a7..ba3ae1f73abf 100644
+--- a/net/ipv4/inet_diag.c
++++ b/net/ipv4/inet_diag.c
+@@ -246,6 +246,18 @@ static int sk_diag_fill(struct sock *sk, struct sk_buff *skb,
+ 	return inet_csk_diag_fill(sk, skb, r, pid, seq, nlmsg_flags, unlh);
+ }
+ 
++int inet_diag_check_cookie(struct sock *sk, struct inet_diag_req *req)
++{
++	if ((req->id.idiag_cookie[0] != INET_DIAG_NOCOOKIE ||
++	     req->id.idiag_cookie[1] != INET_DIAG_NOCOOKIE) &&
++	    ((u32)(unsigned long)sk != req->id.idiag_cookie[0] ||
++	     (u32)((((unsigned long)sk) >> 31) >> 1) != req->id.idiag_cookie[1]))
++		return -ESTALE;
++	else
++		return 0;
++}
++EXPORT_SYMBOL_GPL(inet_diag_check_cookie);
++
+ static int inet_diag_get_exact(struct sk_buff *in_skb,
+ 			       const struct nlmsghdr *nlh,
+ 			       struct inet_diag_req *req)
+@@ -288,11 +300,8 @@ static int inet_diag_get_exact(struct sk_buff *in_skb,
+ 	if (sk == NULL)
+ 		goto unlock;
+ 
+-	err = -ESTALE;
+-	if ((req->id.idiag_cookie[0] != INET_DIAG_NOCOOKIE ||
+-	     req->id.idiag_cookie[1] != INET_DIAG_NOCOOKIE) &&
+-	    ((u32)(unsigned long)sk != req->id.idiag_cookie[0] ||
+-	     (u32)((((unsigned long)sk) >> 31) >> 1) != req->id.idiag_cookie[1]))
++	err = inet_diag_check_cookie(sk, req);
++	if (err)
+ 		goto out;
+ 
+ 	err = -ENOMEM;
+

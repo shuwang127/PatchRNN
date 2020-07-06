@@ -1,0 +1,65 @@
+commit fa7194eb99b8e9fefe96f045002648ffb55f53c0
+Author: Yasuaki Ishimatsu <isimatu.yasuaki@jp.fujitsu.com>
+Date:   Tue Dec 11 16:00:44 2012 -0800
+
+    memory hotplug: suppress "Device memoryX does not have a release() function" warning
+    
+    When calling remove_memory_block(), the function shows following message
+    at device_release().
+    
+    "Device 'memory528' does not have a release() function, it is broken and
+    must be fixed."
+    
+    The reason is memory_block's device struct does not have a release()
+    function.
+    
+    So the patch registers memory_block_release() to the device's release()
+    function for suppressing the warning message.  Additionally, the patch
+    moves kfree(mem) into the release function since the release function is
+    prepared as a means to free a memory_block struct.
+    
+    Signed-off-by: Yasuaki Ishimatsu <isimatu.yasuaki@jp.fujitsu.com>
+    Acked-by: David Rientjes <rientjes@google.com>
+    Cc: Jiang Liu <liuj97@gmail.com>
+    Cc: Minchan Kim <minchan.kim@gmail.com>
+    Acked-by: KOSAKI Motohiro <kosaki.motohiro@jp.fujitsu.com>
+    Cc: Wen Congyang <wency@cn.fujitsu.com>
+    Cc: Greg KH <greg@kroah.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/base/memory.c b/drivers/base/memory.c
+index 86c88216a503..7eb1211ab688 100644
+--- a/drivers/base/memory.c
++++ b/drivers/base/memory.c
+@@ -70,6 +70,13 @@ void unregister_memory_isolate_notifier(struct notifier_block *nb)
+ }
+ EXPORT_SYMBOL(unregister_memory_isolate_notifier);
+ 
++static void memory_block_release(struct device *dev)
++{
++	struct memory_block *mem = container_of(dev, struct memory_block, dev);
++
++	kfree(mem);
++}
++
+ /*
+  * register_memory - Setup a sysfs device for a memory block
+  */
+@@ -80,6 +87,7 @@ int register_memory(struct memory_block *memory)
+ 
+ 	memory->dev.bus = &memory_subsys;
+ 	memory->dev.id = memory->start_section_nr / sections_per_block;
++	memory->dev.release = memory_block_release;
+ 
+ 	error = device_register(&memory->dev);
+ 	return error;
+@@ -635,7 +643,6 @@ int remove_memory_block(unsigned long node_id, struct mem_section *section,
+ 		mem_remove_simple_file(mem, phys_device);
+ 		mem_remove_simple_file(mem, removable);
+ 		unregister_memory(mem);
+-		kfree(mem);
+ 	} else
+ 		kobject_put(&mem->dev.kobj);
+ 
+

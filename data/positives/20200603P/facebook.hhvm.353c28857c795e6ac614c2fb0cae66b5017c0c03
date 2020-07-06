@@ -1,0 +1,133 @@
+commit 353c28857c795e6ac614c2fb0cae66b5017c0c03
+Author: bill fumerola <bill@fb.com>
+Date:   Wed Jan 7 18:10:44 2015 -0800
+
+    explicitly null-terminate buffer for gethostname()
+    
+    Summary: quoth the man page for gethostname(2):
+    
+    > If the null-terminated hostname is too large to fit, then the name is truncated, [...] POSIX.1-2001 says that if such truncation occurs, then it is unspecified whether the returned buffer includes a terminating null byte.
+    
+    and
+    
+    > POSIX.1-2001 guarantees that "Host names (not including the terminating null byte) are limited to HOST_NAME_MAX bytes".
+    
+    always terminate the last byte, possibly truncating.
+    alternative to this would be to over-allocate by 1 and specify the the buflen as sizeof(buf)-1
+    
+    Reviewed By: @markw65
+    
+    Differential Revision: D1774123
+
+diff --git a/hphp/runtime/base/program-functions.cpp b/hphp/runtime/base/program-functions.cpp
+index 8ddacfe477..d34fb9082f 100644
+--- a/hphp/runtime/base/program-functions.cpp
++++ b/hphp/runtime/base/program-functions.cpp
+@@ -653,7 +653,10 @@ void execute_command_line_begin(int argc, char **argv, int xhprof,
+     serverArr.set(s_argc, php_global(s_argc));
+     serverArr.set(s_PWD, g_context->getCwd());
+     char hostname[1024];
+-    if (RuntimeOption::ServerExecutionMode() && !gethostname(hostname, 1024)) {
++    if (RuntimeOption::ServerExecutionMode() &&
++        !gethostname(hostname, sizeof(hostname))) {
++      // gethostname may not null-terminate
++      hostname[sizeof(hostname) - 1] = '\0';
+       serverArr.set(s_HOSTNAME, String(hostname, CopyString));
+     }
+ 
+diff --git a/hphp/runtime/ext/std/ext_std_network.cpp b/hphp/runtime/ext/std/ext_std_network.cpp
+index 6de73a3ccb..0c26107938 100644
+--- a/hphp/runtime/ext/std/ext_std_network.cpp
++++ b/hphp/runtime/ext/std/ext_std_network.cpp
+@@ -125,11 +125,13 @@ IMPLEMENT_THREAD_LOCAL(ResolverInit, ResolverInit::s_res);
+ Variant HHVM_FUNCTION(gethostname) {
+   char h_name[HOST_NAME_MAX];
+ 
+-  if (gethostname(h_name, HOST_NAME_MAX) != 0) {
++  if (gethostname(h_name, sizeof(h_name)) != 0) {
+     raise_warning(
+         "gethostname() failed with errorno=%d: %s", errno, strerror(errno));
+     return false;
+   }
++  // gethostname may not null-terminate
++  h_name[sizeof(h_name) - 1] = '\0';
+ 
+   return String(h_name, CopyString);
+ }
+diff --git a/hphp/runtime/ext_zend_compat/mongo/php_mongo.cpp b/hphp/runtime/ext_zend_compat/mongo/php_mongo.cpp
+index 6d228592ec..510b8392f8 100644
+--- a/hphp/runtime/ext_zend_compat/mongo/php_mongo.cpp
++++ b/hphp/runtime/ext_zend_compat/mongo/php_mongo.cpp
+@@ -224,7 +224,7 @@ static PHP_GINIT_FUNCTION(mongo)
+ 	 * will fill in the first 256 chars of hostname even if the actual
+ 	 * hostname is longer. If you can't get a unique character in the first
+ 	 * 256 chars of your hostname, you're doing it wrong. */
+-	int len, win_max = 256;
++	int len;
+ 	char *hostname, host_start[256];
+ 	register ulong hash;
+ 
+@@ -239,14 +239,15 @@ static PHP_GINIT_FUNCTION(mongo)
+ 
+ 	mongo_globals->pool_size = -1;
+ 
+-	hostname = host_start;
+ 	/* from the gnu manual:
+ 	 *     gethostname stores the beginning of the host name in name even if the
+ 	 *     host name won't entirely fit. For some purposes, a truncated host name
+ 	 *     is good enough. If it is, you can ignore the error code.
+ 	 * So we'll ignore the error code.
+ 	 * Returns 0-terminated hostname. */
+-	gethostname(hostname, win_max);
++	gethostname(host_start, sizeof(host_start));
++ 	host_start[sizeof(host_start) - 1] = '\0';
++	hostname = host_start;
+ 	len = strlen(hostname);
+ 
+ 	hash = 5381;
+diff --git a/hphp/runtime/ext_zend_compat/mongo/types/id.cpp b/hphp/runtime/ext_zend_compat/mongo/types/id.cpp
+index 48c91c90b2..a3ba77e39f 100644
+--- a/hphp/runtime/ext_zend_compat/mongo/types/id.cpp
++++ b/hphp/runtime/ext_zend_compat/mongo/types/id.cpp
+@@ -316,7 +316,8 @@ PHP_METHOD(MongoId, getHostname)
+ {
+ 	char hostname[256];
+ 
+-	gethostname(hostname, 256);
++	gethostname(hostname, sizeof(hostname));
++	hostname[sizeof(hostname) - 1] = '\0';
+ 	RETURN_STRING(hostname, 1);
+ }
+ /* }}} */
+diff --git a/hphp/test/ext/test_logger.cpp b/hphp/test/ext/test_logger.cpp
+index a151373f36..29394281db 100644
+--- a/hphp/test/ext/test_logger.cpp
++++ b/hphp/test/ext/test_logger.cpp
+@@ -40,9 +40,9 @@ bool TestLogger::initializeRun() {
+     return true;
+ 
+   char buf[100];
+-  std::string hostname;
+   gethostname(buf, sizeof(buf));
+-  hostname = buf;
++  buf[sizeof(buf) - 1] = '\0';
++  std::string hostname = buf;
+ 
+   ArrayInit data(8, ArrayInit::Map{});
+   data.set(String("startedTime"),  time(nullptr));
+diff --git a/hphp/util/process.cpp b/hphp/util/process.cpp
+index 7c91afbd16..39fbbb47c6 100644
+--- a/hphp/util/process.cpp
++++ b/hphp/util/process.cpp
+@@ -534,8 +534,8 @@ std::string Process::GetAppName() {
+ std::string Process::GetHostName() {
+   char hostbuf[128];
+   hostbuf[0] = '\0'; // for cleaner valgrind output when gethostname() fails
+-  gethostname(hostbuf, 127);
+-  hostbuf[127] = '\0';
++  gethostname(hostbuf, sizeof(hostbuf));
++  hostbuf[sizeof(hostbuf) - 1] = '\0';
+   return hostbuf;
+ }
+ 
+

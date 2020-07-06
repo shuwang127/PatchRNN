@@ -1,0 +1,204 @@
+commit 7a1c2f6c8d8485af5ac6c2a313f6a7162207a4af
+Author: Thomas Hellstrom <thellstrom@vmware.com>
+Date:   Fri Oct 1 10:21:49 2010 +0200
+
+    vmwgfx: Enable use of the vblank system
+    
+    This is to avoid accessing uninitialized data during
+    drm_irq_uninstall and vblank ioctls. At the same time, enable error check from
+    drm_kms_init which previously appeared to ignore all errors.
+    
+    Signed-off-by: Thomas Hellstrom <thellstrom@vmware.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/vmwgfx/vmwgfx_drv.c b/drivers/gpu/drm/vmwgfx/vmwgfx_drv.c
+index 23e29f3a0c33..6bbe703e7d97 100644
+--- a/drivers/gpu/drm/vmwgfx/vmwgfx_drv.c
++++ b/drivers/gpu/drm/vmwgfx/vmwgfx_drv.c
+@@ -374,17 +374,6 @@ static int vmw_driver_load(struct drm_device *dev, unsigned long chipset)
+ 
+ 	dev->dev_private = dev_priv;
+ 
+-	if (!dev->devname)
+-		dev->devname = vmw_devname;
+-
+-	if (dev_priv->capabilities & SVGA_CAP_IRQMASK) {
+-		ret = drm_irq_install(dev);
+-		if (unlikely(ret != 0)) {
+-			DRM_ERROR("Failed installing irq: %d\n", ret);
+-			goto out_no_irq;
+-		}
+-	}
+-
+ 	ret = pci_request_regions(dev->pdev, "vmwgfx probe");
+ 	dev_priv->stealth = (ret != 0);
+ 	if (dev_priv->stealth) {
+@@ -400,7 +389,9 @@ static int vmw_driver_load(struct drm_device *dev, unsigned long chipset)
+ 			goto out_no_device;
+ 		}
+ 	}
+-	vmw_kms_init(dev_priv);
++	ret = vmw_kms_init(dev_priv);
++	if (unlikely(ret != 0))
++		goto out_no_kms;
+ 	vmw_overlay_init(dev_priv);
+ 	if (dev_priv->enable_fb) {
+ 		ret = vmw_3d_resource_inc(dev_priv);
+@@ -416,24 +407,37 @@ static int vmw_driver_load(struct drm_device *dev, unsigned long chipset)
+ 			 "running the device in SVGA mode yet.\n");
+ 	}
+ 
++	if (!dev->devname)
++		dev->devname = vmw_devname;
++
++	if (dev_priv->capabilities & SVGA_CAP_IRQMASK) {
++		ret = drm_irq_install(dev);
++		if (unlikely(ret != 0)) {
++			DRM_ERROR("Failed installing irq: %d\n", ret);
++			goto out_no_irq;
++		}
++	}
++
+ 	dev_priv->pm_nb.notifier_call = vmwgfx_pm_notifier;
+ 	register_pm_notifier(&dev_priv->pm_nb);
+ 
+ 	return 0;
+ 
++out_no_irq:
++	if (dev_priv->enable_fb) {
++		vmw_fb_close(dev_priv);
++		vmw_kms_restore_vga(dev_priv);
++		vmw_3d_resource_dec(dev_priv);
++	}
+ out_no_fifo:
+ 	vmw_overlay_close(dev_priv);
+ 	vmw_kms_close(dev_priv);
++out_no_kms:
+ 	if (dev_priv->stealth)
+ 		pci_release_region(dev->pdev, 2);
+ 	else
+ 		pci_release_regions(dev->pdev);
+ out_no_device:
+-	if (dev_priv->capabilities & SVGA_CAP_IRQMASK)
+-		drm_irq_uninstall(dev_priv->dev);
+-	if (dev->devname == vmw_devname)
+-		dev->devname = NULL;
+-out_no_irq:
+ 	ttm_object_device_release(&dev_priv->tdev);
+ out_err4:
+ 	iounmap(dev_priv->mmio_virt);
+@@ -460,6 +464,10 @@ static int vmw_driver_unload(struct drm_device *dev)
+ 
+ 	unregister_pm_notifier(&dev_priv->pm_nb);
+ 
++	if (dev_priv->capabilities & SVGA_CAP_IRQMASK)
++		drm_irq_uninstall(dev_priv->dev);
++	if (dev->devname == vmw_devname)
++		dev->devname = NULL;
+ 	if (dev_priv->enable_fb) {
+ 		vmw_fb_close(dev_priv);
+ 		vmw_kms_restore_vga(dev_priv);
+@@ -472,10 +480,6 @@ static int vmw_driver_unload(struct drm_device *dev)
+ 	else
+ 		pci_release_regions(dev->pdev);
+ 
+-	if (dev_priv->capabilities & SVGA_CAP_IRQMASK)
+-		drm_irq_uninstall(dev_priv->dev);
+-	if (dev->devname == vmw_devname)
+-		dev->devname = NULL;
+ 	ttm_object_device_release(&dev_priv->tdev);
+ 	iounmap(dev_priv->mmio_virt);
+ 	drm_mtrr_del(dev_priv->mmio_mtrr, dev_priv->mmio_start,
+@@ -798,6 +802,7 @@ static struct drm_driver driver = {
+ 	.irq_postinstall = vmw_irq_postinstall,
+ 	.irq_uninstall = vmw_irq_uninstall,
+ 	.irq_handler = vmw_irq_handler,
++	.get_vblank_counter = vmw_get_vblank_counter,
+ 	.reclaim_buffers_locked = NULL,
+ 	.get_map_ofs = drm_core_get_map_ofs,
+ 	.get_reg_ofs = drm_core_get_reg_ofs,
+diff --git a/drivers/gpu/drm/vmwgfx/vmwgfx_drv.h b/drivers/gpu/drm/vmwgfx/vmwgfx_drv.h
+index 9142454cc91e..58de6393f611 100644
+--- a/drivers/gpu/drm/vmwgfx/vmwgfx_drv.h
++++ b/drivers/gpu/drm/vmwgfx/vmwgfx_drv.h
+@@ -518,6 +518,7 @@ void vmw_kms_write_svga(struct vmw_private *vmw_priv,
+ 			unsigned bbp, unsigned depth);
+ int vmw_kms_update_layout_ioctl(struct drm_device *dev, void *data,
+ 				struct drm_file *file_priv);
++u32 vmw_get_vblank_counter(struct drm_device *dev, int crtc);
+ 
+ /**
+  * Overlay control - vmwgfx_overlay.c
+diff --git a/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c b/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c
+index 1636e9ba81a1..e882ba099f0c 100644
+--- a/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c
++++ b/drivers/gpu/drm/vmwgfx/vmwgfx_kms.c
+@@ -996,3 +996,8 @@ out_unlock:
+ 	ttm_read_unlock(&vmaster->lock);
+ 	return ret;
+ }
++
++u32 vmw_get_vblank_counter(struct drm_device *dev, int crtc)
++{
++	return 0;
++}
+diff --git a/drivers/gpu/drm/vmwgfx/vmwgfx_ldu.c b/drivers/gpu/drm/vmwgfx/vmwgfx_ldu.c
+index 7083b1a24df3..11cb39e3accb 100644
+--- a/drivers/gpu/drm/vmwgfx/vmwgfx_ldu.c
++++ b/drivers/gpu/drm/vmwgfx/vmwgfx_ldu.c
+@@ -27,6 +27,8 @@
+ 
+ #include "vmwgfx_kms.h"
+ 
++#define VMWGFX_LDU_NUM_DU 8
++
+ #define vmw_crtc_to_ldu(x) \
+ 	container_of(x, struct vmw_legacy_display_unit, base.crtc)
+ #define vmw_encoder_to_ldu(x) \
+@@ -536,6 +538,10 @@ static int vmw_ldu_init(struct vmw_private *dev_priv, unsigned unit)
+ 
+ int vmw_kms_init_legacy_display_system(struct vmw_private *dev_priv)
+ {
++	struct drm_device *dev = dev_priv->dev;
++	int i;
++	int ret;
++
+ 	if (dev_priv->ldu_priv) {
+ 		DRM_INFO("ldu system already on\n");
+ 		return -EINVAL;
+@@ -553,23 +559,24 @@ int vmw_kms_init_legacy_display_system(struct vmw_private *dev_priv)
+ 
+ 	drm_mode_create_dirty_info_property(dev_priv->dev);
+ 
+-	vmw_ldu_init(dev_priv, 0);
+-	/* for old hardware without multimon only enable one display */
+ 	if (dev_priv->capabilities & SVGA_CAP_MULTIMON) {
+-		vmw_ldu_init(dev_priv, 1);
+-		vmw_ldu_init(dev_priv, 2);
+-		vmw_ldu_init(dev_priv, 3);
+-		vmw_ldu_init(dev_priv, 4);
+-		vmw_ldu_init(dev_priv, 5);
+-		vmw_ldu_init(dev_priv, 6);
+-		vmw_ldu_init(dev_priv, 7);
++		for (i = 0; i < VMWGFX_LDU_NUM_DU; ++i)
++			vmw_ldu_init(dev_priv, i);
++		ret = drm_vblank_init(dev, VMWGFX_LDU_NUM_DU);
++	} else {
++		/* for old hardware without multimon only enable one display */
++		vmw_ldu_init(dev_priv, 0);
++		ret = drm_vblank_init(dev, 1);
+ 	}
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ int vmw_kms_close_legacy_display_system(struct vmw_private *dev_priv)
+ {
++	struct drm_device *dev = dev_priv->dev;
++
++	drm_vblank_cleanup(dev);
+ 	if (!dev_priv->ldu_priv)
+ 		return -ENOSYS;
+ 
+

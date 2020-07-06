@@ -1,0 +1,65 @@
+commit 4f8216508b8a8c5ce484e956c3f6ede3b3fa4bcc
+Author: Andreas Ericsson <ae@op5.se>
+Date:   Thu Aug 1 17:04:38 2013 +0200
+
+    lib/worker: Close input filedescriptors more aggressively
+    
+    Previously it was possible to end up in the infinite loop of doom
+    between check_completion() and gather_output() (since the former
+    calls the latter and vice versa), leading to a coredump when we run
+    out of stack space. With this patch, that really shouldn't happen,
+    since we'll now close the offending filedescriptor before we call
+    out to check_completion() from gather_output(), which means we'll
+    at most be called upon once to get the final output from each
+    filedescriptor.
+    
+    We also avoid calling wait4() without WNOHANG, as that could otherwise
+    lead us to wait forever in case plugins end up in uninterruptible sleep.
+    
+    Signed-off-by: Andreas Ericsson <ae@op5.se>
+
+diff --git a/lib/worker.c b/lib/worker.c
+index 8bc942ab..e0cbede9 100644
+--- a/lib/worker.c
++++ b/lib/worker.c
+@@ -366,11 +366,19 @@ static void gather_output(child_process *cp, iobuf *io, int final)
+ 		int rd;
+ 
+ 		rd = read(io->fd, buf, sizeof(buf));
+-		if (rd < 0) {
+-			if (errno == EINTR)
+-				continue;
+-			/* XXX: handle the error somehow */
+-			check_completion(cp, WNOHANG);
++		if (rd < 0 && errno == EINTR)
++			continue;
++
++		/*
++		 * Close down on bad, zero and final reads (we don't get
++		 * EAGAIN, so all errors are really unfixable)
++		 */
++		if (rd <= 0 || final) {
++			iobroker_close(iobs, io->fd);
++			io->fd = -1;
++			if (!final && other_io->fd < 0)
++				check_completion(cp, WNOHANG);
++			break;
+ 		}
+ 
+ 		if (rd) {
+@@ -379,14 +387,6 @@ static void gather_output(child_process *cp, iobuf *io, int final)
+ 			memcpy(&io->buf[io->len], buf, rd);
+ 			io->len += rd;
+ 			io->buf[io->len] = '\0';
+-		} else if (!final) {
+-			iobroker_close(iobs, io->fd);
+-			io->fd = -1;
+-			if (other_io->fd < 0) {
+-				check_completion(cp, 0);
+-			} else {
+-				check_completion(cp, WNOHANG);
+-			}
+ 		}
+ 		break;
+ 	}
+

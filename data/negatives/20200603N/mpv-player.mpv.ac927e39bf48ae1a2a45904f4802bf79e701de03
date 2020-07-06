@@ -1,0 +1,85 @@
+commit ac927e39bf48ae1a2a45904f4802bf79e701de03
+Author: wm4 <wm4@nowhere>
+Date:   Thu Sep 5 23:58:51 2013 +0200
+
+    input: don't deliver mouse events if mouse area is not set
+    
+    This caused the OSC to be always visible at startup on X11:
+    - EnterNotify event send a mouse event to input.c
+    - OSC has not completely initialized yet, and no mouse area is set
+    - mouse event is dispatched to "showhide" OSC section
+    - OSC becomes visible, regardless of mouse position
+    
+    Fix this by treating the mouse area as empty if it's not set, instead of
+    infinite as it was before this commit. This means an input section must
+    set a mouse area to receive mouse events at all. We also have to change
+    the default section to receive mouse events with the new behavior.
+    
+    Also, if MOUSE_MOVE is unmapped (or mapped to something that doesn't
+    parse), and produces no command, the mouse position wouldn't be updated
+    (because the mouse position is bound to input commands), so we have to
+    generate a dummy command in this case.
+    
+    (This matters only for the OSC, On Screen Controller, which isn't merged
+    yet, so these changes shouldn't have much effect right now.)
+
+diff --git a/mpvcore/input/input.c b/mpvcore/input/input.c
+index f3f2cfd6a1..1de9f366f9 100644
+--- a/mpvcore/input/input.c
++++ b/mpvcore/input/input.c
+@@ -1343,8 +1343,9 @@ static struct cmd_bind *find_any_bind_for_key(struct input_ctx *ictx,
+         struct cmd_bind *bind = find_bind_for_key_section(ictx, s->name, n, keys);
+         if (bind) {
+             struct cmd_bind_section *bs = bind->owner;
+-            if (!use_mouse || !bs->mouse_area_set ||
+-                test_rect(&bs->mouse_area, ictx->mouse_vo_x, ictx->mouse_vo_y))
++            if (!use_mouse || (bs->mouse_area_set && test_rect(&bs->mouse_area,
++                                                               ictx->mouse_vo_x,
++                                                               ictx->mouse_vo_y)))
+                 return bind;
+         }
+         if (s->flags & MP_INPUT_EXCLUSIVE)
+@@ -1668,6 +1669,8 @@ void mp_input_set_mouse_pos(struct input_ctx *ictx, int x, int y)
+     update_mouse_section(ictx);
+     struct mp_cmd *cmd =
+         get_cmd_from_keys(ictx, NULL, 1, (int[]){MP_KEY_MOUSE_MOVE});
++    if (!cmd)
++        cmd = mp_input_parse_cmd(bstr0("ignore"), "<internal>");
+ 
+     if (cmd) {
+         cmd->mouse_move = true;
+@@ -2185,7 +2188,7 @@ static bool test_mouse(struct input_ctx *ictx, int x, int y, int rej_flags)
+ 
+ bool mp_input_test_mouse_active(struct input_ctx *ictx, int x, int y)
+ {
+-    return test_mouse(ictx, x, y, 0);
++    return test_mouse(ictx, x, y, MP_INPUT_ALLOW_HIDE_CURSOR);
+ }
+ 
+ bool mp_input_test_dragging(struct input_ctx *ictx, int x, int y)
+@@ -2249,7 +2252,10 @@ struct input_ctx *mp_input_init(struct MPOpts *opts)
+     pthread_mutexattr_destroy(&attr);
+ #endif
+ 
+-    mp_input_enable_section(ictx, NULL, 0);
++    // Setup default section, so that it does nothing.
++    mp_input_enable_section(ictx, NULL, MP_INPUT_ALLOW_VO_DRAGGING |
++                                        MP_INPUT_ALLOW_HIDE_CURSOR);
++    mp_input_set_section_mouse_area(ictx, NULL, INT_MIN, INT_MIN, INT_MAX, INT_MAX);
+ 
+     // "Uncomment" the default key bindings in etc/input.conf and add them.
+     // All lines that do not start with '# ' are parsed.
+diff --git a/mpvcore/input/input.h b/mpvcore/input/input.h
+index ebdbc76821..ed1f177e58 100644
+--- a/mpvcore/input/input.h
++++ b/mpvcore/input/input.h
+@@ -118,6 +118,8 @@ enum mp_input_section_flags {
+     MP_INPUT_EXCLUSIVE = 1,
+     // Let mp_input_test_dragging() return true, even if inside the mouse area.
+     MP_INPUT_ALLOW_VO_DRAGGING = 2,
++    // Don't force mouse pointer visible, even if inside the mouse area.
++    MP_INPUT_ALLOW_HIDE_CURSOR = 4,
+ };
+ 
+ struct input_ctx;
+

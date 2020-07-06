@@ -1,0 +1,38 @@
+commit 2c4fb78f78b6e420604ee1b05bdfb5c1d637869f
+Author: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Date:   Fri Aug 18 12:10:52 2017 +1000
+
+    KVM: PPC: Book3S HV: Workaround POWER9 DD1.0 bug causing IPB bit loss
+    
+    This adds a workaround for a bug in POWER9 DD1 chips where changing
+    the CPPR (Current Processor Priority Register) can cause bits in the
+    IPB (Interrupt Pending Buffer) to get lost.  Thankfully it only
+    happens when manually manipulating CPPR which is quite rare.  When it
+    does happen it can cause interrupts to be delayed or lost.
+    
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    Signed-off-by: Paul Mackerras <paulus@ozlabs.org>
+
+diff --git a/arch/powerpc/kvm/book3s_xive_template.c b/arch/powerpc/kvm/book3s_xive_template.c
+index 4636ca6e7d38..150be86b1018 100644
+--- a/arch/powerpc/kvm/book3s_xive_template.c
++++ b/arch/powerpc/kvm/book3s_xive_template.c
+@@ -16,7 +16,16 @@ static void GLUE(X_PFX,ack_pending)(struct kvmppc_xive_vcpu *xc)
+ 	u8 cppr;
+ 	u16 ack;
+ 
+-	/* XXX DD1 bug workaround: Check PIPR vs. CPPR first ! */
++	/*
++	 * DD1 bug workaround: If PIPR is less favored than CPPR
++	 * ignore the interrupt or we might incorrectly lose an IPB
++	 * bit.
++	 */
++	if (cpu_has_feature(CPU_FTR_POWER9_DD1)) {
++		u8 pipr = __x_readb(__x_tima + TM_QW1_OS + TM_PIPR);
++		if (pipr >= xc->hw_cppr)
++			return;
++	}
+ 
+ 	/* Perform the acknowledge OS to register cycle. */
+ 	ack = be16_to_cpu(__x_readw(__x_tima + TM_SPC_ACK_OS_REG));
+

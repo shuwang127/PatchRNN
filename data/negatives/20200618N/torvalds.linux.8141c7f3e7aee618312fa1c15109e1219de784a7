@@ -1,0 +1,82 @@
+commit 8141c7f3e7aee618312fa1c15109e1219de784a7
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Sat Nov 15 10:20:36 2008 -0800
+
+    Move "exit_robust_list" into mm_release()
+    
+    We don't want to get rid of the futexes just at exit() time, we want to
+    drop them when doing an execve() too, since that gets rid of the
+    previous VM image too.
+    
+    Doing it at mm_release() time means that we automatically always do it
+    when we disassociate a VM map from the task.
+    
+    Reported-by: pageexec@freemail.hu
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Nick Piggin <npiggin@suse.de>
+    Cc: Hugh Dickins <hugh@veritas.com>
+    Cc: Ingo Molnar <mingo@elte.hu>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Brad Spengler <spender@grsecurity.net>
+    Cc: Alex Efros <powerman@powerman.name>
+    Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Cc: Oleg Nesterov <oleg@redhat.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/kernel/exit.c b/kernel/exit.c
+index ae2b92be5fae..2d8be7ebb0f7 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -40,7 +40,6 @@
+ #include <linux/cn_proc.h>
+ #include <linux/mutex.h>
+ #include <linux/futex.h>
+-#include <linux/compat.h>
+ #include <linux/pipe_fs_i.h>
+ #include <linux/audit.h> /* for audit_free() */
+ #include <linux/resource.h>
+@@ -1059,14 +1058,6 @@ NORET_TYPE void do_exit(long code)
+ 		exit_itimers(tsk->signal);
+ 	}
+ 	acct_collect(code, group_dead);
+-#ifdef CONFIG_FUTEX
+-	if (unlikely(tsk->robust_list))
+-		exit_robust_list(tsk);
+-#ifdef CONFIG_COMPAT
+-	if (unlikely(tsk->compat_robust_list))
+-		compat_exit_robust_list(tsk);
+-#endif
+-#endif
+ 	if (group_dead)
+ 		tty_audit_exit();
+ 	if (unlikely(tsk->audit_context))
+diff --git a/kernel/fork.c b/kernel/fork.c
+index f6083561dfe0..2a372a0e206f 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -40,6 +40,7 @@
+ #include <linux/jiffies.h>
+ #include <linux/tracehook.h>
+ #include <linux/futex.h>
++#include <linux/compat.h>
+ #include <linux/task_io_accounting_ops.h>
+ #include <linux/rcupdate.h>
+ #include <linux/ptrace.h>
+@@ -519,6 +520,16 @@ void mm_release(struct task_struct *tsk, struct mm_struct *mm)
+ {
+ 	struct completion *vfork_done = tsk->vfork_done;
+ 
++	/* Get rid of any futexes when releasing the mm */
++#ifdef CONFIG_FUTEX
++	if (unlikely(tsk->robust_list))
++		exit_robust_list(tsk);
++#ifdef CONFIG_COMPAT
++	if (unlikely(tsk->compat_robust_list))
++		compat_exit_robust_list(tsk);
++#endif
++#endif
++
+ 	/* Get rid of any cached register state */
+ 	deactivate_mm(tsk, mm);
+ 
+

@@ -1,0 +1,71 @@
+commit 6444e2a5f1e680278b58ced3568bdff84afe14a5
+Author: Xi Wang <wangxi11@huawei.com>
+Date:   Wed Jun 6 14:07:52 2018 +0100
+
+    net: hns3: Fix for VF mailbox receiving unknown message
+    
+    Before the firmware updates the crq's tail pointer, if the VF driver
+    reads the data in the crq, the data may be incomplete at this time,
+    which will lead to the driver read an unknown message.
+    
+    This patch fixes it by checking if crq is empty before reading the
+    message.
+    
+    Fixes: b11a0bb231f3 ("net: hns3: Add mailbox support to VF driver")
+    Signed-off-by: Xi Wang <wangxi11@huawei.com>
+    Signed-off-by: Peng Li <lipeng321@huawei.com>
+    Signed-off-by: Salil Mehta <salil.mehta@huawei.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/hisilicon/hns3/hns3vf/hclgevf_mbx.c b/drivers/net/ethernet/hisilicon/hns3/hns3vf/hclgevf_mbx.c
+index a28618428338..b598c06af8e0 100644
+--- a/drivers/net/ethernet/hisilicon/hns3/hns3vf/hclgevf_mbx.c
++++ b/drivers/net/ethernet/hisilicon/hns3/hns3vf/hclgevf_mbx.c
+@@ -126,6 +126,13 @@ int hclgevf_send_mbx_msg(struct hclgevf_dev *hdev, u16 code, u16 subcode,
+ 	return status;
+ }
+ 
++static bool hclgevf_cmd_crq_empty(struct hclgevf_hw *hw)
++{
++	u32 tail = hclgevf_read_dev(hw, HCLGEVF_NIC_CRQ_TAIL_REG);
++
++	return tail == hw->cmq.crq.next_to_use;
++}
++
+ void hclgevf_mbx_handler(struct hclgevf_dev *hdev)
+ {
+ 	struct hclgevf_mbx_resp_status *resp;
+@@ -140,11 +147,22 @@ void hclgevf_mbx_handler(struct hclgevf_dev *hdev)
+ 	resp = &hdev->mbx_resp;
+ 	crq = &hdev->hw.cmq.crq;
+ 
+-	flag = le16_to_cpu(crq->desc[crq->next_to_use].flag);
+-	while (hnae_get_bit(flag, HCLGEVF_CMDQ_RX_OUTVLD_B)) {
++	while (!hclgevf_cmd_crq_empty(&hdev->hw)) {
+ 		desc = &crq->desc[crq->next_to_use];
+ 		req = (struct hclge_mbx_pf_to_vf_cmd *)desc->data;
+ 
++		flag = le16_to_cpu(crq->desc[crq->next_to_use].flag);
++		if (unlikely(!hnae_get_bit(flag, HCLGEVF_CMDQ_RX_OUTVLD_B))) {
++			dev_warn(&hdev->pdev->dev,
++				 "dropped invalid mailbox message, code = %d\n",
++				 req->msg[0]);
++
++			/* dropping/not processing this invalid message */
++			crq->desc[crq->next_to_use].flag = 0;
++			hclge_mbx_ring_ptr_move_crq(crq);
++			continue;
++		}
++
+ 		/* synchronous messages are time critical and need preferential
+ 		 * treatment. Therefore, we need to acknowledge all the sync
+ 		 * responses as quickly as possible so that waiting tasks do not
+@@ -205,7 +223,6 @@ void hclgevf_mbx_handler(struct hclgevf_dev *hdev)
+ 		}
+ 		crq->desc[crq->next_to_use].flag = 0;
+ 		hclge_mbx_ring_ptr_move_crq(crq);
+-		flag = le16_to_cpu(crq->desc[crq->next_to_use].flag);
+ 	}
+ 
+ 	/* Write back CMDQ_RQ header pointer, M7 need this pointer */
+

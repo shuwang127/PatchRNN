@@ -1,0 +1,295 @@
+commit 3af044ece7c7690947ffc6b670069c6dd56e76bb
+Author: provos <provos@openbsd.org>
+Date:   Wed Jul 2 06:58:40 1997 +0000
+
+    fix neglected _FLEN's + reserve_spi + output reserved spi's without alg.
+    correctly.
+
+diff --git a/sys/net/encap.c b/sys/net/encap.c
+index ae2de47222a..11c44a79561 100644
+--- a/sys/net/encap.c
++++ b/sys/net/encap.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: encap.c,v 1.6 1997/07/01 22:12:40 provos Exp $	*/
++/*	$OpenBSD: encap.c,v 1.7 1997/07/02 06:58:40 provos Exp $	*/
+ 
+ /*
+  * The author of this code is John Ioannidis, ji@tla.org,
+@@ -182,18 +182,18 @@ va_dcl
+ 	case EMT_SETSPI:
+ 	    if (emlen <= EMT_SETSPI_FLEN)
+ 	      SENDERR(EINVAL);
+-	    
++
++	    /* 
++	     * If only one of the two outter addresses is set, return
++	     * error.
++	     */
++	    if ((emp->em_osrc.s_addr != 0) ^
++		(emp->em_odst.s_addr != 0))
++	      SENDERR(EINVAL);	    
++
+ 	    tdbp = gettdb(emp->em_spi, emp->em_dst);
+ 	    if (tdbp == NULL)
+ 	    {
+-		/* 
+-		 * If only one of the two outter addresses is set, return
+-		 * error.
+-		 */
+-		if ((emp->em_osrc.s_addr != 0) ^
+-		    (emp->em_odst.s_addr != 0))
+-		  SENDERR(EINVAL);
+-		
+ 		MALLOC(tdbp, struct tdb *, sizeof (*tdbp), M_TDB, M_WAITOK);
+ 		if (tdbp == NULL)
+ 		  SENDERR(ENOBUFS);
+@@ -203,41 +203,45 @@ va_dcl
+ 		tdbp->tdb_spi = emp->em_spi;
+ 		tdbp->tdb_dst = emp->em_dst;
+ 
+-		tdbp->tdb_proto = emp->em_proto;
+-		tdbp->tdb_sport = emp->em_sport;
+-		tdbp->tdb_dport = emp->em_dport;
++		puttdb(tdbp);
++	    }
++	    else
++	      if (tdbp->tdb_xform)
++	        (*tdbp->tdb_xform->xf_zeroize)(tdbp);
++	    
++	    tdbp->tdb_proto = emp->em_proto;
++	    tdbp->tdb_sport = emp->em_sport;
++	    tdbp->tdb_dport = emp->em_dport;
+ 
+-	        tdbp->tdb_src = emp->em_src;
++	    tdbp->tdb_src = emp->em_src;
+ 
+-		/* Check if this is an encapsulating SPI */
+-		if (emp->em_osrc.s_addr != 0)
++	    /* Check if this is an encapsulating SPI */
++	    if (emp->em_osrc.s_addr != 0)
++	    {
++		tdbp->tdb_flags |= TDBF_TUNNELING;
++		tdbp->tdb_osrc = emp->em_osrc;
++		tdbp->tdb_odst = emp->em_odst;
++		
++		/* TTL */
++		switch (emp->em_ttl)
+ 		{
+-		    tdbp->tdb_flags |= TDBF_TUNNELING;
+-		    tdbp->tdb_osrc = emp->em_osrc;
+-		    tdbp->tdb_odst = emp->em_odst;
+-
+-		    /* TTL */
+-		    switch (emp->em_ttl)
+-		    {
+-			case IP4_DEFAULT_TTL:
+-			    tdbp->tdb_ttl = 0;
+-			    break;
+-			    
+-			case IP4_SAME_TTL:
+-			    tdbp->tdb_flags |= TDBF_SAME_TTL;
+-			    break;
+-
+-			default:
+-			    /* Get just the least significant bits */
+-			    tdbp->tdb_ttl = emp->em_ttl % 256;
+-			    break;
+-		    }
++		    case IP4_DEFAULT_TTL:
++			tdbp->tdb_ttl = 0;
++			break;
++			
++		    case IP4_SAME_TTL:
++			tdbp->tdb_flags |= TDBF_SAME_TTL;
++			break;
++
++		    default:
++			/* Get just the least significant bits */
++			tdbp->tdb_ttl = emp->em_ttl % 256;
++			break;
+ 		}
+-		
+-		puttdb(tdbp);
+ 	    }
+-	    else
+-	      (*tdbp->tdb_xform->xf_zeroize)(tdbp);
++	    
++	    /* Clear the INVALID flag */
++	    tdbp->tdb_flags &= (~TDBF_INVALID);
+ 
+ 	    /* Various timers/counters */
+ 	    if (emp->em_relative_hard != 0)
+@@ -359,12 +363,9 @@ va_dcl
+ 	    if (emlen != EMT_RESERVESPI_FLEN)
+ 	      SENDERR(EINVAL);
+ 	    
+-	    spi = reserve_spi(emp->em_gen_spi, emp->em_gen_dst);
++	    spi = reserve_spi(emp->em_gen_spi, emp->em_gen_dst, &error);
+ 	    if (spi == 0)
+-	      if (emp->em_gen_spi == 0)
+-		SENDERR(ENOBUFS);
+-	      else
+-		SENDERR(EINVAL);
++	      SENDERR(error);
+ 
+ 	    emp->em_gen_spi = spi;
+ 	    
+@@ -394,6 +395,8 @@ va_dcl
+ 	    /* Clear the INVALID flag */
+ 	    tdbp->tdb_flags &= (~TDBF_INVALID);
+ 
++	    /* XXX Install a routing entry */
++
+ 	    error = 0;
+ 
+ 	    break;
+@@ -409,6 +412,8 @@ va_dcl
+ 	    /* Set the INVALID flag */
+ 	    tdbp->tdb_flags |= TDBF_INVALID;
+ 
++	    /* XXX Delete a routing entry, if on exists */
++
+ 	    error = 0;
+ 	    
+ 	    break;
+diff --git a/sys/net/encap.h b/sys/net/encap.h
+index 7305abd2a33..e02c13aca07 100644
+--- a/sys/net/encap.h
++++ b/sys/net/encap.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: encap.h,v 1.5 1997/07/01 22:12:40 provos Exp $	*/
++/*	$OpenBSD: encap.h,v 1.6 1997/07/02 06:58:40 provos Exp $	*/
+ 
+ /*
+  * The author of this code is John Ioannidis, ji@tla.org,
+@@ -271,14 +271,14 @@ struct encap_msghdr
+ 
+ /* Total packet lengths */
+ #define EMT_SETSPI_FLEN	      124
+-#define EMT_GRPSPIS_FLEN      20
+-#define EMT_GENLEN            12
++#define EMT_GRPSPIS_FLEN      24
++#define EMT_GENLEN            16
+ #define EMT_DELSPI_FLEN       EMT_GENLEN
+ #define EMT_DELSPICHAIN_FLEN  EMT_GENLEN
+ #define EMT_ENABLESPI_FLEN    EMT_GENLEN
+ #define EMT_DISABLESPI_FLEN   EMT_GENLEN
+ #define EMT_RESERVESPI_FLEN   EMT_GENLEN
+-#define EMT_NOTIFY_FLEN       40
++#define EMT_NOTIFY_FLEN       44
+ 
+ #ifdef _KERNEL
+ extern struct ifaddr *encap_findgwifa(struct sockaddr *);
+diff --git a/sys/netinet/ip_ipsp.c b/sys/netinet/ip_ipsp.c
+index f49eef36ff3..2c95904174d 100644
+--- a/sys/netinet/ip_ipsp.c
++++ b/sys/netinet/ip_ipsp.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ip_ipsp.c,v 1.11 1997/07/01 22:12:51 provos Exp $	*/
++/*	$OpenBSD: ip_ipsp.c,v 1.12 1997/07/02 06:58:42 provos Exp $	*/
+ 
+ /*
+  * The author of this code is John Ioannidis, ji@tla.org,
+@@ -117,7 +117,7 @@ int ipspkernfs_dirty = 1;
+  */
+ 
+ u_int32_t
+-reserve_spi(u_int32_t tspi, struct in_addr src)
++reserve_spi(u_int32_t tspi, struct in_addr src, int *errval)
+ {
+     struct tdb *tdbp;
+     u_int32_t spi = tspi;		/* Don't change */
+@@ -131,15 +131,21 @@ reserve_spi(u_int32_t tspi, struct in_addr src)
+ 	if (gettdb(spi, src) != (struct tdb *) NULL)
+ 	{
+ 	    if (tspi != 0)		/* If one was proposed, report error */
+-	      return 0;
+-	    
++	    {
++		(*errval) = EEXIST;
++	      	return 0;
++	    }
++
+ 	    spi = 0;
+ 	    continue;
+ 	}
+ 	
+ 	MALLOC(tdbp, struct tdb *, sizeof(*tdbp), M_TDB, M_WAITOK);
+ 	if (tdbp == NULL)
+-	  return 0;
++	{
++	    spi = 0;
++	    (*errval) = ENOBUFS;
++	} 
+ 
+ 	bzero((caddr_t)tdbp, sizeof(*tdbp));
+ 	
+@@ -214,7 +220,10 @@ tdb_delete(struct tdb *tdbp, int delchain)
+ 	
+     ipspkernfs_dirty = 1;
+     tdbpp = tdbp->tdb_onext;
+-    (*(tdbp->tdb_xform->xf_zeroize))(tdbp);
++
++    if (tdbp->tdb_xform)
++      (*(tdbp->tdb_xform->xf_zeroize))(tdbp);
++
+     FREE(tdbp, M_TDB);
+     if (delchain && tdbpp)
+       return tdb_delete(tdbpp, delchain);
+@@ -281,7 +290,10 @@ ipsp_kern(int off, char **bufp, int len)
+       {
+ 	  /* Being paranoid to avoid buffer overflows */
+ 
+-          k += 126 + strlen(tdbp->tdb_xform->xf_name);
++	  if (tdbp->tdb_xform)
++            k += 126 + strlen(tdbp->tdb_xform->xf_name);
++	  else
++	    k += 60;
+       }
+ 
+     if (k == 0)
+@@ -295,13 +307,17 @@ ipsp_kern(int off, char **bufp, int len)
+       for (tdbp = tdbh[i]; tdbp != (struct tdb *) NULL; tdbp = tdbp->tdb_hnext)
+       {
+ 	  b = (char *)&(tdbp->tdb_dst.s_addr);
+-	  k += sprintf(ipspkernfs + k, 
+-		       "SPI=%x, destination=%d.%d.%d.%d\n algorithm=%d (%s)\n next SPI=%x, previous SPI=%x\n", 
+-		       ntohl(tdbp->tdb_spi), ((int)b[0] & 0xff), ((int)b[1] & 0xff), 
+-		       ((int)b[2] & 0xff), ((int)b[3] & 0xff), 
+-		       tdbp->tdb_xform->xf_type, tdbp->tdb_xform->xf_name,
+-		       (tdbp->tdb_onext ? ntohl(tdbp->tdb_onext->tdb_spi) : 0),
+-		       (tdbp->tdb_inext ? ntohl(tdbp->tdb_inext->tdb_spi) : 0));
++	  if (!tdbp->tdb_xform)
++	    k += sprintf(ipspkernfs + k, "SPI=%x, destination=%d.%d.%d.%d\n",
++			 tdbp->tdb_spi, ((int)b[0] & 0xff), ((int)b[1] & 0xff), ((int)b[2] & 0xff), ((int)b[3] & 0xff));
++	  else
++	    k += sprintf(ipspkernfs + k, 
++		         "SPI=%x, destination=%d.%d.%d.%d\n algorithm=%d (%s)\n next SPI=%x, previous SPI=%x\n", 
++		         ntohl(tdbp->tdb_spi), ((int)b[0] & 0xff), ((int)b[1] & 0xff), 
++		         ((int)b[2] & 0xff), ((int)b[3] & 0xff), 
++		         tdbp->tdb_xform->xf_type, tdbp->tdb_xform->xf_name,
++		         (tdbp->tdb_onext ? ntohl(tdbp->tdb_onext->tdb_spi) : 0),
++		         (tdbp->tdb_inext ? ntohl(tdbp->tdb_inext->tdb_spi) : 0));
+       }
+ 
+     ipspkernfs[k] = '\0';
+diff --git a/sys/netinet/ip_ipsp.h b/sys/netinet/ip_ipsp.h
+index 8d7c65e7ae3..e78c964f2f4 100644
+--- a/sys/netinet/ip_ipsp.h
++++ b/sys/netinet/ip_ipsp.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ip_ipsp.h,v 1.9 1997/07/01 22:12:52 provos Exp $	*/
++/*	$OpenBSD: ip_ipsp.h,v 1.10 1997/07/02 06:58:43 provos Exp $	*/
+ 
+ /*
+  * The author of this code is John Ioannidis, ji@tla.org,
+@@ -143,7 +143,7 @@ extern int encdebug;
+ struct tdb *tdbh[TDB_HASHMOD];
+ extern struct xformsw xformsw[], *xformswNXFORMSW;
+ 
+-extern u_int32_t reserve_spi(u_int32_t, struct in_addr);
++extern u_int32_t reserve_spi(u_int32_t, struct in_addr, int *);
+ extern struct tdb *gettdb(u_int32_t, struct in_addr);
+ extern void puttdb(struct tdb *);
+ extern int tdb_delete(struct tdb *, int);
+

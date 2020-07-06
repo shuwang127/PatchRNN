@@ -1,0 +1,142 @@
+commit 97cb159fd91d00f8d7d1adeb075503dc0d946bff
+Author: Lv Zheng <lv.zheng@intel.com>
+Date:   Wed Sep 7 16:50:27 2016 +0800
+
+    ACPI / EC: Fix issues related to boot_ec
+    
+    There are issues related to the boot_ec:
+    1. If acpi_ec_remove() is invoked, boot_ec will also be freed, this is not
+       expected as the boot_ec could be enumerated via ECDT.
+    2. Address space handler installation/unstallation lead to unexpected _REG
+       evaluations.
+    This patch adds acpi_is_boot_ec() check to be used to fix the above issues.
+    However, since acpi_ec_remove() actually won't be invoked, this patch
+    doesn't handle the reference counting of "struct acpi_ec", it only ensures
+    the correctness of the boot_ec destruction during the boot.
+    
+    Link: https://bugzilla.kernel.org/show_bug.cgi?id=153511
+    Reported-and-tested-by: Jonh Henderson <jw.hendy@gmail.com>
+    Signed-off-by: Lv Zheng <lv.zheng@intel.com>
+    Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+
+diff --git a/drivers/acpi/ec.c b/drivers/acpi/ec.c
+index 2ae9194cc630..680531062160 100644
+--- a/drivers/acpi/ec.c
++++ b/drivers/acpi/ec.c
+@@ -1536,6 +1536,37 @@ static int acpi_config_boot_ec(struct acpi_ec *ec, acpi_handle handle,
+ 	return ret;
+ }
+ 
++static bool acpi_ec_ecdt_get_handle(acpi_handle *phandle)
++{
++	struct acpi_table_ecdt *ecdt_ptr;
++	acpi_status status;
++	acpi_handle handle;
++
++	status = acpi_get_table(ACPI_SIG_ECDT, 1,
++				(struct acpi_table_header **)&ecdt_ptr);
++	if (ACPI_FAILURE(status))
++		return false;
++
++	status = acpi_get_handle(NULL, ecdt_ptr->id, &handle);
++	if (ACPI_FAILURE(status))
++		return false;
++
++	*phandle = handle;
++	return true;
++}
++
++static bool acpi_is_boot_ec(struct acpi_ec *ec)
++{
++	if (!boot_ec)
++		return false;
++	if (ec->handle == boot_ec->handle &&
++	    ec->gpe == boot_ec->gpe &&
++	    ec->command_addr == boot_ec->command_addr &&
++	    ec->data_addr == boot_ec->data_addr)
++		return true;
++	return false;
++}
++
+ static int acpi_ec_add(struct acpi_device *device)
+ {
+ 	struct acpi_ec *ec = NULL;
+@@ -1553,7 +1584,14 @@ static int acpi_ec_add(struct acpi_device *device)
+ 			goto err_alloc;
+ 	}
+ 
+-	ret = acpi_config_boot_ec(ec, device->handle, true, false);
++	if (acpi_is_boot_ec(ec)) {
++		boot_ec_is_ecdt = false;
++		acpi_handle_debug(ec->handle, "duplicated.\n");
++		acpi_ec_free(ec);
++		ec = boot_ec;
++		ret = acpi_config_boot_ec(ec, ec->handle, true, false);
++	} else
++		ret = acpi_ec_setup(ec, true);
+ 	if (ret)
+ 		goto err_query;
+ 
+@@ -1566,12 +1604,15 @@ static int acpi_ec_add(struct acpi_device *device)
+ 
+ 	/* Reprobe devices depending on the EC */
+ 	acpi_walk_dep_device_list(ec->handle);
++	acpi_handle_debug(ec->handle, "enumerated.\n");
+ 	return 0;
+ 
+ err_query:
+-	acpi_ec_remove_query_handlers(ec, true, 0);
++	if (ec != boot_ec)
++		acpi_ec_remove_query_handlers(ec, true, 0);
+ err_alloc:
+-	acpi_ec_free(ec);
++	if (ec != boot_ec)
++		acpi_ec_free(ec);
+ 	return ret;
+ }
+ 
+@@ -1583,11 +1624,13 @@ static int acpi_ec_remove(struct acpi_device *device)
+ 		return -EINVAL;
+ 
+ 	ec = acpi_driver_data(device);
+-	ec_remove_handlers(ec);
+ 	release_region(ec->data_addr, 1);
+ 	release_region(ec->command_addr, 1);
+ 	device->driver_data = NULL;
+-	acpi_ec_free(ec);
++	if (ec != boot_ec) {
++		ec_remove_handlers(ec);
++		acpi_ec_free(ec);
++	}
+ 	return 0;
+ }
+ 
+@@ -1659,8 +1702,6 @@ int __init acpi_ec_dsdt_probe(void)
+  */
+ int __init acpi_ec_ecdt_start(void)
+ {
+-	struct acpi_table_ecdt *ecdt_ptr;
+-	acpi_status status;
+ 	acpi_handle handle;
+ 
+ 	if (!boot_ec)
+@@ -1672,17 +1713,11 @@ int __init acpi_ec_ecdt_start(void)
+ 	if (!boot_ec_is_ecdt)
+ 		return -ENODEV;
+ 
+-	status = acpi_get_table(ACPI_SIG_ECDT, 1,
+-				(struct acpi_table_header **)&ecdt_ptr);
+-	if (ACPI_FAILURE(status))
+-		return -ENODEV;
+-
+ 	/*
+ 	 * At this point, the namespace and the GPE is initialized, so
+ 	 * start to find the namespace objects and handle the events.
+ 	 */
+-	status = acpi_get_handle(NULL, ecdt_ptr->id, &handle);
+-	if (ACPI_FAILURE(status))
++	if (!acpi_ec_ecdt_get_handle(&handle))
+ 		return -ENODEV;
+ 	return acpi_config_boot_ec(boot_ec, handle, true, true);
+ }
+

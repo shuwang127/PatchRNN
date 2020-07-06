@@ -1,0 +1,126 @@
+commit 5a7517422677175af55f678060d572f77d2f20b7
+Author: unknown <mskold@mysql.com>
+Date:   Wed Feb 8 09:58:47 2006 +0100
+
+    NdbEventOperationImpl.cpp, NdbEventOperation.cpp, NdbEventOperation.hpp:
+      Put back getTable
+    NdbDictionaryImpl.cpp, NdbDictionary.cpp, NdbDictionary.hpp:
+      Added putTable
+    
+    
+    storage/ndb/include/ndbapi/NdbDictionary.hpp:
+      Added putTable
+    storage/ndb/include/ndbapi/NdbEventOperation.hpp:
+      Put back getTable
+    storage/ndb/src/ndbapi/NdbDictionary.cpp:
+      Added putTable
+    storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp:
+      Added putTable
+    storage/ndb/src/ndbapi/NdbEventOperation.cpp:
+      Put back getTable
+    storage/ndb/src/ndbapi/NdbEventOperationImpl.cpp:
+      Put back getTable
+
+diff --git a/storage/ndb/include/ndbapi/NdbDictionary.hpp b/storage/ndb/include/ndbapi/NdbDictionary.hpp
+index d96ebc896c3..8139cc3b570 100644
+--- a/storage/ndb/include/ndbapi/NdbDictionary.hpp
++++ b/storage/ndb/include/ndbapi/NdbDictionary.hpp
+@@ -1588,6 +1588,14 @@ public:
+      */
+     const Table * getTable(const char * name) const;
+ 
++#ifndef DOXYGEN_SHOULD_SKIP_INTERNAL
++    /*
++     * Save a table definition in dictionary cache
++     * @param table Object to put into cache
++     */
++    void putTable(const Table * table);
++#endif
++
+     /**
+      * Get index with given name, NULL if undefined
+      * @param indexName  Name of index to get.
+diff --git a/storage/ndb/include/ndbapi/NdbEventOperation.hpp b/storage/ndb/include/ndbapi/NdbEventOperation.hpp
+index 698b66ce701..25d7b8c6644 100644
+--- a/storage/ndb/include/ndbapi/NdbEventOperation.hpp
++++ b/storage/ndb/include/ndbapi/NdbEventOperation.hpp
+@@ -220,6 +220,7 @@ public:
+ 
+ #ifndef DOXYGEN_SHOULD_SKIP_INTERNAL
+   /** these are subject to change at any time */
++  const NdbDictionary::Table* getTable() const;
+   const NdbDictionary::Event *getEvent() const;
+   const NdbRecAttr *getFirstPkAttr() const;
+   const NdbRecAttr *getFirstPkPreAttr() const;
+diff --git a/storage/ndb/src/ndbapi/NdbDictionary.cpp b/storage/ndb/src/ndbapi/NdbDictionary.cpp
+index ea60b36fdee..5b8e06f5df8 100644
+--- a/storage/ndb/src/ndbapi/NdbDictionary.cpp
++++ b/storage/ndb/src/ndbapi/NdbDictionary.cpp
+@@ -1337,6 +1337,13 @@ NdbDictionary::Dictionary::getTable(const char * name, void **data) const
+   return 0;
+ }
+ 
++void NdbDictionary::Dictionary::putTable(const NdbDictionary::Table * table)
++{
++ NdbDictionary::Table  *copy_table = new NdbDictionary::Table;
++  *copy_table = *table;
++  m_impl.putTable(&NdbTableImpl::getImpl(*copy_table));
++}
++
+ void NdbDictionary::Dictionary::set_local_table_data_size(unsigned sz)
+ {
+   m_impl.m_local_table_data_size= sz;
+diff --git a/storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp b/storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp
+index 75760fb4019..6866c059119 100644
+--- a/storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp
++++ b/storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp
+@@ -1271,7 +1271,14 @@ NdbDictionaryImpl::fetchGlobalTableImpl(const BaseString& internalTableName)
+ void
+ NdbDictionaryImpl::putTable(NdbTableImpl *impl)
+ {
++  NdbTableImpl *old;
++
+   m_globalHash->lock();
++  if ((old= m_globalHash->get(impl->m_internalName.c_str())))
++  {
++    old->m_status = NdbDictionary::Object::Invalid;
++    m_globalHash->drop(old);
++  }
+   m_globalHash->put(impl->m_internalName.c_str(), impl);
+   m_globalHash->unlock();
+   Ndb_local_table_info *info=
+diff --git a/storage/ndb/src/ndbapi/NdbEventOperation.cpp b/storage/ndb/src/ndbapi/NdbEventOperation.cpp
+index 71bb8889614..4e96ee63565 100644
+--- a/storage/ndb/src/ndbapi/NdbEventOperation.cpp
++++ b/storage/ndb/src/ndbapi/NdbEventOperation.cpp
+@@ -144,6 +144,10 @@ NdbEventOperation::print()
+ /*
+  * Internal for the mysql server
+  */
++const NdbDictionary::Table *NdbEventOperation::getTable() const
++{
++  return m_impl.m_eventImpl->m_tableImpl->m_facade;
++}
+ const NdbDictionary::Event *NdbEventOperation::getEvent() const
+ {
+   return m_impl.m_eventImpl->m_facade;
+diff --git a/storage/ndb/src/ndbapi/NdbEventOperationImpl.cpp b/storage/ndb/src/ndbapi/NdbEventOperationImpl.cpp
+index 0a9993e33a1..2acfa339d37 100644
+--- a/storage/ndb/src/ndbapi/NdbEventOperationImpl.cpp
++++ b/storage/ndb/src/ndbapi/NdbEventOperationImpl.cpp
+@@ -639,6 +639,14 @@ NdbEventOperationImpl::receive_event()
+                                     m_buffer.length() / 4, 
+                                     true);
+     m_buffer.clear();
++    if (at)
++      at->buildColumnHash();
++    else
++    {
++      DBUG_PRINT_EVENT("info", ("Failed to parse DictTabInfo error %u", 
++                                error.code));
++      DBUG_RETURN_EVENT(1);
++    }
+     if ( m_eventImpl->m_tableImpl) 
+       delete m_eventImpl->m_tableImpl;
+     m_eventImpl->m_tableImpl = at;
+

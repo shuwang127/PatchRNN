@@ -1,0 +1,318 @@
+commit 9efacf2a77e9a526bb1fa63fd3f340358e991bcb
+Author: John Spray <john.spray@redhat.com>
+Date:   Wed Jun 28 09:47:37 2017 -0400
+
+    mgr: use MonCommand for command descriptions
+    
+    ...and update the MonCommand encoding so that we
+    can readily send vectors of them around.
+    
+    Signed-off-by: John Spray <john.spray@redhat.com>
+
+diff --git a/src/mgr/DaemonServer.cc b/src/mgr/DaemonServer.cc
+index 6454c8da30..3b25ef4901 100644
+--- a/src/mgr/DaemonServer.cc
++++ b/src/mgr/DaemonServer.cc
+@@ -17,6 +17,8 @@
+ #include "auth/RotatingKeyRing.h"
+ #include "json_spirit/json_spirit_writer.h"
+ 
++#include "mon/MonCommand.h"
++
+ #include "messages/MMgrOpen.h"
+ #include "messages/MMgrConfigure.h"
+ #include "messages/MMonMgrReport.h"
+@@ -402,21 +404,9 @@ bool DaemonServer::handle_report(MMgrReport *m)
+   return true;
+ }
+ 
+-struct MgrCommand {
+-  string cmdstring;
+-  string helpstring;
+-  string module;
+-  string perm;
+-  string availability;
+-
+-  bool requires_perm(char p) const {
+-    return (perm.find(p) != string::npos);
+-  }
+-
+-} mgr_commands[] = {
+-
++std::vector<MonCommand> mgr_commands = {
+ #define COMMAND(parsesig, helptext, module, perm, availability) \
+-  {parsesig, helptext, module, perm, availability},
++  {parsesig, helptext, module, perm, availability, 0},
+ #include "MgrCommands.h"
+ #undef COMMAND
+ };
+@@ -444,16 +434,14 @@ void DaemonServer::_generate_command_map(
+   }
+ }
+ 
+-const MgrCommand *DaemonServer::_get_mgrcommand(
++const MonCommand *DaemonServer::_get_mgrcommand(
+   const string &cmd_prefix,
+-  MgrCommand *cmds,
+-  int cmds_size)
++  const std::vector<MonCommand> &cmds)
+ {
+-  MgrCommand *this_cmd = NULL;
+-  for (MgrCommand *cp = cmds;
+-       cp < &cmds[cmds_size]; cp++) {
+-    if (cp->cmdstring.compare(0, cmd_prefix.size(), cmd_prefix) == 0) {
+-      this_cmd = cp;
++  const MonCommand *this_cmd = nullptr;
++  for (const auto &cmd : cmds) {
++    if (cmd.cmdstring.compare(0, cmd_prefix.size(), cmd_prefix) == 0) {
++      this_cmd = &cmd;
+       break;
+     }
+   }
+@@ -466,7 +454,7 @@ bool DaemonServer::_allowed_command(
+   const string &prefix,
+   const map<string,cmd_vartype>& cmdmap,
+   const map<string,string>& param_str_map,
+-  const MgrCommand *this_cmd) {
++  const MonCommand *this_cmd) {
+ 
+   if (s->entity_name.is_mon()) {
+     // mon is all-powerful.  even when it is forwarding commands on behalf of
+@@ -593,42 +581,52 @@ bool DaemonServer::handle_command(MCommand *m)
+   dout(4) << "prefix=" << prefix << dendl;
+ 
+   if (prefix == "get_command_descriptions") {
+-    int cmdnum = 0;
+-
+     dout(10) << "reading commands from python modules" << dendl;
+     auto py_commands = py_modules.get_commands();
+ 
+-    JSONFormatter f;
+-    f.open_object_section("command_descriptions");
+-    for (const auto &pyc : py_commands) {
+-      ostringstream secname;
+-      secname << "cmd" << setfill('0') << std::setw(3) << cmdnum;
+-      dout(20) << "Dumping " << pyc.cmdstring << " (" << pyc.helpstring
+-               << ")" << dendl;
+-      dump_cmddesc_to_json(&f, secname.str(), pyc.cmdstring, pyc.helpstring,
+-			   "mgr", pyc.perm, "cli", 0);
+-      cmdnum++;
+-    }
++    bool binary = false;
++    cmd_getval(g_ceph_context, cmdctx->cmdmap, "binary", binary);
++    if (binary) {
++      std::vector<MonCommand> commands = mgr_commands;
++      for (const auto &pyc : py_commands) {
++        commands.push_back({pyc.cmdstring, pyc.helpstring, "mgr",
++                            pyc.perm, "cli", MonCommand::FLAG_MGR});
++      }
++      ::encode(commands, cmdctx->odata);
++    } else {
++      int cmdnum = 0;
++
++      JSONFormatter f;
++      f.open_object_section("command_descriptions");
++      for (const auto &pyc : py_commands) {
++        ostringstream secname;
++        secname << "cmd" << setfill('0') << std::setw(3) << cmdnum;
++        dout(20) << "Dumping " << pyc.cmdstring << " (" << pyc.helpstring
++                 << ")" << dendl;
++        dump_cmddesc_to_json(&f, secname.str(), pyc.cmdstring, pyc.helpstring,
++                             "mgr", pyc.perm, "cli", 0);
++        cmdnum++;
++      }
+ 
+-    for (const auto &cp : mgr_commands) {
+-      ostringstream secname;
+-      secname << "cmd" << setfill('0') << std::setw(3) << cmdnum;
+-      dump_cmddesc_to_json(&f, secname.str(), cp.cmdstring, cp.helpstring,
+-			   cp.module, cp.perm, cp.availability, 0);
+-      cmdnum++;
++      for (const auto &cp : mgr_commands) {
++        ostringstream secname;
++        secname << "cmd" << setfill('0') << std::setw(3) << cmdnum;
++        dump_cmddesc_to_json(&f, secname.str(), cp.cmdstring, cp.helpstring,
++                             cp.module, cp.req_perms, cp.availability, 0);
++        cmdnum++;
++      }
++      f.close_section();	// command_descriptions
++      f.flush(cmdctx->odata);
+     }
+-    f.close_section();	// command_descriptions
+-    f.flush(cmdctx->odata);
+     cmdctx->reply(0, ss);
+     return true;
+   }
+ 
+   // lookup command
+-  const MgrCommand *mgr_cmd = _get_mgrcommand(prefix, mgr_commands,
+-                                              ARRAY_SIZE(mgr_commands));
++  const MonCommand *mgr_cmd = _get_mgrcommand(prefix, mgr_commands);
+   _generate_command_map(cmdctx->cmdmap, param_str_map);
+   if (!mgr_cmd) {
+-    MgrCommand py_command = {"", "", "py", "rw", "cli"};
++    MonCommand py_command = {"", "", "py", "rw", "cli"};
+     if (!_allowed_command(session.get(), py_command.module, prefix, cmdctx->cmdmap,
+                           param_str_map, &py_command)) {
+       dout(1) << " access denied" << dendl;
+diff --git a/src/mgr/DaemonServer.h b/src/mgr/DaemonServer.h
+index 4877cfe85a..6e44832021 100644
+--- a/src/mgr/DaemonServer.h
++++ b/src/mgr/DaemonServer.h
+@@ -35,7 +35,7 @@ class MMgrReport;
+ class MMgrOpen;
+ class MMonMgrReport;
+ class MCommand;
+-struct MgrCommand;
++struct MonCommand;
+ 
+ 
+ /**
+@@ -74,13 +74,13 @@ protected:
+ 
+   static void _generate_command_map(map<string,cmd_vartype>& cmdmap,
+                                     map<string,string> &param_str_map);
+-  static const MgrCommand *_get_mgrcommand(const string &cmd_prefix,
+-                                           MgrCommand *cmds, int cmds_size);
++  static const MonCommand *_get_mgrcommand(const string &cmd_prefix,
++                                           const std::vector<MonCommand> &commands);
+   bool _allowed_command(
+     MgrSession *s, const string &module, const string &prefix,
+     const map<string,cmd_vartype>& cmdmap,
+     const map<string,string>& param_str_map,
+-    const MgrCommand *this_cmd);
++    const MonCommand *this_cmd);
+ 
+ private:
+   friend class ReplyOnFinish;
+diff --git a/src/mon/MonCommand.h b/src/mon/MonCommand.h
+new file mode 100644
+index 0000000000..94716d6c9e
+--- /dev/null
++++ b/src/mon/MonCommand.h
+@@ -0,0 +1,124 @@
++// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
++// vim: ts=8 sw=2 smarttab
++/*
++ * Ceph - scalable distributed file system
++ *
++ * Copyright (C) 2017 John Spray <john.spray@redhat.com>
++ *
++ * This is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License version 2.1, as published by the Free Software
++ * Foundation.  See file COPYING.
++ */
++
++#pragma once
++
++struct MonCommand {
++  string cmdstring;
++  string helpstring;
++  string module;
++  string req_perms;
++  string availability;
++  uint64_t flags;
++
++  // MonCommand flags
++  static const uint64_t FLAG_NONE       = 0;
++  static const uint64_t FLAG_NOFORWARD  = 1 << 0;
++  static const uint64_t FLAG_OBSOLETE   = 1 << 1;
++  static const uint64_t FLAG_DEPRECATED = 1 << 2;
++  static const uint64_t FLAG_MGR        = 1 << 3;
++
++  bool has_flag(uint64_t flag) const { return (flags & flag) != 0; }
++  void set_flag(uint64_t flag) { flags |= flag; }
++  void unset_flag(uint64_t flag) { flags &= ~flag; }
++
++  void encode(bufferlist &bl) const {
++    ENCODE_START(1, 1, bl);
++    encode_bare(bl);
++    ::encode(flags, bl);
++    ENCODE_FINISH(bl);
++  }
++
++  void decode(bufferlist::iterator &bl) {
++    DECODE_START(1, bl);
++    decode_bare(bl);
++    ::decode(flags, bl);
++    DECODE_FINISH(bl);
++  }
++
++  /**
++   * Unversioned encoding for use within encode_array.
++   */
++  void encode_bare(bufferlist &bl) const {
++    ::encode(cmdstring, bl);
++    ::encode(helpstring, bl);
++    ::encode(module, bl);
++    ::encode(req_perms, bl);
++    ::encode(availability, bl);
++  }
++  void decode_bare(bufferlist::iterator &bl) {
++    ::decode(cmdstring, bl);
++    ::decode(helpstring, bl);
++    ::decode(module, bl);
++    ::decode(req_perms, bl);
++    ::decode(availability, bl);
++  }
++  bool is_compat(const MonCommand* o) const {
++    return cmdstring == o->cmdstring &&
++	module == o->module && req_perms == o->req_perms &&
++	availability == o->availability;
++  }
++
++  bool is_noforward() const {
++    return has_flag(MonCommand::FLAG_NOFORWARD);
++  }
++
++  bool is_obsolete() const {
++    return has_flag(MonCommand::FLAG_OBSOLETE);
++  }
++
++  bool is_deprecated() const {
++    return has_flag(MonCommand::FLAG_DEPRECATED);
++  }
++
++  bool is_mgr() const {
++    return has_flag(MonCommand::FLAG_MGR);
++  }
++
++  static void encode_array(const MonCommand *cmds, int size, bufferlist &bl) {
++    ENCODE_START(2, 1, bl);
++    uint16_t s = size;
++    ::encode(s, bl);
++    for (int i = 0; i < size; ++i) {
++      cmds[i].encode_bare(bl);
++    }
++    for (int i = 0; i < size; i++) {
++      ::encode(cmds[i].flags, bl);
++    }
++    ENCODE_FINISH(bl);
++  }
++  static void decode_array(MonCommand **cmds, int *size,
++                           bufferlist::iterator &bl) {
++    DECODE_START(2, bl);
++    uint16_t s = 0;
++    ::decode(s, bl);
++    *size = s;
++    *cmds = new MonCommand[*size];
++    for (int i = 0; i < *size; ++i) {
++      (*cmds)[i].decode_bare(bl);
++    }
++    if (struct_v >= 2) {
++      for (int i = 0; i < *size; i++)
++        ::decode((*cmds)[i].flags, bl);
++    } else {
++      for (int i = 0; i < *size; i++)
++        (*cmds)[i].flags = 0;
++    }
++    DECODE_FINISH(bl);
++  }
++
++  bool requires_perm(char p) const {
++    return (req_perms.find(p) != string::npos); 
++  }
++};
++WRITE_CLASS_ENCODER(MonCommand)
+

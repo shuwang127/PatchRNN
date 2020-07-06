@@ -1,0 +1,135 @@
+commit b957496acc6e2ca6627e6e7f97d816b0d656294c
+Author: Dwight <dmerriman@gmail.com>
+Date:   Wed Aug 13 15:35:28 2008 -0400
+
+    reuse the dbclientconnection on repl passes
+
+diff --git a/db/repl.cpp b/db/repl.cpp
+index c7a59489ad..eb4fa7388f 100644
+--- a/db/repl.cpp
++++ b/db/repl.cpp
+@@ -280,7 +280,7 @@ void Source::applyOperation(JSObj& op) {
+ }
+ 
+ /* note: not yet in mutex at this point. */
+-void Source::pullOpLog(DBClientConnection& conn) { 
++void Source::pullOpLog() { 
+ 	JSObjBuilder q;
+ 	q.appendDate("$gte", syncedTo.asDate());
+ 	JSObjBuilder query;
+@@ -289,7 +289,7 @@ void Source::pullOpLog(DBClientConnection& conn) {
+ 
+ 	string ns = string("local.oplog.$") + sourceName;
+ 	auto_ptr<DBClientCursor> c = 
+-		conn.query(ns.c_str(), query.done());
++		conn->query(ns.c_str(), query.done());
+ 	if( !c->more() ) { 
+ 		problem() << "pull:   " << ns << " empty?\n";
+ 		sleepsecs(3);
+@@ -348,35 +348,42 @@ void Source::pullOpLog(DBClientConnection& conn) {
+ 	}
+ }
+ 
+-/* note: not yet in mutex at this point. */
+-void Source::sync() { 
++/* note: not yet in mutex at this point. 
++   returns true if everything happy.  return false if you want to reconnect.
++*/
++bool Source::sync() { 
+ 	log() << "pull: from " << sourceName << '@' << hostName << endl;
+ 
+ 	if( (string("localhost") == hostName || string("127.0.0.1") == hostName) && port == DBPort ) { 
+         log() << "pull:   can't sync from self (localhost). sources configuration may be wrong." << endl;
+-        return;
++		sleepsecs(5);
++        return false;
+     }
+ 
+-	DBClientConnection conn;
+-	string errmsg;
+-	if( !conn.connect(hostName.c_str(), errmsg) ) {
+-		log() << "pull:   cantconn " << errmsg << endl;
+-		return;
++	if( conn.get() == 0 ) {
++		conn = auto_ptr<DBClientConnection>(new DBClientConnection());
++		string errmsg;
++		if( !conn->connect(hostName.c_str(), errmsg) ) {
++			resetConnection();
++			log() << "pull:   cantconn " << errmsg << endl;
++			return false;
++		}
+ 	}
+ 
+ 	// get current mtime at the server.
+-	JSObj o = conn.findOne("admin.$cmd", opTimeQuery);
++	JSObj o = conn->findOne("admin.$cmd", opTimeQuery);
+ 	Element e = o.findElement("optime");
+ 	if( e.eoo() ) {
+ 		log() << "pull:   failed to get cur optime from master" << endl;
+ 		log() << "        " << o.toString() << endl;
+-		return;
++		return false;
+ 	}
+ 	uassert( e.type() == Date );
+ 	OpTime serverCurTime;
+ 	serverCurTime.asDate() = e.date();
+ 
+-	pullOpLog(conn);
++	pullOpLog();
++	return true;
+ }
+ 
+ /* -- Logging of operations -------------------------------------*/
+@@ -448,12 +455,18 @@ void replMain() {
+ 	if( sources.empty() )
+ 		sleepsecs(20);
+ 
+-	try {
+-		for( vector<Source*>::iterator i = sources.begin(); i != sources.end(); i++ )
+-			(*i)->sync();
+-	}
+-	catch( SyncException ) {
+-		sleepsecs(300);
++	for( vector<Source*>::iterator i = sources.begin(); i != sources.end(); i++ ) {
++		Source *s = *i;
++		bool ok = false;
++		try {
++			ok = s->sync();
++		}
++		catch( SyncException ) {
++			log() << "caught SyncException, sleeping 5 minutes" << endl;
++			sleepsecs(300);
++		}
++		if( !ok ) 
++			s->resetConnection();
+ 	}
+ 
+ 	Source::cleanup(sources);
+diff --git a/db/repl.h b/db/repl.h
+index 75f4177323..8832dcc8d4 100644
+--- a/db/repl.h
++++ b/db/repl.h
+@@ -82,8 +82,10 @@ struct SyncException {
+ */
+ class Source {
+ 	bool resync(string db);
+-	void pullOpLog(DBClientConnection&);
++	void pullOpLog();
+ 	void applyOperation(JSObj& op);
++
++	auto_ptr<DBClientConnection> conn;
+ public:
+ 	string hostName;    // ip addr or hostname
+ 	string sourceName;  // a logical source name.
+@@ -100,8 +102,9 @@ public:
+ 	static void loadAll(vector<Source*>&);
+ 	static void cleanup(vector<Source*>&);
+ 	Source(JSObj);
+-	void sync();
++	bool sync();
+ 	void save(); // write ourself to local.sources
++	void resetConnection() { conn = auto_ptr<DBClientConnection>(0); }
+ 
+ 	// make a jsobj from our member fields of the form 
+ 	//   { host: ..., source: ..., syncedTo: }
+

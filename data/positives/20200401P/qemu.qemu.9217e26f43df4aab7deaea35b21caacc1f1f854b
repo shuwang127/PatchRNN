@@ -1,0 +1,42 @@
+commit 9217e26f43df4aab7deaea35b21caacc1f1f854b
+Author: Kevin Wolf <mail@kevin-wolf.de>
+Date:   Fri Sep 10 12:27:03 2010 +0200
+
+    vvfat: Fix double free for opening the image rw
+    
+    Allocation and deallocation of bs->opaque is not in the control of a
+    block driver. Therefore it should not set bs->opaque to a data structure
+    used by another bs, or closing the image will lead to a double free.
+    
+    Signed-off-by: Kevin Wolf <mail@kevin-wolf.de>
+
+diff --git a/block/vvfat.c b/block/vvfat.c
+index 5898d664b0..07720371c9 100644
+--- a/block/vvfat.c
++++ b/block/vvfat.c
+@@ -2768,12 +2768,12 @@ static int vvfat_is_allocated(BlockDriverState *bs,
+ 
+ static int write_target_commit(BlockDriverState *bs, int64_t sector_num,
+ 	const uint8_t* buffer, int nb_sectors) {
+-    BDRVVVFATState* s = bs->opaque;
++    BDRVVVFATState* s = *((BDRVVVFATState**) bs->opaque);
+     return try_commit(s);
+ }
+ 
+ static void write_target_close(BlockDriverState *bs) {
+-    BDRVVVFATState* s = bs->opaque;
++    BDRVVVFATState* s = *((BDRVVVFATState**) bs->opaque);
+     bdrv_delete(s->qcow);
+     free(s->qcow_filename);
+ }
+@@ -2816,7 +2816,8 @@ static int enable_write_target(BDRVVVFATState *s)
+ 
+     s->bs->backing_hd = calloc(sizeof(BlockDriverState), 1);
+     s->bs->backing_hd->drv = &vvfat_write_target;
+-    s->bs->backing_hd->opaque = s;
++    s->bs->backing_hd->opaque = qemu_malloc(sizeof(void*));
++    *(void**)s->bs->backing_hd->opaque = s;
+ 
+     return 0;
+ }
+

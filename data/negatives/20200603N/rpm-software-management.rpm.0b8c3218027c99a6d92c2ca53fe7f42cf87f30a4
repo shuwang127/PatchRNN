@@ -1,0 +1,71 @@
+commit 0b8c3218027c99a6d92c2ca53fe7f42cf87f30a4
+Author: Panu Matilainen <pmatilai@redhat.com>
+Date:   Fri Mar 23 14:17:47 2012 +0200
+
+    Eliminate broken data end calculation in dataLength()
+    
+    - If the caller doesn't know the end pointer, we dont have a whole lot
+      of chance to come up with a reasonable one either. Just assume
+      the terminating \0's are there when end boundary is not specified:
+      when this happens we're dealing with relatively "trusted" data
+      anyway, the more critical case of reading in unknown headers does
+      always pass end pointers.
+    - While capping the end pointer to HEADER_DATA_MAX seems like a
+      reasonable thing to do (as was done in commit
+      f79909d04e43cbfbbcdc588530a8c8033c5e0a7c), it doesn't really help
+      (bad data would likely run past bounds anyway), and it's not right
+      either: the pointer can be to a stack address, and the stack can be
+      near the top of addressable range, and ptr + HEADER_DATA_MAX can
+      cause pointer wraparound. Notably that's exactly what happens
+      when running 32bit personality process on 64bit system on Linux,
+      at least in case of i386 process on x86_64, causing all sorts of
+      breakage..
+
+diff --git a/lib/header.c b/lib/header.c
+index d74155283..023c6e30d 100644
+--- a/lib/header.c
++++ b/lib/header.c
+@@ -301,16 +301,27 @@ unsigned headerSizeof(Header h, int magicp)
+     return size;
+ }
+ 
+-/* Bounded header string (array) size calculation, return -1 on error */
++/*
++ * Header string (array) size calculation, bounded if end is non-NULL.
++ * Return length (including \0 termination) on success, -1 on error.
++ */
+ static inline int strtaglen(const char *str, rpm_count_t c, const char *end)
+ {
+     const char *start = str;
+     const char *s;
+ 
+-    while ((s = memchr(start, '\0', end-start))) {
+-	if (--c == 0 || s > end)
+-	    break;
+-	start = s + 1;
++    if (end) {
++	while ((s = memchr(start, '\0', end-start))) {
++	    if (--c == 0 || s > end)
++		break;
++	    start = s + 1;
++	}
++    } else {
++	while ((s = strchr(start, '\0'))) {
++	    if (--c == 0)
++		break;
++	    start = s + 1;
++	}
+     }
+     return (c > 0) ? -1 : (s - str + 1);
+ }
+@@ -328,8 +339,7 @@ static int dataLength(rpm_tagtype_t type, rpm_constdata_t p, rpm_count_t count,
+ 			 int onDisk, rpm_constdata_t pend)
+ {
+     const char * s = p;
+-    /* Not all callers supply data end, avoid falling over edge of the world */
+-    const char * se = pend ? pend : s + HEADER_DATA_MAX;
++    const char * se = pend;
+     int length = 0;
+ 
+     switch (type) {
+

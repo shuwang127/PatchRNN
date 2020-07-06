@@ -1,0 +1,110 @@
+commit b3eeea6619a0ed4f37138661c49339b21361d397
+Author: Bart Van Assche <bart.vanassche@sandisk.com>
+Date:   Tue May 19 16:16:01 2015 +0200
+
+    target: Simplify LUN shutdown code
+    
+    Instead of starting a thread from transport_clear_lun_ref() that
+    waits for LUN shutdown, wait in that function for LUN shutdown
+    to finish. Additionally, change the return type of
+    transport_clear_lun_ref() from int to void.
+    
+    Signed-off-by: Bart Van Assche <bart.vanassche@sandisk.com>
+    Reviewed-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Nicholas Bellinger <nab@linux-iscsi.org>
+
+diff --git a/drivers/target/target_core_device.c b/drivers/target/target_core_device.c
+index 22f1e180d8ee..1e4485b1849d 100644
+--- a/drivers/target/target_core_device.c
++++ b/drivers/target/target_core_device.c
+@@ -928,7 +928,6 @@ struct se_device *target_alloc_device(struct se_hba *hba, const char *name)
+ 
+ 	xcopy_lun = &dev->xcopy_lun;
+ 	xcopy_lun->lun_se_dev = dev;
+-	init_completion(&xcopy_lun->lun_shutdown_comp);
+ 	spin_lock_init(&xcopy_lun->lun_sep_lock);
+ 	init_completion(&xcopy_lun->lun_ref_comp);
+ 
+diff --git a/drivers/target/target_core_internal.h b/drivers/target/target_core_internal.h
+index 01181aed67dc..23f992ed7cae 100644
+--- a/drivers/target/target_core_internal.h
++++ b/drivers/target/target_core_internal.h
+@@ -108,7 +108,7 @@ int	transport_dump_vpd_assoc(struct t10_vpd *, unsigned char *, int);
+ int	transport_dump_vpd_ident_type(struct t10_vpd *, unsigned char *, int);
+ int	transport_dump_vpd_ident(struct t10_vpd *, unsigned char *, int);
+ bool	target_stop_cmd(struct se_cmd *cmd, unsigned long *flags);
+-int	transport_clear_lun_ref(struct se_lun *);
++void	transport_clear_lun_ref(struct se_lun *);
+ void	transport_send_task_abort(struct se_cmd *);
+ sense_reason_t	target_cmd_size_check(struct se_cmd *cmd, unsigned int size);
+ void	target_qf_do_work(struct work_struct *work);
+diff --git a/drivers/target/target_core_tpg.c b/drivers/target/target_core_tpg.c
+index 91f8ddb6d783..fd531fcf3191 100644
+--- a/drivers/target/target_core_tpg.c
++++ b/drivers/target/target_core_tpg.c
+@@ -494,7 +494,6 @@ static int core_tpg_setup_virtual_lun0(struct se_portal_group *se_tpg)
+ 
+ 	lun->unpacked_lun = 0;
+ 	atomic_set(&lun->lun_acl_count, 0);
+-	init_completion(&lun->lun_shutdown_comp);
+ 	spin_lock_init(&lun->lun_sep_lock);
+ 	init_completion(&lun->lun_ref_comp);
+ 
+@@ -606,7 +605,6 @@ struct se_lun *core_tpg_alloc_lun(
+ 	lun->unpacked_lun = unpacked_lun;
+ 	lun->lun_link_magic = SE_LUN_LINK_MAGIC;
+ 	atomic_set(&lun->lun_acl_count, 0);
+-	init_completion(&lun->lun_shutdown_comp);
+ 	spin_lock_init(&lun->lun_sep_lock);
+ 	init_completion(&lun->lun_ref_comp);
+ 
+diff --git a/drivers/target/target_core_transport.c b/drivers/target/target_core_transport.c
+index 965a308e10a5..7c0518a28186 100644
+--- a/drivers/target/target_core_transport.c
++++ b/drivers/target/target_core_transport.c
+@@ -2596,31 +2596,10 @@ void target_wait_for_sess_cmds(struct se_session *se_sess)
+ }
+ EXPORT_SYMBOL(target_wait_for_sess_cmds);
+ 
+-static int transport_clear_lun_ref_thread(void *p)
++void transport_clear_lun_ref(struct se_lun *lun)
+ {
+-	struct se_lun *lun = p;
+-
+ 	percpu_ref_kill(&lun->lun_ref);
+-
+ 	wait_for_completion(&lun->lun_ref_comp);
+-	complete(&lun->lun_shutdown_comp);
+-
+-	return 0;
+-}
+-
+-int transport_clear_lun_ref(struct se_lun *lun)
+-{
+-	struct task_struct *kt;
+-
+-	kt = kthread_run(transport_clear_lun_ref_thread, lun,
+-			"tcm_cl_%u", lun->unpacked_lun);
+-	if (IS_ERR(kt)) {
+-		pr_err("Unable to start clear_lun thread\n");
+-		return PTR_ERR(kt);
+-	}
+-	wait_for_completion(&lun->lun_shutdown_comp);
+-
+-	return 0;
+ }
+ 
+ /**
+diff --git a/include/target/target_core_base.h b/include/target/target_core_base.h
+index 03e2ee8f8337..ee7abdd6b7a2 100644
+--- a/include/target/target_core_base.h
++++ b/include/target/target_core_base.h
+@@ -707,7 +707,6 @@ struct se_lun {
+ 	u32			lun_index;
+ 	atomic_t		lun_acl_count;
+ 	spinlock_t		lun_sep_lock;
+-	struct completion	lun_shutdown_comp;
+ 	struct se_device	*lun_se_dev;
+ 	struct se_port		*lun_sep;
+ 	struct config_group	lun_group;
+

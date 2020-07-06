@@ -1,0 +1,106 @@
+commit 3be8585661f8b0a9b94e9bc1db6ebfa097c3270f
+Author: Bram Moolenaar <Bram@vim.org>
+Date:   Thu Jun 12 14:01:31 2014 +0200
+
+    updated for version 7.4.320
+    Problem:    Possible crash when an BufLeave autocommand deletes the buffer.
+    Solution:   Check for the window pointer being valid.  Postpone freeing the
+                window until autocommands are done. (Yasuhiro Matsumoto)
+
+diff --git a/src/buffer.c b/src/buffer.c
+index 3c298590c..7a6dbc591 100644
+--- a/src/buffer.c
++++ b/src/buffer.c
+@@ -371,7 +371,11 @@ close_buffer(win, buf, action, abort_if_last)
+ 	unload_buf = TRUE;
+ #endif
+ 
+-    if (win != NULL)
++    if (win != NULL
++#ifdef FEAT_WINDOWS
++	&& win_valid(win)	/* in case autocommands closed the window */
++#endif
++	    )
+     {
+ 	/* Set b_last_cursor when closing the last window for the buffer.
+ 	 * Remember the last cursor position and window options of the buffer.
+diff --git a/src/fileio.c b/src/fileio.c
+index a45ec2cfd..38dc2597d 100644
+--- a/src/fileio.c
++++ b/src/fileio.c
+@@ -9549,7 +9549,8 @@ apply_autocmds_group(event, fname, fname_io, force, group, buf, eap)
+ 
+     /*
+      * When stopping to execute autocommands, restore the search patterns and
+-     * the redo buffer.  Free buffers in the au_pending_free_buf list.
++     * the redo buffer.  Free any buffers in the au_pending_free_buf list and
++     * free any windows in the au_pending_free_win list.
+      */
+     if (!autocmd_busy)
+     {
+@@ -9562,6 +9563,12 @@ apply_autocmds_group(event, fname, fname_io, force, group, buf, eap)
+ 	    vim_free(au_pending_free_buf);
+ 	    au_pending_free_buf = b;
+ 	}
++	while (au_pending_free_win != NULL)
++	{
++	    win_T *w = au_pending_free_win->w_next;
++	    vim_free(au_pending_free_win);
++	    au_pending_free_win = w;
++	}
+     }
+ 
+     /*
+diff --git a/src/globals.h b/src/globals.h
+index d831db9f8..b3310b368 100644
+--- a/src/globals.h
++++ b/src/globals.h
+@@ -387,10 +387,12 @@ EXTERN int	keep_filetype INIT(= FALSE);	/* value for did_filetype when
+  * which one is preferred, au_new_curbuf is set to it */
+ EXTERN buf_T	*au_new_curbuf INIT(= NULL);
+ 
+-/* When deleting the buffer and autocmd_busy is TRUE, do not free the buffer
+- * but link it in the list starting with au_pending_free_buf, using b_next.
+- * Free the buffer when autocmd_busy is set to FALSE. */
++/* When deleting a buffer/window and autocmd_busy is TRUE, do not free the
++ * buffer/window. but link it in the list starting with
++ * au_pending_free_buf/ap_pending_free_win, using b_next/w_next.
++ * Free the buffer/window when autocmd_busy is being set to FALSE. */
+ EXTERN buf_T	*au_pending_free_buf INIT(= NULL);
++EXTERN win_T	*au_pending_free_win INIT(= NULL);
+ #endif
+ 
+ #ifdef FEAT_MOUSE
+diff --git a/src/version.c b/src/version.c
+index 335f9dea4..0df080ea3 100644
+--- a/src/version.c
++++ b/src/version.c
+@@ -734,6 +734,8 @@ static char *(features[]) =
+ 
+ static int included_patches[] =
+ {   /* Add new patch number below this line */
++/**/
++    320,
+ /**/
+     319,
+ /**/
+diff --git a/src/window.c b/src/window.c
+index fe6f335cc..f4dea1da1 100644
+--- a/src/window.c
++++ b/src/window.c
+@@ -4597,7 +4597,13 @@ win_free(wp, tp)
+     if (wp != aucmd_win)
+ #endif
+ 	win_remove(wp, tp);
+-    vim_free(wp);
++    if (autocmd_busy)
++    {
++	wp->w_next = au_pending_free_win;
++	au_pending_free_win = wp;
++    }
++    else
++	vim_free(wp);
+ 
+ #ifdef FEAT_AUTOCMD
+     unblock_autocmds();
+

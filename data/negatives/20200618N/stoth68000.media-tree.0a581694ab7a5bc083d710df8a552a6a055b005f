@@ -1,0 +1,99 @@
+commit 0a581694ab7a5bc083d710df8a552a6a055b005f
+Author: Petr Mladek <pmladek@suse.cz>
+Date:   Wed Jun 4 16:11:28 2014 -0700
+
+    printk: split code for making free space in the log buffer
+    
+    The check for free space in the log buffer always passes when "first_seq"
+    and "next_seq" are equal.  In theory, it might cause writing outside of
+    the log buffer.
+    
+    Fortunately, the current usage looks safe because the used "text" and
+    "dict" buffers are quite limited.  See the second patch for more details.
+    
+    Anyway, it is better to be on the safe side and add a check.  An easy
+    solution is done in the 2nd patch and it is improved in the 4th patch.
+    
+    5th patch fixes the computation of the printed message length.
+    
+    1st and 3rd patches just do some code refactoring to make the other
+    patches easier.
+    
+    This patch (of 5):
+    
+    There will be needed some fixes in the check for free space.  They will be
+    easier if the code is moved outside of the quite long log_store()
+    function.
+    
+    This patch does not change the existing behavior.
+    
+    Signed-off-by: Petr Mladek <pmladek@suse.cz>
+    Cc: Jan Kara <jack@suse.cz>
+    Cc: Jiri Kosina <jkosina@suse.cz>
+    Cc: Kay Sievers <kay@vrfy.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/kernel/printk/printk.c b/kernel/printk/printk.c
+index 221229cf0190..99b7a2d87b6a 100644
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@ -297,6 +297,34 @@ static u32 log_next(u32 idx)
+ 	return idx + msg->len;
+ }
+ 
++/* check whether there is enough free space for the given message */
++static int logbuf_has_space(u32 msg_size)
++{
++	u32 free;
++
++	if (log_next_idx > log_first_idx)
++		free = max(log_buf_len - log_next_idx, log_first_idx);
++	else
++		free = log_first_idx - log_next_idx;
++
++	/*
++	 * We need space also for an empty header that signalizes wrapping
++	 * of the buffer.
++	 */
++	return free >= msg_size + sizeof(struct printk_log);
++}
++
++static void log_make_free_space(u32 msg_size)
++{
++	while (log_first_seq < log_next_seq) {
++		if (logbuf_has_space(msg_size))
++			return;
++		/* drop old messages until we have enough continuous space */
++		log_first_idx = log_next(log_first_idx);
++		log_first_seq++;
++	}
++}
++
+ /* insert record into the buffer, discard old ones, update heads */
+ static void log_store(int facility, int level,
+ 		      enum log_flags flags, u64 ts_nsec,
+@@ -311,21 +339,7 @@ static void log_store(int facility, int level,
+ 	pad_len = (-size) & (LOG_ALIGN - 1);
+ 	size += pad_len;
+ 
+-	while (log_first_seq < log_next_seq) {
+-		u32 free;
+-
+-		if (log_next_idx > log_first_idx)
+-			free = max(log_buf_len - log_next_idx, log_first_idx);
+-		else
+-			free = log_first_idx - log_next_idx;
+-
+-		if (free >= size + sizeof(struct printk_log))
+-			break;
+-
+-		/* drop old messages until we have enough contiuous space */
+-		log_first_idx = log_next(log_first_idx);
+-		log_first_seq++;
+-	}
++	log_make_free_space(size);
+ 
+ 	if (log_next_idx + size + sizeof(struct printk_log) > log_buf_len) {
+ 		/*
+

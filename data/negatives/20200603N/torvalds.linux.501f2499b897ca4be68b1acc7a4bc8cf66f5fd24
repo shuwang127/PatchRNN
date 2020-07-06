@@ -1,0 +1,80 @@
+commit 501f2499b897ca4be68b1acc7a4bc8cf66f5fd24
+Author: Bryan Holty <lgeek@frontiernet.net>
+Date:   Sat Mar 25 03:07:37 2006 -0800
+
+    [PATCH] IRQ: prevent enabling of previously disabled interrupt
+    
+    This fix prevents re-disabling and enabling of a previously disabled
+    interrupt.  On an SMP system with irq balancing enabled; If an interrupt is
+    disabled from within its own interrupt context with disable_irq_nosync and is
+    also earmarked for processor migration, the interrupt is blindly moved to the
+    other processor and enabled without regard for its current "enabled" state.
+    If there is an interrupt pending, it will unexpectedly invoke the irq handler
+    on the new irq owning processor (even though the irq was previously disabled)
+    
+    The more intuitive fix would be to invoke disable_irq_nosync and
+    enable_irq, but since we already have the desc->lock from __do_IRQ, we
+    cannot call them directly.  Instead we can use the same logic to disable
+    and enable found in disable_irq_nosync and enable_irq, with regards to the
+    desc->depth.
+    
+    This now prevents a disabled interrupt from being re-disabled, and more
+    importantly prevents a disabled interrupt from being incorrectly enabled on
+    a different processor.
+    
+    Signed-off-by: Bryan Holty <lgeek@frontiernet.net>
+    Cc: Andi Kleen <ak@muc.de>
+    Cc: "Luck, Tony" <tony.luck@intel.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/kernel/irq/migration.c b/kernel/irq/migration.c
+index 6bdd03c524c7..52a8655fa080 100644
+--- a/kernel/irq/migration.c
++++ b/kernel/irq/migration.c
+@@ -18,9 +18,17 @@ void move_native_irq(int irq)
+ 	cpumask_t tmp;
+ 	irq_desc_t *desc = irq_descp(irq);
+ 
+-	if (likely (!desc->move_irq))
++	if (likely(!desc->move_irq))
+ 		return;
+ 
++	/*
++	 * Paranoia: cpu-local interrupts shouldn't be calling in here anyway.
++	 */
++	if (CHECK_IRQ_PER_CPU(desc->status)) {
++		WARN_ON(1);
++		return;
++	}
++
+ 	desc->move_irq = 0;
+ 
+ 	if (likely(cpus_empty(pending_irq_cpumask[irq])))
+@@ -29,7 +37,8 @@ void move_native_irq(int irq)
+ 	if (!desc->handler->set_affinity)
+ 		return;
+ 
+-	/* note - we hold the desc->lock */
++	assert_spin_locked(&desc->lock);
++
+ 	cpus_and(tmp, pending_irq_cpumask[irq], cpu_online_map);
+ 
+ 	/*
+@@ -42,9 +51,13 @@ void move_native_irq(int irq)
+ 	 * Being paranoid i guess!
+ 	 */
+ 	if (unlikely(!cpus_empty(tmp))) {
+-		desc->handler->disable(irq);
++		if (likely(!(desc->status & IRQ_DISABLED)))
++			desc->handler->disable(irq);
++
+ 		desc->handler->set_affinity(irq,tmp);
+-		desc->handler->enable(irq);
++
++		if (likely(!(desc->status & IRQ_DISABLED)))
++			desc->handler->enable(irq);
+ 	}
+ 	cpus_clear(pending_irq_cpumask[irq]);
+ }
+

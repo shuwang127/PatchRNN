@@ -1,0 +1,107 @@
+commit 4cee4798a304ee1ea579423ca048f16ceaccdfb5
+Author: Kevin Wolf <kwolf@redhat.com>
+Date:   Wed Feb 8 14:34:41 2012 +0100
+
+    KVM: x86 emulator: Allow PM/VM86 switch during task switch
+    
+    Task switches can switch between Protected Mode and VM86. The current
+    mode must be updated during the task switch emulation so that the new
+    segment selectors are interpreted correctly.
+    
+    In order to let privilege checks succeed, rflags needs to be updated in
+    the vcpu struct as this causes a CPL update.
+    
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/include/asm/kvm_emulate.h b/arch/x86/include/asm/kvm_emulate.h
+index df437b68f42b..c222e1a1b12a 100644
+--- a/arch/x86/include/asm/kvm_emulate.h
++++ b/arch/x86/include/asm/kvm_emulate.h
+@@ -176,6 +176,7 @@ struct x86_emulate_ops {
+ 	void (*set_idt)(struct x86_emulate_ctxt *ctxt, struct desc_ptr *dt);
+ 	ulong (*get_cr)(struct x86_emulate_ctxt *ctxt, int cr);
+ 	int (*set_cr)(struct x86_emulate_ctxt *ctxt, int cr, ulong val);
++	void (*set_rflags)(struct x86_emulate_ctxt *ctxt, ulong val);
+ 	int (*cpl)(struct x86_emulate_ctxt *ctxt);
+ 	int (*get_dr)(struct x86_emulate_ctxt *ctxt, int dr, ulong *dest);
+ 	int (*set_dr)(struct x86_emulate_ctxt *ctxt, int dr, ulong value);
+diff --git a/arch/x86/kvm/emulate.c b/arch/x86/kvm/emulate.c
+index b19e9fffe582..83756223f8aa 100644
+--- a/arch/x86/kvm/emulate.c
++++ b/arch/x86/kvm/emulate.c
+@@ -2344,6 +2344,8 @@ static int load_state_from_tss32(struct x86_emulate_ctxt *ctxt,
+ 		return emulate_gp(ctxt, 0);
+ 	ctxt->_eip = tss->eip;
+ 	ctxt->eflags = tss->eflags | 2;
++
++	/* General purpose registers */
+ 	ctxt->regs[VCPU_REGS_RAX] = tss->eax;
+ 	ctxt->regs[VCPU_REGS_RCX] = tss->ecx;
+ 	ctxt->regs[VCPU_REGS_RDX] = tss->edx;
+@@ -2365,6 +2367,24 @@ static int load_state_from_tss32(struct x86_emulate_ctxt *ctxt,
+ 	set_segment_selector(ctxt, tss->fs, VCPU_SREG_FS);
+ 	set_segment_selector(ctxt, tss->gs, VCPU_SREG_GS);
+ 
++	/*
++	 * If we're switching between Protected Mode and VM86, we need to make
++	 * sure to update the mode before loading the segment descriptors so
++	 * that the selectors are interpreted correctly.
++	 *
++	 * Need to get rflags to the vcpu struct immediately because it
++	 * influences the CPL which is checked at least when loading the segment
++	 * descriptors and when pushing an error code to the new kernel stack.
++	 *
++	 * TODO Introduce a separate ctxt->ops->set_cpl callback
++	 */
++	if (ctxt->eflags & X86_EFLAGS_VM)
++		ctxt->mode = X86EMUL_MODE_VM86;
++	else
++		ctxt->mode = X86EMUL_MODE_PROT32;
++
++	ctxt->ops->set_rflags(ctxt, ctxt->eflags);
++
+ 	/*
+ 	 * Now load segment descriptors. If fault happenes at this stage
+ 	 * it is handled in a context of new task
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index ab39d84dee00..53efd597f39e 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -1354,7 +1354,11 @@ static unsigned long svm_get_rflags(struct kvm_vcpu *vcpu)
+ 
+ static void svm_set_rflags(struct kvm_vcpu *vcpu, unsigned long rflags)
+ {
++	unsigned long old_rflags = to_svm(vcpu)->vmcb->save.rflags;
++
+ 	to_svm(vcpu)->vmcb->save.rflags = rflags;
++	if ((old_rflags ^ rflags) & X86_EFLAGS_VM)
++		svm_update_cpl(vcpu);
+ }
+ 
+ static void svm_cache_reg(struct kvm_vcpu *vcpu, enum kvm_reg reg)
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 490a1b1a255f..03a1fd47a6d3 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -4129,6 +4129,11 @@ static int emulator_set_cr(struct x86_emulate_ctxt *ctxt, int cr, ulong val)
+ 	return res;
+ }
+ 
++static void emulator_set_rflags(struct x86_emulate_ctxt *ctxt, ulong val)
++{
++	kvm_set_rflags(emul_to_vcpu(ctxt), val);
++}
++
+ static int emulator_get_cpl(struct x86_emulate_ctxt *ctxt)
+ {
+ 	return kvm_x86_ops->get_cpl(emul_to_vcpu(ctxt));
+@@ -4310,6 +4315,7 @@ static struct x86_emulate_ops emulate_ops = {
+ 	.set_idt	     = emulator_set_idt,
+ 	.get_cr              = emulator_get_cr,
+ 	.set_cr              = emulator_set_cr,
++	.set_rflags          = emulator_set_rflags,
+ 	.cpl                 = emulator_get_cpl,
+ 	.get_dr              = emulator_get_dr,
+ 	.set_dr              = emulator_set_dr,
+

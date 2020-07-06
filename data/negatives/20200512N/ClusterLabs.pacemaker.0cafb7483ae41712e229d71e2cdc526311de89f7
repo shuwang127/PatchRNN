@@ -1,0 +1,281 @@
+commit 0cafb7483ae41712e229d71e2cdc526311de89f7
+Author: Andrew Beekhof <andrew@beekhof.net>
+Date:   Wed Mar 4 15:44:26 2009 +0100
+
+    High: PE: Bug LF#2087 - Correctly parse the state of anonymous clones that have multiple instances on a given node
+    
+    Mercurial revision: bfd844e1daf6e924a895b92e0f8ea3485eac4260
+
+diff --git a/lib/pengine/clone.c b/lib/pengine/clone.c
+index fd70629b4..09d47d517 100644
+--- a/lib/pengine/clone.c
++++ b/lib/pengine/clone.c
+@@ -31,7 +31,7 @@ void clone_create_notifications(
+ 	resource_t *rsc, action_t *action, action_t *action_complete,
+ 	pe_working_set_t *data_set);
+ void force_non_unique_clone(resource_t *rsc, const char *rid, pe_working_set_t *data_set);
+-gboolean create_child_clone(resource_t *rsc, int sub_id, pe_working_set_t *data_set);
++resource_t *create_child_clone(resource_t *rsc, int sub_id, pe_working_set_t *data_set);
+ 
+ static void mark_as_orphan(resource_t *rsc) 
+ {
+@@ -70,10 +70,9 @@ void force_non_unique_clone(resource_t *rsc, const char *rid, pe_working_set_t *
+     }
+ }
+ 
+-gboolean
++resource_t *
+ create_child_clone(resource_t *rsc, int sub_id, pe_working_set_t *data_set) 
+ {
+-	gboolean rc = TRUE;
+ 	gboolean as_orphan = FALSE;
+ 	char *inc_num = NULL;
+ 	char *inc_max = NULL;
+@@ -99,6 +98,7 @@ create_child_clone(resource_t *rsc, int sub_id, pe_working_set_t *data_set)
+ 			 rsc, data_set) == FALSE) {
+ 		pe_err("Failed unpacking resource %s",
+ 		       crm_element_value(child_copy, XML_ATTR_ID));
++		child_rsc = NULL;
+ 		goto bail;
+ 	}
+ /* 	child_rsc->globally_unique = rsc->globally_unique; */
+@@ -118,7 +118,7 @@ create_child_clone(resource_t *rsc, int sub_id, pe_working_set_t *data_set)
+ 	crm_free(inc_num);
+ 	crm_free(inc_max);
+ 	
+-	return rc;
++	return child_rsc;
+ }
+ 
+ gboolean master_unpack(resource_t *rsc, pe_working_set_t *data_set)
+@@ -323,7 +323,7 @@ void clone_print(
+ 		child_rsc, resource_t, rsc->children, lpc,
+ 
+ 		if(is_set(child_rsc->flags, pe_rsc_orphan)
+-		   && child_rsc->fns->active(child_rsc, TRUE) == FALSE) {
++		   && child_rsc->fns->active(child_rsc, FALSE) == FALSE) {
+ 		    continue;
+ 		}
+ 		
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 378c8a10a..15a2918c5 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -611,10 +611,10 @@ determine_online_status(
+ #define set_char(x) last_rsc_id[lpc] = x; complete = TRUE;
+ 
+ static char *
+-clone_zero(char *last_rsc_id)
++clone_zero(const char *last_rsc_id)
+ {
+     int lpc = 0;
+-    char *tmp = NULL;
++    char *zero = NULL;
+ 
+     CRM_CHECK(last_rsc_id != NULL, return NULL);
+     if(last_rsc_id != NULL) {
+@@ -638,13 +638,12 @@ clone_zero(char *last_rsc_id)
+ 	    case '9':
+ 		break;
+ 	    case ':':
+-		tmp = last_rsc_id;
+-		crm_malloc0(last_rsc_id, lpc + 3);
+-		memcpy(last_rsc_id, tmp, lpc);		
+-		last_rsc_id[lpc] = ':';
+-		last_rsc_id[lpc+1] = '0';
+-		last_rsc_id[lpc+2] = 0;
+-		return last_rsc_id;
++		crm_malloc0(zero, lpc + 3);
++		memcpy(zero, last_rsc_id, lpc);		
++		zero[lpc] = ':';
++		zero[lpc+1] = '0';
++		zero[lpc+2] = 0;
++		return zero;
+ 	}
+     }
+     return NULL;
+@@ -736,7 +735,97 @@ create_fake_resource(const char *rsc_id, xmlNode *rsc_entry, pe_working_set_t *d
+ 	return rsc;
+ }
+ 
+-extern gboolean create_child_clone(resource_t *rsc, int sub_id, pe_working_set_t *data_set);
++extern resource_t *create_child_clone(resource_t *rsc, int sub_id, pe_working_set_t *data_set);
++
++static resource_t *find_child_on(
++    resource_t *rsc, node_t *node, const char *base, gboolean current, gboolean allow_inactive) 
++{
++    if(rsc->children) {
++	slist_iter(child, resource_t, rsc->children, lpc,
++		   resource_t *match = find_child_on(child, node, base, current, allow_inactive);
++		   if(match) {
++		       return match;
++		   }
++	    );
++
++    } else if(base && strstr(rsc->id, base) == NULL) {
++	return NULL;
++	
++    } else if(current && rsc->running_on) {
++	slist_iter(loc, node_t, rsc->running_on, lpc,
++		   if(loc->details == node->details) {
++		       return rsc;
++		   });
++	
++    } else if(current == FALSE && rsc->allocated_to->details == node->details) {
++	return rsc;
++
++    } else if(rsc->running_on == NULL && allow_inactive) {
++	return rsc;
++    }
++    
++    return NULL;
++}
++
++
++static resource_t *find_clone(pe_working_set_t *data_set, node_t *node, resource_t *parent, const char *rsc_id) 
++{
++    int len = 0;
++    resource_t *rsc = NULL;
++    char *base = clone_zero(rsc_id);
++    char *alt_rsc_id = crm_strdup(rsc_id);
++
++    CRM_ASSERT(parent != NULL);
++    CRM_ASSERT(parent->variant == pe_clone || parent->variant == pe_master);
++
++	if(base) {
++	    len = strlen(base);
++	}
++	if(len > 0) {
++	    base[len-1] = 0;
++	}
++	
++    
++    if(is_set(parent->flags, pe_rsc_unique)) {
++	rsc = pe_find_resource(data_set->resources, rsc_id);
++
++    } else {
++	rsc = find_child_on(parent, node, base, TRUE, FALSE);
++	if(rsc != NULL && rsc->running_on) {
++	    resource_t *top = create_child_clone(parent, -1, data_set);
++	    rsc = find_child_on(top, node, base, TRUE, TRUE);
++	}
++	
++	while(rsc == NULL) {
++	    rsc = pe_find_resource(data_set->resources, alt_rsc_id);
++	    if(rsc == NULL) {
++		break;
++
++	    } else if(rsc->running_on == NULL) {
++		break;
++	    }
++	    alt_rsc_id = increment_clone(alt_rsc_id);
++	}
++    }
++	
++    if(rsc == NULL) {
++	/* Create an extra orphan */
++	resource_t *top = create_child_clone(parent, -1, data_set);
++	rsc = find_child_on(top, node, base, TRUE, TRUE);
++    }
++
++    crm_free(rsc->clone_name); rsc->clone_name = NULL;
++    if(safe_str_neq(rsc_id, rsc->id)) {
++	crm_info("Internally renamed %s on %s to %s%s",
++		 rsc_id, node->details->uname, rsc->id,
++		 is_set(rsc->flags, pe_rsc_orphan)?" (ORPHAN)":"");
++	rsc->clone_name = crm_strdup(rsc_id);
++    }
++    
++    crm_free(alt_rsc_id);
++    crm_free(base);
++    return rsc;
++}
+ 
+ static resource_t *
+ unpack_find_resource(
+@@ -746,66 +835,29 @@ unpack_find_resource(
+ 	resource_t *clone_parent = NULL;
+ 	char *alt_rsc_id = crm_strdup(rsc_id);
+ 	
+-	while(rsc == NULL) {
+-		crm_debug_3("looking for: %s", alt_rsc_id);
++	crm_debug_2("looking for %s", rsc_id);
+ 		
+-		rsc = pe_find_resource(data_set->resources, alt_rsc_id);
+-		/* no match */
+-		if(rsc == NULL) {
+-		    if(clone_parent == NULL) {
+-			/* Even when clone-max=0, we still create a single :0 orphan to match against */
+-			char *tmp = clone_zero(alt_rsc_id);
+-			resource_t *clone0 = pe_find_resource(data_set->resources, tmp);
+-			clone_parent = uber_parent(clone0);
+-			crm_free(tmp);
+-		    }
+-
+-		    crm_debug_2("%s not found: %s", alt_rsc_id, clone_parent?clone_parent->id:"orphan");
+-		    if(clone_parent && clone_parent->variant > pe_group) {
+-			/* Create an extra orphan */
+-			create_child_clone(clone_parent, -1, data_set);
++	rsc = pe_find_resource(data_set->resources, alt_rsc_id);
++	/* no match */
++	if(rsc == NULL) {
++	    /* Even when clone-max=0, we still create a single :0 orphan to match against */
++	    char *tmp = clone_zero(alt_rsc_id);
++	    resource_t *clone0 = pe_find_resource(data_set->resources, tmp);
++	    clone_parent = uber_parent(clone0);
++	    crm_free(tmp);
++	    
++	    crm_debug_2("%s not found: %s", alt_rsc_id, clone_parent?clone_parent->id:"orphan");
+ 
+-		    } else {
+-			break;
+-		    }
+-			
+-			/* not running anywhere else */
+-		} else if(rsc->running_on == NULL) {
+-			crm_debug_3("not active yet");
+-			break;
+-			
+-			/* always unique */
+-		} else if(is_set(rsc->flags, pe_rsc_unique)) {
+-			crm_debug_3("unique");
+-			break;
+-			
+-			/* running somewhere already but we dont care
+-			 *   find another clone instead
+-			 */
+-		} else {
+-			if(clone_parent == NULL) {
+-			    clone_parent = uber_parent(rsc);
+-			}
+-			
+-			if(clone_parent && clone_parent->variant > pe_group) {
+-			    /* find another one */
+-			    alt_rsc_id = increment_clone(alt_rsc_id);
+-			    rsc = NULL;
+-			}
+-		}
++	} else {
++	    clone_parent = uber_parent(rsc);
+ 	}
+-	crm_free(alt_rsc_id);
+-	if(rsc != NULL) {
+-		crm_free(rsc->clone_name);
+-		rsc->clone_name = NULL;
+-		if(clone_parent && clone_parent->variant > pe_group) {
+-			crm_info("Internally renamed %s on %s to %s",
+-				 rsc_id, node->details->uname, rsc->id);
+-			rsc->clone_name = crm_strdup(rsc_id);
+-		}
++
++	if(clone_parent && clone_parent->variant > pe_group) {
++	    rsc = find_clone(data_set, node, clone_parent, rsc_id);
++	    CRM_ASSERT(rsc != NULL);
+ 	}
+ 	
+-	
++	crm_free(alt_rsc_id);
+ 	return rsc;
+ }
+ 
+

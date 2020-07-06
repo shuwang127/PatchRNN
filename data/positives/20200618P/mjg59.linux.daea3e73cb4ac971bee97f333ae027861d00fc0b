@@ -1,0 +1,115 @@
+commit daea3e73cb4ac971bee97f333ae027861d00fc0b
+Author: Avi Kivity <avi@redhat.com>
+Date:   Mon Mar 15 13:59:54 2010 +0200
+
+    KVM: Make locked operations truly atomic
+    
+    Once upon a time, locked operations were emulated while holding the mmu mutex.
+    Since mmu pages were write protected, it was safe to emulate the writes in
+    a non-atomic manner, since there could be no other writer, either in the
+    guest or in the kernel.
+    
+    These days emulation takes place without holding the mmu spinlock, so the
+    write could be preempted by an unshadowing event, which exposes the page
+    to writes by the guest.  This may cause corruption of guest page tables.
+    
+    Fix by using an atomic cmpxchg for these operations.
+    
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 7a8fe9051ecf..855f3ea9edd1 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -3291,41 +3291,68 @@ int emulator_write_emulated(unsigned long addr,
+ }
+ EXPORT_SYMBOL_GPL(emulator_write_emulated);
+ 
++#define CMPXCHG_TYPE(t, ptr, old, new) \
++	(cmpxchg((t *)(ptr), *(t *)(old), *(t *)(new)) == *(t *)(old))
++
++#ifdef CONFIG_X86_64
++#  define CMPXCHG64(ptr, old, new) CMPXCHG_TYPE(u64, ptr, old, new)
++#else
++#  define CMPXCHG64(ptr, old, new) \
++	(cmpxchg64((u64 *)(ptr), *(u64 *)(old), *(u *)(new)) == *(u64 *)(old))
++#endif
++
+ static int emulator_cmpxchg_emulated(unsigned long addr,
+ 				     const void *old,
+ 				     const void *new,
+ 				     unsigned int bytes,
+ 				     struct kvm_vcpu *vcpu)
+ {
+-	printk_once(KERN_WARNING "kvm: emulating exchange as write\n");
+-#ifndef CONFIG_X86_64
+-	/* guests cmpxchg8b have to be emulated atomically */
+-	if (bytes == 8) {
+-		gpa_t gpa;
+-		struct page *page;
+-		char *kaddr;
+-		u64 val;
++	gpa_t gpa;
++	struct page *page;
++	char *kaddr;
++	bool exchanged;
+ 
+-		gpa = kvm_mmu_gva_to_gpa_write(vcpu, addr, NULL);
++	/* guests cmpxchg8b have to be emulated atomically */
++	if (bytes > 8 || (bytes & (bytes - 1)))
++		goto emul_write;
+ 
+-		if (gpa == UNMAPPED_GVA ||
+-		   (gpa & PAGE_MASK) == APIC_DEFAULT_PHYS_BASE)
+-			goto emul_write;
++	gpa = kvm_mmu_gva_to_gpa_write(vcpu, addr, NULL);
+ 
+-		if (((gpa + bytes - 1) & PAGE_MASK) != (gpa & PAGE_MASK))
+-			goto emul_write;
++	if (gpa == UNMAPPED_GVA ||
++	    (gpa & PAGE_MASK) == APIC_DEFAULT_PHYS_BASE)
++		goto emul_write;
+ 
+-		val = *(u64 *)new;
++	if (((gpa + bytes - 1) & PAGE_MASK) != (gpa & PAGE_MASK))
++		goto emul_write;
+ 
+-		page = gfn_to_page(vcpu->kvm, gpa >> PAGE_SHIFT);
++	page = gfn_to_page(vcpu->kvm, gpa >> PAGE_SHIFT);
+ 
+-		kaddr = kmap_atomic(page, KM_USER0);
+-		set_64bit((u64 *)(kaddr + offset_in_page(gpa)), val);
+-		kunmap_atomic(kaddr, KM_USER0);
+-		kvm_release_page_dirty(page);
++	kaddr = kmap_atomic(page, KM_USER0);
++	kaddr += offset_in_page(gpa);
++	switch (bytes) {
++	case 1:
++		exchanged = CMPXCHG_TYPE(u8, kaddr, old, new);
++		break;
++	case 2:
++		exchanged = CMPXCHG_TYPE(u16, kaddr, old, new);
++		break;
++	case 4:
++		exchanged = CMPXCHG_TYPE(u32, kaddr, old, new);
++		break;
++	case 8:
++		exchanged = CMPXCHG64(kaddr, old, new);
++		break;
++	default:
++		BUG();
+ 	}
++	kunmap_atomic(kaddr, KM_USER0);
++	kvm_release_page_dirty(page);
++
++	if (!exchanged)
++		return X86EMUL_CMPXCHG_FAILED;
++
+ emul_write:
+-#endif
++	printk_once(KERN_WARNING "kvm: emulating exchange as write\n");
+ 
+ 	return emulator_write_emulated(addr, new, bytes, vcpu);
+ }
+

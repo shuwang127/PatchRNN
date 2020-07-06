@@ -1,0 +1,78 @@
+commit 28f20d2ff487aa589643d8f70eaf614b78839685
+Author: Giorgio Vazzana <mywing81@gmail.com>
+Date:   Fri May 8 17:25:15 2015 +0200
+
+    lavd/v4l2: produce a 0 byte packet when a dequeued buffer is flagged with V4L2_BUF_FLAG_ERROR
+    
+    Fixes ticket #4030.
+    
+    Signed-off-by: Michael Niedermayer <michaelni@gmx.at>
+
+diff --git a/libavdevice/v4l2.c b/libavdevice/v4l2.c
+index ba7cd41dca..76f7c4ed1e 100644
+--- a/libavdevice/v4l2.c
++++ b/libavdevice/v4l2.c
+@@ -499,13 +499,14 @@ static int mmap_read_frame(AVFormatContext *ctx, AVPacket *pkt)
+     };
+     int res;
+ 
++    pkt->size = 0;
++
+     /* FIXME: Some special treatment might be needed in case of loss of signal... */
+     while ((res = v4l2_ioctl(s->fd, VIDIOC_DQBUF, &buf)) < 0 && (errno == EINTR));
+     if (res < 0) {
+-        if (errno == EAGAIN) {
+-            pkt->size = 0;
++        if (errno == EAGAIN)
+             return AVERROR(EAGAIN);
+-        }
++
+         res = AVERROR(errno);
+         av_log(ctx, AV_LOG_ERROR, "ioctl(VIDIOC_DQBUF): %s\n",
+                av_err2str(res));
+@@ -520,18 +521,24 @@ static int mmap_read_frame(AVFormatContext *ctx, AVPacket *pkt)
+     // always keep at least one buffer queued
+     av_assert0(avpriv_atomic_int_get(&s->buffers_queued) >= 1);
+ 
+-    /* CPIA is a compressed format and we don't know the exact number of bytes
+-     * used by a frame, so set it here as the driver announces it.
+-     */
+-    if (ctx->video_codec_id == AV_CODEC_ID_CPIA)
+-        s->frame_size = buf.bytesused;
++    if (buf.flags & V4L2_BUF_FLAG_ERROR) {
++        av_log(ctx, AV_LOG_WARNING,
++               "Dequeued v4l2 buffer contains corrupted data (%d bytes).\n",
++               buf.bytesused);
++        buf.bytesused = 0;
++    } else {
++        /* CPIA is a compressed format and we don't know the exact number of bytes
++         * used by a frame, so set it here as the driver announces it. */
++        if (ctx->video_codec_id == AV_CODEC_ID_CPIA)
++            s->frame_size = buf.bytesused;
+ 
+-    if (s->frame_size > 0 && buf.bytesused != s->frame_size) {
+-        av_log(ctx, AV_LOG_ERROR,
+-               "The v4l2 frame is %d bytes, but %d bytes are expected. Flags: 0x%08X\n",
+-               buf.bytesused, s->frame_size, buf.flags);
+-        enqueue_buffer(s, &buf);
+-        return AVERROR_INVALIDDATA;
++        if (s->frame_size > 0 && buf.bytesused != s->frame_size) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "Dequeued v4l2 buffer contains %d bytes, but %d were expected. Flags: 0x%08X.\n",
++                   buf.bytesused, s->frame_size, buf.flags);
++            enqueue_buffer(s, &buf);
++            return AVERROR_INVALIDDATA;
++        }
+     }
+ 
+     /* Image is at s->buff_start[buf.index] */
+@@ -586,7 +593,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
+     pkt->pts = buf.timestamp.tv_sec * INT64_C(1000000) + buf.timestamp.tv_usec;
+     convert_timestamp(ctx, &pkt->pts);
+ 
+-    return s->buf_len[buf.index];
++    return pkt->size;
+ }
+ 
+ static int mmap_start(AVFormatContext *ctx)
+

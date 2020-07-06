@@ -1,0 +1,123 @@
+commit e8bb4beb2b1f90d499134f2849727ed04c3bedc4
+Author: Roland Dreier <rolandd@cisco.com>
+Date:   Tue Jul 22 14:20:05 2008 -0700
+
+    IB/mthca: Keep free count for MTT buddy allocator
+    
+    MTT entries are allocated with a buddy allocator, which just keeps
+    bitmaps for each level of the buddy table.  However, all free space
+    starts out at the highest order, and small allocations start scanning
+    from the lowest order.  When the lowest order tables have no free
+    space, this can lead to scanning potentially millions of bits before
+    finding a free entry at a higher order.
+    
+    We can avoid this by just keeping a count of how many free entries
+    each order has, and skipping the bitmap scan when an order is
+    completely empty.  This provides a nice performance boost for a
+    negligible increase in memory usage.
+    
+    Signed-off-by: Roland Dreier <rolandd@cisco.com>
+
+diff --git a/drivers/infiniband/hw/mthca/mthca_dev.h b/drivers/infiniband/hw/mthca/mthca_dev.h
+index ee4d073c889f..252590116df5 100644
+--- a/drivers/infiniband/hw/mthca/mthca_dev.h
++++ b/drivers/infiniband/hw/mthca/mthca_dev.h
+@@ -202,6 +202,7 @@ struct mthca_pd_table {
+ 
+ struct mthca_buddy {
+ 	unsigned long **bits;
++	int	       *num_free;
+ 	int             max_order;
+ 	spinlock_t      lock;
+ };
+diff --git a/drivers/infiniband/hw/mthca/mthca_mr.c b/drivers/infiniband/hw/mthca/mthca_mr.c
+index 8489b1e81c0f..882e6b735915 100644
+--- a/drivers/infiniband/hw/mthca/mthca_mr.c
++++ b/drivers/infiniband/hw/mthca/mthca_mr.c
+@@ -89,23 +89,26 @@ static u32 mthca_buddy_alloc(struct mthca_buddy *buddy, int order)
+ 
+ 	spin_lock(&buddy->lock);
+ 
+-	for (o = order; o <= buddy->max_order; ++o) {
+-		m = 1 << (buddy->max_order - o);
+-		seg = find_first_bit(buddy->bits[o], m);
+-		if (seg < m)
+-			goto found;
+-	}
++	for (o = order; o <= buddy->max_order; ++o)
++		if (buddy->num_free[o]) {
++			m = 1 << (buddy->max_order - o);
++			seg = find_first_bit(buddy->bits[o], m);
++			if (seg < m)
++				goto found;
++		}
+ 
+ 	spin_unlock(&buddy->lock);
+ 	return -1;
+ 
+  found:
+ 	clear_bit(seg, buddy->bits[o]);
++	--buddy->num_free[o];
+ 
+ 	while (o > order) {
+ 		--o;
+ 		seg <<= 1;
+ 		set_bit(seg ^ 1, buddy->bits[o]);
++		++buddy->num_free[o];
+ 	}
+ 
+ 	spin_unlock(&buddy->lock);
+@@ -123,11 +126,13 @@ static void mthca_buddy_free(struct mthca_buddy *buddy, u32 seg, int order)
+ 
+ 	while (test_bit(seg ^ 1, buddy->bits[order])) {
+ 		clear_bit(seg ^ 1, buddy->bits[order]);
++		--buddy->num_free[order];
+ 		seg >>= 1;
+ 		++order;
+ 	}
+ 
+ 	set_bit(seg, buddy->bits[order]);
++	++buddy->num_free[order];
+ 
+ 	spin_unlock(&buddy->lock);
+ }
+@@ -141,7 +146,9 @@ static int mthca_buddy_init(struct mthca_buddy *buddy, int max_order)
+ 
+ 	buddy->bits = kzalloc((buddy->max_order + 1) * sizeof (long *),
+ 			      GFP_KERNEL);
+-	if (!buddy->bits)
++	buddy->num_free = kzalloc((buddy->max_order + 1) * sizeof (int *),
++				  GFP_KERNEL);
++	if (!buddy->bits || !buddy->num_free)
+ 		goto err_out;
+ 
+ 	for (i = 0; i <= buddy->max_order; ++i) {
+@@ -154,6 +161,7 @@ static int mthca_buddy_init(struct mthca_buddy *buddy, int max_order)
+ 	}
+ 
+ 	set_bit(0, buddy->bits[buddy->max_order]);
++	buddy->num_free[buddy->max_order] = 1;
+ 
+ 	return 0;
+ 
+@@ -161,9 +169,10 @@ err_out_free:
+ 	for (i = 0; i <= buddy->max_order; ++i)
+ 		kfree(buddy->bits[i]);
+ 
++err_out:
+ 	kfree(buddy->bits);
++	kfree(buddy->num_free);
+ 
+-err_out:
+ 	return -ENOMEM;
+ }
+ 
+@@ -175,6 +184,7 @@ static void mthca_buddy_cleanup(struct mthca_buddy *buddy)
+ 		kfree(buddy->bits[i]);
+ 
+ 	kfree(buddy->bits);
++	kfree(buddy->num_free);
+ }
+ 
+ static u32 mthca_alloc_mtt_range(struct mthca_dev *dev, int order,
+

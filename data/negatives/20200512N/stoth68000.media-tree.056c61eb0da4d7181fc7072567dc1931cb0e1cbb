@@ -1,0 +1,76 @@
+commit 056c61eb0da4d7181fc7072567dc1931cb0e1cbb
+Author: Sylwester Nawrocki <s.nawrocki@samsung.com>
+Date:   Tue Sep 13 11:39:33 2016 -0300
+
+    [media] exynos4-is: Clear isp-i2c adapter power.ignore_children flag
+    
+    Since commit 04f59143b571161d25315dd52d7a2ecc022cb71a
+    ("i2c: let I2C masters ignore their children for PM")
+    the power.ignore_children flag is set when registering an I2C
+    adapter.  Since I2C transfers are not managed by the fimc-isp-i2c
+    driver its clients use pm_runtime_* calls directly to communicate
+    required power state of the bus controller.
+    
+    However, when the power.ignore_children flag is set that doesn't
+    work, so clear that flag back after registering the adapter.
+    While at it drop pm_runtime_enable() call on the i2c_adapter
+    as it is already done by the I2C subsystem when registering
+    I2C adapter.
+    
+    This patch is meant as a minimal change to fix the regression,
+    eventually the I2C_ISPx clock handling will be moved to the
+    top level fimc-is driver and whole runtime PM code is going to
+    be dropped from the fimc-is-i2c module.
+    
+    Cc: <stable@vger.kernel.org> # 4.7+
+    Reported-by: Marek Szyprowski <m.szyprowski@samsung.com>
+    Signed-off-by: Sylwester Nawrocki <s.nawrocki@samsung.com>
+    Reviewed-by: Bartlomiej Zolnierkiewicz <b.zolnierkie@samsung.com>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+
+diff --git a/drivers/media/platform/exynos4-is/fimc-is-i2c.c b/drivers/media/platform/exynos4-is/fimc-is-i2c.c
+index fd888ef447a9..6bba4ca022be 100644
+--- a/drivers/media/platform/exynos4-is/fimc-is-i2c.c
++++ b/drivers/media/platform/exynos4-is/fimc-is-i2c.c
+@@ -55,23 +55,33 @@ static int fimc_is_i2c_probe(struct platform_device *pdev)
+ 	i2c_adap->algo = &fimc_is_i2c_algorithm;
+ 	i2c_adap->class = I2C_CLASS_SPD;
+ 
+-	ret = i2c_add_adapter(i2c_adap);
+-	if (ret < 0)
+-		return ret;
+-
+ 	platform_set_drvdata(pdev, isp_i2c);
+-
+ 	pm_runtime_enable(&pdev->dev);
+-	pm_runtime_enable(&i2c_adap->dev);
+ 
++	ret = i2c_add_adapter(i2c_adap);
++	if (ret < 0)
++		goto err_pm_dis;
++	/*
++	 * Client drivers of this adapter don't do any I2C transfers as that
++	 * is handled by the ISP firmware.  But we rely on the runtime PM
++	 * state propagation from the clients up to the adapter driver so
++	 * clear the ignore_children flags here.  PM rutnime calls are not
++	 * used in probe() handler of clients of this adapter so there is
++	 * no issues with clearing the flag right after registering the I2C
++	 * adapter.
++	 */
++	pm_suspend_ignore_children(&i2c_adap->dev, false);
+ 	return 0;
++
++err_pm_dis:
++	pm_runtime_disable(&pdev->dev);
++	return ret;
+ }
+ 
+ static int fimc_is_i2c_remove(struct platform_device *pdev)
+ {
+ 	struct fimc_is_i2c *isp_i2c = platform_get_drvdata(pdev);
+ 
+-	pm_runtime_disable(&isp_i2c->adapter.dev);
+ 	pm_runtime_disable(&pdev->dev);
+ 	i2c_del_adapter(&isp_i2c->adapter);
+ 
+

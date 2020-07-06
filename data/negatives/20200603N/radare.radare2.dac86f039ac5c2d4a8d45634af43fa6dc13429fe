@@ -1,0 +1,90 @@
+commit dac86f039ac5c2d4a8d45634af43fa6dc13429fe
+Author: pancake <pancake@nopcode.org>
+Date:   Wed Jun 28 02:21:16 2017 +0200
+
+    Fix visual cursor, invert V|| offset and fix so-1
+
+diff --git a/libr/core/visual.c b/libr/core/visual.c
+index 30f5ab78b..3a3c5696e 100644
+--- a/libr/core/visual.c
++++ b/libr/core/visual.c
+@@ -1212,7 +1212,7 @@ static void cursor_prevrow(RCore *core, bool use_ocur) {
+ 	if (PIDX == 7 || !strcmp ("prc", r_config_get (core->config, "cmd.visual"))) {
+ 		int cols = r_config_get_i (core->config, "hex.cols") + r_config_get_i (core->config, "hex.pcols");
+ 		cols /= 2;
+-		p->cur -= cols > 0? cols: 0;
++		p->cur -= R_MAX (cols, 0);
+ 		return;
+ 	}
+ 	if (PIDX == 2 && core->seltab == 1) {
+@@ -1259,7 +1259,15 @@ static void cursor_prevrow(RCore *core, bool use_ocur) {
+ 		} else {
+ 			prev_sz = roff - prev_roff;
+ 		}
+-		p->cur = prev_roff + R_MIN (delta, prev_sz - 1);
++		int res = R_MIN (delta, prev_sz - 1);
++		ut64 cur = prev_roff + res;
++		if (cur == p->cur) {
++			if (p->cur > 0) {
++				p->cur--;
++			}
++		} else {
++			p->cur = prev_roff + delta; //res;
++		}
+ 	} else {
+ 		p->cur -= p->cols;
+ 	}
+@@ -2673,6 +2681,7 @@ static void visual_refresh(RCore *core) {
+ 	r_cons_print_clear ();
+ 
+ 	vi = r_config_get (core->config, "cmd.cprompt");
++	bool ce = core->print->cur_enabled;
+ 	if (vi && *vi) {
+ 		// XXX: slow
+ 		core->cons->blankline = false;
+@@ -2692,6 +2701,7 @@ static void visual_refresh(RCore *core) {
+ 				r_cons_flush ();
+ 				if (!strncmp (vi, "p=", 2) && core->print->cur_enabled) {
+ 					oseek = core->offset;
++					core->print->cur_enabled = false;
+ 					r_core_seek (core, core->num->value, 1);
+ 				} else {
+ 					oseek = UT64_MAX;
+@@ -2711,8 +2721,6 @@ static void visual_refresh(RCore *core) {
+ 		}
+ 		r_core_visual_title (core, color);
+ 	}
+-	bool ce = core->print->cur_enabled;
+-	core->print->cur_enabled = false;
+ 
+ 	vcmd = r_config_get (core->config, "cmd.visual");
+ 	if (vcmd && *vcmd) {
+diff --git a/libr/util/print.c b/libr/util/print.c
+index 6cb42a428..4cfee953d 100644
+--- a/libr/util/print.c
++++ b/libr/util/print.c
+@@ -1333,17 +1333,19 @@ R_API void r_print_fill(RPrint *p, const ut8 *arr, int size, ut64 addr, int step
+ 		ut8 next = (i + 1 < size)? arr[i + 1]: 0;
+ 		int base = 0;
+ 		if (addr != UT64_MAX && step > 0) {
++			ut64 at = addr + (i * step);
+ 			if (p->cur_enabled) {
+ 				if (i == p->cur) {
+-					p->cb_printf ("> ");
++					p->cb_printf (Color_INVERT"> 0x%08" PFMT64x " "Color_RESET, at);
+ 					if (p->num) {
+-						p->num->value = addr + (i * step);
++						p->num->value = at;
+ 					}
+ 				} else {
+-					p->cb_printf ("  ");
++					p->cb_printf ("  0x%08" PFMT64x " ", at);
+ 				}
++			} else {
++				p->cb_printf ("0x%08" PFMT64x " ", at);
+ 			}
+-			p->cb_printf ("0x%08" PFMT64x " ", addr + (i * step));
+ 			p->cb_printf ("%02x %04x |", i, arr[i]);
+ 		} else {
+ 			p->cb_printf ("|");
+

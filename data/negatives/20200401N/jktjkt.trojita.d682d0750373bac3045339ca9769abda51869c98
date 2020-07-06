@@ -1,0 +1,46 @@
+commit d682d0750373bac3045339ca9769abda51869c98
+Author: Jan Kundrát <jkt@kde.org>
+Date:   Thu May 24 01:33:49 2018 +0200
+
+    GUI: Special handling for parts whose MIME structure failed to parse
+    
+    This is better than showing our internal fake MIME type.
+    
+    Change-Id: Ib0b21aeeebb1fefad0977657d5f3220d37d072e5
+
+diff --git a/src/Gui/AttachmentView.cpp b/src/Gui/AttachmentView.cpp
+index f0bbfd33..99cc1890 100644
+--- a/src/Gui/AttachmentView.cpp
++++ b/src/Gui/AttachmentView.cpp
+@@ -120,7 +120,14 @@ AttachmentView::AttachmentView(QWidget *parent, Imap::Network::MsgPartNetAccessM
+     QString mimeDescription = partIndex.data(Imap::Mailbox::RolePartMimeType).toString();
+     QString rawMime = mimeDescription;
+     QMimeType mimeType = QMimeDatabase().mimeTypeForName(mimeDescription);
+-    if (mimeType.isValid() && !mimeType.isDefault()) {
++    if (rawMime == QStringLiteral("application/x-trojita-malformed-part-from-imap-response")) {
++        mimeDescription = QString::fromUtf8(partIndex.data(Imap::Mailbox::RolePartBodyFldParam)
++                                            .value<Imap::Message::AbstractMessage::bodyFldParam_t>()
++                                            .value("x-trojita-original-mime-type"));
++        mimeDescription = tr("IMAP Server error for this part: %1 (%2)").arg(
++                    QMimeDatabase().mimeTypeForName(mimeDescription).comment(), mimeDescription);
++        m_icon->setIcon(UiUtils::loadIcon(QStringLiteral("emblem-warning")));
++    } else if (mimeType.isValid() && !mimeType.isDefault()) {
+         mimeDescription = mimeType.comment();
+         QIcon icon;
+         if (rawMime == QLatin1String("message/rfc822")) {
+diff --git a/src/UiUtils/PartWalker_impl.h b/src/UiUtils/PartWalker_impl.h
+index 87841fd9..3f61562c 100644
+--- a/src/UiUtils/PartWalker_impl.h
++++ b/src/UiUtils/PartWalker_impl.h
+@@ -88,8 +88,9 @@ Result PartWalker<Result, Context>::walk(const QModelIndex &partIndex,int recurs
+     const QByteArray contentDisposition = partIndex.data(Imap::Mailbox::RolePartBodyDisposition).toByteArray().toLower();
+     const bool isInline = (contentDisposition.isEmpty() || contentDisposition == "inline") && !(loadingMode & PART_IGNORE_INLINE);
+     const bool looksLikeAttachment = !partIndex.data(Imap::Mailbox::RolePartFileName).toString().isEmpty();
++    const bool isMimeParsingError = mimeType == QStringLiteral("application/x-trojita-malformed-part-from-imap-response");
+     const bool wrapInAttachmentView = !(loadingMode & PART_IGNORE_DISPOSITION_ATTACHMENT)
+-            && (looksLikeAttachment || !isInline || !recognizedMimeType || isDerivedMimeType || isMessageRfc822);
++            && (looksLikeAttachment || !isInline || !recognizedMimeType || isDerivedMimeType || isMessageRfc822 || isMimeParsingError);
+     if (wrapInAttachmentView) {
+         // The problem is that some nasty MUAs (hint hint Thunderbird) would
+         // happily attach a .tar.gz and call it "inline"
+

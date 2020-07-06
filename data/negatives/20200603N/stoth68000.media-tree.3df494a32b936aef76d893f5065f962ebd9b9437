@@ -1,0 +1,85 @@
+commit 3df494a32b936aef76d893f5065f962ebd9b9437
+Author: Rafael J. Wysocki <rjw@sisk.pl>
+Date:   Wed Dec 13 00:34:28 2006 -0800
+
+    [PATCH] PM: Fix freezing of stopped tasks
+    
+    Currently, if a task is stopped (ie.  it's in the TASK_STOPPED state), it
+    is considered by the freezer as unfreezeable.  However, there may be a race
+    between the freezer and the delivery of the continuation signal to the task
+    resulting in the task running after we have finished freezing the other
+    tasks.  This, in turn, may lead to undesirable effects up to and including
+    data corruption.
+    
+    To prevent this from happening we first need to make the freezer consider
+    stopped tasks as freezeable.  For this purpose we need to make freezeable()
+    stop returning 0 for these tasks and we need to force them to enter the
+    refrigerator.  However, if there's no continuation signal in the meantime,
+    the stopped tasks should remain stopped after all processes have been
+    thawed, so we need to send an additional SIGSTOP to each of them before
+    waking it up.
+    
+    Also, a stopped task that has just been woken up should first check if
+    there's a freezing request for it and go to the refrigerator if that's the
+    case.
+    
+    Signed-off-by: Rafael J. Wysocki <rjw@sisk.pl>
+    Acked-by: Pavel Machek <pavel@ucw.cz>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/kernel/power/process.c b/kernel/power/process.c
+index 99eeb119b06d..b9a32860bef3 100644
+--- a/kernel/power/process.c
++++ b/kernel/power/process.c
+@@ -28,8 +28,7 @@ static inline int freezeable(struct task_struct * p)
+ 	if ((p == current) || 
+ 	    (p->flags & PF_NOFREEZE) ||
+ 	    (p->exit_state == EXIT_ZOMBIE) ||
+-	    (p->exit_state == EXIT_DEAD) ||
+-	    (p->state == TASK_STOPPED))
++	    (p->exit_state == EXIT_DEAD))
+ 		return 0;
+ 	return 1;
+ }
+@@ -61,9 +60,12 @@ static inline void freeze_process(struct task_struct *p)
+ 	unsigned long flags;
+ 
+ 	if (!freezing(p)) {
++		if (p->state == TASK_STOPPED)
++			force_sig_specific(SIGSTOP, p);
++
+ 		freeze(p);
+ 		spin_lock_irqsave(&p->sighand->siglock, flags);
+-		signal_wake_up(p, 0);
++		signal_wake_up(p, p->state == TASK_STOPPED);
+ 		spin_unlock_irqrestore(&p->sighand->siglock, flags);
+ 	}
+ }
+@@ -103,9 +105,7 @@ static unsigned int try_to_freeze_tasks(int freeze_user_space)
+ 			if (frozen(p))
+ 				continue;
+ 
+-			if (p->state == TASK_TRACED &&
+-			    (frozen(p->parent) ||
+-			     p->parent->state == TASK_STOPPED)) {
++			if (p->state == TASK_TRACED && frozen(p->parent)) {
+ 				cancel_freezing(p);
+ 				continue;
+ 			}
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 1921ffdc5e77..5630255d2e2a 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -1705,7 +1705,9 @@ finish_stop(int stop_count)
+ 		read_unlock(&tasklist_lock);
+ 	}
+ 
+-	schedule();
++	do {
++		schedule();
++	} while (try_to_freeze());
+ 	/*
+ 	 * Now we don't run again until continued.
+ 	 */
+

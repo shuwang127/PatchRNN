@@ -1,0 +1,59 @@
+commit f1225ee4c8fcf09afaa199b8b1f0450f38b8cd11
+Author: Stefano Stabellini <sstabellini@kernel.org>
+Date:   Thu Jan 19 10:39:09 2017 -0800
+
+    swiotlb-xen: update dev_addr after swapping pages
+    
+    In xen_swiotlb_map_page and xen_swiotlb_map_sg_attrs, if the original
+    page is not suitable, we swap it for another page from the swiotlb
+    pool.
+    
+    In these cases, we don't update the previously calculated dma address
+    for the page before calling xen_dma_map_page. Thus, we end up calling
+    xen_dma_map_page passing the wrong dev_addr, resulting in
+    xen_dma_map_page mistakenly assuming that the page is foreign when it is
+    local.
+    
+    Fix the bug by updating dev_addr appropriately.
+    
+    This change has no effect on x86, because xen_dma_map_page is a stub
+    there.
+    
+    Signed-off-by: Stefano Stabellini <sstabellini@kernel.org>
+    Signed-off-by: Pooya Keshavarzi <Pooya.Keshavarzi@de.bosch.com>
+    Tested-by: Pooya Keshavarzi <Pooya.Keshavarzi@de.bosch.com>
+    Reviewed-by: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+    Signed-off-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+
+diff --git a/drivers/xen/swiotlb-xen.c b/drivers/xen/swiotlb-xen.c
+index f905d6eeb048..f8afc6dcc29f 100644
+--- a/drivers/xen/swiotlb-xen.c
++++ b/drivers/xen/swiotlb-xen.c
+@@ -414,9 +414,9 @@ dma_addr_t xen_swiotlb_map_page(struct device *dev, struct page *page,
+ 	if (map == SWIOTLB_MAP_ERROR)
+ 		return DMA_ERROR_CODE;
+ 
++	dev_addr = xen_phys_to_bus(map);
+ 	xen_dma_map_page(dev, pfn_to_page(map >> PAGE_SHIFT),
+ 					dev_addr, map & ~PAGE_MASK, size, dir, attrs);
+-	dev_addr = xen_phys_to_bus(map);
+ 
+ 	/*
+ 	 * Ensure that the address returned is DMA'ble
+@@ -575,13 +575,14 @@ xen_swiotlb_map_sg_attrs(struct device *hwdev, struct scatterlist *sgl,
+ 				sg_dma_len(sgl) = 0;
+ 				return 0;
+ 			}
++			dev_addr = xen_phys_to_bus(map);
+ 			xen_dma_map_page(hwdev, pfn_to_page(map >> PAGE_SHIFT),
+ 						dev_addr,
+ 						map & ~PAGE_MASK,
+ 						sg->length,
+ 						dir,
+ 						attrs);
+-			sg->dma_address = xen_phys_to_bus(map);
++			sg->dma_address = dev_addr;
+ 		} else {
+ 			/* we are not interested in the dma_addr returned by
+ 			 * xen_dma_map_page, only in the potential cache flushes executed
+

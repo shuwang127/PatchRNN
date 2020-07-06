@@ -1,0 +1,166 @@
+commit 43eab86167a0893e0e1102d4a5a1d95dfe442f8d
+Author: Archit Taneja <archit@ti.com>
+Date:   Mon Aug 13 12:24:53 2012 +0530
+
+    OMAPDSS: RFBI: Remove partial update support
+    
+    Partial update suppport was removed from DISPC and DSI sometime back. The RFBI
+    driver still tries to support partial update without the underlying support in
+    DISPC.
+    
+    Remove partial update support from RFBI, only support updates which span acros
+    the whole panel size. This also helps in DSI and RFBI having similar update
+    ops.
+    
+    Signed-off-by: Archit Taneja <archit@ti.com>
+
+diff --git a/drivers/video/omap2/displays/panel-n8x0.c b/drivers/video/omap2/displays/panel-n8x0.c
+index e6c115373c00..1d421b5ffae4 100644
+--- a/drivers/video/omap2/displays/panel-n8x0.c
++++ b/drivers/video/omap2/displays/panel-n8x0.c
+@@ -625,17 +625,25 @@ static int n8x0_panel_update(struct omap_dss_device *dssdev,
+ 		u16 x, u16 y, u16 w, u16 h)
+ {
+ 	struct panel_drv_data *ddata = get_drv_data(dssdev);
++	u16 dw, dh;
+ 
+ 	dev_dbg(&dssdev->dev, "update\n");
+ 
++	dw = dssdev->panel.timings.x_res;
++	dh = dssdev->panel.timings.y_res;
++
++	if (x != 0 || y != 0 || w != dw || h != dh) {
++		dev_err(&dssdev->dev, "invaid update region %d, %d, %d, %d\n",
++			x, y, w, h);
++		return -EINVAL;
++	}
++
+ 	mutex_lock(&ddata->lock);
+ 	rfbi_bus_lock();
+ 
+-	omap_rfbi_prepare_update(dssdev, &x, &y, &w, &h);
+-
+ 	blizzard_ctrl_setup_update(dssdev, x, y, w, h);
+ 
+-	omap_rfbi_update(dssdev, x, y, w, h, update_done, NULL);
++	omap_rfbi_update(dssdev, update_done, NULL);
+ 
+ 	mutex_unlock(&ddata->lock);
+ 
+diff --git a/drivers/video/omap2/dss/rfbi.c b/drivers/video/omap2/dss/rfbi.c
+index 7c087424b634..6bc264818edf 100644
+--- a/drivers/video/omap2/dss/rfbi.c
++++ b/drivers/video/omap2/dss/rfbi.c
+@@ -300,21 +300,24 @@ void omap_rfbi_write_pixels(const void __iomem *buf, int scr_width,
+ }
+ EXPORT_SYMBOL(omap_rfbi_write_pixels);
+ 
+-static int rfbi_transfer_area(struct omap_dss_device *dssdev, u16 width,
+-		u16 height, void (*callback)(void *data), void *data)
++static int rfbi_transfer_area(struct omap_dss_device *dssdev,
++		void (*callback)(void *data), void *data)
+ {
+ 	u32 l;
+ 	int r;
+-	struct omap_video_timings timings = {
+-		.hsw		= 1,
+-		.hfp		= 1,
+-		.hbp		= 1,
+-		.vsw		= 1,
+-		.vfp		= 0,
+-		.vbp		= 0,
+-		.x_res		= width,
+-		.y_res		= height,
+-	};
++	struct omap_video_timings timings;
++	u16 width, height;
++
++	dssdev->driver->get_resolution(dssdev, &width, &height);
++
++	timings.x_res = width;
++	timings.y_res = height;
++	timings.hsw = 1;
++	timings.hfp = 1;
++	timings.hbp = 1;
++	timings.vsw = 1;
++	timings.vfp = 0;
++	timings.vbp = 0;
+ 
+ 	/*BUG_ON(callback == 0);*/
+ 	BUG_ON(rfbi.framedone_callback != NULL);
+@@ -777,53 +780,10 @@ int omap_rfbi_configure(struct omap_dss_device *dssdev, int pixel_size,
+ }
+ EXPORT_SYMBOL(omap_rfbi_configure);
+ 
+-int omap_rfbi_prepare_update(struct omap_dss_device *dssdev,
+-		u16 *x, u16 *y, u16 *w, u16 *h)
+-{
+-	u16 dw, dh;
+-	struct omap_video_timings timings = {
+-		.hsw		= 1,
+-		.hfp		= 1,
+-		.hbp		= 1,
+-		.vsw		= 1,
+-		.vfp		= 0,
+-		.vbp		= 0,
+-		.x_res		= *w,
+-		.y_res		= *h,
+-	};
+-
+-	dssdev->driver->get_resolution(dssdev, &dw, &dh);
+-
+-	if  (*x > dw || *y > dh)
+-		return -EINVAL;
+-
+-	if (*x + *w > dw)
+-		return -EINVAL;
+-
+-	if (*y + *h > dh)
+-		return -EINVAL;
+-
+-	if (*w == 1)
+-		return -EINVAL;
+-
+-	if (*w == 0 || *h == 0)
+-		return -EINVAL;
+-
+-	dss_mgr_set_timings(dssdev->manager, &timings);
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL(omap_rfbi_prepare_update);
+-
+-int omap_rfbi_update(struct omap_dss_device *dssdev,
+-		u16 x, u16 y, u16 w, u16 h,
+-		void (*callback)(void *), void *data)
++int omap_rfbi_update(struct omap_dss_device *dssdev, void (*callback)(void *),
++		void *data)
+ {
+-	int r;
+-
+-	r = rfbi_transfer_area(dssdev, w, h, callback, data);
+-
+-	return r;
++	return rfbi_transfer_area(dssdev, callback, data);
+ }
+ EXPORT_SYMBOL(omap_rfbi_update);
+ 
+diff --git a/include/video/omapdss.h b/include/video/omapdss.h
+index a06a9ba3872d..b6b03cea8600 100644
+--- a/include/video/omapdss.h
++++ b/include/video/omapdss.h
+@@ -749,11 +749,8 @@ void omapdss_sdi_set_timings(struct omap_dss_device *dssdev,
+ 
+ int omapdss_rfbi_display_enable(struct omap_dss_device *dssdev);
+ void omapdss_rfbi_display_disable(struct omap_dss_device *dssdev);
+-int omap_rfbi_prepare_update(struct omap_dss_device *dssdev,
+-		u16 *x, u16 *y, u16 *w, u16 *h);
+-int omap_rfbi_update(struct omap_dss_device *dssdev,
+-		u16 x, u16 y, u16 w, u16 h,
+-		void (*callback)(void *), void *data);
++int omap_rfbi_update(struct omap_dss_device *dssdev, void (*callback)(void *),
++		void *data);
+ int omap_rfbi_configure(struct omap_dss_device *dssdev, int pixel_size,
+ 		int data_lines);
+ 
+

@@ -1,0 +1,48 @@
+commit 3c9267673e81d2f98b3d26cb64d8adb1e696a247
+Author: Ronald S. Bultje <rsbultje@gmail.com>
+Date:   Wed Mar 21 15:43:03 2012 -0700
+
+    wmalossless: error out if a subframe is not used by any channel.
+    
+    Prevents infinite loop because min_channel_len never increments.
+    
+    Found-by: Mateusz "j00ru" Jurczyk and Gynvael Coldwind
+    CC: libav-stable@libav.org
+
+diff --git a/libavcodec/wmalosslessdec.c b/libavcodec/wmalosslessdec.c
+index 5529079fe1..0ecf5dea3f 100644
+--- a/libavcodec/wmalosslessdec.c
++++ b/libavcodec/wmalosslessdec.c
+@@ -330,21 +330,28 @@ static int decode_tilehdr(WmallDecodeCtx *s)
+ 
+     /* loop until the frame data is split between the subframes */
+     do {
+-        int subframe_len;
++        int subframe_len, in_use = 0;
+ 
+         /* check which channels contain the subframe */
+         for (c = 0; c < s->num_channels; c++) {
+             if (num_samples[c] == min_channel_len) {
+                 if (fixed_channel_layout || channels_for_cur_subframe == 1 ||
+                    (min_channel_len == s->samples_per_frame - s->min_samples_per_subframe)) {
+-                    contains_subframe[c] = 1;
++                    contains_subframe[c] = in_use = 1;
+                 } else {
+-                    contains_subframe[c] = get_bits1(&s->gb);
++                    if (get_bits1(&s->gb))
++                        contains_subframe[c] = in_use = 1;
+                 }
+             } else
+                 contains_subframe[c] = 0;
+         }
+ 
++        if (!in_use) {
++            av_log(s->avctx, AV_LOG_ERROR,
++                   "Found empty subframe\n");
++            return AVERROR_INVALIDDATA;
++        }
++
+         /* get subframe length, subframe_len == 0 is not allowed */
+         if ((subframe_len = decode_subframe_length(s, min_channel_len)) <= 0)
+             return AVERROR_INVALIDDATA;
+

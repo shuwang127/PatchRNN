@@ -1,0 +1,37 @@
+commit 07a5d38453599052aff0877b16bb9c1585f08609
+Author: Francesco Ruggeri <fruggeri@aristanetworks.com>
+Date:   Wed Jan 6 00:18:48 2016 -0800
+
+    net: possible use after free in dst_release
+    
+    dst_release should not access dst->flags after decrementing
+    __refcnt to 0. The dst_entry may be in dst_busy_list and
+    dst_gc_task may dst_destroy it before dst_release gets a chance
+    to access dst->flags.
+    
+    Fixes: d69bbf88c8d0 ("net: fix a race in dst_release()")
+    Fixes: 27b75c95f10d ("net: avoid RCU for NOCACHE dst")
+    Signed-off-by: Francesco Ruggeri <fruggeri@arista.com>
+    Acked-by: Eric Dumazet <edumazet@google.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/core/dst.c b/net/core/dst.c
+index e6dc77252fe9..a1656e3b8d72 100644
+--- a/net/core/dst.c
++++ b/net/core/dst.c
+@@ -301,12 +301,13 @@ void dst_release(struct dst_entry *dst)
+ {
+ 	if (dst) {
+ 		int newrefcnt;
++		unsigned short nocache = dst->flags & DST_NOCACHE;
+ 
+ 		newrefcnt = atomic_dec_return(&dst->__refcnt);
+ 		if (unlikely(newrefcnt < 0))
+ 			net_warn_ratelimited("%s: dst:%p refcnt:%d\n",
+ 					     __func__, dst, newrefcnt);
+-		if (!newrefcnt && unlikely(dst->flags & DST_NOCACHE))
++		if (!newrefcnt && unlikely(nocache))
+ 			call_rcu(&dst->rcu_head, dst_destroy_rcu);
+ 	}
+ }
+

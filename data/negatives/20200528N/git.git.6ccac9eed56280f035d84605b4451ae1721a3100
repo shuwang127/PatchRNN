@@ -1,0 +1,189 @@
+commit 6ccac9eed56280f035d84605b4451ae1721a3100
+Author: brian m. carlson <sandals@crustytoothpaste.net>
+Date:   Sun Oct 15 22:06:54 2017 +0000
+
+    Convert check_connected to use struct object_id
+    
+    Convert check_connected and the callbacks it takes to use struct
+    object_id.
+    
+    Signed-off-by: brian m. carlson <sandals@crustytoothpaste.net>
+    Signed-off-by: Junio C Hamano <gitster@pobox.com>
+
+diff --git a/builtin/clone.c b/builtin/clone.c
+index 665a0e267..5cd1b02d5 100644
+--- a/builtin/clone.c
++++ b/builtin/clone.c
+@@ -615,7 +615,7 @@ static void write_followtags(const struct ref *refs, const char *msg)
+ 	}
+ }
+ 
+-static int iterate_ref_map(void *cb_data, unsigned char sha1[20])
++static int iterate_ref_map(void *cb_data, struct object_id *oid)
+ {
+ 	struct ref **rm = cb_data;
+ 	struct ref *ref = *rm;
+@@ -630,7 +630,7 @@ static int iterate_ref_map(void *cb_data, unsigned char sha1[20])
+ 	if (!ref)
+ 		return -1;
+ 
+-	hashcpy(sha1, ref->old_oid.hash);
++	oidcpy(oid, &ref->old_oid);
+ 	*rm = ref->next;
+ 	return 0;
+ }
+diff --git a/builtin/fetch.c b/builtin/fetch.c
+index 859be91d6..e705237fa 100644
+--- a/builtin/fetch.c
++++ b/builtin/fetch.c
+@@ -727,7 +727,7 @@ static int update_local_ref(struct ref *ref,
+ 	}
+ }
+ 
+-static int iterate_ref_map(void *cb_data, unsigned char sha1[20])
++static int iterate_ref_map(void *cb_data, struct object_id *oid)
+ {
+ 	struct ref **rm = cb_data;
+ 	struct ref *ref = *rm;
+@@ -737,7 +737,7 @@ static int iterate_ref_map(void *cb_data, unsigned char sha1[20])
+ 	if (!ref)
+ 		return -1; /* end of the list */
+ 	*rm = ref->next;
+-	hashcpy(sha1, ref->old_oid.hash);
++	oidcpy(oid, &ref->old_oid);
+ 	return 0;
+ }
+ 
+diff --git a/builtin/receive-pack.c b/builtin/receive-pack.c
+index 2da3c4cd5..4d37a160d 100644
+--- a/builtin/receive-pack.c
++++ b/builtin/receive-pack.c
+@@ -870,7 +870,7 @@ static void refuse_unconfigured_deny_delete_current(void)
+ 	rp_error("%s", _(refuse_unconfigured_deny_delete_current_msg));
+ }
+ 
+-static int command_singleton_iterator(void *cb_data, unsigned char sha1[20]);
++static int command_singleton_iterator(void *cb_data, struct object_id *oid);
+ static int update_shallow_ref(struct command *cmd, struct shallow_info *si)
+ {
+ 	static struct lock_file shallow_lock;
+@@ -1270,7 +1270,7 @@ static void check_aliased_updates(struct command *commands)
+ 	string_list_clear(&ref_list, 0);
+ }
+ 
+-static int command_singleton_iterator(void *cb_data, unsigned char sha1[20])
++static int command_singleton_iterator(void *cb_data, struct object_id *oid)
+ {
+ 	struct command **cmd_list = cb_data;
+ 	struct command *cmd = *cmd_list;
+@@ -1278,7 +1278,7 @@ static int command_singleton_iterator(void *cb_data, unsigned char sha1[20])
+ 	if (!cmd || is_null_oid(&cmd->new_oid))
+ 		return -1; /* end of list */
+ 	*cmd_list = NULL; /* this returns only one */
+-	hashcpy(sha1, cmd->new_oid.hash);
++	oidcpy(oid, &cmd->new_oid);
+ 	return 0;
+ }
+ 
+@@ -1309,7 +1309,7 @@ struct iterate_data {
+ 	struct shallow_info *si;
+ };
+ 
+-static int iterate_receive_command_list(void *cb_data, unsigned char sha1[20])
++static int iterate_receive_command_list(void *cb_data, struct object_id *oid)
+ {
+ 	struct iterate_data *data = cb_data;
+ 	struct command **cmd_list = &data->cmds;
+@@ -1320,7 +1320,7 @@ static int iterate_receive_command_list(void *cb_data, unsigned char sha1[20])
+ 			/* to be checked in update_shallow_ref() */
+ 			continue;
+ 		if (!is_null_oid(&cmd->new_oid) && !cmd->skip_update) {
+-			hashcpy(sha1, cmd->new_oid.hash);
++			oidcpy(oid, &cmd->new_oid);
+ 			*cmd_list = cmd->next;
+ 			return 0;
+ 		}
+diff --git a/connected.c b/connected.c
+index f416b0505..4a47f3327 100644
+--- a/connected.c
++++ b/connected.c
+@@ -16,13 +16,13 @@
+  *
+  * Returns 0 if everything is connected, non-zero otherwise.
+  */
+-int check_connected(sha1_iterate_fn fn, void *cb_data,
++int check_connected(oid_iterate_fn fn, void *cb_data,
+ 		    struct check_connected_options *opt)
+ {
+ 	struct child_process rev_list = CHILD_PROCESS_INIT;
+ 	struct check_connected_options defaults = CHECK_CONNECTED_INIT;
+-	char commit[41];
+-	unsigned char sha1[20];
++	char commit[GIT_MAX_HEXSZ + 1];
++	struct object_id oid;
+ 	int err = 0;
+ 	struct packed_git *new_pack = NULL;
+ 	struct transport *transport;
+@@ -32,7 +32,7 @@ int check_connected(sha1_iterate_fn fn, void *cb_data,
+ 		opt = &defaults;
+ 	transport = opt->transport;
+ 
+-	if (fn(cb_data, sha1)) {
++	if (fn(cb_data, &oid)) {
+ 		if (opt->err_fd)
+ 			close(opt->err_fd);
+ 		return err;
+@@ -77,7 +77,7 @@ int check_connected(sha1_iterate_fn fn, void *cb_data,
+ 
+ 	sigchain_push(SIGPIPE, SIG_IGN);
+ 
+-	commit[40] = '\n';
++	commit[GIT_SHA1_HEXSZ] = '\n';
+ 	do {
+ 		/*
+ 		 * If index-pack already checked that:
+@@ -87,17 +87,17 @@ int check_connected(sha1_iterate_fn fn, void *cb_data,
+ 		 * are sure the ref is good and not sending it to
+ 		 * rev-list for verification.
+ 		 */
+-		if (new_pack && find_pack_entry_one(sha1, new_pack))
++		if (new_pack && find_pack_entry_one(oid.hash, new_pack))
+ 			continue;
+ 
+-		memcpy(commit, sha1_to_hex(sha1), 40);
+-		if (write_in_full(rev_list.in, commit, 41) < 0) {
++		memcpy(commit, oid_to_hex(&oid), GIT_SHA1_HEXSZ);
++		if (write_in_full(rev_list.in, commit, GIT_SHA1_HEXSZ + 1) < 0) {
+ 			if (errno != EPIPE && errno != EINVAL)
+ 				error_errno(_("failed write to rev-list"));
+ 			err = -1;
+ 			break;
+ 		}
+-	} while (!fn(cb_data, sha1));
++	} while (!fn(cb_data, &oid));
+ 
+ 	if (close(rev_list.in))
+ 		err = error_errno(_("failed to close rev-list's stdin"));
+diff --git a/connected.h b/connected.h
+index 4ca325f79..a53f03a61 100644
+--- a/connected.h
++++ b/connected.h
+@@ -8,7 +8,7 @@ struct transport;
+  * When called after returning the name for the last object, return -1
+  * to signal EOF, otherwise return 0.
+  */
+-typedef int (*sha1_iterate_fn)(void *, unsigned char [20]);
++typedef int (*oid_iterate_fn)(void *, struct object_id *oid);
+ 
+ /*
+  * Named-arguments struct for check_connected. All arguments are
+@@ -51,7 +51,7 @@ struct check_connected_options {
+  *
+  * If "opt" is NULL, behaves as if CHECK_CONNECTED_INIT was passed.
+  */
+-int check_connected(sha1_iterate_fn fn, void *cb_data,
++int check_connected(oid_iterate_fn fn, void *cb_data,
+ 		    struct check_connected_options *opt);
+ 
+ #endif /* CONNECTED_H */
+

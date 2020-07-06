@@ -1,0 +1,79 @@
+commit 8efe78fdb1490e271615fab32433ebc0f15fa822
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+Date:   Sat Apr 11 18:07:41 2015 -0700
+
+    Drivers: hv: kvp: move poll_channel() to hyperv_vmbus.h
+    
+    Move poll_channel() to hyperv_vmbus.h and make it inline and rename it to hv_poll_channel() so it can be reused
+    in other hv_util modules.
+    
+    Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Tested-by: Alex Ng <alexng@microsoft.com>
+    Signed-off-by: K. Y. Srinivasan <kys@microsoft.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/hv/hv_kvp.c b/drivers/hv/hv_kvp.c
+index caa467dc8351..939c3e7e4175 100644
+--- a/drivers/hv/hv_kvp.c
++++ b/drivers/hv/hv_kvp.c
+@@ -128,17 +128,6 @@ kvp_work_func(struct work_struct *dummy)
+ 	kvp_respond_to_host(NULL, HV_E_FAIL);
+ }
+ 
+-static void poll_channel(struct vmbus_channel *channel)
+-{
+-	if (channel->target_cpu != smp_processor_id())
+-		smp_call_function_single(channel->target_cpu,
+-					 hv_kvp_onchannelcallback,
+-					 channel, true);
+-	else
+-		hv_kvp_onchannelcallback(channel);
+-}
+-
+-
+ static int kvp_handle_handshake(struct hv_kvp_msg *msg)
+ {
+ 	int ret = 1;
+@@ -166,8 +155,8 @@ static int kvp_handle_handshake(struct hv_kvp_msg *msg)
+ 		pr_info("KVP: user-mode registering done.\n");
+ 		kvp_register(dm_reg_value);
+ 		kvp_transaction.active = false;
+-		if (kvp_transaction.kvp_context)
+-			poll_channel(kvp_transaction.kvp_context);
++		hv_poll_channel(kvp_transaction.kvp_context,
++				hv_kvp_onchannelcallback);
+ 	}
+ 	return ret;
+ }
+@@ -587,7 +576,7 @@ response_done:
+ 
+ 	vmbus_sendpacket(channel, recv_buffer, buf_len, req_id,
+ 				VM_PKT_DATA_INBAND, 0);
+-	poll_channel(channel);
++	hv_poll_channel(channel, hv_kvp_onchannelcallback);
+ }
+ 
+ /*
+diff --git a/drivers/hv/hyperv_vmbus.h b/drivers/hv/hyperv_vmbus.h
+index ddcf6c405195..2f30456d90a5 100644
+--- a/drivers/hv/hyperv_vmbus.h
++++ b/drivers/hv/hyperv_vmbus.h
+@@ -742,5 +742,17 @@ int hv_fcopy_init(struct hv_util_service *);
+ void hv_fcopy_deinit(void);
+ void hv_fcopy_onchannelcallback(void *);
+ 
++static inline void hv_poll_channel(struct vmbus_channel *channel,
++				   void (*cb)(void *))
++{
++	if (!channel)
++		return;
++
++	if (channel->target_cpu != smp_processor_id())
++		smp_call_function_single(channel->target_cpu,
++					 cb, channel, true);
++	else
++		cb(channel);
++}
+ 
+ #endif /* _HYPERV_VMBUS_H */
+

@@ -1,0 +1,154 @@
+commit 64d6519dda3905dfb94d3f93c07c5f263f41813f
+Author: Lee Schermerhorn <lee.schermerhorn@hp.com>
+Date:   Sat Oct 18 20:26:52 2008 -0700
+
+    swap: cull unevictable pages in fault path
+    
+    In the fault paths that install new anonymous pages, check whether the
+    page is evictable or not using lru_cache_add_active_or_unevictable().  If
+    the page is evictable, just add it to the active lru list [via the pagevec
+    cache], else add it to the unevictable list.
+    
+    This "proactive" culling in the fault path mimics the handling of mlocked
+    pages in Nick Piggin's series to keep mlocked pages off the lru lists.
+    
+    Notes:
+    
+    1) This patch is optional--e.g., if one is concerned about the
+       additional test in the fault path.  We can defer the moving of
+       nonreclaimable pages until when vmscan [shrink_*_list()]
+       encounters them.  Vmscan will only need to handle such pages
+       once, but if there are a lot of them it could impact system
+       performance.
+    
+    2) The 'vma' argument to page_evictable() is require to notice that
+       we're faulting a page into an mlock()ed vma w/o having to scan the
+       page's rmap in the fault path.   Culling mlock()ed anon pages is
+       currently the only reason for this patch.
+    
+    3) We can't cull swap pages in read_swap_cache_async() because the
+       vma argument doesn't necessarily correspond to the swap cache
+       offset passed in by swapin_readahead().  This could [did!] result
+       in mlocking pages in non-VM_LOCKED vmas if [when] we tried to
+       cull in this path.
+    
+    4) Move set_pte_at() to after where we add page to lru to keep it
+       hidden from other tasks that might walk the page table.
+       We already do it in this order in do_anonymous() page.  And,
+       these are COW'd anon pages.  Is this safe?
+    
+    [riel@redhat.com: undo an overzealous code cleanup]
+    Signed-off-by: Lee Schermerhorn <lee.schermerhorn@hp.com>
+    Signed-off-by: Rik van Riel <riel@redhat.com>
+    Signed-off-by: KOSAKI Motohiro <kosaki.motohiro@jp.fujitsu.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/linux/swap.h b/include/linux/swap.h
+index 7edb4cbc29f9..07eda69412fb 100644
+--- a/include/linux/swap.h
++++ b/include/linux/swap.h
+@@ -173,6 +173,8 @@ extern unsigned int nr_free_pagecache_pages(void);
+ /* linux/mm/swap.c */
+ extern void __lru_cache_add(struct page *, enum lru_list lru);
+ extern void lru_cache_add_lru(struct page *, enum lru_list lru);
++extern void lru_cache_add_active_or_unevictable(struct page *,
++					struct vm_area_struct *);
+ extern void activate_page(struct page *);
+ extern void mark_page_accessed(struct page *);
+ extern void lru_add_drain(void);
+diff --git a/mm/memory.c b/mm/memory.c
+index 9fef7272fb9e..450127f4c582 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1922,12 +1922,13 @@ static int do_wp_page(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		 * thread doing COW.
+ 		 */
+ 		ptep_clear_flush_notify(vma, address, page_table);
+-		set_pte_at(mm, address, page_table, entry);
+-		update_mmu_cache(vma, address, entry);
+ 		SetPageSwapBacked(new_page);
+-		lru_cache_add_active_anon(new_page);
++		lru_cache_add_active_or_unevictable(new_page, vma);
+ 		page_add_new_anon_rmap(new_page, vma, address);
+ 
++//TODO:  is this safe?  do_anonymous_page() does it this way.
++		set_pte_at(mm, address, page_table, entry);
++		update_mmu_cache(vma, address, entry);
+ 		if (old_page) {
+ 			/*
+ 			 * Only after switching the pte to the new page may
+@@ -2420,7 +2421,7 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		goto release;
+ 	inc_mm_counter(mm, anon_rss);
+ 	SetPageSwapBacked(page);
+-	lru_cache_add_active_anon(page);
++	lru_cache_add_active_or_unevictable(page, vma);
+ 	page_add_new_anon_rmap(page, vma, address);
+ 	set_pte_at(mm, address, page_table, entry);
+ 
+@@ -2564,12 +2565,11 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		entry = mk_pte(page, vma->vm_page_prot);
+ 		if (flags & FAULT_FLAG_WRITE)
+ 			entry = maybe_mkwrite(pte_mkdirty(entry), vma);
+-		set_pte_at(mm, address, page_table, entry);
+ 		if (anon) {
+-                        inc_mm_counter(mm, anon_rss);
++			inc_mm_counter(mm, anon_rss);
+ 			SetPageSwapBacked(page);
+-                        lru_cache_add_active_anon(page);
+-                        page_add_new_anon_rmap(page, vma, address);
++			lru_cache_add_active_or_unevictable(page, vma);
++			page_add_new_anon_rmap(page, vma, address);
+ 		} else {
+ 			inc_mm_counter(mm, file_rss);
+ 			page_add_file_rmap(page);
+@@ -2578,6 +2578,8 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+ 				get_page(dirty_page);
+ 			}
+ 		}
++//TODO:  is this safe?  do_anonymous_page() does it this way.
++		set_pte_at(mm, address, page_table, entry);
+ 
+ 		/* no need to invalidate: a not-present page won't be cached */
+ 		update_mmu_cache(vma, address, entry);
+diff --git a/mm/swap.c b/mm/swap.c
+index bc58c1369dd6..2152e48a7b8f 100644
+--- a/mm/swap.c
++++ b/mm/swap.c
+@@ -31,6 +31,8 @@
+ #include <linux/backing-dev.h>
+ #include <linux/memcontrol.h>
+ 
++#include "internal.h"
++
+ /* How many pages do we try to swap or page in/out together? */
+ int page_cluster;
+ 
+@@ -244,6 +246,25 @@ void add_page_to_unevictable_list(struct page *page)
+ 	spin_unlock_irq(&zone->lru_lock);
+ }
+ 
++/**
++ * lru_cache_add_active_or_unevictable
++ * @page:  the page to be added to LRU
++ * @vma:   vma in which page is mapped for determining reclaimability
++ *
++ * place @page on active or unevictable LRU list, depending on
++ * page_evictable().  Note that if the page is not evictable,
++ * it goes directly back onto it's zone's unevictable list.  It does
++ * NOT use a per cpu pagevec.
++ */
++void lru_cache_add_active_or_unevictable(struct page *page,
++					struct vm_area_struct *vma)
++{
++	if (page_evictable(page, vma))
++		lru_cache_add_lru(page, LRU_ACTIVE + page_is_file_cache(page));
++	else
++		add_page_to_unevictable_list(page);
++}
++
+ /*
+  * Drain pages out of the cpu's pagevecs.
+  * Either "cpu" is the current CPU, and preemption has already been
+

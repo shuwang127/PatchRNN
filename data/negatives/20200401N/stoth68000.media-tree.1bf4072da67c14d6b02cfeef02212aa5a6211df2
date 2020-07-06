@@ -1,0 +1,196 @@
+commit 1bf4072da67c14d6b02cfeef02212aa5a6211df2
+Author: Christoph Hellwig <hch@infradead.org>
+Date:   Wed May 27 09:37:33 2009 -0400
+
+    cifs: reorganize get_cifs_acl
+    
+    Thus spake Christoph:
+    
+    "But this whole set_cifs_acl function is a real mess anyway and needs
+    some splitting up."
+    
+    With this change too, it's possible to call acl_to_uid_mode() with a
+    NULL inode pointer. That (or something close to it) will eventually be
+    necessary when cifs_get_inode_info is reorganized.
+    
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Reviewed-by: Shirish Pargaonkar <shirishp@us.ibm.com>
+    Signed-off-by: Jeff Layton <jlayton@redhat.com>
+    Signed-off-by: Steve French <sfrench@us.ibm.com>
+
+diff --git a/fs/cifs/cifsacl.c b/fs/cifs/cifsacl.c
+index 57ecdc83c26f..7f8e6c46d116 100644
+--- a/fs/cifs/cifsacl.c
++++ b/fs/cifs/cifsacl.c
+@@ -552,67 +552,66 @@ static int build_sec_desc(struct cifs_ntsd *pntsd, struct cifs_ntsd *pnntsd,
+ 	return rc;
+ }
+ 
+-
+-/* Retrieve an ACL from the server */
+-static struct cifs_ntsd *get_cifs_acl(u32 *pacllen, struct inode *inode,
+-				       const char *path, const __u16 *pfid)
++static struct cifs_ntsd *get_cifs_acl_by_fid(struct cifs_sb_info *cifs_sb,
++		__u16 fid, u32 *pacllen)
+ {
+-	struct cifsFileInfo *open_file = NULL;
+-	bool unlock_file = false;
+-	int xid;
+-	int rc = -EIO;
+-	__u16 fid;
+-	struct super_block *sb;
+-	struct cifs_sb_info *cifs_sb;
+ 	struct cifs_ntsd *pntsd = NULL;
++	int xid, rc;
+ 
+-	cFYI(1, ("get mode from ACL for %s", path));
++	xid = GetXid();
++	rc = CIFSSMBGetCIFSACL(xid, cifs_sb->tcon, fid, &pntsd, pacllen);
++	FreeXid(xid);
+ 
+-	if (inode == NULL)
+-		return NULL;
+ 
+-	xid = GetXid();
+-	if (pfid == NULL)
+-		open_file = find_readable_file(CIFS_I(inode));
+-	else
+-		fid = *pfid;
++	cFYI(1, ("GetCIFSACL rc = %d ACL len %d", rc, *pacllen));
++	return pntsd;
++}
+ 
+-	sb = inode->i_sb;
+-	if (sb == NULL) {
+-		FreeXid(xid);
+-		return NULL;
+-	}
+-	cifs_sb = CIFS_SB(sb);
++static struct cifs_ntsd *get_cifs_acl_by_path(struct cifs_sb_info *cifs_sb,
++		const char *path, u32 *pacllen)
++{
++	struct cifs_ntsd *pntsd = NULL;
++	int oplock = 0;
++	int xid, rc;
++	__u16 fid;
+ 
+-	if (open_file) {
+-		unlock_file = true;
+-		fid = open_file->netfid;
+-	} else if (pfid == NULL) {
+-		int oplock = 0;
+-		/* open file */
+-		rc = CIFSSMBOpen(xid, cifs_sb->tcon, path, FILE_OPEN,
+-				READ_CONTROL, 0, &fid, &oplock, NULL,
+-				cifs_sb->local_nls, cifs_sb->mnt_cifs_flags &
+-					CIFS_MOUNT_MAP_SPECIAL_CHR);
+-		if (rc != 0) {
+-			cERROR(1, ("Unable to open file to get ACL"));
+-			FreeXid(xid);
+-			return NULL;
+-		}
++	xid = GetXid();
++
++	rc = CIFSSMBOpen(xid, cifs_sb->tcon, path, FILE_OPEN, READ_CONTROL, 0,
++			 &fid, &oplock, NULL, cifs_sb->local_nls,
++			 cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MAP_SPECIAL_CHR);
++	if (rc) {
++		cERROR(1, ("Unable to open file to get ACL"));
++		goto out;
+ 	}
+ 
+ 	rc = CIFSSMBGetCIFSACL(xid, cifs_sb->tcon, fid, &pntsd, pacllen);
+ 	cFYI(1, ("GetCIFSACL rc = %d ACL len %d", rc, *pacllen));
+-	if (unlock_file == true) /* find_readable_file increments ref count */
+-		atomic_dec(&open_file->wrtPending);
+-	else if (pfid == NULL) /* if opened above we have to close the handle */
+-		CIFSSMBClose(xid, cifs_sb->tcon, fid);
+-	/* else handle was passed in by caller */
+ 
++	CIFSSMBClose(xid, cifs_sb->tcon, fid);
++ out:
+ 	FreeXid(xid);
+ 	return pntsd;
+ }
+ 
++/* Retrieve an ACL from the server */
++static struct cifs_ntsd *get_cifs_acl(struct cifs_sb_info *cifs_sb,
++				      struct inode *inode, const char *path,
++				      u32 *pacllen)
++{
++	struct cifs_ntsd *pntsd = NULL;
++	struct cifsFileInfo *open_file = NULL;
++
++	if (inode)
++		open_file = find_readable_file(CIFS_I(inode));
++	if (!open_file)
++		return get_cifs_acl_by_path(cifs_sb, path, pacllen);
++
++	pntsd = get_cifs_acl_by_fid(cifs_sb, open_file->netfid, pacllen);
++	atomic_dec(&open_file->wrtPending);
++	return pntsd;
++}
++
+ /* Set an ACL on the server */
+ static int set_cifs_acl(struct cifs_ntsd *pnntsd, __u32 acllen,
+ 				struct inode *inode, const char *path)
+@@ -668,14 +667,19 @@ static int set_cifs_acl(struct cifs_ntsd *pnntsd, __u32 acllen,
+ }
+ 
+ /* Translate the CIFS ACL (simlar to NTFS ACL) for a file into mode bits */
+-void acl_to_uid_mode(struct inode *inode, const char *path, const __u16 *pfid)
++void acl_to_uid_mode(struct cifs_sb_info *cifs_sb, struct inode *inode,
++		     const char *path, const __u16 *pfid)
+ {
+ 	struct cifs_ntsd *pntsd = NULL;
+ 	u32 acllen = 0;
+ 	int rc = 0;
+ 
+ 	cFYI(DBG2, ("converting ACL to mode for %s", path));
+-	pntsd = get_cifs_acl(&acllen, inode, path, pfid);
++
++	if (pfid)
++		pntsd = get_cifs_acl_by_fid(cifs_sb, *pfid, &acllen);
++	else
++		pntsd = get_cifs_acl(cifs_sb, inode, path, &acllen);
+ 
+ 	/* if we can retrieve the ACL, now parse Access Control Entries, ACEs */
+ 	if (pntsd)
+@@ -698,7 +702,7 @@ int mode_to_acl(struct inode *inode, const char *path, __u64 nmode)
+ 	cFYI(DBG2, ("set ACL from mode for %s", path));
+ 
+ 	/* Get the security descriptor */
+-	pntsd = get_cifs_acl(&secdesclen, inode, path, NULL);
++	pntsd = get_cifs_acl(CIFS_SB(inode->i_sb), inode, path, &secdesclen);
+ 
+ 	/* Add three ACEs for owner, group, everyone getting rid of
+ 	   other ACEs as chmod disables ACEs and set the security descriptor */
+diff --git a/fs/cifs/cifsproto.h b/fs/cifs/cifsproto.h
+index d542cf1f69c3..f9452329bcce 100644
+--- a/fs/cifs/cifsproto.h
++++ b/fs/cifs/cifsproto.h
+@@ -108,8 +108,8 @@ extern int cifs_get_inode_info(struct inode **pinode,
+ extern int cifs_get_inode_info_unix(struct inode **pinode,
+ 			const unsigned char *search_path,
+ 			struct super_block *sb, int xid);
+-extern void acl_to_uid_mode(struct inode *inode, const char *path,
+-			    const __u16 *pfid);
++extern void acl_to_uid_mode(struct cifs_sb_info *cifs_sb, struct inode *inode,
++			    const char *path, const __u16 *pfid);
+ extern int mode_to_acl(struct inode *inode, const char *path, __u64);
+ 
+ extern int cifs_mount(struct super_block *, struct cifs_sb_info *, char *,
+diff --git a/fs/cifs/inode.c b/fs/cifs/inode.c
+index 84b7bea73674..fad882b075ba 100644
+--- a/fs/cifs/inode.c
++++ b/fs/cifs/inode.c
+@@ -626,7 +626,7 @@ int cifs_get_inode_info(struct inode **pinode,
+ 	/* fill in 0777 bits from ACL */
+ 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_CIFS_ACL) {
+ 		cFYI(1, ("Getting mode bits from ACL"));
+-		acl_to_uid_mode(inode, full_path, pfid);
++		acl_to_uid_mode(cifs_sb, inode, full_path, pfid);
+ 	}
+ #endif
+ 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL) {
+

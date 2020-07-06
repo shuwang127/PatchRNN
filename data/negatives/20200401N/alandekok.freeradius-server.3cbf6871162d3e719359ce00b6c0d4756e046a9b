@@ -1,0 +1,66 @@
+commit 3cbf6871162d3e719359ce00b6c0d4756e046a9b
+Author: aland <aland>
+Date:   Wed Apr 9 15:12:09 2003 +0000
+
+            Patch from Chris Brotsos: If all home servers for realms are dead,
+            then we MAY want to give up, and mark all of them alive again.
+    
+            This helps to prevent request starvation.
+
+diff --git a/src/include/radiusd.h b/src/include/radiusd.h
+index 26e6f45f0..3f36e768d 100644
+--- a/src/include/radiusd.h
++++ b/src/include/radiusd.h
+@@ -140,6 +140,7 @@ typedef struct main_config_t {
+ 	int		debug_level;
+ 	int		proxy_requests;
+ 	int		post_proxy_authorize;
++	int		wake_all_if_all_dead;
+ 	int		proxy_synchronous;
+ 	int		proxy_dead_time;
+ 	int		proxy_retry_count;
+diff --git a/src/main/files.c b/src/main/files.c
+index 64e1948e2..7091eaf0a 100644
+--- a/src/main/files.c
++++ b/src/main/files.c
+@@ -568,7 +568,26 @@ REALM *realm_find(const char *realm, int accounting)
+ 	 *	we return NULL, which means "no match found".
+ 	 */
+ 	if (!mainconfig.proxy_fallback && dead_match) {
+-		return NULL;
++		if (mainconfig.wake_all_if_all_dead) {
++			REALM *rcl = NULL;
++			for (cl = mainconfig.realms; cl; cl = cl->next) {
++				if(strcasecmp(cl->realm,realm) == 0) {
++					if (!accounting && !cl->active) {
++						cl->active = TRUE;
++						rcl = cl;
++					}
++					else if (accounting &&
++						 !cl->acct_active) {
++						cl->acct_active = TRUE;
++						rcl = cl;
++					}
++				}
++			}
++			return rcl;
++		}
++		else {
++			return NULL;
++		}
+ 	}
+ 
+ 	/*      If we didn't find the realm 'NULL' don't return the 
+diff --git a/src/main/mainconfig.c b/src/main/mainconfig.c
+index 17ea665f7..eb178b4de 100644
+--- a/src/main/mainconfig.c
++++ b/src/main/mainconfig.c
+@@ -68,6 +68,7 @@ static CONF_PARSER proxy_config[] = {
+ 	{ "default_fallback", PW_TYPE_BOOLEAN, 0, &mainconfig.proxy_fallback, "no" },
+ 	{ "dead_time",    PW_TYPE_INTEGER, 0, &mainconfig.proxy_dead_time, Stringify(DEAD_TIME) },
+         { "post_proxy_authorize", PW_TYPE_BOOLEAN, 0, &mainconfig.post_proxy_authorize, "yes" },
++	{ "wake_all_if_all_dead", PW_TYPE_BOOLEAN, 0, &mainconfig.wake_all_if_all_dead, "no" },
+ 	{ NULL, -1, 0, NULL, NULL }
+ };
+ 
+

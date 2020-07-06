@@ -1,0 +1,85 @@
+commit c6ced61112f1e6139914149fab65695801a74f0f
+Author: Frederic Weisbecker <fweisbec@gmail.com>
+Date:   Sun Sep 13 00:46:19 2009 +0200
+
+    perf sched: Add involuntarily sleeping task in work atoms
+    
+    Currently in perf sched, we are measuring the scheduler wakeup
+    latencies.
+    
+    Now we also want measure the time a task wait to be scheduled
+    after it gets preempted.
+    
+    Signed-off-by: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Cc: Mike Galbraith <efault@gmx.de>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/tools/perf/builtin-sched.c b/tools/perf/builtin-sched.c
+index 7e57a986c056..61a80e8c9d0d 100644
+--- a/tools/perf/builtin-sched.c
++++ b/tools/perf/builtin-sched.c
+@@ -866,8 +866,8 @@ static struct trace_sched_handler replay_ops  = {
+ #define TASK_STATE_TO_CHAR_STR "RSDTtZX"
+ 
+ enum thread_state {
+-	THREAD_SLEEPING,
+-	THREAD_WAKED_UP,
++	THREAD_SLEEPING = 0,
++	THREAD_WAIT_CPU,
+ 	THREAD_SCHED_IN,
+ 	THREAD_IGNORE
+ };
+@@ -962,7 +962,9 @@ static char sched_out_state(struct trace_switch_event *switch_event)
+ 
+ static void
+ lat_sched_out(struct task_atoms *atoms,
+-	     struct trace_switch_event *switch_event __used, u64 delta)
++	      struct trace_switch_event *switch_event __used,
++	      u64 delta,
++	      u64 timestamp)
+ {
+ 	struct work_atom *snapshot;
+ 
+@@ -970,6 +972,11 @@ lat_sched_out(struct task_atoms *atoms,
+ 	if (!snapshot)
+ 		die("Non memory");
+ 
++	if (sched_out_state(switch_event) == 'R') {
++		snapshot->state = THREAD_WAIT_CPU;
++		snapshot->wake_up_time = timestamp;
++	}
++
+ 	snapshot->runtime = delta;
+ 	list_add_tail(&snapshot->list, &atoms->snapshot_list);
+ }
+@@ -985,7 +992,7 @@ lat_sched_in(struct task_atoms *atoms, u64 timestamp)
+ 	snapshot = list_entry(atoms->snapshot_list.prev, struct work_atom,
+ 			      list);
+ 
+-	if (snapshot->state != THREAD_WAKED_UP)
++	if (snapshot->state != THREAD_WAIT_CPU)
+ 		return;
+ 
+ 	if (timestamp < snapshot->wake_up_time) {
+@@ -1043,7 +1050,7 @@ latency_switch_event(struct trace_switch_event *switch_event,
+ 	}
+ 
+ 	lat_sched_in(in_atoms, timestamp);
+-	lat_sched_out(out_atoms, switch_event, delta);
++	lat_sched_out(out_atoms, switch_event, delta, timestamp);
+ }
+ 
+ static void
+@@ -1077,7 +1084,7 @@ latency_wakeup_event(struct trace_wakeup_event *wakeup_event,
+ 	if (snapshot->state != THREAD_SLEEPING)
+ 		return;
+ 
+-	snapshot->state = THREAD_WAKED_UP;
++	snapshot->state = THREAD_WAIT_CPU;
+ 	snapshot->wake_up_time = timestamp;
+ }
+ 
+

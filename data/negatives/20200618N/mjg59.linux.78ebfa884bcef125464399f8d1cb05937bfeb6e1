@@ -1,0 +1,202 @@
+commit 78ebfa884bcef125464399f8d1cb05937bfeb6e1
+Author: Michal Simek <monstr@monstr.eu>
+Date:   Tue Mar 23 15:37:02 2010 +0100
+
+    microblaze: Adding likely macros
+    
+    On the base on GCOV analytics is helpful to add likely/unlikely
+    macros.
+    
+    Signed-off-by: Michal Simek <monstr@monstr.eu>
+
+diff --git a/arch/microblaze/kernel/dma.c b/arch/microblaze/kernel/dma.c
+index b1084974fccd..4d5b0311601b 100644
+--- a/arch/microblaze/kernel/dma.c
++++ b/arch/microblaze/kernel/dma.c
+@@ -37,7 +37,7 @@ static inline void __dma_sync_page(unsigned long paddr, unsigned long offset,
+ 
+ static unsigned long get_dma_direct_offset(struct device *dev)
+ {
+-	if (dev)
++	if (likely(dev))
+ 		return (unsigned long)dev->archdata.dma_data;
+ 
+ 	return PCI_DRAM_OFFSET; /* FIXME Not sure if is correct */
+diff --git a/arch/microblaze/kernel/process.c b/arch/microblaze/kernel/process.c
+index 35efb2f42d50..09bed44dfcd3 100644
+--- a/arch/microblaze/kernel/process.c
++++ b/arch/microblaze/kernel/process.c
+@@ -75,7 +75,10 @@ __setup("hlt", hlt_setup);
+ 
+ void default_idle(void)
+ {
+-	if (!hlt_counter) {
++	if (likely(hlt_counter)) {
++		while (!need_resched())
++			cpu_relax();
++	} else {
+ 		clear_thread_flag(TIF_POLLING_NRFLAG);
+ 		smp_mb__after_clear_bit();
+ 		local_irq_disable();
+@@ -83,9 +86,7 @@ void default_idle(void)
+ 			cpu_sleep();
+ 		local_irq_enable();
+ 		set_thread_flag(TIF_POLLING_NRFLAG);
+-	} else
+-		while (!need_resched())
+-			cpu_relax();
++	}
+ }
+ 
+ void cpu_idle(void)
+diff --git a/arch/microblaze/lib/memcpy.c b/arch/microblaze/lib/memcpy.c
+index cc2108b6b260..014bac92bdff 100644
+--- a/arch/microblaze/lib/memcpy.c
++++ b/arch/microblaze/lib/memcpy.c
+@@ -53,7 +53,7 @@ void *memcpy(void *v_dst, const void *v_src, __kernel_size_t c)
+ 	const uint32_t *i_src;
+ 	uint32_t *i_dst;
+ 
+-	if (c >= 4) {
++	if (likely(c >= 4)) {
+ 		unsigned  value, buf_hold;
+ 
+ 		/* Align the dstination to a word boundry. */
+diff --git a/arch/microblaze/lib/memset.c b/arch/microblaze/lib/memset.c
+index 4df851d41a29..ecfb663e1fc1 100644
+--- a/arch/microblaze/lib/memset.c
++++ b/arch/microblaze/lib/memset.c
+@@ -33,22 +33,23 @@
+ #ifdef __HAVE_ARCH_MEMSET
+ void *memset(void *v_src, int c, __kernel_size_t n)
+ {
+-
+ 	char *src = v_src;
+ #ifdef CONFIG_OPT_LIB_FUNCTION
+ 	uint32_t *i_src;
+-	uint32_t w32;
++	uint32_t w32 = 0;
+ #endif
+ 	/* Truncate c to 8 bits */
+ 	c = (c & 0xFF);
+ 
+ #ifdef CONFIG_OPT_LIB_FUNCTION
+-	/* Make a repeating word out of it */
+-	w32 = c;
+-	w32 |= w32 << 8;
+-	w32 |= w32 << 16;
++	if (unlikely(c)) {
++		/* Make a repeating word out of it */
++		w32 = c;
++		w32 |= w32 << 8;
++		w32 |= w32 << 16;
++	}
+ 
+-	if (n >= 4) {
++	if (likely(n >= 4)) {
+ 		/* Align the destination to a word boundary */
+ 		/* This is done in an endian independant manner */
+ 		switch ((unsigned) src & 3) {
+diff --git a/arch/microblaze/mm/fault.c b/arch/microblaze/mm/fault.c
+index d9d249a66ff2..7af87f4b2c2c 100644
+--- a/arch/microblaze/mm/fault.c
++++ b/arch/microblaze/mm/fault.c
+@@ -106,7 +106,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
+ 	regs->esr = error_code;
+ 
+ 	/* On a kernel SLB miss we can only check for a valid exception entry */
+-	if (kernel_mode(regs) && (address >= TASK_SIZE)) {
++	if (unlikely(kernel_mode(regs) && (address >= TASK_SIZE))) {
+ 		printk(KERN_WARNING "kernel task_size exceed");
+ 		_exception(SIGSEGV, regs, code, address);
+ 	}
+@@ -122,7 +122,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
+ 	}
+ #endif /* CONFIG_KGDB */
+ 
+-	if (in_atomic() || !mm) {
++	if (unlikely(in_atomic() || !mm)) {
+ 		if (kernel_mode(regs))
+ 			goto bad_area_nosemaphore;
+ 
+@@ -150,7 +150,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
+ 	 * source.  If this is invalid we can skip the address space check,
+ 	 * thus avoiding the deadlock.
+ 	 */
+-	if (!down_read_trylock(&mm->mmap_sem)) {
++	if (unlikely(!down_read_trylock(&mm->mmap_sem))) {
+ 		if (kernel_mode(regs) && !search_exception_tables(regs->pc))
+ 			goto bad_area_nosemaphore;
+ 
+@@ -158,16 +158,16 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
+ 	}
+ 
+ 	vma = find_vma(mm, address);
+-	if (!vma)
++	if (unlikely(!vma))
+ 		goto bad_area;
+ 
+ 	if (vma->vm_start <= address)
+ 		goto good_area;
+ 
+-	if (!(vma->vm_flags & VM_GROWSDOWN))
++	if (unlikely(!(vma->vm_flags & VM_GROWSDOWN)))
+ 		goto bad_area;
+ 
+-	if (!is_write)
++	if (unlikely(!is_write))
+ 		goto bad_area;
+ 
+ 	/*
+@@ -179,7 +179,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
+ 	 * before setting the user r1.  Thus we allow the stack to
+ 	 * expand to 1MB without further checks.
+ 	 */
+-	if (address + 0x100000 < vma->vm_end) {
++	if (unlikely(address + 0x100000 < vma->vm_end)) {
+ 
+ 		/* get user regs even if this fault is in kernel mode */
+ 		struct pt_regs *uregs = current->thread.regs;
+@@ -209,15 +209,15 @@ good_area:
+ 	code = SEGV_ACCERR;
+ 
+ 	/* a write */
+-	if (is_write) {
+-		if (!(vma->vm_flags & VM_WRITE))
++	if (unlikely(is_write)) {
++		if (unlikely(!(vma->vm_flags & VM_WRITE)))
+ 			goto bad_area;
+ 	/* a read */
+ 	} else {
+ 		/* protection fault */
+-		if (error_code & 0x08000000)
++		if (unlikely(error_code & 0x08000000))
+ 			goto bad_area;
+-		if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
++		if (unlikely(!(vma->vm_flags & (VM_READ | VM_EXEC))))
+ 			goto bad_area;
+ 	}
+ 
+@@ -235,7 +235,7 @@ survive:
+ 			goto do_sigbus;
+ 		BUG();
+ 	}
+-	if (fault & VM_FAULT_MAJOR)
++	if (unlikely(fault & VM_FAULT_MAJOR))
+ 		current->maj_flt++;
+ 	else
+ 		current->min_flt++;
+diff --git a/arch/microblaze/mm/pgtable.c b/arch/microblaze/mm/pgtable.c
+index 63a6fd07c48f..d31312cde6ea 100644
+--- a/arch/microblaze/mm/pgtable.c
++++ b/arch/microblaze/mm/pgtable.c
+@@ -154,7 +154,7 @@ int map_page(unsigned long va, phys_addr_t pa, int flags)
+ 		err = 0;
+ 		set_pte_at(&init_mm, va, pg, pfn_pte(pa >> PAGE_SHIFT,
+ 				__pgprot(flags)));
+-		if (mem_init_done)
++		if (unlikely(mem_init_done))
+ 			flush_HPTE(0, va, pmd_val(*pd));
+ 			/* flush_HPTE(0, va, pg); */
+ 	}
+

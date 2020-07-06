@@ -1,0 +1,114 @@
+commit d54e0948e0fc8c17e9f409b716f982faf0470101
+Author: S.N. Hemanth Meenakshisundaram <smeenaks@ucsd.edu>
+Date:   Sat Aug 7 00:02:26 2010 +0000
+
+    Move format from AVFilterBuffer to AVFilterPicRef.
+    
+    Patch by S.N. Hemanth Meenakshisundaram |smeenaks|ucsd|edu|.
+    
+    Originally committed as revision 24728 to svn://svn.ffmpeg.org/ffmpeg/trunk
+
+diff --git a/ffplay.c b/ffplay.c
+index c200119722..c976f09ed5 100644
+--- a/ffplay.c
++++ b/ffplay.c
+@@ -1585,8 +1585,8 @@ static int input_get_buffer(AVCodecContext *codec, AVFrame *pic)
+     ref->w = codec->width;
+     ref->h = codec->height;
+     for(i = 0; i < 4; i ++) {
+-        unsigned hshift = (i == 1 || i == 2) ? av_pix_fmt_descriptors[ref->pic->format].log2_chroma_w : 0;
+-        unsigned vshift = (i == 1 || i == 2) ? av_pix_fmt_descriptors[ref->pic->format].log2_chroma_h : 0;
++        unsigned hshift = (i == 1 || i == 2) ? av_pix_fmt_descriptors[ref->format].log2_chroma_w : 0;
++        unsigned vshift = (i == 1 || i == 2) ? av_pix_fmt_descriptors[ref->format].log2_chroma_h : 0;
+ 
+         if (ref->data[i]) {
+             ref->data[i]    += (edge >> hshift) + ((edge * ref->linesize[i]) >> vshift);
+@@ -1617,7 +1617,7 @@ static int input_reget_buffer(AVCodecContext *codec, AVFrame *pic)
+     }
+ 
+     if ((codec->width != ref->w) || (codec->height != ref->h) ||
+-        (codec->pix_fmt != ref->pic->format)) {
++        (codec->pix_fmt != ref->format)) {
+         av_log(codec, AV_LOG_ERROR, "Picture properties changed.\n");
+         return -1;
+     }
+@@ -1671,7 +1671,7 @@ static int input_request_frame(AVFilterLink *link)
+     } else {
+         picref = avfilter_get_video_buffer(link, AV_PERM_WRITE, link->w, link->h);
+         av_picture_copy((AVPicture *)&picref->data, (AVPicture *)priv->frame,
+-                        picref->pic->format, link->w, link->h);
++                        picref->format, link->w, link->h);
+     }
+     av_free_packet(&pkt);
+ 
+diff --git a/libavfilter/avfilter.h b/libavfilter/avfilter.h
+index c0193789ba..5746b6c998 100644
+--- a/libavfilter/avfilter.h
++++ b/libavfilter/avfilter.h
+@@ -25,8 +25,8 @@
+ #include "libavutil/avutil.h"
+ 
+ #define LIBAVFILTER_VERSION_MAJOR  1
+-#define LIBAVFILTER_VERSION_MINOR 27
+-#define LIBAVFILTER_VERSION_MICRO  1
++#define LIBAVFILTER_VERSION_MINOR 28
++#define LIBAVFILTER_VERSION_MICRO  0
+ 
+ #define LIBAVFILTER_VERSION_INT AV_VERSION_INT(LIBAVFILTER_VERSION_MAJOR, \
+                                                LIBAVFILTER_VERSION_MINOR, \
+@@ -68,7 +68,6 @@ typedef struct AVFilterBuffer
+ {
+     uint8_t *data[8];           ///< buffer data for each plane/channel
+     int linesize[8];            ///< number of bytes per line
+-    int format;                 ///< media format
+ 
+     unsigned refcount;          ///< number of references to this buffer
+ 
+@@ -104,6 +103,7 @@ typedef struct AVFilterPicRef
+     int linesize[4];            ///< number of bytes per line
+     int w;                      ///< image width
+     int h;                      ///< image height
++    int format;                 ///< media format
+ 
+     int64_t pts;                ///< presentation timestamp in units of 1/AV_TIME_BASE
+     int64_t pos;                ///< byte position in stream, -1 if unknown
+diff --git a/libavfilter/defaults.c b/libavfilter/defaults.c
+index 47ae1e9c90..8f58cfe069 100644
+--- a/libavfilter/defaults.c
++++ b/libavfilter/defaults.c
+@@ -47,17 +47,17 @@ AVFilterPicRef *avfilter_default_get_video_buffer(AVFilterLink *link, int perms,
+     ref->perms = perms | AV_PERM_READ;
+ 
+     pic->refcount = 1;
+-    pic->format   = link->format;
++    ref->format   = link->format;
+     pic->free     = avfilter_default_free_buffer;
+-    av_fill_image_linesizes(pic->linesize, pic->format, ref->w);
++    av_fill_image_linesizes(pic->linesize, ref->format, ref->w);
+ 
+     for (i=0; i<4;i++)
+         pic->linesize[i] = FFALIGN(pic->linesize[i], 16);
+ 
+-    tempsize = av_fill_image_pointers(pic->data, pic->format, ref->h, NULL, pic->linesize);
++    tempsize = av_fill_image_pointers(pic->data, ref->format, ref->h, NULL, pic->linesize);
+     buf = av_malloc(tempsize + 16); // +2 is needed for swscaler, +16 to be
+                                     // SIMD-friendly
+-    av_fill_image_pointers(pic->data, pic->format, ref->h, buf, pic->linesize);
++    av_fill_image_pointers(pic->data, ref->format, ref->h, buf, pic->linesize);
+ 
+     memcpy(ref->data,     pic->data,     4*sizeof(pic->data[0]));
+     memcpy(ref->linesize, pic->linesize, 4*sizeof(pic->linesize[0]));
+diff --git a/libavfilter/vsrc_buffer.c b/libavfilter/vsrc_buffer.c
+index 9e84c27e43..57dea94695 100644
+--- a/libavfilter/vsrc_buffer.c
++++ b/libavfilter/vsrc_buffer.c
+@@ -120,7 +120,7 @@ static int request_frame(AVFilterLink *link)
+                                        link->w, link->h);
+ 
+     av_picture_copy((AVPicture *)&picref->data, (AVPicture *)&c->frame,
+-                    picref->pic->format, link->w, link->h);
++                    picref->format, link->w, link->h);
+ 
+     picref->pts             = c->pts;
+     picref->pixel_aspect    = c->pixel_aspect;
+

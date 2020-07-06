@@ -1,0 +1,92 @@
+commit cbb60b4b987c8a57533dca0f66887ed14a9498e5
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu Apr 6 18:00:28 2017 +0100
+
+    drm/i915: Advance ring->head fully when idle
+    
+    When we retire the last request on the ring, before we ever access that
+    ring again we know it will be completely idle and so we can advance the
+    ring->head fully to the end (i.e. ring->tail) and not just to the start
+    of the breadcrumb. This allows us to skip re-emitting the breadcrumb
+    after resetting the GPU if the ring was entirely idle. This prevents us
+    from overwriting a seqno wraparound by re-executing a stale breadcrumb,
+    i.e.
+            submit_request(1)
+            intel_engine_init_global_seqno(0)
+            i915_reset()
+    would then leave 1 in the HWS, but the next request to execute would
+    also be with seqno 1. The sanity checks upon submission detect this as a
+    timewarp and explode. By setting the ring as empty, upon reset the HWS
+    is left as 0, leaving it consistent with the timeline.
+    
+    v2: Fix check for deleting last element of list. We know that this
+    request is always the first element of the ring, so only if next
+    points back to the start will this be the only request in flight.
+    v3: Remove opencoding of list_is_last()
+    v4: Move the block to its own function for some clarity.
+    
+    Bugzilla: https://bugs.freedesktop.org/show_bug.cgi?id=100144
+    Testcase: igt/gem_exec_whisper/hang-*
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Mika Kuoppala <mika.kuoppala@intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/20170406170028.26871-1-chris@chris-wilson.co.uk
+    Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_request.c b/drivers/gpu/drm/i915/i915_gem_request.c
+index 2f8c5132b54e..313cdff7c6dd 100644
+--- a/drivers/gpu/drm/i915/i915_gem_request.c
++++ b/drivers/gpu/drm/i915/i915_gem_request.c
+@@ -271,6 +271,27 @@ void i915_gem_retire_noop(struct i915_gem_active *active,
+ 	/* Space left intentionally blank */
+ }
+ 
++static void advance_ring(struct drm_i915_gem_request *request)
++{
++	unsigned int tail;
++
++	/* We know the GPU must have read the request to have
++	 * sent us the seqno + interrupt, so use the position
++	 * of tail of the request to update the last known position
++	 * of the GPU head.
++	 *
++	 * Note this requires that we are always called in request
++	 * completion order.
++	 */
++	if (list_is_last(&request->ring_link, &request->ring->request_list))
++		tail = request->ring->tail;
++	else
++		tail = request->postfix;
++	list_del(&request->ring_link);
++
++	request->ring->head = tail;
++}
++
+ static void i915_gem_request_retire(struct drm_i915_gem_request *request)
+ {
+ 	struct intel_engine_cs *engine = request->engine;
+@@ -287,16 +308,6 @@ static void i915_gem_request_retire(struct drm_i915_gem_request *request)
+ 	list_del_init(&request->link);
+ 	spin_unlock_irq(&engine->timeline->lock);
+ 
+-	/* We know the GPU must have read the request to have
+-	 * sent us the seqno + interrupt, so use the position
+-	 * of tail of the request to update the last known position
+-	 * of the GPU head.
+-	 *
+-	 * Note this requires that we are always called in request
+-	 * completion order.
+-	 */
+-	list_del(&request->ring_link);
+-	request->ring->head = request->postfix;
+ 	if (!--request->i915->gt.active_requests) {
+ 		GEM_BUG_ON(!request->i915->gt.awake);
+ 		mod_delayed_work(request->i915->wq,
+@@ -304,6 +315,7 @@ static void i915_gem_request_retire(struct drm_i915_gem_request *request)
+ 				 msecs_to_jiffies(100));
+ 	}
+ 	unreserve_seqno(request->engine);
++	advance_ring(request);
+ 
+ 	/* Walk through the active list, calling retire on each. This allows
+ 	 * objects to track their GPU activity and mark themselves as idle
+

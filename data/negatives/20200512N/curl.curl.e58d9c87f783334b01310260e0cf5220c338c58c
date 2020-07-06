@@ -1,0 +1,38 @@
+commit e58d9c87f783334b01310260e0cf5220c338c58c
+Author: Mike Giancola <mikegiancola@gmail.com>
+Date:   Wed May 22 23:08:27 2013 +0200
+
+    ossl_send: SSL_write() returning 0 is an error too
+    
+    We found that in specific cases if the connection is abruptly closed,
+    the underlying socket is listed in a close_wait state. We continue to
+    call the curl_multi_perform, curl_mutli_fdset etc. None of these APIs
+    report the socket closed / connection finished.  Since we have cases
+    where the multi connection is only used once, this can pose a problem
+    for us. I've read that if another connection was to come in, curl would
+    see the socket as bad and attempt to close it at that time -
+    unfortunately, this does not work for us.
+    
+    I found that in specific situations, if SSL_write returns 0, curl did
+    not recognize the socket as closed (or errored out) and did not report
+    it to the application. I believe we need to change the code slightly, to
+    check if ssl_write returns 0. If so, treat it as an error - the same as
+    a negative return code.
+    
+    For OpenSSL - the ssl_write documentation is here:
+    http://www.openssl.org/docs/ssl/SSL_write.html
+
+diff --git a/lib/ssluse.c b/lib/ssluse.c
+index b4bd31493..80fa11957 100644
+--- a/lib/ssluse.c
++++ b/lib/ssluse.c
+@@ -2546,7 +2546,7 @@ static ssize_t ossl_send(struct connectdata *conn,
+   memlen = (len > (size_t)INT_MAX) ? INT_MAX : (int)len;
+   rc = SSL_write(conn->ssl[sockindex].handle, mem, memlen);
+ 
+-  if(rc < 0) {
++  if(rc <= 0) {
+     err = SSL_get_error(conn->ssl[sockindex].handle, rc);
+ 
+     switch(err) {
+

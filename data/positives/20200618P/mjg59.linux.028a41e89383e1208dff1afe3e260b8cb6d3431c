@@ -1,0 +1,108 @@
+commit 028a41e89383e1208dff1afe3e260b8cb6d3431c
+Author: Chao Yu <chao2.yu@samsung.com>
+Date:   Thu Mar 19 19:26:02 2015 +0800
+
+    f2fs: initialize extent tree with on-disk extent info of inode
+    
+    With normal extent info cache, we records largest extent mapping between logical
+    block and physical block into extent info, and we persist extent info in on-disk
+    inode.
+    
+    When we enable extent tree cache, if extent info of on-disk inode is exist, and
+    the extent is not a small fragmented mapping extent. We'd better to load the
+    extent info into extent tree cache when inode is loaded. By this way we can have
+    more chance to hit extent tree cache rather than taking more time to read dnode
+    page for block address.
+    
+    Signed-off-by: Chao Yu <chao2.yu@samsung.com>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/data.c b/fs/f2fs/data.c
+index 67b3a99e03d5..e3be4be3a6d8 100644
+--- a/fs/f2fs/data.c
++++ b/fs/f2fs/data.c
+@@ -572,6 +572,39 @@ static unsigned int __free_extent_tree(struct f2fs_sb_info *sbi,
+ 	return count - et->count;
+ }
+ 
++static void f2fs_init_extent_tree(struct inode *inode,
++						struct f2fs_extent *i_ext)
++{
++	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
++	struct extent_tree *et;
++	struct extent_node *en;
++	struct extent_info ei;
++
++	if (le32_to_cpu(i_ext->len) < F2FS_MIN_EXTENT_LEN)
++		return;
++
++	et = __grab_extent_tree(inode);
++
++	write_lock(&et->lock);
++	if (et->count)
++		goto out;
++
++	set_extent_info(&ei, le32_to_cpu(i_ext->fofs),
++		le32_to_cpu(i_ext->blk), le32_to_cpu(i_ext->len));
++
++	en = __insert_extent_tree(sbi, et, &ei, NULL);
++	if (en) {
++		et->cached_en = en;
++
++		spin_lock(&sbi->extent_lock);
++		list_add_tail(&en->list, &sbi->extent_list);
++		spin_unlock(&sbi->extent_lock);
++	}
++out:
++	write_unlock(&et->lock);
++	atomic_dec(&et->refcount);
++}
++
+ static bool f2fs_lookup_extent_tree(struct inode *inode, pgoff_t pgofs,
+ 							struct extent_info *ei)
+ {
+@@ -782,6 +815,16 @@ out:
+ 	return;
+ }
+ 
++void f2fs_init_extent_cache(struct inode *inode, struct f2fs_extent *i_ext)
++{
++	if (test_opt(F2FS_I_SB(inode), EXTENT_CACHE))
++		f2fs_init_extent_tree(inode, i_ext);
++
++	write_lock(&F2FS_I(inode)->ext_lock);
++	get_extent_info(&F2FS_I(inode)->ext, *i_ext);
++	write_unlock(&F2FS_I(inode)->ext_lock);
++}
++
+ static bool f2fs_lookup_extent_cache(struct inode *inode, pgoff_t pgofs,
+ 							struct extent_info *ei)
+ {
+diff --git a/fs/f2fs/f2fs.h b/fs/f2fs/f2fs.h
+index 83223d8b32bb..431b4af693e5 100644
+--- a/fs/f2fs/f2fs.h
++++ b/fs/f2fs/f2fs.h
+@@ -1596,6 +1596,7 @@ int reserve_new_block(struct dnode_of_data *);
+ int f2fs_reserve_block(struct dnode_of_data *, pgoff_t);
+ void f2fs_shrink_extent_tree(struct f2fs_sb_info *, int);
+ void f2fs_destroy_extent_tree(struct inode *);
++void f2fs_init_extent_cache(struct inode *, struct f2fs_extent *);
+ void f2fs_update_extent_cache(struct dnode_of_data *);
+ struct page *find_data_page(struct inode *, pgoff_t, bool);
+ struct page *get_lock_data_page(struct inode *, pgoff_t);
+diff --git a/fs/f2fs/inode.c b/fs/f2fs/inode.c
+index bb5800969bcc..9e64d3efb2d2 100644
+--- a/fs/f2fs/inode.c
++++ b/fs/f2fs/inode.c
+@@ -137,9 +137,7 @@ static int do_read_inode(struct inode *inode)
+ 	fi->i_pino = le32_to_cpu(ri->i_pino);
+ 	fi->i_dir_level = ri->i_dir_level;
+ 
+-	write_lock(&fi->ext_lock);
+-	get_extent_info(&fi->ext, ri->i_ext);
+-	write_unlock(&fi->ext_lock);
++	f2fs_init_extent_cache(inode, &ri->i_ext);
+ 
+ 	get_inline_info(fi, ri);
+ 
+

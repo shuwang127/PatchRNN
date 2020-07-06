@@ -1,0 +1,96 @@
+commit 35834ca1e4bda56d252aa2024a283d631f0e5ac6
+Author: Eric W. Biederman <ebiederm@xmission.com>
+Date:   Thu Oct 18 03:05:31 2007 -0700
+
+    sysctl: simplify the pty sysctl logic
+    
+    Instead of having a bunch of ifdefs in sysctl.c move all of the pty sysctl
+    logic into drivers/char/pty.c
+    
+    As well as cleaning up the logic this prevents sysctl_check_table from
+    complaining that the root table has a NULL data pointer on something with
+    generic methods.
+    
+    Signed-off-by: Eric W. Biederman <ebiederm@xmission.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/char/pty.c b/drivers/char/pty.c
+index 73de77105fea..706ff34728f1 100644
+--- a/drivers/char/pty.c
++++ b/drivers/char/pty.c
+@@ -318,7 +318,7 @@ int pty_limit = NR_UNIX98_PTY_DEFAULT;
+ static int pty_limit_min = 0;
+ static int pty_limit_max = NR_UNIX98_PTY_MAX;
+ 
+-ctl_table pty_table[] = {
++static struct ctl_table pty_table[] = {
+ 	{
+ 		.ctl_name	= PTY_MAX,
+ 		.procname	= "max",
+@@ -340,6 +340,27 @@ ctl_table pty_table[] = {
+ 	}
+ };
+ 
++static struct ctl_table pty_kern_table[] = {
++	{
++		.ctl_name	= KERN_PTY,
++		.procname	= "pty",
++		.mode		= 0555,
++		.child		= pty_table,
++	},
++	{}
++};
++
++static struct ctl_table pty_root_table[] = {
++	{
++		.ctl_name	= CTL_KERN,
++		.procname	= "kernel",
++		.mode		= 0555,
++		.child		= pty_kern_table,
++	},
++	{}
++};
++
++
+ static int pty_unix98_ioctl(struct tty_struct *tty, struct file *file,
+ 			    unsigned int cmd, unsigned long arg)
+ {
+@@ -404,6 +425,7 @@ static void __init unix98_pty_init(void)
+ 		panic("Couldn't register Unix98 pts driver");
+ 
+ 	pty_table[1].data = &ptm_driver->refcount;
++	register_sysctl_table(pty_root_table);
+ }
+ #else
+ static inline void unix98_pty_init(void) { }
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index bed6cdb3e47a..0278f52c4b04 100644
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -163,9 +163,6 @@ static struct ctl_table fs_table[];
+ static struct ctl_table debug_table[];
+ static struct ctl_table dev_table[];
+ extern struct ctl_table random_table[];
+-#ifdef CONFIG_UNIX98_PTYS
+-extern struct ctl_table pty_table[];
+-#endif
+ #ifdef CONFIG_INOTIFY_USER
+ extern struct ctl_table inotify_table[];
+ #endif
+@@ -534,14 +531,6 @@ static struct ctl_table kern_table[] = {
+ 		.mode		= 0555,
+ 		.child		= random_table,
+ 	},
+-#ifdef CONFIG_UNIX98_PTYS
+-	{
+-		.ctl_name	= KERN_PTY,
+-		.procname	= "pty",
+-		.mode		= 0555,
+-		.child		= pty_table,
+-	},
+-#endif
+ 	{
+ 		.ctl_name	= KERN_OVERFLOWUID,
+ 		.procname	= "overflowuid",
+

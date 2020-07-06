@@ -1,0 +1,56 @@
+commit d64e9a2c750930272492952c16f3f2c95311a6c9
+Author: Stephen Barber <smbarber@chromium.org>
+Date:   Thu Aug 18 17:59:59 2016 -0700
+
+    dmaengine: pl330: fix residual for non-running BUSY descriptors
+    
+    Only one descriptor in the work list should be running at
+    any given time, but it's possible to have an enqueued BUSY
+    descriptor that has not yet transferred any data, or for
+    a BUSY descriptor to linger briefly before transitioning
+    to DONE. These cases should be handled to keep residual
+    calculations consistent even with the non-running BUSY
+    descriptors in the work list.
+    
+    Signed-off-by: Stephen Barber <smbarber@chromium.org>
+    Signed-off-by: Vinod Koul <vinod.koul@intel.com>
+
+diff --git a/drivers/dma/pl330.c b/drivers/dma/pl330.c
+index 4fc3ffbd5ca0..31e9c49e5604 100644
+--- a/drivers/dma/pl330.c
++++ b/drivers/dma/pl330.c
+@@ -2274,7 +2274,7 @@ pl330_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
+ {
+ 	enum dma_status ret;
+ 	unsigned long flags;
+-	struct dma_pl330_desc *desc, *running = NULL;
++	struct dma_pl330_desc *desc, *running = NULL, *last_enq = NULL;
+ 	struct dma_pl330_chan *pch = to_pchan(chan);
+ 	unsigned int transferred, residual = 0;
+ 
+@@ -2291,6 +2291,8 @@ pl330_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
+ 	if (pch->thread->req_running != -1)
+ 		running = pch->thread->req[pch->thread->req_running].desc;
+ 
++	last_enq = pch->thread->req[pch->thread->lstenq].desc;
++
+ 	/* Check in pending list */
+ 	list_for_each_entry(desc, &pch->work_list, node) {
+ 		if (desc->status == DONE)
+@@ -2298,6 +2300,15 @@ pl330_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
+ 		else if (running && desc == running)
+ 			transferred =
+ 				pl330_get_current_xferred_count(pch, desc);
++		else if (desc->status == BUSY)
++			/*
++			 * Busy but not running means either just enqueued,
++			 * or finished and not yet marked done
++			 */
++			if (desc == last_enq)
++				transferred = 0;
++			else
++				transferred = desc->bytes_requested;
+ 		else
+ 			transferred = 0;
+ 		residual += desc->bytes_requested - transferred;
+

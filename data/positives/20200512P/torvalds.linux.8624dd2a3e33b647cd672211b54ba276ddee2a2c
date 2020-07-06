@@ -1,0 +1,58 @@
+commit 8624dd2a3e33b647cd672211b54ba276ddee2a2c
+Author: Bjørn Mork <bjorn@mork.no>
+Date:   Wed Sep 12 20:44:35 2012 +0000
+
+    net: qmi_wwan: call subdriver with control intf only
+    
+    This fixes a hang on suspend due to calling wdm_suspend on
+    the unregistered data interface. The hang should have been
+    a NULL pointer reference had it not been for a logic error
+    in the cdc_wdm code.
+    
+      commit 230718bd net: qmi_wwan: bind to both control and data interface
+    
+    changed qmi_wwan to use cdc_wdm as a subdriver for devices with
+    a two-interface QMI/wwan function.  The commit failed to update
+    qmi_wwan_suspend and qmi_wwan_resume, which were written to handle
+    either a single combined interface function, or no subdriver at all.
+    
+    The result was that we called into the subdriver both when the
+    control interface was suspended and when the data interface was
+    suspended.  Calling the subdriver suspend function with an
+    unregistered interface is not supported and will make the
+    subdriver bug out.
+    
+    Signed-off-by: Bjørn Mork <bjorn@mork.no>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/usb/qmi_wwan.c b/drivers/net/usb/qmi_wwan.c
+index 17b8f3e37687..b1ba68f1a049 100644
+--- a/drivers/net/usb/qmi_wwan.c
++++ b/drivers/net/usb/qmi_wwan.c
+@@ -297,7 +297,7 @@ static int qmi_wwan_suspend(struct usb_interface *intf, pm_message_t message)
+ 	if (ret < 0)
+ 		goto err;
+ 
+-	if (info->subdriver && info->subdriver->suspend)
++	if (intf == info->control && info->subdriver && info->subdriver->suspend)
+ 		ret = info->subdriver->suspend(intf, message);
+ 	if (ret < 0)
+ 		usbnet_resume(intf);
+@@ -310,13 +310,14 @@ static int qmi_wwan_resume(struct usb_interface *intf)
+ 	struct usbnet *dev = usb_get_intfdata(intf);
+ 	struct qmi_wwan_state *info = (void *)&dev->data;
+ 	int ret = 0;
++	bool callsub = (intf == info->control && info->subdriver && info->subdriver->resume);
+ 
+-	if (info->subdriver && info->subdriver->resume)
++	if (callsub)
+ 		ret = info->subdriver->resume(intf);
+ 	if (ret < 0)
+ 		goto err;
+ 	ret = usbnet_resume(intf);
+-	if (ret < 0 && info->subdriver && info->subdriver->resume && info->subdriver->suspend)
++	if (ret < 0 && callsub && info->subdriver->suspend)
+ 		info->subdriver->suspend(intf, PMSG_SUSPEND);
+ err:
+ 	return ret;
+

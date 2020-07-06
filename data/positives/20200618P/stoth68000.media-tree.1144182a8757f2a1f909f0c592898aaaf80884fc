@@ -1,0 +1,69 @@
+commit 1144182a8757f2a1f909f0c592898aaaf80884fc
+Author: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+Date:   Wed Oct 6 17:15:35 2010 -0700
+
+    net: suppress RCU lockdep false positive in sock_update_classid
+    
+    > ===================================================
+    > [ INFO: suspicious rcu_dereference_check() usage. ]
+    > ---------------------------------------------------
+    > include/linux/cgroup.h:542 invoked rcu_dereference_check() without protection!
+    >
+    > other info that might help us debug this:
+    >
+    >
+    > rcu_scheduler_active = 1, debug_locks = 0
+    > 1 lock held by swapper/1:
+    >  #0:  (net_mutex){+.+.+.}, at: [<ffffffff813e9010>]
+    > register_pernet_subsys+0x1f/0x47
+    >
+    > stack backtrace:
+    > Pid: 1, comm: swapper Not tainted 2.6.35.4-28.fc14.x86_64 #1
+    > Call Trace:
+    >  [<ffffffff8107bd3a>] lockdep_rcu_dereference+0xaa/0xb3
+    >  [<ffffffff813e04b9>] sock_update_classid+0x7c/0xa2
+    >  [<ffffffff813e054a>] sk_alloc+0x6b/0x77
+    >  [<ffffffff8140b281>] __netlink_create+0x37/0xab
+    >  [<ffffffff813f941c>] ? rtnetlink_rcv+0x0/0x2d
+    >  [<ffffffff8140cee1>] netlink_kernel_create+0x74/0x19d
+    >  [<ffffffff8149c3ca>] ? __mutex_lock_common+0x339/0x35b
+    >  [<ffffffff813f7e9c>] rtnetlink_net_init+0x2e/0x48
+    >  [<ffffffff813e8d7a>] ops_init+0xe9/0xff
+    >  [<ffffffff813e8f0d>] register_pernet_operations+0xab/0x130
+    >  [<ffffffff813e901f>] register_pernet_subsys+0x2e/0x47
+    >  [<ffffffff81db7bca>] rtnetlink_init+0x53/0x102
+    >  [<ffffffff81db835c>] netlink_proto_init+0x126/0x143
+    >  [<ffffffff81db8236>] ? netlink_proto_init+0x0/0x143
+    >  [<ffffffff810021b8>] do_one_initcall+0x72/0x186
+    >  [<ffffffff81d78ebc>] kernel_init+0x23b/0x2c9
+    >  [<ffffffff8100aae4>] kernel_thread_helper+0x4/0x10
+    >  [<ffffffff8149e2d0>] ? restore_args+0x0/0x30
+    >  [<ffffffff81d78c81>] ? kernel_init+0x0/0x2c9
+    >  [<ffffffff8100aae0>] ? kernel_thread_helper+0x0/0x10
+    
+    The sock_update_classid() function calls task_cls_classid(current),
+    but the calling task cannot go away, so there is no danger of
+    the associated structures disappearing.  Insert an RCU read-side
+    critical section to suppress the false positive.
+    
+    Reported-by: Subrata Modak <subrata@linux.vnet.ibm.com>
+    Signed-off-by: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+
+diff --git a/net/core/sock.c b/net/core/sock.c
+index ef30e9d286e7..7d99e13148e6 100644
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -1078,8 +1078,11 @@ static void sk_prot_free(struct proto *prot, struct sock *sk)
+ #ifdef CONFIG_CGROUPS
+ void sock_update_classid(struct sock *sk)
+ {
+-	u32 classid = task_cls_classid(current);
++	u32 classid;
+ 
++	rcu_read_lock();  /* doing current task, which cannot vanish. */
++	classid = task_cls_classid(current);
++	rcu_read_unlock();
+ 	if (classid && classid != sk->sk_classid)
+ 		sk->sk_classid = classid;
+ }
+

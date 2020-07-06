@@ -1,0 +1,399 @@
+commit 8c5a2bd6bb9a8c2bb3e1b63c03e57bb1115275d1
+Author: Nils Larsch <nils@openssl.org>
+Date:   Sun Jan 29 23:12:22 2006 +0000
+
+    add additional checks + cleanup
+    
+    Submitted by: David Hartman <david_hartman@symantec.com>
+
+diff --git a/crypto/asn1/a_strex.c b/crypto/asn1/a_strex.c
+index 45fe4bd150..fc743c2ad0 100644
+--- a/crypto/asn1/a_strex.c
++++ b/crypto/asn1/a_strex.c
+@@ -194,6 +194,8 @@ static int do_buf(unsigned char *buf, int buflen,
+ 			if(i < 0) return -1;	/* Invalid UTF8String */
+ 			p += i;
+ 			break;
++			default:
++			return -1;	/* invalid width */
+ 		}
+ 		if (p == q) orflags = CHARTYPE_LAST_ESC_2253;
+ 		if(type & BUF_TYPE_CONVUTF8) {
+@@ -356,12 +358,13 @@ static int do_print_ex(char_io *io_ch, void *arg, unsigned long lflags, ASN1_STR
+ 	}
+ 
+ 	len = do_buf(str->data, str->length, type, flags, &quotes, io_ch, NULL);
+-	if(outlen < 0) return -1;
++	if(len < 0) return -1;
+ 	outlen += len;
+ 	if(quotes) outlen += 2;
+ 	if(!arg) return outlen;
+ 	if(quotes && !io_ch(arg, "\"", 1)) return -1;
+-	do_buf(str->data, str->length, type, flags, NULL, io_ch, arg);
++	if(do_buf(str->data, str->length, type, flags, NULL, io_ch, arg) < 0)
++		return -1;
+ 	if(quotes && !io_ch(arg, "\"", 1)) return -1;
+ 	return outlen;
+ }
+diff --git a/crypto/asn1/t_pkey.c b/crypto/asn1/t_pkey.c
+index f54e5df157..afb95d6712 100644
+--- a/crypto/asn1/t_pkey.c
++++ b/crypto/asn1/t_pkey.c
+@@ -109,7 +109,7 @@ int RSA_print(BIO *bp, const RSA *x, int off)
+ 	char str[128];
+ 	const char *s;
+ 	unsigned char *m=NULL;
+-	int ret=0;
++	int ret=0, mod_len = 0;
+ 	size_t buf_len=0, i;
+ 
+ 	if (x->n)
+@@ -143,27 +143,37 @@ int RSA_print(BIO *bp, const RSA *x, int off)
+ 		goto err;
+ 		}
+ 
++	if (x->n != NULL)
++		mod_len = BN_num_bits(x->n);
++
+ 	if (x->d != NULL)
+ 		{
+ 		if(!BIO_indent(bp,off,128))
+ 		   goto err;
+-		if (BIO_printf(bp,"Private-Key: (%d bit)\n",BN_num_bits(x->n))
++		if (BIO_printf(bp,"Private-Key: (%d bit)\n", mod_len)
+ 			<= 0) goto err;
+ 		}
+ 
+ 	if (x->d == NULL)
+-		BIO_snprintf(str,sizeof str,"Modulus (%d bit):",BN_num_bits(x->n));
++		BIO_snprintf(str,sizeof str,"Modulus (%d bit):", mod_len);
+ 	else
+ 		BUF_strlcpy(str,"modulus:",sizeof str);
+ 	if (!print(bp,str,x->n,m,off)) goto err;
+ 	s=(x->d == NULL)?"Exponent:":"publicExponent:";
+-	if (!print(bp,s,x->e,m,off)) goto err;
+-	if (!print(bp,"privateExponent:",x->d,m,off)) goto err;
+-	if (!print(bp,"prime1:",x->p,m,off)) goto err;
+-	if (!print(bp,"prime2:",x->q,m,off)) goto err;
+-	if (!print(bp,"exponent1:",x->dmp1,m,off)) goto err;
+-	if (!print(bp,"exponent2:",x->dmq1,m,off)) goto err;
+-	if (!print(bp,"coefficient:",x->iqmp,m,off)) goto err;
++	if ((x->e != NULL) && !print(bp,s,x->e,m,off))
++		goto err;
++	if ((x->d != NULL) && !print(bp,"privateExponent:",x->d,m,off))
++		goto err;
++	if ((x->p != NULL) && !print(bp,"prime1:",x->p,m,off))
++		goto err;
++	if ((x->q != NULL) && !print(bp,"prime2:",x->q,m,off))
++		goto err;
++	if ((x->dmp1 != NULL) && !print(bp,"exponent1:",x->dmp1,m,off))
++		goto err;
++	if ((x->dmq1 != NULL) && !print(bp,"exponent2:",x->dmq1,m,off))
++		goto err;
++	if ((x->iqmp != NULL) && !print(bp,"coefficient:",x->iqmp,m,off))
++		goto err;
+ 	ret=1;
+ err:
+ 	if (m != NULL) OPENSSL_free(m);
+@@ -760,8 +770,8 @@ int DSAparams_print(BIO *bp, const DSA *x)
+ 		BN_num_bits(x->p)) <= 0)
+ 		goto err;
+ 	if (!print(bp,"p:",x->p,m,4)) goto err;
+-	if (!print(bp,"q:",x->q,m,4)) goto err;
+-	if (!print(bp,"g:",x->g,m,4)) goto err;
++	if ((x->q != NULL) && !print(bp,"q:",x->q,m,4)) goto err;
++	if ((x->g != NULL) && !print(bp,"g:",x->g,m,4)) goto err;
+ 	ret=1;
+ err:
+ 	if (m != NULL) OPENSSL_free(m);
+diff --git a/crypto/asn1/tasn_dec.c b/crypto/asn1/tasn_dec.c
+index 4ee5a62e3e..f369fcb9bb 100644
+--- a/crypto/asn1/tasn_dec.c
++++ b/crypto/asn1/tasn_dec.c
+@@ -924,6 +924,8 @@ int asn1_ex_c2i(ASN1_VALUE **pval, const unsigned char *cont, int len,
+ 		if (!*pval)
+ 			{
+ 			typ = ASN1_TYPE_new();
++			if (typ == NULL)
++				goto err;
+ 			*pval = (ASN1_VALUE *)typ;
+ 			}
+ 		else
+diff --git a/crypto/bio/bss_file.c b/crypto/bio/bss_file.c
+index 9e161b17f5..b7504baf20 100644
+--- a/crypto/bio/bss_file.c
++++ b/crypto/bio/bss_file.c
+@@ -128,7 +128,10 @@ BIO *BIO_new_file(const char *filename, const char *mode)
+ 		return(NULL);
+ 		}
+ 	if ((ret=BIO_new(BIO_s_file())) == NULL)
++		{
++		fclose(file);
+ 		return(NULL);
++		}
+ 
+ 	BIO_clear_flags(ret,BIO_FLAGS_UPLINK); /* we did fopen -> we disengage UPLINK */
+ 	BIO_set_fp(ret,file,BIO_CLOSE);
+diff --git a/crypto/bn/bn_gf2m.c b/crypto/bn/bn_gf2m.c
+index 00f188ab66..3953b9890d 100644
+--- a/crypto/bn/bn_gf2m.c
++++ b/crypto/bn/bn_gf2m.c
+@@ -1018,7 +1018,8 @@ int BN_GF2m_arr2poly(const unsigned int p[], BIGNUM *a)
+ 	BN_zero(a);
+ 	for (i = 0; p[i] != 0; i++)
+ 		{
+-		BN_set_bit(a, p[i]);
++		if (BN_set_bit(a, p[i]) == 0)
++			return 0;
+ 		}
+ 	BN_set_bit(a, 0);
+ 	bn_check_top(a);
+diff --git a/crypto/ec/ec_asn1.c b/crypto/ec/ec_asn1.c
+index 5693201a26..dec913b8ad 100644
+--- a/crypto/ec/ec_asn1.c
++++ b/crypto/ec/ec_asn1.c
+@@ -837,11 +837,6 @@ static EC_GROUP *ec_asn1_parameters2group(const ECPARAMETERS *params)
+ 
+ 		/* create the EC_GROUP structure */
+ 		ret = EC_GROUP_new_curve_GF2m(p, a, b, NULL);
+-		if (ret == NULL)
+-			{
+-			ECerr(EC_F_EC_ASN1_PARAMETERS2GROUP, ERR_R_EC_LIB);
+-			goto err;
+-			}
+ 		}
+ 	else if (tmp == NID_X9_62_prime_field)
+ 		{
+@@ -860,11 +855,17 @@ static EC_GROUP *ec_asn1_parameters2group(const ECPARAMETERS *params)
+ 			}
+ 		/* create the EC_GROUP structure */
+ 		ret = EC_GROUP_new_curve_GFp(p, a, b, NULL);
+-		if (ret == NULL)
+-			{
+-			ECerr(EC_F_EC_ASN1_PARAMETERS2GROUP, ERR_R_EC_LIB);
+-			goto err;
+-			}
++		}
++	else
++		{
++		ECerr(EC_F_EC_ASN1_PARAMETERS2GROUP, EC_R_INVALID_FIELD);
++		goto err;
++		}
++
++	if (ret == NULL)
++		{
++		ECerr(EC_F_EC_ASN1_PARAMETERS2GROUP, ERR_R_EC_LIB);
++		goto err;
+ 		}
+ 
+ 	/* extract seed (optional) */
+diff --git a/crypto/ecdsa/ecs_lib.c b/crypto/ecdsa/ecs_lib.c
+index ab96a6dc9c..1fb9bc9600 100644
+--- a/crypto/ecdsa/ecs_lib.c
++++ b/crypto/ecdsa/ecs_lib.c
+@@ -206,10 +206,14 @@ int ECDSA_size(const EC_KEY *r)
+ 	ASN1_INTEGER bs;
+ 	BIGNUM	*order=NULL;
+ 	unsigned char buf[4];
+-	const EC_GROUP *group = EC_KEY_get0_group(r);
++	const EC_GROUP *group;
+ 
+-	if (r == NULL || group == NULL)
++	if (r == NULL)
++		return 0;
++	group = EC_KEY_get0_group(r);
++	if (group == NULL)
+ 		return 0;
++
+ 	if ((order = BN_new()) == NULL) return 0;
+ 	if (!EC_GROUP_get_order(group,order,NULL))
+ 	{
+diff --git a/crypto/err/err.c b/crypto/err/err.c
+index e084714383..72e3f3a26c 100644
+--- a/crypto/err/err.c
++++ b/crypto/err/err.c
+@@ -1108,7 +1108,7 @@ int ERR_pop_to_mark(void)
+ 		{
+ 		err_clear(es,es->top);
+ 		es->top-=1;
+-		if (es->top == -1) es->top=ERR_NUM_ERRORS;
++		if (es->top == -1) es->top=ERR_NUM_ERRORS-1;
+ 		}
+ 		
+ 	if (es->bottom == es->top) return 0;
+diff --git a/crypto/objects/obj_lib.c b/crypto/objects/obj_lib.c
+index b0b0f2ff24..706fa0b0e7 100644
+--- a/crypto/objects/obj_lib.c
++++ b/crypto/objects/obj_lib.c
+@@ -82,7 +82,8 @@ ASN1_OBJECT *OBJ_dup(const ASN1_OBJECT *o)
+ 	r->data=OPENSSL_malloc(o->length);
+ 	if (r->data == NULL)
+ 		goto err;
+-	memcpy(r->data,o->data,o->length);
++	if (o->data != NULL)
++		memcpy(r->data,o->data,o->length);
+ 	r->length=o->length;
+ 	r->nid=o->nid;
+ 	r->ln=r->sn=NULL;
+diff --git a/crypto/rsa/rsa_depr.c b/crypto/rsa/rsa_depr.c
+index c5582b996d..a859ded987 100644
+--- a/crypto/rsa/rsa_depr.c
++++ b/crypto/rsa/rsa_depr.c
+@@ -83,7 +83,8 @@ RSA *RSA_generate_key(int bits, unsigned long e_value,
+ 	for (i=0; i<(int)sizeof(unsigned long)*8; i++)
+ 		{
+ 		if (e_value & (1UL<<i))
+-			BN_set_bit(e,i);
++			if (BN_set_bit(e,i) == 0)
++				goto err;
+ 		}
+ 
+ 	BN_GENCB_set_old(&cb, callback, cb_arg);
+diff --git a/crypto/store/str_meth.c b/crypto/store/str_meth.c
+index 648c08d76d..a46de03a26 100644
+--- a/crypto/store/str_meth.c
++++ b/crypto/store/str_meth.c
+@@ -65,8 +65,10 @@ STORE_METHOD *STORE_create_method(char *name)
+ 	STORE_METHOD *store_method = (STORE_METHOD *)OPENSSL_malloc(sizeof(STORE_METHOD));
+ 
+ 	if (store_method)
++		{
+ 		memset(store_method, 0, sizeof(*store_method));
+-	store_method->name = BUF_strdup(name);
++		store_method->name = BUF_strdup(name);
++		}
+ 	return store_method;
+ 	}
+ 
+diff --git a/crypto/x509/x509_r2x.c b/crypto/x509/x509_r2x.c
+index fb8a78dabe..254a14693d 100644
+--- a/crypto/x509/x509_r2x.c
++++ b/crypto/x509/x509_r2x.c
+@@ -89,8 +89,10 @@ X509 *X509_REQ_to_X509(X509_REQ *r, int days, EVP_PKEY *pkey)
+ 		}
+ 
+ 	xn=X509_REQ_get_subject_name(r);
+-	X509_set_subject_name(ret,X509_NAME_dup(xn));
+-	X509_set_issuer_name(ret,X509_NAME_dup(xn));
++	if (X509_set_subject_name(ret,X509_NAME_dup(xn)) == 0)
++		goto err;
++	if (X509_set_issuer_name(ret,X509_NAME_dup(xn)) == 0)
++		goto err;
+ 
+ 	if (X509_gmtime_adj(xi->validity->notBefore,0) == NULL)
+ 		goto err;
+diff --git a/crypto/x509v3/pcy_tree.c b/crypto/x509v3/pcy_tree.c
+index 62eea0c4ab..1c68ce3352 100644
+--- a/crypto/x509v3/pcy_tree.c
++++ b/crypto/x509v3/pcy_tree.c
+@@ -631,6 +631,7 @@ int X509_policy_check(X509_POLICY_TREE **ptree, int *pexplicit_policy,
+ 		break;
+ 		}
+ 
++	if (!tree) goto error;
+ 	ret = tree_evaluate(tree);
+ 
+ 	if (ret <= 0)
+diff --git a/engines/e_cswift.c b/engines/e_cswift.c
+index e67379e23e..bc65179846 100644
+--- a/engines/e_cswift.c
++++ b/engines/e_cswift.c
+@@ -744,6 +744,12 @@ static int cswift_rsa_mod_exp(BIGNUM *r0, const BIGNUM *I, RSA *rsa, BN_CTX *ctx
+ 	int to_return = 0;
+ 	const RSA_METHOD * def_rsa_method;
+ 
++	if(!rsa->p || !rsa->q || !rsa->dmp1 || !rsa->dmq1 || !rsa->iqmp)
++		{
++		CSWIFTerr(CSWIFT_F_CSWIFT_RSA_MOD_EXP,CSWIFT_R_MISSING_KEY_COMPONENTS);
++		goto err;
++		}
++
+ 	/* Try the limits of RSA (2048 bits) */
+ 	if(BN_num_bytes(rsa->p) > 128 ||
+ 		BN_num_bytes(rsa->q) > 128 ||
+@@ -764,11 +770,6 @@ static int cswift_rsa_mod_exp(BIGNUM *r0, const BIGNUM *I, RSA *rsa, BN_CTX *ctx
+ 			return def_rsa_method->rsa_mod_exp(r0, I, rsa, ctx);
+ 	}
+ 
+-	if(!rsa->p || !rsa->q || !rsa->dmp1 || !rsa->dmq1 || !rsa->iqmp)
+-		{
+-		CSWIFTerr(CSWIFT_F_CSWIFT_RSA_MOD_EXP,CSWIFT_R_MISSING_KEY_COMPONENTS);
+-		goto err;
+-		}
+ 	to_return = cswift_mod_exp_crt(r0, I, rsa->p, rsa->q, rsa->dmp1,
+ 		rsa->dmq1, rsa->iqmp, ctx);
+ err:
+diff --git a/engines/e_sureware.c b/engines/e_sureware.c
+index 424b82fd98..58fa9a98ee 100644
+--- a/engines/e_sureware.c
++++ b/engines/e_sureware.c
+@@ -976,11 +976,13 @@ static	DSA_SIG * surewarehk_dsa_do_sign(const unsigned char *from, int flen, DSA
+ 	if (!p_surewarehk_Dsa_Sign)
+ 	{
+ 		SUREWAREerr(SUREWARE_F_SUREWAREHK_DSA_DO_SIGN,ENGINE_R_NOT_INITIALISED);
++		goto err;
+ 	}
+ 	/* extract ref to private key */
+ 	else if (!(hptr=DSA_get_ex_data(dsa, dsaHndidx)))
+ 	{
+ 		SUREWAREerr(SUREWARE_F_SUREWAREHK_DSA_DO_SIGN,SUREWARE_R_MISSING_KEY_COMPONENTS);
++		goto err;
+ 	}
+ 	else
+ 	{
+diff --git a/ssl/d1_enc.c b/ssl/d1_enc.c
+index 42997eaee9..cbff7495c5 100644
+--- a/ssl/d1_enc.c
++++ b/ssl/d1_enc.c
+@@ -146,7 +146,10 @@ int dtls1_enc(SSL *s, int send)
+ 				fprintf(stderr, "%s:%d: rec->data != rec->input\n",
+ 					__FILE__, __LINE__);
+ 			else if ( EVP_CIPHER_block_size(ds->cipher) > 1)
+-				RAND_bytes(rec->input, EVP_CIPHER_block_size(ds->cipher));
++				{
++				if (!RAND_bytes(rec->input, EVP_CIPHER_block_size(ds->cipher)))
++					return -1;
++				}
+ 			}
+ 		}
+ 	else
+diff --git a/ssl/d1_pkt.c b/ssl/d1_pkt.c
+index c4f38e3cb7..5c7fcd124e 100644
+--- a/ssl/d1_pkt.c
++++ b/ssl/d1_pkt.c
+@@ -237,7 +237,13 @@ dtls1_buffer_record(SSL *s, record_pqueue *queue, unsigned char *priority)
+ 	memset(&(s->s3->rbuf), 0, sizeof(SSL3_BUFFER));
+ 	memset(&(s->s3->rrec), 0, sizeof(SSL3_RECORD));
+ 	
+-	ssl3_setup_buffers(s);
++	if (!ssl3_setup_buffers(s))
++		{
++		SSLerr(SSL_F_DTLS1_BUFFER_RECORD, ERR_R_INTERNAL_ERROR);
++		OPENSSL_free(rdata);
++		pitem_free(item);
++		return(0);
++		}
+ 	
+ 	return(1);
+ 	}
+diff --git a/ssl/s3_srvr.c b/ssl/s3_srvr.c
+index 479b281c7d..44b9c9cdac 100644
+--- a/ssl/s3_srvr.c
++++ b/ssl/s3_srvr.c
+@@ -2110,8 +2110,13 @@ int ssl3_get_client_key_exchange(SSL *s)
+                            	goto f_err;
+                            	}
+ 
+-			EC_POINT_copy(clnt_ecpoint,
+-			    EC_KEY_get0_public_key(clnt_pub_pkey->pkey.ec));
++			if (EC_POINT_copy(clnt_ecpoint,
++			    EC_KEY_get0_public_key(clnt_pub_pkey->pkey.ec)) == 0)
++				{
++				SSLerr(SSL_F_SSL3_GET_CLIENT_KEY_EXCHANGE,
++					ERR_R_EC_LIB);
++				goto err;
++				}
+                         ret = 2; /* Skip certificate verify processing */
+                         }
+                 else
+

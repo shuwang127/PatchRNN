@@ -1,0 +1,63 @@
+commit 6d6467305aa62368e086c697f14560c80eac17c5
+Author: John Haxby <john.haxby@oracle.com>
+Date:   Fri Jun 17 12:16:00 2011 +0000
+
+    Move the xenfb pointer handler to the connected method
+    
+    Ensure that we read "request-abs-pointer" after the frontend has written
+    it.  This means that we will correctly set up an ansolute or relative
+    pointer handler correctly.
+    
+    Signed-off-by: John Haxby <john.haxby@oracle.com>
+    Signed-off-by: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+
+diff --git a/hw/xenfb.c b/hw/xenfb.c
+index 3a53711fa0..1bcf171b01 100644
+--- a/hw/xenfb.c
++++ b/hw/xenfb.c
+@@ -356,10 +356,6 @@ static int input_initialise(struct XenDevice *xendev)
+     struct XenInput *in = container_of(xendev, struct XenInput, c.xendev);
+     int rc;
+ 
+-    if (xenstore_read_fe_int(xendev, "request-abs-pointer",
+-                             &in->abs_pointer_wanted) == -1)
+-	in->abs_pointer_wanted = 0;
+-
+     if (!in->c.ds) {
+         char *vfb = xenstore_read_str(NULL, "device/vfb");
+         if (vfb == NULL) {
+@@ -377,10 +373,24 @@ static int input_initialise(struct XenDevice *xendev)
+ 	return rc;
+ 
+     qemu_add_kbd_event_handler(xenfb_key_event, in);
++    return 0;
++}
++
++static void input_connected(struct XenDevice *xendev)
++{
++    struct XenInput *in = container_of(xendev, struct XenInput, c.xendev);
++
++    if (xenstore_read_fe_int(xendev, "request-abs-pointer",
++                             &in->abs_pointer_wanted) == -1) {
++        in->abs_pointer_wanted = 0;
++    }
++
++    if (in->qmouse) {
++        qemu_remove_mouse_event_handler(in->qmouse);
++    }
+     in->qmouse = qemu_add_mouse_event_handler(xenfb_mouse_event, in,
+ 					      in->abs_pointer_wanted,
+ 					      "Xen PVFB Mouse");
+-    return 0;
+ }
+ 
+ static void input_disconnect(struct XenDevice *xendev)
+@@ -960,6 +970,7 @@ struct XenDevOps xen_kbdmouse_ops = {
+     .size       = sizeof(struct XenInput),
+     .init       = input_init,
+     .initialise = input_initialise,
++    .connected  = input_connected,
+     .disconnect = input_disconnect,
+     .event      = input_event,
+ };
+

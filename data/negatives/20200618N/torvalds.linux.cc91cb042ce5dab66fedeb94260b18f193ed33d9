@@ -1,0 +1,113 @@
+commit cc91cb042ce5dab66fedeb94260b18f193ed33d9
+Author: Marcel Holtmann <marcel@holtmann.org>
+Date:   Thu Mar 12 22:30:58 2015 -0700
+
+    Bluetooth: Add support connectable advertising setting
+    
+    The patch adds a second advertising setting that allows switching of the
+    controller into connectable mode independent of the global connectable
+    setting.
+    
+    Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+    Signed-off-by: Johan Hedberg <johan.hedberg@intel.com>
+
+diff --git a/include/net/bluetooth/hci.h b/include/net/bluetooth/hci.h
+index f76f45ae76c3..0f3413b285a5 100644
+--- a/include/net/bluetooth/hci.h
++++ b/include/net/bluetooth/hci.h
+@@ -217,6 +217,7 @@ enum {
+ 	HCI_HS_ENABLED,
+ 	HCI_LE_ENABLED,
+ 	HCI_ADVERTISING,
++	HCI_ADVERTISING_CONNECTABLE,
+ 	HCI_CONNECTABLE,
+ 	HCI_DISCOVERABLE,
+ 	HCI_LIMITED_DISCOVERABLE,
+diff --git a/net/bluetooth/mgmt.c b/net/bluetooth/mgmt.c
+index 025f29bf1f1a..0761f2e0fefa 100644
+--- a/net/bluetooth/mgmt.c
++++ b/net/bluetooth/mgmt.c
+@@ -1110,7 +1110,10 @@ static void enable_advertising(struct hci_request *req)
+ 	 */
+ 	clear_bit(HCI_LE_ADV, &hdev->dev_flags);
+ 
+-	connectable = get_connectable(hdev);
++	if (test_bit(HCI_ADVERTISING_CONNECTABLE, &hdev->dev_flags))
++		connectable = true;
++	else
++		connectable = get_connectable(hdev);
+ 
+ 	/* Set require_privacy to true only when non-connectable
+ 	 * advertising is used. In that case it is fine to use a
+@@ -4430,7 +4433,7 @@ static int set_advertising(struct sock *sk, struct hci_dev *hdev, void *data,
+ 	struct mgmt_mode *cp = data;
+ 	struct mgmt_pending_cmd *cmd;
+ 	struct hci_request req;
+-	u8 val, enabled, status;
++	u8 val, status;
+ 	int err;
+ 
+ 	BT_DBG("request for %s", hdev->name);
+@@ -4440,29 +4443,42 @@ static int set_advertising(struct sock *sk, struct hci_dev *hdev, void *data,
+ 		return mgmt_cmd_status(sk, hdev->id, MGMT_OP_SET_ADVERTISING,
+ 				       status);
+ 
+-	if (cp->val != 0x00 && cp->val != 0x01)
++	if (cp->val != 0x00 && cp->val != 0x01 && cp->val != 0x02)
+ 		return mgmt_cmd_status(sk, hdev->id, MGMT_OP_SET_ADVERTISING,
+ 				       MGMT_STATUS_INVALID_PARAMS);
+ 
+ 	hci_dev_lock(hdev);
+ 
+ 	val = !!cp->val;
+-	enabled = test_bit(HCI_ADVERTISING, &hdev->dev_flags);
+ 
+ 	/* The following conditions are ones which mean that we should
+ 	 * not do any HCI communication but directly send a mgmt
+ 	 * response to user space (after toggling the flag if
+ 	 * necessary).
+ 	 */
+-	if (!hdev_is_powered(hdev) || val == enabled ||
++	if (!hdev_is_powered(hdev) ||
++	    (val == test_bit(HCI_ADVERTISING, &hdev->dev_flags) &&
++	     (cp->val == 0x02) == test_bit(HCI_ADVERTISING_CONNECTABLE,
++					   &hdev->dev_flags)) ||
+ 	    hci_conn_num(hdev, LE_LINK) > 0 ||
+ 	    (test_bit(HCI_LE_SCAN, &hdev->dev_flags) &&
+ 	     hdev->le_scan_type == LE_SCAN_ACTIVE)) {
+-		bool changed = false;
++		bool changed;
+ 
+-		if (val != test_bit(HCI_ADVERTISING, &hdev->dev_flags)) {
+-			change_bit(HCI_ADVERTISING, &hdev->dev_flags);
+-			changed = true;
++		if (cp->val) {
++			changed = !test_and_set_bit(HCI_ADVERTISING,
++						    &hdev->dev_flags);
++			if (cp->val == 0x02)
++				set_bit(HCI_ADVERTISING_CONNECTABLE,
++					&hdev->dev_flags);
++			else
++				clear_bit(HCI_ADVERTISING_CONNECTABLE,
++					  &hdev->dev_flags);
++		} else {
++			changed = test_and_clear_bit(HCI_ADVERTISING,
++						     &hdev->dev_flags);
++			clear_bit(HCI_ADVERTISING_CONNECTABLE,
++				  &hdev->dev_flags);
+ 		}
+ 
+ 		err = send_settings_rsp(sk, MGMT_OP_SET_ADVERTISING, hdev);
+@@ -4490,6 +4506,11 @@ static int set_advertising(struct sock *sk, struct hci_dev *hdev, void *data,
+ 
+ 	hci_req_init(&req, hdev);
+ 
++	if (cp->val == 0x02)
++		set_bit(HCI_ADVERTISING_CONNECTABLE, &hdev->dev_flags);
++	else
++		clear_bit(HCI_ADVERTISING_CONNECTABLE, &hdev->dev_flags);
++
+ 	if (val)
+ 		enable_advertising(&req);
+ 	else
+

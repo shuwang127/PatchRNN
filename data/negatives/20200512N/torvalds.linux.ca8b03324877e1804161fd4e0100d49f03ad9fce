@@ -1,0 +1,149 @@
+commit ca8b03324877e1804161fd4e0100d49f03ad9fce
+Author: Chen Yu <chenyu56@huawei.com>
+Date:   Mon Jan 23 15:00:18 2017 -0800
+
+    usb: dwc2: Add a quirk to allow speed negotiation for Hisilicon Hi6220
+    
+    The Hi6220's usb controller is limited in that it does not
+    support "Split Transactions", so it does not support communicating
+    with low-speed and full-speed devices behind a high-speed hub.
+    
+    Thus it requires a quirk so that we can manually drop the usb
+    speed when low/full-speed are attached, and bump back to high
+    speed when they are removed.
+    
+    Cc: Wei Xu <xuwei5@hisilicon.com>
+    Cc: Guodong Xu <guodong.xu@linaro.org>
+    Cc: Amit Pundir <amit.pundir@linaro.org>
+    Cc: Rob Herring <robh+dt@kernel.org>
+    Cc: John Youn <johnyoun@synopsys.com>
+    Cc: Douglas Anderson <dianders@chromium.org>
+    Cc: Chen Yu <chenyu56@huawei.com>
+    Cc: Vardan Mikayelyan <mvardan@synopsys.com>
+    Cc: Kishon Vijay Abraham I <kishon@ti.com>
+    Cc: Felipe Balbi <felipe.balbi@linux.intel.com>
+    Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Cc: linux-usb@vger.kernel.org
+    Signed-off-by: Chen Yu <chenyu56@huawei.com>
+    [jstultz: Reworked to simplify the patch, and made
+     commit log to be more specific about the issue]
+    Signed-off-by: John Stultz <john.stultz@linaro.org>
+    Signed-off-by: John Youn <johnyoun@synopsys.com>
+    Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+
+diff --git a/drivers/usb/dwc2/core.h b/drivers/usb/dwc2/core.h
+index b07bf7be2034..a473853ca39c 100644
+--- a/drivers/usb/dwc2/core.h
++++ b/drivers/usb/dwc2/core.h
+@@ -444,6 +444,11 @@ enum dwc2_ep0_state {
+  *			in DWORDS with possible values from from
+  *			16-32768 (default: 256, 256, 256, 256, 768,
+  *			768, 768, 768, 0, 0, 0, 0, 0, 0, 0).
++ * @change_speed_quirk: Change speed configuration to DWC2_SPEED_PARAM_FULL
++ *                      while full&low speed device connect. And change speed
++ *                      back to DWC2_SPEED_PARAM_HIGH while device is gone.
++ *			0 - No (default)
++ *			1 - Yes
+  *
+  * The following parameters may be specified when starting the module. These
+  * parameters define how the DWC_otg controller should be configured. A
+@@ -501,6 +506,8 @@ struct dwc2_core_params {
+ 	u32 g_rx_fifo_size;
+ 	u32 g_np_tx_fifo_size;
+ 	u32 g_tx_fifo_size[MAX_EPS_CHANNELS];
++
++	bool change_speed_quirk;
+ };
+ 
+ /**
+diff --git a/drivers/usb/dwc2/hcd.c b/drivers/usb/dwc2/hcd.c
+index 1f670c3429a6..751f0ddd741b 100644
+--- a/drivers/usb/dwc2/hcd.c
++++ b/drivers/usb/dwc2/hcd.c
+@@ -4868,6 +4868,61 @@ static void _dwc2_hcd_clear_tt_buffer_complete(struct usb_hcd *hcd,
+ 	spin_unlock_irqrestore(&hsotg->lock, flags);
+ }
+ 
++/*
++ * HPRT0_SPD_HIGH_SPEED: high speed
++ * HPRT0_SPD_FULL_SPEED: full speed
++ */
++static void dwc2_change_bus_speed(struct usb_hcd *hcd, int speed)
++{
++	struct dwc2_hsotg *hsotg = dwc2_hcd_to_hsotg(hcd);
++
++	if (hsotg->params.speed == speed)
++		return;
++
++	hsotg->params.speed = speed;
++	queue_work(hsotg->wq_otg, &hsotg->wf_otg);
++}
++
++static void dwc2_free_dev(struct usb_hcd *hcd, struct usb_device *udev)
++{
++	struct dwc2_hsotg *hsotg = dwc2_hcd_to_hsotg(hcd);
++
++	if (!hsotg->params.change_speed_quirk)
++		return;
++
++	/*
++	 * On removal, set speed to default high-speed.
++	 */
++	if (udev->parent && udev->parent->speed > USB_SPEED_UNKNOWN &&
++	    udev->parent->speed < USB_SPEED_HIGH) {
++		dev_info(hsotg->dev, "Set speed to default high-speed\n");
++		dwc2_change_bus_speed(hcd, HPRT0_SPD_HIGH_SPEED);
++	}
++}
++
++static int dwc2_reset_device(struct usb_hcd *hcd, struct usb_device *udev)
++{
++	struct dwc2_hsotg *hsotg = dwc2_hcd_to_hsotg(hcd);
++
++	if (!hsotg->params.change_speed_quirk)
++		return 0;
++
++	if (udev->speed == USB_SPEED_HIGH) {
++		dev_info(hsotg->dev, "Set speed to high-speed\n");
++		dwc2_change_bus_speed(hcd, HPRT0_SPD_HIGH_SPEED);
++	} else if ((udev->speed == USB_SPEED_FULL ||
++				udev->speed == USB_SPEED_LOW)) {
++		/*
++		 * Change speed setting to full-speed if there's
++		 * a full-speed or low-speed device plugged in.
++		 */
++		dev_info(hsotg->dev, "Set speed to full-speed\n");
++		dwc2_change_bus_speed(hcd, HPRT0_SPD_FULL_SPEED);
++	}
++
++	return 0;
++}
++
+ static struct hc_driver dwc2_hc_driver = {
+ 	.description = "dwc2_hsotg",
+ 	.product_desc = "DWC OTG Controller",
+@@ -5023,6 +5078,11 @@ int dwc2_hcd_init(struct dwc2_hsotg *hsotg, int irq)
+ 			dev_warn(hsotg->dev, "can't set coherent DMA mask\n");
+ 	}
+ 
++	if (hsotg->params.change_speed_quirk) {
++		dwc2_hc_driver.free_dev = dwc2_free_dev;
++		dwc2_hc_driver.reset_device = dwc2_reset_device;
++	}
++
+ 	hcd = usb_create_hcd(&dwc2_hc_driver, hsotg->dev, dev_name(hsotg->dev));
+ 	if (!hcd)
+ 		goto error1;
+diff --git a/drivers/usb/dwc2/params.c b/drivers/usb/dwc2/params.c
+index 620b02723f0d..8e5039e2d3fc 100644
+--- a/drivers/usb/dwc2/params.c
++++ b/drivers/usb/dwc2/params.c
+@@ -68,6 +68,7 @@ static void dwc2_set_his_params(struct dwc2_hsotg *hsotg)
+ 	p->ahbcfg = GAHBCFG_HBSTLEN_INCR16 <<
+ 		GAHBCFG_HBSTLEN_SHIFT;
+ 	p->uframe_sched = false;
++	p->change_speed_quirk = true;
+ }
+ 
+ static void dwc2_set_rk_params(struct dwc2_hsotg *hsotg)
+

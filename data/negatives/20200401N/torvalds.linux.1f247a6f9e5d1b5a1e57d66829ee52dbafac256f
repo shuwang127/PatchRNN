@@ -1,0 +1,54 @@
+commit 1f247a6f9e5d1b5a1e57d66829ee52dbafac256f
+Author: Thomas Falcon <tlfalcon@linux.vnet.ibm.com>
+Date:   Mon Mar 12 11:51:04 2018 -0500
+
+    ibmvnic: Pad small packets to minimum MTU size
+    
+    Some backing devices cannot handle small packets well,
+    so pad any small packets to avoid that. It was recommended
+    that the VNIC driver should not send packets smaller than the
+    minimum MTU value provided by firmware, so pad small packets
+    to be at least that long.
+    
+    Signed-off-by: Thomas Falcon <tlfalcon@linux.vnet.ibm.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/ibm/ibmvnic.c b/drivers/net/ethernet/ibm/ibmvnic.c
+index 14f00810db33..7ed87fbb156b 100644
+--- a/drivers/net/ethernet/ibm/ibmvnic.c
++++ b/drivers/net/ethernet/ibm/ibmvnic.c
+@@ -1340,6 +1340,19 @@ static void build_hdr_descs_arr(struct ibmvnic_tx_buff *txbuff,
+ 			 txbuff->indir_arr + 1);
+ }
+ 
++static int ibmvnic_xmit_workarounds(struct sk_buff *skb,
++				    struct net_device *netdev)
++{
++	/* For some backing devices, mishandling of small packets
++	 * can result in a loss of connection or TX stall. Device
++	 * architects recommend that no packet should be smaller
++	 * than the minimum MTU value provided to the driver, so
++	 * pad any packets to that length
++	 */
++	if (skb->len < netdev->min_mtu)
++		return skb_put_padto(skb, netdev->min_mtu);
++}
++
+ static int ibmvnic_xmit(struct sk_buff *skb, struct net_device *netdev)
+ {
+ 	struct ibmvnic_adapter *adapter = netdev_priv(netdev);
+@@ -1377,6 +1390,13 @@ static int ibmvnic_xmit(struct sk_buff *skb, struct net_device *netdev)
+ 		goto out;
+ 	}
+ 
++	if (ibmvnic_xmit_workarounds(skb, adapter)) {
++		tx_dropped++;
++		tx_send_failed++;
++		ret = NETDEV_TX_OK;
++		goto out;
++	}
++
+ 	tx_pool = &adapter->tx_pool[queue_num];
+ 	tx_scrq = adapter->tx_scrq[queue_num];
+ 	txq = netdev_get_tx_queue(netdev, skb_get_queue_mapping(skb));
+

@@ -1,0 +1,71 @@
+commit 064231e548d0ef90453081f424ced7b3ffffffe9
+Author: Paul Burton <paul.burton@imgtec.com>
+Date:   Wed Jul 9 12:48:18 2014 +0100
+
+    MIPS: pm-cps: Prevent use of mips_cps_* without CPS SMP
+    
+    These symbols will not be defined when CONFIG_MIPS_CPS=n, but although
+    the CPS_PM_POWER_GATED state will never be used in that case the
+    compiler doesn't have enough information to figure that out. Add checks
+    which evaluate to a constant false for CONFIG_MIPS_CPS=n cases in order
+    to help the compiler out & eliminate the symbol references.
+    
+    Signed-off-by: Paul Burton <paul.burton@imgtec.com>
+    Reviewed-by: Markos Chandras <markos.chandras@imgtec.com>
+    Cc: linux-mips@linux-mips.org
+    Patchwork: https://patchwork.linux-mips.org/patch/7278/
+    Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+
+diff --git a/arch/mips/include/asm/smp-cps.h b/arch/mips/include/asm/smp-cps.h
+index a06a08a9afc6..326c16ebd589 100644
+--- a/arch/mips/include/asm/smp-cps.h
++++ b/arch/mips/include/asm/smp-cps.h
+@@ -31,11 +31,19 @@ extern void mips_cps_core_init(void);
+ 
+ extern struct vpe_boot_config *mips_cps_boot_vpes(void);
+ 
+-extern bool mips_cps_smp_in_use(void);
+-
+ extern void mips_cps_pm_save(void);
+ extern void mips_cps_pm_restore(void);
+ 
++#ifdef CONFIG_MIPS_CPS
++
++extern bool mips_cps_smp_in_use(void);
++
++#else /* !CONFIG_MIPS_CPS */
++
++static inline bool mips_cps_smp_in_use(void) { return false; }
++
++#endif /* !CONFIG_MIPS_CPS */
++
+ #else /* __ASSEMBLY__ */
+ 
+ .extern mips_cps_bootcfg;
+diff --git a/arch/mips/kernel/pm-cps.c b/arch/mips/kernel/pm-cps.c
+index c4c2069d3a20..c409a5aef8ab 100644
+--- a/arch/mips/kernel/pm-cps.c
++++ b/arch/mips/kernel/pm-cps.c
+@@ -149,6 +149,10 @@ int cps_pm_enter_state(enum cps_pm_state state)
+ 
+ 	/* Setup the VPE to run mips_cps_pm_restore when started again */
+ 	if (config_enabled(CONFIG_CPU_PM) && state == CPS_PM_POWER_GATED) {
++		/* Power gating relies upon CPS SMP */
++		if (!mips_cps_smp_in_use())
++			return -EINVAL;
++
+ 		core_cfg = &mips_cps_core_bootcfg[core];
+ 		vpe_cfg = &core_cfg->vpe_config[current_cpu_data.vpe_id];
+ 		vpe_cfg->pc = (unsigned long)mips_cps_pm_restore;
+@@ -376,6 +380,10 @@ static void * __init cps_gen_entry_code(unsigned cpu, enum cps_pm_state state)
+ 	memset(relocs, 0, sizeof(relocs));
+ 
+ 	if (config_enabled(CONFIG_CPU_PM) && state == CPS_PM_POWER_GATED) {
++		/* Power gating relies upon CPS SMP */
++		if (!mips_cps_smp_in_use())
++			goto out_err;
++
+ 		/*
+ 		 * Save CPU state. Note the non-standard calling convention
+ 		 * with the return address placed in v0 to avoid clobbering
+

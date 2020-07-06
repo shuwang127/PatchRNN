@@ -1,0 +1,92 @@
+commit 86dc12e4bedcdc2e0ff9ed0243eeb5e9cc6bc800
+Author: Sage Weil <sage@newdream.net>
+Date:   Tue Nov 18 13:53:13 2008 -0800
+
+    osd: include fsid in OSDPing, and verify
+
+diff --git a/src/include/ceph_fs.h b/src/include/ceph_fs.h
+index 16b9d50b05..114b453a03 100644
+--- a/src/include/ceph_fs.h
++++ b/src/include/ceph_fs.h
+@@ -22,7 +22,7 @@
+  * whenever the wire protocol changes.  try to keep this string length
+  * constant.
+  */
+-#define CEPH_BANNER "ceph 007\n"
++#define CEPH_BANNER "ceph 008\n"
+ #define CEPH_BANNER_MAX_LEN 30
+ 
+ /*
+diff --git a/src/messages/MOSDPing.h b/src/messages/MOSDPing.h
+index 2bff616fb3..9276bb3649 100644
+--- a/src/messages/MOSDPing.h
++++ b/src/messages/MOSDPing.h
+@@ -23,21 +23,24 @@
+ 
+ class MOSDPing : public Message {
+  public:
++  ceph_fsid fsid;
+   epoch_t map_epoch;
+   bool ack;
+   osd_peer_stat_t peer_stat;
+ 
+-  MOSDPing(epoch_t e, osd_peer_stat_t& ps, bool a=false) : 
+-    Message(MSG_OSD_PING), map_epoch(e), ack(a), peer_stat(ps) { }
++  MOSDPing(ceph_fsid& f, epoch_t e, osd_peer_stat_t& ps, bool a=false) : 
++    Message(MSG_OSD_PING), fsid(f), map_epoch(e), ack(a), peer_stat(ps) { }
+   MOSDPing() {}
+ 
+   void decode_payload() {
+     bufferlist::iterator p = payload.begin();
++    ::decode(fsid, p);
+     ::decode(map_epoch, p);
+     ::decode(ack, p);
+     ::decode(peer_stat, p);
+   }
+   void encode_payload() {
++    ::encode(fsid, payload);
+     ::encode(map_epoch, payload);
+     ::encode(ack, payload);
+     ::encode(peer_stat, payload);
+diff --git a/src/osd/OSD.cc b/src/osd/OSD.cc
+index 5ca346769b..5f68735827 100644
+--- a/src/osd/OSD.cc
++++ b/src/osd/OSD.cc
+@@ -967,7 +967,7 @@ void OSD::heartbeat()
+        i++) {
+     _share_map_outgoing( osdmap->get_inst(*i) );
+     my_stat_on_peer[*i] = my_stat;
+-    Message *m = new MOSDPing(osdmap->get_epoch(), my_stat);
++    Message *m = new MOSDPing(osdmap->get_fsid(),osdmap->get_epoch(), my_stat);
+     m->set_priority(CEPH_MSG_PRIO_HIGH);
+     messenger->send_message(m, osdmap->get_inst(*i));
+   }
+@@ -1438,6 +1438,13 @@ void OSD::handle_osd_ping(MOSDPing *m)
+ {
+   dout(20) << "osdping from " << m->get_source() << " got stat " << m->peer_stat << dendl;
+ 
++  if (!ceph_fsid_equal(&osdmap->get_fsid(), &m->fsid)) {
++    dout(20) << "osdping from " << m->get_source()
++	     << " bad fsid " << m->fsid << " != " << osdmap->get_fsid() << dendl;
++    delete m;
++    return;
++  }
++
+   int from = m->get_source().num();
+   if (osdmap->have_inst(from) &&
+       osdmap->get_inst(from) == m->get_source_inst()) {
+diff --git a/src/osd/ReplicatedPG.cc b/src/osd/ReplicatedPG.cc
+index a5cabc205b..9a754d734f 100644
+--- a/src/osd/ReplicatedPG.cc
++++ b/src/osd/ReplicatedPG.cc
+@@ -669,7 +669,8 @@ void ReplicatedPG::op_read(MOSDOp *op)
+ 		  << " > them " << op->get_peer_stat().read_latency
+ 		  << ", but they didn't know better, sharing" << dendl;
+ 	osd->my_stat_on_peer[from] = osd->my_stat;
+-	osd->messenger->send_message(new MOSDPing(osd->osdmap->get_epoch(), osd->my_stat),
++	osd->messenger->send_message(new MOSDPing(osd->osdmap->get_fsid(), osd->osdmap->get_epoch(),
++						  osd->my_stat),
+ 				     osd->osdmap->get_inst(from));
+       }
+     } else {
+

@@ -1,0 +1,620 @@
+commit 44c821525778c5d2e81da293195d5d589e8ad845
+Author: Thomas Klein <osstklei@de.ibm.com>
+Date:   Wed Jul 11 16:32:00 2007 +0200
+
+    eHEA: Introducing support vor DLPAR memory add
+    
+    This patch adds support for DLPAR memory add to the eHEA driver. To detect
+    whether memory was added the driver uses its own memory mapping table and
+    checks for kernel addresses whether they're located in already known memory
+    sections. If not the function ehea_rereg_mrs() is triggered which performs
+    a rebuild of the mapping table and a re-registration of the global memory
+    region.
+    
+    Signed-off-by: Thomas Klein <tklein@de.ibm.com>
+    Signed-off-by: Jeff Garzik <jeff@garzik.org>
+
+diff --git a/drivers/net/ehea/ehea.h b/drivers/net/ehea/ehea.h
+index f03f070451de..6628fa622e2c 100644
+--- a/drivers/net/ehea/ehea.h
++++ b/drivers/net/ehea/ehea.h
+@@ -39,13 +39,13 @@
+ #include <asm/io.h>
+ 
+ #define DRV_NAME	"ehea"
+-#define DRV_VERSION	"EHEA_0067"
++#define DRV_VERSION	"EHEA_0070"
+ 
+-/* EHEA capability flags */
++/* eHEA capability flags */
+ #define DLPAR_PORT_ADD_REM 1
+-#define DLPAR_MEM_ADD 2
+-#define DLPAR_MEM_REM 4
+-#define EHEA_CAPABILITIES (DLPAR_PORT_ADD_REM)
++#define DLPAR_MEM_ADD      2
++#define DLPAR_MEM_REM      4
++#define EHEA_CAPABILITIES  (DLPAR_PORT_ADD_REM)
+ 
+ #define EHEA_MSG_DEFAULT (NETIF_MSG_LINK | NETIF_MSG_TIMER \
+ 	| NETIF_MSG_RX_ERR | NETIF_MSG_TX_ERR)
+@@ -113,6 +113,8 @@
+ /* Memory Regions */
+ #define EHEA_MR_ACC_CTRL       0x00800000
+ 
++#define EHEA_BUSMAP_START      0x8000000000000000ULL
++
+ #define EHEA_WATCH_DOG_TIMEOUT 10*HZ
+ 
+ /* utility functions */
+@@ -186,6 +188,12 @@ struct h_epas {
+ 				   set to 0 if unused */
+ };
+ 
++struct ehea_busmap {
++	unsigned int entries;		/* total number of entries */
++	unsigned int valid_sections;	/* number of valid sections */
++	u64 *vaddr;
++};
++
+ struct ehea_qp;
+ struct ehea_cq;
+ struct ehea_eq;
+@@ -382,6 +390,8 @@ struct ehea_adapter {
+ 	struct ehea_mr mr;
+ 	u32 pd;                    /* protection domain */
+ 	u64 max_mc_mac;            /* max number of multicast mac addresses */
++	int active_ports;
++	struct list_head list;
+ };
+ 
+ 
+@@ -431,6 +441,9 @@ struct port_res_cfg {
+ 	int max_entries_rq3;
+ };
+ 
++enum ehea_flag_bits {
++	__EHEA_STOP_XFER
++};
+ 
+ void ehea_set_ethtool_ops(struct net_device *netdev);
+ int ehea_sense_port_attr(struct ehea_port *port);
+diff --git a/drivers/net/ehea/ehea_main.c b/drivers/net/ehea/ehea_main.c
+index 383144db4d18..1d1571cf322e 100644
+--- a/drivers/net/ehea/ehea_main.c
++++ b/drivers/net/ehea/ehea_main.c
+@@ -79,6 +79,11 @@ MODULE_PARM_DESC(sq_entries, " Number of entries for the Send Queue  "
+ MODULE_PARM_DESC(use_mcs, " 0:NAPI, 1:Multiple receive queues, Default = 1 ");
+ 
+ static int port_name_cnt = 0;
++static LIST_HEAD(adapter_list);
++u64 ehea_driver_flags = 0;
++struct workqueue_struct *ehea_driver_wq;
++struct work_struct ehea_rereg_mr_task;
++
+ 
+ static int __devinit ehea_probe_adapter(struct ibmebus_dev *dev,
+ 					const struct of_device_id *id);
+@@ -238,13 +243,17 @@ static int ehea_refill_rq_def(struct ehea_port_res *pr,
+ 		rwqe->wr_id = EHEA_BMASK_SET(EHEA_WR_ID_TYPE, wqe_type)
+ 			    | EHEA_BMASK_SET(EHEA_WR_ID_INDEX, index);
+ 		rwqe->sg_list[0].l_key = pr->recv_mr.lkey;
+-		rwqe->sg_list[0].vaddr = (u64)skb->data;
++		rwqe->sg_list[0].vaddr = ehea_map_vaddr(skb->data);
+ 		rwqe->sg_list[0].len = packet_size;
+ 		rwqe->data_segments = 1;
+ 
+ 		index++;
+ 		index &= max_index_mask;
++
++		if (unlikely(test_bit(__EHEA_STOP_XFER, &ehea_driver_flags)))
++			goto out;
+ 	}
++
+ 	q_skba->index = index;
+ 
+ 	/* Ring doorbell */
+@@ -253,7 +262,7 @@ static int ehea_refill_rq_def(struct ehea_port_res *pr,
+ 		ehea_update_rq2a(pr->qp, i);
+ 	else
+ 		ehea_update_rq3a(pr->qp, i);
+-
++out:
+ 	return ret;
+ }
+ 
+@@ -1321,7 +1330,7 @@ static void write_swqe2_TSO(struct sk_buff *skb,
+ 			sg1entry->len = skb_data_size - headersize;
+ 
+ 			tmp_addr = (u64)(skb->data + headersize);
+-			sg1entry->vaddr = tmp_addr;
++			sg1entry->vaddr = ehea_map_vaddr(tmp_addr);
+ 			swqe->descriptors++;
+ 		}
+ 	} else
+@@ -1352,7 +1361,7 @@ static void write_swqe2_nonTSO(struct sk_buff *skb,
+ 			sg1entry->l_key = lkey;
+ 			sg1entry->len = skb_data_size - SWQE2_MAX_IMM;
+ 			tmp_addr = (u64)(skb->data + SWQE2_MAX_IMM);
+-			sg1entry->vaddr = tmp_addr;
++			sg1entry->vaddr = ehea_map_vaddr(tmp_addr);
+ 			swqe->descriptors++;
+ 		}
+ 	} else {
+@@ -1391,7 +1400,7 @@ static inline void write_swqe2_data(struct sk_buff *skb, struct net_device *dev,
+ 			sg1entry->len = frag->size;
+ 			tmp_addr =  (u64)(page_address(frag->page)
+ 					  + frag->page_offset);
+-			sg1entry->vaddr = tmp_addr;
++			sg1entry->vaddr = ehea_map_vaddr(tmp_addr);
+ 			swqe->descriptors++;
+ 			sg1entry_contains_frag_data = 1;
+ 		}
+@@ -1406,7 +1415,7 @@ static inline void write_swqe2_data(struct sk_buff *skb, struct net_device *dev,
+ 
+ 			tmp_addr = (u64)(page_address(frag->page)
+ 					 + frag->page_offset);
+-			sgentry->vaddr = tmp_addr;
++			sgentry->vaddr = ehea_map_vaddr(tmp_addr);
+ 			swqe->descriptors++;
+ 		}
+ 	}
+@@ -1878,6 +1887,9 @@ static int ehea_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ 		ehea_dump(swqe, 512, "swqe");
+ 	}
+ 
++	if (unlikely(test_bit(__EHEA_STOP_XFER, &ehea_driver_flags)))
++		goto out;
++
+ 	ehea_post_swqe(pr->qp, swqe);
+ 	pr->tx_packets++;
+ 
+@@ -1892,7 +1904,7 @@ static int ehea_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	}
+ 	dev->trans_start = jiffies;
+ 	spin_unlock(&pr->xmit_lock);
+-
++out:
+ 	return NETDEV_TX_OK;
+ }
+ 
+@@ -2220,6 +2232,9 @@ out_dereg_bc:
+ out_clean_pr:
+ 	ehea_clean_all_portres(port);
+ out:
++	if (ret)
++		ehea_info("Failed starting %s. ret=%i", dev->name, ret);
++
+ 	return ret;
+ }
+ 
+@@ -2259,8 +2274,13 @@ static int ehea_down(struct net_device *dev)
+ 			msleep(1);
+ 
+ 	ehea_broadcast_reg_helper(port, H_DEREG_BCMC);
+-	ret = ehea_clean_all_portres(port);
+ 	port->state = EHEA_PORT_DOWN;
++
++	ret = ehea_clean_all_portres(port);
++	if (ret)
++		ehea_info("Failed freeing resources for %s. ret=%i",
++			  dev->name, ret);
++
+ 	return ret;
+ }
+ 
+@@ -2292,15 +2312,11 @@ static void ehea_reset_port(struct work_struct *work)
+ 	netif_stop_queue(dev);
+ 	netif_poll_disable(dev);
+ 
+-	ret = ehea_down(dev);
+-	if (ret)
+-		ehea_error("ehea_down failed. not all resources are freed");
++	ehea_down(dev);
+ 
+ 	ret = ehea_up(dev);
+-	if (ret) {
+-		ehea_error("Reset device %s failed: ret=%d", dev->name, ret);
++	if (ret)
+ 		goto out;
+-	}
+ 
+ 	if (netif_msg_timer(port))
+ 		ehea_info("Device %s resetted successfully", dev->name);
+@@ -2312,6 +2328,88 @@ out:
+ 	return;
+ }
+ 
++static void ehea_rereg_mrs(struct work_struct *work)
++{
++	int ret, i;
++	struct ehea_adapter *adapter;
++
++	ehea_info("LPAR memory enlarged - re-initializing driver");
++
++	list_for_each_entry(adapter, &adapter_list, list)
++		if (adapter->active_ports) {
++			/* Shutdown all ports */
++			for (i = 0; i < EHEA_MAX_PORTS; i++) {
++				struct ehea_port *port = adapter->port[i];
++
++				if (port) {
++					struct net_device *dev = port->netdev;
++
++					if (dev->flags & IFF_UP) {
++						ehea_info("stopping %s",
++							  dev->name);
++						down(&port->port_lock);
++						netif_stop_queue(dev);
++						netif_poll_disable(dev);
++						ehea_down(dev);
++						up(&port->port_lock);
++					}
++				}
++			}
++
++			/* Unregister old memory region */
++			ret = ehea_rem_mr(&adapter->mr);
++			if (ret) {
++				ehea_error("unregister MR failed - driver"
++					   " inoperable!");
++				goto out;
++			}
++		}
++
++	ehea_destroy_busmap();
++
++	ret = ehea_create_busmap();
++	if (ret)
++		goto out;
++
++	clear_bit(__EHEA_STOP_XFER, &ehea_driver_flags);
++
++	list_for_each_entry(adapter, &adapter_list, list)
++		if (adapter->active_ports) {
++			/* Register new memory region */
++			ret = ehea_reg_kernel_mr(adapter, &adapter->mr);
++			if (ret) {
++				ehea_error("register MR failed - driver"
++					   " inoperable!");
++				goto out;
++			}
++
++			/* Restart all ports */
++			for (i = 0; i < EHEA_MAX_PORTS; i++) {
++				struct ehea_port *port = adapter->port[i];
++
++				if (port) {
++					struct net_device *dev = port->netdev;
++
++					if (dev->flags & IFF_UP) {
++						ehea_info("restarting %s",
++							  dev->name);
++						down(&port->port_lock);
++
++						ret = ehea_up(dev);
++						if (!ret) {
++							netif_poll_enable(dev);
++							netif_wake_queue(dev);
++						}
++
++						up(&port->port_lock);
++					}
++				}
++			}
++		}
++out:
++	return;
++}
++
+ static void ehea_tx_watchdog(struct net_device *dev)
+ {
+ 	struct ehea_port *port = netdev_priv(dev);
+@@ -2573,6 +2671,8 @@ struct ehea_port *ehea_setup_single_port(struct ehea_adapter *adapter,
+ 	ehea_info("%s: Jumbo frames are %sabled", dev->name,
+ 		  jumbo == 1 ? "en" : "dis");
+ 
++	adapter->active_ports++;
++
+ 	return port;
+ 
+ out_unreg_port:
+@@ -2596,6 +2696,7 @@ static void ehea_shutdown_single_port(struct ehea_port *port)
+ 	ehea_unregister_port(port);
+ 	kfree(port->mc_list);
+ 	free_netdev(port->netdev);
++	port->adapter->active_ports--;
+ }
+ 
+ static int ehea_setup_ports(struct ehea_adapter *adapter)
+@@ -2788,6 +2889,8 @@ static int __devinit ehea_probe_adapter(struct ibmebus_dev *dev,
+ 		goto out;
+ 	}
+ 
++	list_add(&adapter->list, &adapter_list);
++
+ 	adapter->ebus_dev = dev;
+ 
+ 	adapter_handle = of_get_property(dev->ofdev.node, "ibm,hea-handle",
+@@ -2891,7 +2994,10 @@ static int __devexit ehea_remove(struct ibmebus_dev *dev)
+ 
+ 	ehea_destroy_eq(adapter->neq);
+ 	ehea_remove_adapter_mr(adapter);
++	list_del(&adapter->list);
++
+ 	kfree(adapter);
++
+ 	return 0;
+ }
+ 
+@@ -2939,9 +3045,18 @@ int __init ehea_module_init(void)
+ 	printk(KERN_INFO "IBM eHEA ethernet device driver (Release %s)\n",
+ 	       DRV_VERSION);
+ 
++	ehea_driver_wq = create_workqueue("ehea_driver_wq");
++
++	INIT_WORK(&ehea_rereg_mr_task, ehea_rereg_mrs);
++
+ 	ret = check_module_parm();
+ 	if (ret)
+ 		goto out;
++
++	ret = ehea_create_busmap();
++	if (ret)
++		goto out;
++
+ 	ret = ibmebus_register_driver(&ehea_driver);
+ 	if (ret) {
+ 		ehea_error("failed registering eHEA device driver on ebus");
+@@ -2965,6 +3080,7 @@ static void __exit ehea_module_exit(void)
+ {
+ 	driver_remove_file(&ehea_driver.driver, &driver_attr_capabilities);
+ 	ibmebus_unregister_driver(&ehea_driver);
++	ehea_destroy_busmap();
+ }
+ 
+ module_init(ehea_module_init);
+diff --git a/drivers/net/ehea/ehea_phyp.h b/drivers/net/ehea/ehea_phyp.h
+index d17a45a7e717..89b63531ff26 100644
+--- a/drivers/net/ehea/ehea_phyp.h
++++ b/drivers/net/ehea/ehea_phyp.h
+@@ -60,6 +60,9 @@ static inline u32 get_longbusy_msecs(int long_busy_ret_code)
+ 	}
+ }
+ 
++/* Number of pages which can be registered at once by H_REGISTER_HEA_RPAGES */
++#define EHEA_MAX_RPAGE 512
++
+ /* Notification Event Queue (NEQ) Entry bit masks */
+ #define NEQE_EVENT_CODE		EHEA_BMASK_IBM(2, 7)
+ #define NEQE_PORTNUM  		EHEA_BMASK_IBM(32, 47)
+diff --git a/drivers/net/ehea/ehea_qmr.c b/drivers/net/ehea/ehea_qmr.c
+index 29eaa46948b0..a36fa6c23fdf 100644
+--- a/drivers/net/ehea/ehea_qmr.c
++++ b/drivers/net/ehea/ehea_qmr.c
+@@ -31,6 +31,13 @@
+ #include "ehea_phyp.h"
+ #include "ehea_qmr.h"
+ 
++
++struct ehea_busmap ehea_bmap = { 0, 0, NULL };
++extern u64 ehea_driver_flags;
++extern struct workqueue_struct *ehea_driver_wq;
++extern struct work_struct ehea_rereg_mr_task;
++
++
+ static void *hw_qpageit_get_inc(struct hw_queue *queue)
+ {
+ 	void *retvalue = hw_qeit_get(queue);
+@@ -547,18 +554,84 @@ int ehea_destroy_qp(struct ehea_qp *qp)
+ 	return 0;
+ }
+ 
++int ehea_create_busmap( void )
++{
++	u64 vaddr = EHEA_BUSMAP_START;
++	unsigned long abs_max_pfn = 0;
++	unsigned long sec_max_pfn;
++	int i;
++
++	/*
++	 * Sections are not in ascending order -> Loop over all sections and
++	 * find the highest PFN to compute the required map size.
++	*/
++	ehea_bmap.valid_sections = 0;
++
++	for (i = 0; i < NR_MEM_SECTIONS; i++)
++		if (valid_section_nr(i)) {
++			sec_max_pfn = section_nr_to_pfn(i);
++			if (sec_max_pfn > abs_max_pfn)
++				abs_max_pfn = sec_max_pfn;
++			ehea_bmap.valid_sections++;
++		}
++
++	ehea_bmap.entries = abs_max_pfn / EHEA_PAGES_PER_SECTION + 1;
++	ehea_bmap.vaddr = vmalloc(ehea_bmap.entries * sizeof(*ehea_bmap.vaddr));
++
++	if (!ehea_bmap.vaddr)
++		return -ENOMEM;
++
++	for (i = 0 ; i < ehea_bmap.entries; i++) {
++		unsigned long pfn = section_nr_to_pfn(i);
++
++		if (pfn_valid(pfn)) {
++			ehea_bmap.vaddr[i] = vaddr;
++			vaddr += EHEA_SECTSIZE;
++		} else
++			ehea_bmap.vaddr[i] = 0;
++	}
++
++	return 0;
++}
++
++void ehea_destroy_busmap( void )
++{
++	vfree(ehea_bmap.vaddr);
++}
++
++u64 ehea_map_vaddr(void *caddr)
++{
++	u64 mapped_addr;
++	unsigned long index = __pa(caddr) >> SECTION_SIZE_BITS;
++
++	if (likely(index < ehea_bmap.entries)) {
++		mapped_addr = ehea_bmap.vaddr[index];
++		if (likely(mapped_addr))
++			mapped_addr |= (((unsigned long)caddr)
++					& (EHEA_SECTSIZE - 1));
++		else
++			mapped_addr = -1;
++	} else
++		mapped_addr = -1;
++
++	if (unlikely(mapped_addr == -1))
++		if (!test_and_set_bit(__EHEA_STOP_XFER, &ehea_driver_flags))
++			queue_work(ehea_driver_wq, &ehea_rereg_mr_task);
++
++	return mapped_addr;
++}
++
+ int ehea_reg_kernel_mr(struct ehea_adapter *adapter, struct ehea_mr *mr)
+ {
+-	int i, k, ret;
+-	u64 hret, pt_abs, start, end, nr_pages;
+-	u32 acc_ctrl = EHEA_MR_ACC_CTRL;
++	int ret;
+ 	u64 *pt;
++	void *pg;
++	u64 hret, pt_abs, i, j, m, mr_len;
++	u32 acc_ctrl = EHEA_MR_ACC_CTRL;
+ 
+-	start = KERNELBASE;
+-	end = (u64)high_memory;
+-	nr_pages = (end - start) / EHEA_PAGESIZE;
++	mr_len = ehea_bmap.valid_sections * EHEA_SECTSIZE;
+ 
+-	pt =  kzalloc(PAGE_SIZE, GFP_KERNEL);
++	pt =  kzalloc(EHEA_MAX_RPAGE * sizeof(u64), GFP_KERNEL);
+ 	if (!pt) {
+ 		ehea_error("no mem");
+ 		ret = -ENOMEM;
+@@ -566,7 +639,8 @@ int ehea_reg_kernel_mr(struct ehea_adapter *adapter, struct ehea_mr *mr)
+ 	}
+ 	pt_abs = virt_to_abs(pt);
+ 
+-	hret = ehea_h_alloc_resource_mr(adapter->handle, start, end - start,
++	hret = ehea_h_alloc_resource_mr(adapter->handle,
++					EHEA_BUSMAP_START, mr_len,
+ 					acc_ctrl, adapter->pd,
+ 					&mr->handle, &mr->lkey);
+ 	if (hret != H_SUCCESS) {
+@@ -575,49 +649,43 @@ int ehea_reg_kernel_mr(struct ehea_adapter *adapter, struct ehea_mr *mr)
+ 		goto out;
+ 	}
+ 
+-	mr->vaddr = KERNELBASE;
+-	k = 0;
+-
+-	while (nr_pages > 0) {
+-		if (nr_pages > 1) {
+-			u64 num_pages = min(nr_pages, (u64)512);
+-			for (i = 0; i < num_pages; i++)
+-				pt[i] = virt_to_abs((void*)(((u64)start) +
+-							    ((k++) *
+-							     EHEA_PAGESIZE)));
+-
+-			hret = ehea_h_register_rpage_mr(adapter->handle,
+-							mr->handle, 0,
+-							0, (u64)pt_abs,
+-							num_pages);
+-			nr_pages -= num_pages;
+-		} else {
+-			u64 abs_adr = virt_to_abs((void*)(((u64)start) +
+-							  (k * EHEA_PAGESIZE)));
+-
+-			hret = ehea_h_register_rpage_mr(adapter->handle,
+-							mr->handle, 0,
+-							0, abs_adr,1);
+-			nr_pages--;
+-		}
+-
+-		if ((hret != H_SUCCESS) && (hret != H_PAGE_REGISTERED)) {
+-			ehea_h_free_resource(adapter->handle,
+-					     mr->handle, FORCE_FREE);
+-			ehea_error("register_rpage_mr failed");
+-			ret = -EIO;
+-			goto out;
++	for (i = 0 ; i < ehea_bmap.entries; i++)
++		if (ehea_bmap.vaddr[i]) {
++			void *sectbase = __va(i << SECTION_SIZE_BITS);
++			unsigned long k = 0;
++
++			for (j = 0; j < (PAGES_PER_SECTION / EHEA_MAX_RPAGE);
++			      j++) {
++
++				for (m = 0; m < EHEA_MAX_RPAGE; m++) {
++					pg = sectbase + ((k++) * EHEA_PAGESIZE);
++					pt[m] = virt_to_abs(pg);
++				}
++
++				hret = ehea_h_register_rpage_mr(adapter->handle,
++								mr->handle,
++								0, 0, pt_abs,
++								EHEA_MAX_RPAGE);
++				if ((hret != H_SUCCESS)
++				    && (hret != H_PAGE_REGISTERED)) {
++					ehea_h_free_resource(adapter->handle,
++							     mr->handle,
++							     FORCE_FREE);
++					ehea_error("register_rpage_mr failed");
++					ret = -EIO;
++					goto out;
++				}
++			}
+ 		}
+-	}
+ 
+ 	if (hret != H_SUCCESS) {
+-		ehea_h_free_resource(adapter->handle, mr->handle,
+-				     FORCE_FREE);
+-		ehea_error("register_rpage failed for last page");
++		ehea_h_free_resource(adapter->handle, mr->handle, FORCE_FREE);
++		ehea_error("registering mr failed");
+ 		ret = -EIO;
+ 		goto out;
+ 	}
+ 
++	mr->vaddr = EHEA_BUSMAP_START;
+ 	mr->adapter = adapter;
+ 	ret = 0;
+ out:
+diff --git a/drivers/net/ehea/ehea_qmr.h b/drivers/net/ehea/ehea_qmr.h
+index c0eb3e03a102..b71f8452a5e3 100644
+--- a/drivers/net/ehea/ehea_qmr.h
++++ b/drivers/net/ehea/ehea_qmr.h
+@@ -36,8 +36,14 @@
+  * page size of ehea hardware queues
+  */
+ 
+-#define EHEA_PAGESHIFT  12
+-#define EHEA_PAGESIZE   4096UL
++#define EHEA_PAGESHIFT         12
++#define EHEA_PAGESIZE          (1UL << EHEA_PAGESHIFT)
++#define EHEA_SECTSIZE          (1UL << 24)
++#define EHEA_PAGES_PER_SECTION (EHEA_SECTSIZE >> PAGE_SHIFT)
++
++#if (1UL << SECTION_SIZE_BITS) < EHEA_SECTSIZE
++#error eHEA module can't work if kernel sectionsize < ehea sectionsize
++#endif
+ 
+ /* Some abbreviations used here:
+  *
+@@ -372,4 +378,8 @@ int ehea_rem_mr(struct ehea_mr *mr);
+ 
+ void ehea_error_data(struct ehea_adapter *adapter, u64 res_handle);
+ 
++int ehea_create_busmap( void );
++void ehea_destroy_busmap( void );
++u64 ehea_map_vaddr(void *caddr);
++
+ #endif	/* __EHEA_QMR_H__ */
+

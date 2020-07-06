@@ -1,0 +1,35 @@
+commit 9cd90018ebd5b4f484300f2a5af804317d3428a1
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Tue Jun 27 16:25:10 2017 +0100
+
+    drm/i915: Cancel pending execlists irq handler upon idling
+    
+    Due to the slight asynchronicity in handling the execlists interrupts
+    (i.e. we defer the work to a handler that may consume more than one
+    interrupt event), when the engine is idle we may still have an irq
+    tasklet queued (especially when it has been deferred to a ksoftirqd).
+    At the beginning of the tasklet, we assert that we do hold a device
+    wakeref for the access we are about to perform. This assumes that when
+    we idle and release the GT wakeref, all execlists work has been
+    completed (since the elsp tracking says the hw is idle). However, there
+    may still be a tasklet queued, so as we mark the engine idle, also
+    cancel any pending tasklet.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/20170627152510.28589-1-chris@chris-wilson.co.uk
+    Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+
+diff --git a/drivers/gpu/drm/i915/intel_engine_cs.c b/drivers/gpu/drm/i915/intel_engine_cs.c
+index 3b46c1f7b88b..49e875c46c96 100644
+--- a/drivers/gpu/drm/i915/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/intel_engine_cs.c
+@@ -1328,6 +1328,7 @@ void intel_engines_mark_idle(struct drm_i915_private *i915)
+ 	for_each_engine(engine, i915, id) {
+ 		intel_engine_disarm_breadcrumbs(engine);
+ 		i915_gem_batch_pool_fini(&engine->batch_pool);
++		tasklet_kill(&engine->irq_tasklet);
+ 		engine->no_priolist = false;
+ 	}
+ }
+

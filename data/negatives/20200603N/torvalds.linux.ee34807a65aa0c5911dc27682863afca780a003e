@@ -1,0 +1,120 @@
+commit ee34807a65aa0c5911dc27682863afca780a003e
+Author: Nathan Scott <nathans@sgi.com>
+Date:   Wed Nov 2 10:32:38 2005 +1100
+
+    [XFS] Provide a mechiansm for flushing delalloc before quota reporting.
+    
+    SGI-PV: 942815
+    SGI-Modid: xfs-linux:xfs-kern:23829a
+    
+    Signed-off-by: Nathan Scott <nathans@sgi.com>
+
+diff --git a/fs/xfs/linux-2.6/xfs_fs_subr.c b/fs/xfs/linux-2.6/xfs_fs_subr.c
+index 05ebd30ec96f..88134cba5cb0 100644
+--- a/fs/xfs/linux-2.6/xfs_fs_subr.c
++++ b/fs/xfs/linux-2.6/xfs_fs_subr.c
+@@ -117,6 +117,8 @@ fs_flush_pages(
+ 
+ 	if (VN_CACHED(vp)) {
+ 		filemap_fdatawrite(ip->i_mapping);
++		if (flags & XFS_B_ASYNC)
++			return 0;
+ 		filemap_fdatawait(ip->i_mapping);
+ 	}
+ 
+diff --git a/fs/xfs/linux-2.6/xfs_super.c b/fs/xfs/linux-2.6/xfs_super.c
+index d2701cc624b9..fa87279405d8 100644
+--- a/fs/xfs/linux-2.6/xfs_super.c
++++ b/fs/xfs/linux-2.6/xfs_super.c
+@@ -766,6 +766,18 @@ linvfs_show_options(
+ 	return error;
+ }
+ 
++STATIC int
++linvfs_quotasync(
++	struct super_block	*sb,
++	int			type)
++{
++	struct vfs		*vfsp = LINVFS_GET_VFS(sb);
++	int			error;
++
++	VFS_QUOTACTL(vfsp, Q_XQUOTASYNC, 0, (caddr_t)NULL, error);
++	return -error;
++}
++
+ STATIC int
+ linvfs_getxstate(
+ 	struct super_block	*sb,
+@@ -934,6 +946,7 @@ STATIC struct super_operations linvfs_sops = {
+ };
+ 
+ STATIC struct quotactl_ops linvfs_qops = {
++	.quota_sync		= linvfs_quotasync,
+ 	.get_xstate		= linvfs_getxstate,
+ 	.set_xstate		= linvfs_setxstate,
+ 	.get_xquota		= linvfs_getxquota,
+diff --git a/fs/xfs/quota/xfs_qm_syscalls.c b/fs/xfs/quota/xfs_qm_syscalls.c
+index 4e397940b3a6..485f83d41191 100644
+--- a/fs/xfs/quota/xfs_qm_syscalls.c
++++ b/fs/xfs/quota/xfs_qm_syscalls.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2000-2003 Silicon Graphics, Inc.  All Rights Reserved.
++ * Copyright (c) 2000-2005 Silicon Graphics, Inc.  All Rights Reserved.
+  *
+  * This program is free software; you can redistribute it and/or modify it
+  * under the terms of version 2 of the GNU General Public License as
+@@ -109,7 +109,7 @@ xfs_qm_quotactl(
+ 	vfsp = bhvtovfs(bdp);
+ 	mp = XFS_VFSTOM(vfsp);
+ 
+-	ASSERT(addr != NULL);
++	ASSERT(addr != NULL || cmd == Q_XQUOTASYNC);
+ 
+ 	/*
+ 	 * The following commands are valid even when quotaoff.
+@@ -147,6 +147,9 @@ xfs_qm_quotactl(
+ 			return XFS_ERROR(EROFS);
+ 		break;
+ 
++	case Q_XQUOTASYNC:
++		return (xfs_sync_inodes(mp, SYNC_DELWRI, 0, NULL));
++
+ 	default:
+ 		break;
+ 	}
+diff --git a/fs/xfs/xfs_mount.h b/fs/xfs/xfs_mount.h
+index bc55931ac74e..0653beecf93a 100644
+--- a/fs/xfs/xfs_mount.h
++++ b/fs/xfs/xfs_mount.h
+@@ -556,6 +556,7 @@ extern int	xfs_readsb(xfs_mount_t *mp);
+ extern void	xfs_freesb(xfs_mount_t *);
+ extern void	xfs_do_force_shutdown(bhv_desc_t *, int, char *, int);
+ extern int	xfs_syncsub(xfs_mount_t *, int, int, int *);
++extern int	xfs_sync_inodes(xfs_mount_t *, int, int, int *);
+ extern xfs_agnumber_t	xfs_initialize_perag(xfs_mount_t *, xfs_agnumber_t);
+ extern void	xfs_xlatesb(void *, struct xfs_sb *, int, __int64_t);
+ 
+diff --git a/fs/xfs/xfs_vfsops.c b/fs/xfs/xfs_vfsops.c
+index 8238c7517822..9142351df515 100644
+--- a/fs/xfs/xfs_vfsops.c
++++ b/fs/xfs/xfs_vfsops.c
+@@ -903,7 +903,7 @@ xfs_sync(
+  * only available by calling this routine.
+  *
+  */
+-STATIC int
++int
+ xfs_sync_inodes(
+ 	xfs_mount_t	*mp,
+ 	int		flags,
+@@ -987,7 +987,7 @@ xfs_sync_inodes(
+ 	ipointer = (xfs_iptr_t *)kmem_zalloc(sizeof(xfs_iptr_t), KM_SLEEP);
+ 
+ 	fflag = XFS_B_ASYNC;		/* default is don't wait */
+-	if (flags & SYNC_BDFLUSH)
++	if (flags & (SYNC_BDFLUSH | SYNC_DELWRI))
+ 		fflag = XFS_B_DELWRI;
+ 	if (flags & SYNC_WAIT)
+ 		fflag = 0;		/* synchronous overrides all */
+

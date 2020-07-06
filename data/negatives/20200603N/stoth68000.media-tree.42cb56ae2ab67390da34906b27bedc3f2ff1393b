@@ -1,0 +1,67 @@
+commit 42cb56ae2ab67390da34906b27bedc3f2ff1393b
+Author: Jeff Layton <jlayton@redhat.com>
+Date:   Fri Sep 18 13:05:53 2009 -0700
+
+    vfs: change sb->s_maxbytes to a loff_t
+    
+    sb->s_maxbytes is supposed to indicate the maximum size of a file that can
+    exist on the filesystem.  It's declared as an unsigned long long.
+    
+    Even if a filesystem has no inherent limit that prevents it from using
+    every bit in that unsigned long long, it's still problematic to set it to
+    anything larger than MAX_LFS_FILESIZE.  There are places in the kernel
+    that cast s_maxbytes to a signed value.  If it's set too large then this
+    cast makes it a negative number and generally breaks the comparison.
+    
+    Change s_maxbytes to be loff_t instead.  That should help eliminate the
+    temptation to set it too large by making it a signed value.
+    
+    Also, add a warning for couple of releases to help catch filesystems that
+    set s_maxbytes too large.  Eventually we can either convert this to a
+    BUG() or just remove it and in the hope that no one will get it wrong now
+    that it's a signed value.
+    
+    Signed-off-by: Jeff Layton <jlayton@redhat.com>
+    Cc: Johannes Weiner <hannes@cmpxchg.org>
+    Cc: Christoph Hellwig <hch@lst.de>
+    Cc: Al Viro <viro@zeniv.linux.org.uk>
+    Cc: Robert Love <rlove@google.com>
+    Cc: Mandeep Singh Baines <msb@google.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/super.c b/fs/super.c
+index 0e7207b9815c..4906e2d8f400 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -892,6 +892,16 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void
+  	if (error)
+  		goto out_sb;
+ 
++	/*
++	 * filesystems should never set s_maxbytes larger than MAX_LFS_FILESIZE
++	 * but s_maxbytes was an unsigned long long for many releases. Throw
++	 * this warning for a little while to try and catch filesystems that
++	 * violate this rule. This warning should be either removed or
++	 * converted to a BUG() in 2.6.34.
++	 */
++	WARN((mnt->mnt_sb->s_maxbytes < 0), "%s set sb->s_maxbytes to "
++		"negative value (%lld)\n", type->name, mnt->mnt_sb->s_maxbytes);
++
+ 	mnt->mnt_mountpoint = mnt->mnt_root;
+ 	mnt->mnt_parent = mnt;
+ 	up_write(&mnt->mnt_sb->s_umount);
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 955e34615cb7..cbb7724c11d3 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1315,7 +1315,7 @@ struct super_block {
+ 	unsigned long		s_blocksize;
+ 	unsigned char		s_blocksize_bits;
+ 	unsigned char		s_dirt;
+-	unsigned long long	s_maxbytes;	/* Max file size */
++	loff_t			s_maxbytes;	/* Max file size */
+ 	struct file_system_type	*s_type;
+ 	const struct super_operations	*s_op;
+ 	const struct dquot_operations	*dq_op;
+

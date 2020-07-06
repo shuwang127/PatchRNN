@@ -1,0 +1,55 @@
+commit 526fd8d4f770d18e99680ff87965e16bb8f1d806
+Author: Jiri Olsa <jolsa@redhat.com>
+Date:   Thu Sep 5 11:14:50 2013 +0200
+
+    perf session: Separate progress bar update when processing events
+    
+    Currently when processing events in the __perf_session__process_events
+    function we update a progress bar based on the file_size. During the
+    same processing we update the progress bar from within
+    flush_sample_queue which is based on number of samples count.
+    
+    Having 2 different based updates is causing the progress bar to jump
+    heavily back and forth giving not much usefull info.
+    
+    Fixing this by keeping only __perf_session__process_events based
+    progress bar update. And turning on flush_sample_queue progress bar
+    update only for final flushing.
+    
+    This reduces the number of time the progress bar update function is
+    called and it significantly reduces the loading time for TUI, where the
+    progress bar update takes quite a lot of time.
+    
+    Signed-off-by: Jiri Olsa <jolsa@redhat.com>
+    Cc: Corey Ashford <cjashfor@linux.vnet.ibm.com>
+    Cc: David Ahern <dsahern@gmail.com>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Ingo Molnar <mingo@elte.hu>
+    Cc: Namhyung Kim <namhyung@kernel.org>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Link: http://lkml.kernel.org/r/20130905091449.GC1100@krava.brq.redhat.com
+    Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+
+diff --git a/tools/perf/util/session.c b/tools/perf/util/session.c
+index 1fc0c628683e..476caa129a20 100644
+--- a/tools/perf/util/session.c
++++ b/tools/perf/util/session.c
+@@ -504,6 +504,7 @@ static int flush_sample_queue(struct perf_session *s,
+ 	u64 limit = os->next_flush;
+ 	u64 last_ts = os->last_sample ? os->last_sample->timestamp : 0ULL;
+ 	unsigned idx = 0, progress_next = os->nr_samples / 16;
++	bool show_progress = limit == ULLONG_MAX;
+ 	int ret;
+ 
+ 	if (!tool->ordered_samples || !limit)
+@@ -526,7 +527,7 @@ static int flush_sample_queue(struct perf_session *s,
+ 		os->last_flush = iter->timestamp;
+ 		list_del(&iter->list);
+ 		list_add(&iter->list, &os->sample_cache);
+-		if (++idx >= progress_next) {
++		if (show_progress && (++idx >= progress_next)) {
+ 			progress_next += os->nr_samples / 16;
+ 			ui_progress__update(idx, os->nr_samples,
+ 					    "Processing time ordered events...");
+

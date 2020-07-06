@@ -1,0 +1,119 @@
+commit ff14bd18f7dbe8b75be80a0ecee142a40777618e
+Author: Robert Moore <Robert.Moore@intel.com>
+Date:   Thu Nov 7 13:19:05 2013 -0800
+
+    Cleanup ACPI_ALLOCATE_BUFFER buffer deletion.
+    
+    This patch enforces buffer deletion pairing for ACPI_ALLOCATE_BUFFER.
+    Note: the following functions are also using ACPI_ALLOCATE_BUFFER, but have
+    performed actual allocations:
+     dbexec.c: AcpiDbExecutionWalk
+     dbmethod.c: AcpiDbWalkForExecute
+    This patch also changes comment of ACPI_FREE_BUFFER to pair
+    ACPI_ALLOCATE_BUFFER.  Lv Zheng.
+
+diff --git a/source/components/namespace/nsxfeval.c b/source/components/namespace/nsxfeval.c
+index d8b34807c..39f2aa0eb 100644
+--- a/source/components/namespace/nsxfeval.c
++++ b/source/components/namespace/nsxfeval.c
+@@ -221,13 +221,9 @@ AcpiEvaluateObjectTyped (
+ 
+     if (MustFree)
+     {
+-        /*
+-         * Caller used ACPI_ALLOCATE_BUFFER, free the return buffer.
+-         * Note: We use AcpiOsFree here because AcpiOsAllocate was used
+-         * to allocate the buffer. This purposefully bypasses the internal
+-         * allocation tracking mechanism (if it is enabled).
+-         */
+-        AcpiOsFree (ReturnBuffer->Pointer);
++        /* Caller used ACPI_ALLOCATE_BUFFER, free the return buffer */
++
++        ACPI_FREE_BUFFER (*ReturnBuffer);
+         ReturnBuffer->Pointer = NULL;
+     }
+ 
+diff --git a/source/include/actypes.h b/source/include/actypes.h
+index 072b94606..daab6060c 100644
+--- a/source/include/actypes.h
++++ b/source/include/actypes.h
+@@ -1036,9 +1036,13 @@ typedef struct acpi_buffer
+ 
+ } ACPI_BUFFER;
+ 
+-/* Free a buffer created in an ACPI_BUFFER via ACPI_ALLOCATE_LOCAL_BUFFER */
+-
+-#define ACPI_FREE_BUFFER(b)         ACPI_FREE(b.Pointer)
++/*
++ * Free a buffer created in an ACPI_BUFFER via ACPI_ALLOCATE_BUFFER.
++ * Note: We use AcpiOsFree here because AcpiOsAllocate was used to allocate
++ * the buffer. This purposefully bypasses the internal allocation tracking
++ * mechanism (if it is enabled).
++ */
++#define ACPI_FREE_BUFFER(b)         AcpiOsFree((b).Pointer)
+ 
+ 
+ /*
+diff --git a/source/tools/acpiexec/aeexec.c b/source/tools/acpiexec/aeexec.c
+index af4d92a78..41898efd5 100644
+--- a/source/tools/acpiexec/aeexec.c
++++ b/source/tools/acpiexec/aeexec.c
+@@ -427,6 +427,7 @@ ExecuteOSI (
+     if (Obj->Type != ACPI_TYPE_INTEGER)
+     {
+         AcpiOsPrintf ("Invalid return type from _OSI method, %.2X\n", Obj->Type);
++        ACPI_FREE_BUFFER (ReturnValue);
+         return (AE_ERROR);
+     }
+ 
+@@ -434,12 +435,14 @@ ExecuteOSI (
+     {
+         AcpiOsPrintf ("Invalid return value from _OSI, expected %.8X found %.8X\n",
+             ExpectedResult, (UINT32) Obj->Integer.Value);
++        ACPI_FREE_BUFFER (ReturnValue);
+         return (AE_ERROR);
+     }
+ 
+     /* Reset the OSI data */
+ 
+     AcpiGbl_OsiData = 0;
++    ACPI_FREE_BUFFER (ReturnValue);
+     return (AE_OK);
+ }
+ 
+@@ -830,7 +833,7 @@ AeMiscellaneousTests (
+         Status = AcpiGetVendorResource (Handle, "_CRS", &Uuid, &ReturnBuf);
+         if (ACPI_SUCCESS (Status))
+         {
+-            AcpiOsFree (ReturnBuf.Pointer);
++            ACPI_FREE_BUFFER (ReturnBuf);
+         }
+     }
+ 
+diff --git a/source/tools/acpiexec/aehandlers.c b/source/tools/acpiexec/aehandlers.c
+index f0cc8ba18..3952c4c52 100644
+--- a/source/tools/acpiexec/aehandlers.c
++++ b/source/tools/acpiexec/aehandlers.c
+@@ -527,7 +527,7 @@ AeExceptionHandler (
+             NewAmlStatus = (ACPI_STATUS)
+                 ((ACPI_OBJECT *) ReturnObj.Pointer)->Integer.Value;
+ 
+-            AcpiOsFree (ReturnObj.Pointer);
++            ACPI_FREE_BUFFER (ReturnObj);
+         }
+     }
+     else if (Status != AE_NOT_FOUND)
+diff --git a/source/tools/examples/examples.c b/source/tools/examples/examples.c
+index a49353d11..862e19815 100644
+--- a/source/tools/examples/examples.c
++++ b/source/tools/examples/examples.c
+@@ -484,7 +484,7 @@ ExecuteOSI (void)
+     }
+ 
+     ACPI_INFO ((AE_INFO, "_OSI returned 0x%8.8X", (UINT32) Object->Integer.Value));
+-    AcpiOsFree (Object);
++    ACPI_FREE_BUFFER (ReturnValue);
+     return;
+ }
+ 
+

@@ -1,0 +1,96 @@
+commit e043e42bdb66885b3ac10d27a01ccb9972e2b0a3
+Author: OGAWA Hirofumi <hirofumi@mail.parknet.co.jp>
+Date:   Wed Jul 29 12:15:56 2009 -0700
+
+    pty: avoid forcing 'low_latency' tty flag
+    
+    We really don't want to mark the pty as a low-latency device, because as
+    Alan points out, the ->write method can be called from an IRQ (ppp?),
+    and that means we can't use ->low_latency=1 as we take mutexes in the
+    low_latency case.
+    
+    So rather than using low_latency to force the written data to be pushed
+    to the ldisc handling at 'write()' time, just make the reader side (or
+    the poll function) do the flush when it checks whether there is data to
+    be had.
+    
+    This also fixes the problem with lost data in an emacs compile buffer
+    (bugzilla 13815), and we can thus revert the low_latency pty hack
+    (commit 3a54297478e6578f96fd54bf4daa1751130aca86: "pty: quickfix for the
+    pty ENXIO timing problems").
+    
+    Signed-off-by: OGAWA Hirofumi <hirofumi@mail.parknet.co.jp>
+    Tested-by: Aneesh Kumar K.V <aneesh.kumar@linux.vnet.ibm.com>
+    [ Modified to do the tty_flush_to_ldisc() inside input_available_p() so
+      that it triggers for both read and poll()  - Linus]
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/char/n_tty.c b/drivers/char/n_tty.c
+index ff47907ff1bf..973be2f44195 100644
+--- a/drivers/char/n_tty.c
++++ b/drivers/char/n_tty.c
+@@ -1583,6 +1583,7 @@ static int n_tty_open(struct tty_struct *tty)
+ 
+ static inline int input_available_p(struct tty_struct *tty, int amt)
+ {
++	tty_flush_to_ldisc(tty);
+ 	if (tty->icanon) {
+ 		if (tty->canon_data)
+ 			return 1;
+diff --git a/drivers/char/pty.c b/drivers/char/pty.c
+index 3850a68f265a..6e6942c45f5b 100644
+--- a/drivers/char/pty.c
++++ b/drivers/char/pty.c
+@@ -52,7 +52,6 @@ static void pty_close(struct tty_struct *tty, struct file *filp)
+ 		return;
+ 	tty->link->packet = 0;
+ 	set_bit(TTY_OTHER_CLOSED, &tty->link->flags);
+-	tty_flip_buffer_push(tty->link);
+ 	wake_up_interruptible(&tty->link->read_wait);
+ 	wake_up_interruptible(&tty->link->write_wait);
+ 	if (tty->driver->subtype == PTY_TYPE_MASTER) {
+@@ -208,7 +207,6 @@ static int pty_open(struct tty_struct *tty, struct file *filp)
+ 	clear_bit(TTY_OTHER_CLOSED, &tty->link->flags);
+ 	set_bit(TTY_THROTTLED, &tty->flags);
+ 	retval = 0;
+-	tty->low_latency = 1;
+ out:
+ 	return retval;
+ }
+diff --git a/drivers/char/tty_buffer.c b/drivers/char/tty_buffer.c
+index 810ee25d66a4..3108991c5c8b 100644
+--- a/drivers/char/tty_buffer.c
++++ b/drivers/char/tty_buffer.c
+@@ -461,6 +461,19 @@ static void flush_to_ldisc(struct work_struct *work)
+ 	tty_ldisc_deref(disc);
+ }
+ 
++/**
++ *	tty_flush_to_ldisc
++ *	@tty: tty to push
++ *
++ *	Push the terminal flip buffers to the line discipline.
++ *
++ *	Must not be called from IRQ context.
++ */
++void tty_flush_to_ldisc(struct tty_struct *tty)
++{
++	flush_to_ldisc(&tty->buf.work.work);
++}
++
+ /**
+  *	tty_flip_buffer_push	-	terminal
+  *	@tty: tty to push
+diff --git a/include/linux/tty.h b/include/linux/tty.h
+index 1488d8c81aac..e8c6c9136c97 100644
+--- a/include/linux/tty.h
++++ b/include/linux/tty.h
+@@ -394,6 +394,7 @@ extern void __do_SAK(struct tty_struct *tty);
+ extern void disassociate_ctty(int priv);
+ extern void no_tty(void);
+ extern void tty_flip_buffer_push(struct tty_struct *tty);
++extern void tty_flush_to_ldisc(struct tty_struct *tty);
+ extern void tty_buffer_free_all(struct tty_struct *tty);
+ extern void tty_buffer_flush(struct tty_struct *tty);
+ extern void tty_buffer_init(struct tty_struct *tty);
+

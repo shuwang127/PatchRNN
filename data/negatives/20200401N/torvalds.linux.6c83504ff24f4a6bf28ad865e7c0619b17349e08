@@ -1,0 +1,58 @@
+commit 6c83504ff24f4a6bf28ad865e7c0619b17349e08
+Author: Stephen Hemminger <shemminger@vyatta.com>
+Date:   Wed Jun 17 07:30:35 2009 +0000
+
+    sky2: fix shutdown synchronization
+    
+    The logic in sky2_down was incorrect. Receiver could report status
+    after rx_stop was called.
+    
+    The steps need to be:
+       * stop new frames from being transmitted
+       * shut off transmit/receive logic
+       * synchronize with NAPI to process status info about transmitter
+         and receiver
+    
+    Signed-off-by: Stephen Hemminger <shemminger@vyatta.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/sky2.c b/drivers/net/sky2.c
+index cc1c8d13845f..fd7accf8f305 100644
+--- a/drivers/net/sky2.c
++++ b/drivers/net/sky2.c
+@@ -1815,8 +1815,6 @@ static int sky2_down(struct net_device *dev)
+ 	sky2_write32(hw, B0_IMSK, imask);
+ 	sky2_read32(hw, B0_IMSK);
+ 
+-	synchronize_irq(hw->pdev->irq);
+-
+ 	/* Force flow control off */
+ 	sky2_write8(hw, SK_REG(port, GMAC_CTRL), GMC_PAUSE_OFF);
+ 
+@@ -1831,9 +1829,6 @@ static int sky2_down(struct net_device *dev)
+ 	ctrl &= ~(GM_GPCR_TX_ENA | GM_GPCR_RX_ENA);
+ 	gma_write16(hw, port, GM_GP_CTRL, ctrl);
+ 
+-	/* Make sure no packets are pending */
+-	napi_synchronize(&hw->napi);
+-
+ 	sky2_write8(hw, SK_REG(port, GPHY_CTRL), GPC_RST_SET);
+ 
+ 	/* Workaround shared GMAC reset */
+@@ -1864,6 +1859,15 @@ static int sky2_down(struct net_device *dev)
+ 	sky2_write8(hw, SK_REG(port, RX_GMF_CTRL_T), GMF_RST_SET);
+ 	sky2_write8(hw, SK_REG(port, TX_GMF_CTRL_T), GMF_RST_SET);
+ 
++	/* Force any delayed status interrrupt and NAPI */
++	sky2_write32(hw, STAT_LEV_TIMER_CNT, 0);
++	sky2_write32(hw, STAT_TX_TIMER_CNT, 0);
++	sky2_write32(hw, STAT_ISR_TIMER_CNT, 0);
++	sky2_read8(hw, STAT_ISR_TIMER_CTRL);
++
++	synchronize_irq(hw->pdev->irq);
++	napi_synchronize(&hw->napi);
++
+ 	sky2_phy_power_down(hw, port);
+ 
+ 	/* turn off LED's */
+

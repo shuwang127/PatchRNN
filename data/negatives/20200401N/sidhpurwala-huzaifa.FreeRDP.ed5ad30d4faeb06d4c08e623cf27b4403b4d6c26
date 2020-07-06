@@ -1,0 +1,211 @@
+commit ed5ad30d4faeb06d4c08e623cf27b4403b4d6c26
+Author: Vic Lee <llyzs@163.com>
+Date:   Fri Dec 21 16:23:50 2012 +0800
+
+    libfreerdp-core/transport: select sockfd instead of sleep when blocking.
+
+diff --git a/include/freerdp/crypto/tls.h b/include/freerdp/crypto/tls.h
+index 949f60ae..9ac7223b 100644
+--- a/include/freerdp/crypto/tls.h
++++ b/include/freerdp/crypto/tls.h
+@@ -53,6 +53,9 @@ FREERDP_API int tls_write(rdpTls* tls, BYTE* data, int length);
+ FREERDP_API int tls_read_all(rdpTls* tls, BYTE* data, int length);
+ FREERDP_API int tls_write_all(rdpTls* tls, BYTE* data, int length);
+ 
++FREERDP_API int tls_wait_read(rdpTls* tls);
++FREERDP_API int tls_wait_write(rdpTls* tls);
++
+ FREERDP_API BOOL tls_verify_certificate(rdpTls* tls, CryptoCert cert, char* hostname);
+ FREERDP_API void tls_print_certificate_error(char* hostname, char* fingerprint);
+ FREERDP_API void tls_print_certificate_name_mismatch_error(char* hostname, char* common_name, char** alt_names, int alt_names_count);
+diff --git a/include/freerdp/utils/tcp.h b/include/freerdp/utils/tcp.h
+index 6517ad42..3a47708f 100644
+--- a/include/freerdp/utils/tcp.h
++++ b/include/freerdp/utils/tcp.h
+@@ -26,6 +26,8 @@
+ FREERDP_API int freerdp_tcp_connect(const char* hostname, int port);
+ FREERDP_API int freerdp_tcp_read(int sockfd, BYTE* data, int length);
+ FREERDP_API int freerdp_tcp_write(int sockfd, BYTE* data, int length);
++FREERDP_API int freerdp_tcp_wait_read(int sockfd);
++FREERDP_API int freerdp_tcp_wait_write(int sockfd);
+ FREERDP_API int freerdp_tcp_disconnect(int sockfd);
+ 
+ FREERDP_API int freerdp_tcp_set_no_delay(int sockfd, BOOL no_delay);
+diff --git a/libfreerdp/core/tcp.c b/libfreerdp/core/tcp.c
+index 077eb19e..978bf0e1 100644
+--- a/libfreerdp/core/tcp.c
++++ b/libfreerdp/core/tcp.c
+@@ -168,6 +168,16 @@ int tcp_write(rdpTcp* tcp, BYTE* data, int length)
+ 	return freerdp_tcp_write(tcp->sockfd, data, length);
+ }
+ 
++int tcp_wait_read(rdpTcp* tcp)
++{
++	return freerdp_tcp_wait_read(tcp->sockfd);
++}
++
++int tcp_wait_write(rdpTcp* tcp)
++{
++	return freerdp_tcp_wait_write(tcp->sockfd);
++}
++
+ BOOL tcp_disconnect(rdpTcp* tcp)
+ {
+ 	freerdp_tcp_disconnect(tcp->sockfd);
+diff --git a/libfreerdp/core/tcp.h b/libfreerdp/core/tcp.h
+index fe602784..62ebec61 100644
+--- a/libfreerdp/core/tcp.h
++++ b/libfreerdp/core/tcp.h
+@@ -48,6 +48,8 @@ BOOL tcp_connect(rdpTcp* tcp, const char* hostname, UINT16 port);
+ BOOL tcp_disconnect(rdpTcp* tcp);
+ int tcp_read(rdpTcp* tcp, BYTE* data, int length);
+ int tcp_write(rdpTcp* tcp, BYTE* data, int length);
++int tcp_wait_read(rdpTcp* tcp);
++int tcp_wait_write(rdpTcp* tcp);
+ BOOL tcp_set_blocking_mode(rdpTcp* tcp, BOOL blocking);
+ BOOL tcp_set_keep_alive_mode(rdpTcp* tcp);
+ 
+diff --git a/libfreerdp/core/transport.c b/libfreerdp/core/transport.c
+index 09088d7f..34397d0d 100644
+--- a/libfreerdp/core/transport.c
++++ b/libfreerdp/core/transport.c
+@@ -423,7 +423,12 @@ int transport_read(rdpTransport* transport, STREAM* s)
+ 
+ 		if ((status == 0) && (transport->blocking))
+ 		{
+-			USleep(transport->usleep_interval);
++			if (transport->layer == TRANSPORT_LAYER_TLS)
++				tls_wait_read(transport->TlsIn);
++			else if (transport->layer == TRANSPORT_LAYER_TCP)
++				tcp_wait_read(transport->TcpIn);
++			else
++				USleep(transport->usleep_interval);
+ 			continue;
+ 		}
+ 
+@@ -488,9 +493,6 @@ int transport_write(rdpTransport* transport, STREAM* s)
+ 
+ 		if (status == 0)
+ 		{
+-			/* blocking while sending */
+-			USleep(transport->usleep_interval);
+-
+ 			/* when sending is blocked in nonblocking mode, the receiving buffer should be checked */
+ 			if (!transport->blocking)
+ 			{
+@@ -498,6 +500,13 @@ int transport_write(rdpTransport* transport, STREAM* s)
+ 				if (transport_read_nonblocking(transport) > 0)
+ 					SetEvent(transport->recv_event);
+ 			}
++
++			if (transport->layer == TRANSPORT_LAYER_TLS)
++				tls_wait_write(transport->TlsOut);
++			else if (transport->layer == TRANSPORT_LAYER_TCP)
++				tcp_wait_write(transport->TcpOut);
++			else
++				USleep(transport->usleep_interval);
+ 		}
+ 
+ 		length -= status;
+diff --git a/libfreerdp/crypto/tls.c b/libfreerdp/crypto/tls.c
+index aa2d6635..6b265fb2 100644
+--- a/libfreerdp/crypto/tls.c
++++ b/libfreerdp/crypto/tls.c
+@@ -24,6 +24,7 @@
+ #include <winpr/crt.h>
+ 
+ #include <freerdp/utils/stream.h>
++#include <freerdp/utils/tcp.h>
+ 
+ #include <freerdp/crypto/tls.h>
+ 
+@@ -331,6 +332,8 @@ int tls_read_all(rdpTls* tls, BYTE* data, int length)
+ 	do
+ 	{
+ 		status = tls_read(tls, data, length);
++		if (status == 0)
++			tls_wait_read(tls);
+ 	}
+ 	while (status == 0);
+ 
+@@ -382,6 +385,8 @@ int tls_write_all(rdpTls* tls, BYTE* data, int length)
+ 
+ 		if (status > 0)
+ 			sent += status;
++		else if (status == 0)
++			tls_wait_write(tls);
+ 
+ 		if (sent >= length)
+ 			break;
+@@ -394,6 +399,16 @@ int tls_write_all(rdpTls* tls, BYTE* data, int length)
+ 		return status;
+ }
+ 
++int tls_wait_read(rdpTls* tls)
++{
++	return freerdp_tcp_wait_read(tls->sockfd);
++}
++
++int tls_wait_write(rdpTls* tls)
++{
++	return freerdp_tcp_wait_write(tls->sockfd);
++}
++
+ static void tls_errors(const char *prefix)
+ {
+ 	unsigned long error;
+diff --git a/libfreerdp/utils/tcp.c b/libfreerdp/utils/tcp.c
+index aa955f3c..83e125d7 100644
+--- a/libfreerdp/utils/tcp.c
++++ b/libfreerdp/utils/tcp.c
+@@ -41,6 +41,7 @@
+ #include <unistd.h>
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
++#include <sys/select.h>
+ #include <netinet/in.h>
+ #include <netinet/tcp.h>
+ #include <net/if.h>
+@@ -178,6 +179,28 @@ int freerdp_tcp_write(int sockfd, BYTE* data, int length)
+ 	return status;
+ }
+ 
++int freerdp_tcp_wait_read(int sockfd)
++{
++	fd_set fds;
++
++	FD_ZERO(&fds);
++	FD_SET(sockfd, &fds);
++	select(1, &fds, NULL, NULL, NULL);
++
++	return 0;
++}
++
++int freerdp_tcp_wait_write(int sockfd)
++{
++	fd_set fds;
++
++	FD_ZERO(&fds);
++	FD_SET(sockfd, &fds);
++	select(1, NULL, &fds, NULL, NULL);
++
++	return 0;
++}
++
+ int freerdp_tcp_disconnect(int sockfd)
+ {
+ 	if (sockfd != -1)
+diff --git a/libfreerdp/utils/thread.c b/libfreerdp/utils/thread.c
+index df3f1faf..6eaaf406 100644
+--- a/libfreerdp/utils/thread.c
++++ b/libfreerdp/utils/thread.c
+@@ -79,7 +79,7 @@ void freerdp_thread_stop(freerdp_thread* thread)
+ 	while ((thread->status > 0) && (i < 1000))
+ 	{
+ 		i++;
+-		USleep(100000);
++		Sleep(100);
+ 	}
+ }
+ 
+

@@ -1,0 +1,49 @@
+commit 4cdfe84b51420c9ac95c7133da2d4c8a191094af
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Sun Aug 24 07:45:33 2008 -0400
+
+    [PATCH] deal with the first call of ->show() generating no output
+    
+    seq_read() has a subtle bug - we want the first loop there to go
+    until at least one *non-empty* record had fit entirely into buffer.
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/seq_file.c b/fs/seq_file.c
+index 5d54205e486b..bd20f7f5a933 100644
+--- a/fs/seq_file.c
++++ b/fs/seq_file.c
+@@ -108,9 +108,9 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
+ 			goto Done;
+ 	}
+ 	/* we need at least one record in buffer */
++	pos = m->index;
++	p = m->op->start(m, &pos);
+ 	while (1) {
+-		pos = m->index;
+-		p = m->op->start(m, &pos);
+ 		err = PTR_ERR(p);
+ 		if (!p || IS_ERR(p))
+ 			break;
+@@ -119,6 +119,11 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
+ 			break;
+ 		if (unlikely(err))
+ 			m->count = 0;
++		if (unlikely(!m->count)) {
++			p = m->op->next(m, p, &pos);
++			m->index = pos;
++			continue;
++		}
+ 		if (m->count < m->size)
+ 			goto Fill;
+ 		m->op->stop(m, p);
+@@ -128,6 +133,8 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
+ 			goto Enomem;
+ 		m->count = 0;
+ 		m->version = 0;
++		pos = m->index;
++		p = m->op->start(m, &pos);
+ 	}
+ 	m->op->stop(m, p);
+ 	m->count = 0;
+

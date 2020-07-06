@@ -1,0 +1,141 @@
+commit b7f2672d4a9363bba02686fa2ac1b18617fe4e1b
+Author: Jilles Tjoelker <jilles@stack.nl>
+Date:   Fri Jul 4 15:13:38 2008 +0200
+
+    Move incorrect password handling code to a common function in services.c.
+
+diff --git a/include/services.h b/include/services.h
+index cfa7134d0..d44890c9b 100644
+--- a/include/services.h
++++ b/include/services.h
+@@ -156,6 +156,7 @@ E void verbose(mychan_t *mychan, const char *fmt, ...) PRINTFLIKE(2, 3);
+ E void snoop(const char *fmt, ...) PRINTFLIKE(1, 2);
+ E void notice(const char *from, const char *to, const char *message, ...) PRINTFLIKE(3, 4);
+ E void change_notify(const char *from, user_t *to, const char *message, ...) PRINTFLIKE(3, 4);
++E boolean_t bad_password(sourceinfo_t *si, myuser_t *mu);
+ E void command_fail(sourceinfo_t *si, faultcode_t code, const char *fmt, ...) PRINTFLIKE(3, 4);
+ E void command_success_nodata(sourceinfo_t *si, const char *fmt, ...) PRINTFLIKE(2, 3);
+ E void command_success_string(sourceinfo_t *si, const char *result, const char *fmt, ...) PRINTFLIKE(3, 4);
+diff --git a/modules/nickserv/identify.c b/modules/nickserv/identify.c
+index dc6b85c31..ab6ed24c1 100644
+--- a/modules/nickserv/identify.c
++++ b/modules/nickserv/identify.c
+@@ -136,9 +136,6 @@ static void ns_cmd_login(sourceinfo_t *si, int parc, char *parv[])
+ 		/* logout killed the user... */
+ 		return;
+ 
+-	/* we use this in both cases, so set it up here. may be NULL. */
+-	md_failnum = metadata_find(mu, METADATA_USER, "private:loginfail:failnum");
+-
+ 	if (verify_password(mu, password))
+ 	{
+ 		if (LIST_LENGTH(&mu->logins) >= me.maxlogins)
+@@ -195,6 +192,7 @@ static void ns_cmd_login(sourceinfo_t *si, int parc, char *parv[])
+ 		command_success_nodata(si, nicksvs.no_nick_ownership ? "You are now logged in as \2%s\2." : "You are now identified for \2%s\2.", u->myuser->name);
+ 
+ 		/* check for failed attempts and let them know */
++		md_failnum = metadata_find(mu, METADATA_USER, "private:loginfail:failnum");
+ 		if (md_failnum && (atoi(md_failnum->value) > 0))
+ 		{
+ 			metadata_t *md_failtime, *md_failaddr;
+@@ -300,34 +298,10 @@ static void ns_cmd_login(sourceinfo_t *si, int parc, char *parv[])
+ 		return;
+ 	}
+ 
+-	if (is_soper(mu))
+-		snoop("SOPER:AF: \2%s\2 as \2%s\2", u->nick, mu->name);
+-
+ 	logcommand(si, CMDLOG_LOGIN, "failed " COMMAND_UC " to %s (bad password)", mu->name);
+ 
+ 	command_fail(si, fault_authfail, _("Invalid password for \2%s\2."), mu->name);
+-
+-	/* record the failed attempts */
+-	/* note that we reuse this buffer later when warning opers about failed logins */
+-	snprintf(buf, sizeof buf, "%s!%s@%s", u->nick, u->user, u->vhost);
+-
+-	/* increment fail count */
+-	if (md_failnum && (atoi(md_failnum->value) > 0))
+-		md_failnum = metadata_add(mu, METADATA_USER, "private:loginfail:failnum",
+-								itoa(atoi(md_failnum->value) + 1));
+-	else
+-		md_failnum = metadata_add(mu, METADATA_USER, "private:loginfail:failnum", "1");
+-	metadata_add(mu, METADATA_USER, "private:loginfail:lastfailaddr", buf);
+-	metadata_add(mu, METADATA_USER, "private:loginfail:lastfailtime", itoa(CURRTIME));
+-
+-	if (atoi(md_failnum->value) == 10)
+-	{
+-		time_t ts = CURRTIME;
+-		tm = *localtime(&ts);
+-		strftime(strfbuf, sizeof(strfbuf) - 1, "%b %d %H:%M:%S %Y", &tm);
+-
+-		wallops("Warning: Numerous failed login attempts to \2%s\2. Last attempt received from \2%s\2 on %s.", mu->name, buf, strfbuf);
+-	}
++	bad_password(si, mu);
+ }
+ 
+ /* vim:cinoptions=>s,e0,n0,f0,{0,}0,^0,=s,ps,t0,c3,+s,(2s,us,)20,*30,gs,hs
+diff --git a/src/services.c b/src/services.c
+index 2dc3cb820..6eeaf144a 100644
+--- a/src/services.c
++++ b/src/services.c
+@@ -479,6 +479,59 @@ void change_notify(const char *from, user_t *to, const char *fmt, ...)
+ 	notice_user_sts(user_find_named(from), to, buf);
+ }
+ 
++/*
++ * bad_password()
++ *
++ * Registers an attempt to authenticate with an incorrect password.
++ *
++ * Inputs:
++ *       - sourceinfo_t representing what sent the bad password
++ *       - myuser_t object attempt was against
++ *
++ * Outputs:
++ *       - whether the user was killed off the network
++ *
++ * Side Effects:
++ *       - attempt is registered in metadata
++ *       - opers warned if necessary
++ *
++ * Note:
++ *       - kills are currently not done
++ */
++boolean_t bad_password(sourceinfo_t *si, myuser_t *mu)
++{
++	const char *mask;
++	struct tm tm;
++	char numeric[21], strfbuf[32];
++	int count;
++	metadata_t *md_failnum;
++
++	mask = get_source_mask(si);
++
++	md_failnum = metadata_find(mu, METADATA_USER, "private:loginfail:failnum");
++	count = md_failnum ? atoi(md_failnum->value) : 0;
++	count++;
++	snprintf(numeric, sizeof numeric, "%d", count);
++	md_failnum = metadata_add(mu, METADATA_USER, "private:loginfail:failnum", numeric);
++	metadata_add(mu, METADATA_USER, "private:loginfail:lastfailaddr", mask);
++	snprintf(numeric, sizeof numeric, "%lu", (unsigned long)CURRTIME);
++	metadata_add(mu, METADATA_USER, "private:loginfail:lastfailtime", numeric);
++
++	if (is_soper(mu))
++		snoop("SOPER:AF: \2%s\2 as \2%s\2", get_source_name(si), mu->name);
++
++	if (atoi(md_failnum->value) == 10)
++	{
++		time_t ts = CURRTIME;
++		tm = *localtime(&ts);
++		strftime(strfbuf, sizeof(strfbuf) - 1, "%b %d %H:%M:%S %Y", &tm);
++
++		wallops("Warning: Numerous failed login attempts to \2%s\2. Last attempt received from \2%s\2 on %s.", mu->name, mask, strfbuf);
++	}
++
++	return FALSE;
++}
++
+ void command_fail(sourceinfo_t *si, faultcode_t code, const char *fmt, ...)
+ {
+ 	va_list args;
+

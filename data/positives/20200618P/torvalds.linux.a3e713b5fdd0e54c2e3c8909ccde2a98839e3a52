@@ -1,0 +1,44 @@
+commit a3e713b5fdd0e54c2e3c8909ccde2a98839e3a52
+Author: Andrew Morton <akpm@osdl.org>
+Date:   Sun Oct 30 15:03:15 2005 -0800
+
+    [PATCH] __bread oops fix
+    
+    If a filesystem passes an idiotic blocksize into bread(), __getblk_slow() will
+    warn and will return NULL.  We have a report (from Hubert Tonneau
+    <hubert.tonneau@fullpliant.org>) of isofs_fill_super() doing this (passing in
+    a silly block size) against an unplugged CDROM drive.
+    
+    But a couple of __getblk_slow() callers forgot to check for the NULL bh, hence
+    oops.
+    
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/fs/buffer.c b/fs/buffer.c
+index 75cac9ada026..35fa34977e81 100644
+--- a/fs/buffer.c
++++ b/fs/buffer.c
+@@ -1478,8 +1478,10 @@ EXPORT_SYMBOL(__getblk);
+ void __breadahead(struct block_device *bdev, sector_t block, int size)
+ {
+ 	struct buffer_head *bh = __getblk(bdev, block, size);
+-	ll_rw_block(READA, 1, &bh);
+-	brelse(bh);
++	if (likely(bh)) {
++		ll_rw_block(READA, 1, &bh);
++		brelse(bh);
++	}
+ }
+ EXPORT_SYMBOL(__breadahead);
+ 
+@@ -1497,7 +1499,7 @@ __bread(struct block_device *bdev, sector_t block, int size)
+ {
+ 	struct buffer_head *bh = __getblk(bdev, block, size);
+ 
+-	if (!buffer_uptodate(bh))
++	if (likely(bh) && !buffer_uptodate(bh))
+ 		bh = __bread_slow(bh);
+ 	return bh;
+ }
+

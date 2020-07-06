@@ -1,0 +1,51 @@
+commit 13c76aba7846647f86d479293ae0a0adc1ca840a
+Author: Philipp Reisner <philipp.reisner@linbit.com>
+Date:   Thu Nov 22 17:06:00 2012 +0100
+
+    drbd: close race between drbd_set_role and drbd_connect
+    
+    drbd_set_role(, R_PRIMARY, ) does the state change to Primary,
+    some more housekeeping, and possibly generates a new UUID set.
+    
+    All of this holding the "state_mutex".
+    
+    The connection handshake involves sending of various state information,
+    including the current data generation UUID set, and two connection
+    state changes from C_WF_CONNECTION to C_WF_REPORT_PARAMS further to
+    a number of different outcomes, resync being one of them.
+    
+    If the connection handshake happens between the state change to Primary
+    and the generation of the new UUIDs, the resync decision based on the
+    old UUID set may be confused, depending on circumstances.
+    
+    Make sure that, before we do the handshake, any promotion to Primary
+    role will either be complete (including the housekeeping stuff), or can
+    see, and serialize with, the ongoing handshake, based on the
+    "STATE_SENT" bit, which is set when we start the handshake, and cleared
+    only when we leave C_WF_REPORT_PARAMS again.
+    
+    Signed-off-by: Philipp Reisner <philipp.reisner@linbit.com>
+    Signed-off-by: Lars Ellenberg <lars.ellenberg@linbit.com>
+
+diff --git a/drivers/block/drbd/drbd_receiver.c b/drivers/block/drbd/drbd_receiver.c
+index 1599a1a6f1f7..a9eccfc6079b 100644
+--- a/drivers/block/drbd/drbd_receiver.c
++++ b/drivers/block/drbd/drbd_receiver.c
+@@ -1037,6 +1037,16 @@ randomize:
+ 	rcu_read_lock();
+ 	idr_for_each_entry(&tconn->volumes, mdev, vnr) {
+ 		kref_get(&mdev->kref);
++		/* Prevent a race between resync-handshake and
++		 * being promoted to Primary.
++		 *
++		 * Grab and release the state mutex, so we know that any current
++		 * drbd_set_role() is finished, and any incoming drbd_set_role
++		 * will see the STATE_SENT flag, and wait for it to be cleared.
++		 */
++		mutex_lock(mdev->state_mutex);
++		mutex_unlock(mdev->state_mutex);
++
+ 		rcu_read_unlock();
+ 
+ 		if (discard_my_data)
+

@@ -1,0 +1,81 @@
+commit 72b9076b2887add930d3b102760f09d02ffbfbe7
+Author: Marek Olšák <marek.olsak@amd.com>
+Date:   Wed Apr 29 19:40:33 2015 +0200
+
+    drm/radeon: add a GPU reset counter queryable by userspace
+    
+    Userspace will be able to tell whether a GPU reset occured by comparing
+    an old referece value of the counter with a new value.
+    
+    Reviewed-by: Christian König <christian.koenig@amd.com>
+    Signed-off-by: Marek Olšák <marek.olsak@amd.com>
+    Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+diff --git a/drivers/gpu/drm/radeon/radeon.h b/drivers/gpu/drm/radeon/radeon.h
+index 46eb0fa75a61..352870cbb8b8 100644
+--- a/drivers/gpu/drm/radeon/radeon.h
++++ b/drivers/gpu/drm/radeon/radeon.h
+@@ -2435,6 +2435,7 @@ struct radeon_device {
+ 	atomic64_t			vram_usage;
+ 	atomic64_t			gtt_usage;
+ 	atomic64_t			num_bytes_moved;
++	atomic_t			gpu_reset_counter;
+ 	/* ACPI interface */
+ 	struct radeon_atif		atif;
+ 	struct radeon_atcs		atcs;
+diff --git a/drivers/gpu/drm/radeon/radeon_device.c b/drivers/gpu/drm/radeon/radeon_device.c
+index b7ca4c514621..13e207e0dff0 100644
+--- a/drivers/gpu/drm/radeon/radeon_device.c
++++ b/drivers/gpu/drm/radeon/radeon_device.c
+@@ -1725,6 +1725,8 @@ int radeon_gpu_reset(struct radeon_device *rdev)
+ 		return 0;
+ 	}
+ 
++	atomic_inc(&rdev->gpu_reset_counter);
++
+ 	radeon_save_bios_scratch_regs(rdev);
+ 	/* block TTM */
+ 	resched = ttm_bo_lock_delayed_workqueue(&rdev->mman.bdev);
+diff --git a/drivers/gpu/drm/radeon/radeon_drv.c b/drivers/gpu/drm/radeon/radeon_drv.c
+index 7d620d4b3f31..5751446677d3 100644
+--- a/drivers/gpu/drm/radeon/radeon_drv.c
++++ b/drivers/gpu/drm/radeon/radeon_drv.c
+@@ -90,9 +90,10 @@
+  *            CS to GPU on >= r600
+  *   2.41.0 - evergreen/cayman: Add SET_BASE/DRAW_INDIRECT command parsing support
+  *   2.42.0 - Add VCE/VUI (Video Usability Information) support
++ *   2.43.0 - RADEON_INFO_GPU_RESET_COUNTER
+  */
+ #define KMS_DRIVER_MAJOR	2
+-#define KMS_DRIVER_MINOR	42
++#define KMS_DRIVER_MINOR	43
+ #define KMS_DRIVER_PATCHLEVEL	0
+ int radeon_driver_load_kms(struct drm_device *dev, unsigned long flags);
+ int radeon_driver_unload_kms(struct drm_device *dev);
+diff --git a/drivers/gpu/drm/radeon/radeon_kms.c b/drivers/gpu/drm/radeon/radeon_kms.c
+index 7b2a7335cc5d..9632e886ddc3 100644
+--- a/drivers/gpu/drm/radeon/radeon_kms.c
++++ b/drivers/gpu/drm/radeon/radeon_kms.c
+@@ -576,6 +576,9 @@ static int radeon_info_ioctl(struct drm_device *dev, void *data, struct drm_file
+ 		if (radeon_get_allowed_info_register(rdev, *value, value))
+ 			return -EINVAL;
+ 		break;
++	case RADEON_INFO_GPU_RESET_COUNTER:
++		*value = atomic_read(&rdev->gpu_reset_counter);
++		break;
+ 	default:
+ 		DRM_DEBUG_KMS("Invalid request %d\n", info->request);
+ 		return -EINVAL;
+diff --git a/include/uapi/drm/radeon_drm.h b/include/uapi/drm/radeon_drm.h
+index 871e73f99a4d..573cb86a3d6e 100644
+--- a/include/uapi/drm/radeon_drm.h
++++ b/include/uapi/drm/radeon_drm.h
+@@ -1038,6 +1038,7 @@ struct drm_radeon_cs {
+ #define RADEON_INFO_CURRENT_GPU_SCLK	0x22
+ #define RADEON_INFO_CURRENT_GPU_MCLK	0x23
+ #define RADEON_INFO_READ_REG		0x24
++#define RADEON_INFO_GPU_RESET_COUNTER	0x25
+ 
+ struct drm_radeon_info {
+ 	uint32_t		request;
+

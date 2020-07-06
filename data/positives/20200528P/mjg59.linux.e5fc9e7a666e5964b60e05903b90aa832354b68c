@@ -1,0 +1,147 @@
+commit e5fc9e7a666e5964b60e05903b90aa832354b68c
+Author: Changli Gao <xiaosuo@gmail.com>
+Date:   Fri Nov 12 17:33:17 2010 +0100
+
+    netfilter: nf_conntrack: don't always initialize ct->proto
+    
+    ct->proto is big(60 bytes) due to structure ip_ct_tcp, and we don't need
+    to initialize the whole for all the other protocols. This patch moves
+    proto to the end of structure nf_conn, and pushes the initialization down
+    to the individual protocols.
+    
+    Signed-off-by: Changli Gao <xiaosuo@gmail.com>
+    Signed-off-by: Patrick McHardy <kaber@trash.net>
+
+diff --git a/include/net/netfilter/nf_conntrack.h b/include/net/netfilter/nf_conntrack.h
+index caf17db87dbc..abfff1e8e0d0 100644
+--- a/include/net/netfilter/nf_conntrack.h
++++ b/include/net/netfilter/nf_conntrack.h
+@@ -116,14 +116,14 @@ struct nf_conn {
+ 	u_int32_t secmark;
+ #endif
+ 
+-	/* Storage reserved for other modules: */
+-	union nf_conntrack_proto proto;
+-
+ 	/* Extensions */
+ 	struct nf_ct_ext *ext;
+ #ifdef CONFIG_NET_NS
+ 	struct net *ct_net;
+ #endif
++
++	/* Storage reserved for other modules, must be the last member */
++	union nf_conntrack_proto proto;
+ };
+ 
+ static inline struct nf_conn *
+diff --git a/net/netfilter/nf_conntrack_core.c b/net/netfilter/nf_conntrack_core.c
+index 27a5ea6b6a0f..0ba7d4801daf 100644
+--- a/net/netfilter/nf_conntrack_core.c
++++ b/net/netfilter/nf_conntrack_core.c
+@@ -651,7 +651,8 @@ __nf_conntrack_alloc(struct net *net, u16 zone,
+ 	 * and ct->tuplehash[IP_CT_DIR_REPLY].hnnode.next unchanged.
+ 	 */
+ 	memset(&ct->tuplehash[IP_CT_DIR_MAX], 0,
+-	       sizeof(*ct) - offsetof(struct nf_conn, tuplehash[IP_CT_DIR_MAX]));
++	       offsetof(struct nf_conn, proto) -
++	       offsetof(struct nf_conn, tuplehash[IP_CT_DIR_MAX]));
+ 	spin_lock_init(&ct->lock);
+ 	ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple = *orig;
+ 	ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode.pprev = NULL;
+diff --git a/net/netfilter/nf_conntrack_netlink.c b/net/netfilter/nf_conntrack_netlink.c
+index b729ace1dcc1..7f59be82449f 100644
+--- a/net/netfilter/nf_conntrack_netlink.c
++++ b/net/netfilter/nf_conntrack_netlink.c
+@@ -1375,6 +1375,7 @@ ctnetlink_create_conntrack(struct net *net, u16 zone,
+ 	}
+ #endif
+ 
++	memset(&ct->proto, 0, sizeof(ct->proto));
+ 	if (cda[CTA_PROTOINFO]) {
+ 		err = ctnetlink_change_protoinfo(ct, cda);
+ 		if (err < 0)
+diff --git a/net/netfilter/nf_conntrack_proto_dccp.c b/net/netfilter/nf_conntrack_proto_dccp.c
+index 5292560d6d4a..9ae57c57c50e 100644
+--- a/net/netfilter/nf_conntrack_proto_dccp.c
++++ b/net/netfilter/nf_conntrack_proto_dccp.c
+@@ -452,6 +452,9 @@ static bool dccp_new(struct nf_conn *ct, const struct sk_buff *skb,
+ 	ct->proto.dccp.role[IP_CT_DIR_ORIGINAL] = CT_DCCP_ROLE_CLIENT;
+ 	ct->proto.dccp.role[IP_CT_DIR_REPLY] = CT_DCCP_ROLE_SERVER;
+ 	ct->proto.dccp.state = CT_DCCP_NONE;
++	ct->proto.dccp.last_pkt = DCCP_PKT_REQUEST;
++	ct->proto.dccp.last_dir = IP_CT_DIR_ORIGINAL;
++	ct->proto.dccp.handshake_seq = 0;
+ 	return true;
+ 
+ out_invalid:
+diff --git a/net/netfilter/nf_conntrack_proto_sctp.c b/net/netfilter/nf_conntrack_proto_sctp.c
+index c6049c2d5ea8..6f4ee70f460b 100644
+--- a/net/netfilter/nf_conntrack_proto_sctp.c
++++ b/net/netfilter/nf_conntrack_proto_sctp.c
+@@ -413,6 +413,7 @@ static bool sctp_new(struct nf_conn *ct, const struct sk_buff *skb,
+ 	    test_bit(SCTP_CID_COOKIE_ACK, map))
+ 		return false;
+ 
++	memset(&ct->proto.sctp, 0, sizeof(ct->proto.sctp));
+ 	new_state = SCTP_CONNTRACK_MAX;
+ 	for_each_sctp_chunk (skb, sch, _sch, offset, dataoff, count) {
+ 		/* Don't need lock here: this conntrack not in circulation yet */
+diff --git a/net/netfilter/nf_conntrack_proto_tcp.c b/net/netfilter/nf_conntrack_proto_tcp.c
+index 3fb2b73b24dc..6f38d0e2ea4a 100644
+--- a/net/netfilter/nf_conntrack_proto_tcp.c
++++ b/net/netfilter/nf_conntrack_proto_tcp.c
+@@ -1066,9 +1066,7 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
+ 	BUG_ON(th == NULL);
+ 
+ 	/* Don't need lock here: this conntrack not in circulation yet */
+-	new_state
+-		= tcp_conntracks[0][get_conntrack_index(th)]
+-		[TCP_CONNTRACK_NONE];
++	new_state = tcp_conntracks[0][get_conntrack_index(th)][TCP_CONNTRACK_NONE];
+ 
+ 	/* Invalid: delete conntrack */
+ 	if (new_state >= TCP_CONNTRACK_MAX) {
+@@ -1077,6 +1075,7 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
+ 	}
+ 
+ 	if (new_state == TCP_CONNTRACK_SYN_SENT) {
++		memset(&ct->proto.tcp, 0, sizeof(ct->proto.tcp));
+ 		/* SYN packet */
+ 		ct->proto.tcp.seen[0].td_end =
+ 			segment_seq_plus_len(ntohl(th->seq), skb->len,
+@@ -1088,11 +1087,11 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
+ 			ct->proto.tcp.seen[0].td_end;
+ 
+ 		tcp_options(skb, dataoff, th, &ct->proto.tcp.seen[0]);
+-		ct->proto.tcp.seen[1].flags = 0;
+ 	} else if (nf_ct_tcp_loose == 0) {
+ 		/* Don't try to pick up connections. */
+ 		return false;
+ 	} else {
++		memset(&ct->proto.tcp, 0, sizeof(ct->proto.tcp));
+ 		/*
+ 		 * We are in the middle of a connection,
+ 		 * its history is lost for us.
+@@ -1107,7 +1106,6 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
+ 		ct->proto.tcp.seen[0].td_maxend =
+ 			ct->proto.tcp.seen[0].td_end +
+ 			ct->proto.tcp.seen[0].td_maxwin;
+-		ct->proto.tcp.seen[0].td_scale = 0;
+ 
+ 		/* We assume SACK and liberal window checking to handle
+ 		 * window scaling */
+@@ -1116,13 +1114,7 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
+ 					      IP_CT_TCP_FLAG_BE_LIBERAL;
+ 	}
+ 
+-	ct->proto.tcp.seen[1].td_end = 0;
+-	ct->proto.tcp.seen[1].td_maxend = 0;
+-	ct->proto.tcp.seen[1].td_maxwin = 0;
+-	ct->proto.tcp.seen[1].td_scale = 0;
+-
+ 	/* tcp_packet will set them */
+-	ct->proto.tcp.state = TCP_CONNTRACK_NONE;
+ 	ct->proto.tcp.last_index = TCP_NONE_SET;
+ 
+ 	pr_debug("tcp_new: sender end=%u maxend=%u maxwin=%u scale=%i "
+

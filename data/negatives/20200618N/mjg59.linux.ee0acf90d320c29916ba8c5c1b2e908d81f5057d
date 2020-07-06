@@ -1,0 +1,65 @@
+commit ee0acf90d320c29916ba8c5c1b2e908d81f5057d
+Author: Oleg Nesterov <oleg@tv-sign.ru>
+Date:   Sun Jan 8 01:03:53 2006 -0800
+
+    [PATCH] setpgid: should work for sub-threads
+    
+    setpgid(0, pgid) or setpgid(forked_child_pid, pgid) does not work unless
+    the calling process is a thread_group_leader().
+    
+    'man setpgid' does not tell anything about that, so I consider this
+    behaviour is a bug.
+    
+    Signed-off-by: Oleg Nesterov <oleg@tv-sign.ru>
+    Cc: Oren Laadan <orenl@cs.columbia.edu>
+    Cc: Roland McGrath <roland@redhat.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/kernel/sys.c b/kernel/sys.c
+index d8e49e659027..43e557211d8d 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -1090,10 +1090,11 @@ asmlinkage long sys_times(struct tms __user * tbuf)
+ asmlinkage long sys_setpgid(pid_t pid, pid_t pgid)
+ {
+ 	struct task_struct *p;
++	struct task_struct *group_leader = current->group_leader;
+ 	int err = -EINVAL;
+ 
+ 	if (!pid)
+-		pid = current->pid;
++		pid = group_leader->pid;
+ 	if (!pgid)
+ 		pgid = pid;
+ 	if (pgid < 0)
+@@ -1113,16 +1114,16 @@ asmlinkage long sys_setpgid(pid_t pid, pid_t pgid)
+ 	if (!thread_group_leader(p))
+ 		goto out;
+ 
+-	if (p->parent == current || p->real_parent == current) {
++	if (p->parent == current || p->real_parent == group_leader) {
+ 		err = -EPERM;
+-		if (p->signal->session != current->signal->session)
++		if (p->signal->session != group_leader->signal->session)
+ 			goto out;
+ 		err = -EACCES;
+ 		if (p->did_exec)
+ 			goto out;
+ 	} else {
+ 		err = -ESRCH;
+-		if (p != current)
++		if (p != group_leader)
+ 			goto out;
+ 	}
+ 
+@@ -1134,7 +1135,7 @@ asmlinkage long sys_setpgid(pid_t pid, pid_t pgid)
+ 		struct task_struct *p;
+ 
+ 		do_each_task_pid(pgid, PIDTYPE_PGID, p) {
+-			if (p->signal->session == current->signal->session)
++			if (p->signal->session == group_leader->signal->session)
+ 				goto ok_pgid;
+ 		} while_each_task_pid(pgid, PIDTYPE_PGID, p);
+ 		goto out;
+

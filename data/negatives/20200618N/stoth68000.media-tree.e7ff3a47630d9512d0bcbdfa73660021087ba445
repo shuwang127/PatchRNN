@@ -1,0 +1,102 @@
+commit e7ff3a47630d9512d0bcbdfa73660021087ba445
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Fri Dec 9 19:29:10 2016 +0100
+
+    x86/amd: Check for the C1E bug post ACPI subsystem init
+    
+    AMD CPUs affected by the E400 erratum suffer from the issue that the
+    local APIC timer stops when the CPU goes into C1E. Unfortunately there
+    is no way to detect the affected CPUs on early boot. It's only possible
+    to determine the range of possibly affected CPUs from the family/model
+    range.
+    
+    The actual decision whether to enter C1E and thus cause the bug is done
+    by the firmware and we need to detect that case late, after ACPI has
+    been initialized.
+    
+    The current solution is to check in the idle routine whether the CPU is
+    affected by reading the MSR_K8_INT_PENDING_MSG MSR and checking for the
+    K8_INTP_C1E_ACTIVE_MASK bits. If one of the bits is set then the CPU is
+    affected and the system is switched into forced broadcast mode.
+    
+    This is ineffective and on non-affected CPUs every entry to idle does
+    the extra RDMSR.
+    
+    After doing some research it turns out that the bits are visible on the
+    boot CPU right after the ACPI subsystem is initialized in the early
+    boot process. So instead of polling for the bits in the idle loop, add
+    a detection function after acpi_subsystem_init() and check for the MSR
+    bits. If set, then the X86_BUG_AMD_APIC_C1E is set on the boot CPU and
+    the TSC is marked unstable when X86_FEATURE_NONSTOP_TSC is not set as it
+    will stop in C1E state as well.
+    
+    The switch to broadcast mode cannot be done at this point because the
+    boot CPU still uses HPET as a clockevent device and the local APIC timer
+    is not yet calibrated and installed. The switch to broadcast mode on the
+    affected CPUs needs to be done when the local APIC timer is actually set
+    up.
+    
+    This allows to cleanup the amd_e400_idle() function in the next step.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Signed-off-by: Borislav Petkov <bp@suse.de>
+    Cc: Jiri Olsa <jolsa@redhat.com>
+    Link: http://lkml.kernel.org/r/20161209182912.2726-4-bp@alien8.de
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
+index 29bbbce4f2fd..ced76f13d20d 100644
+--- a/arch/x86/kernel/process.c
++++ b/arch/x86/kernel/process.c
+@@ -418,6 +418,29 @@ void __init init_amd_e400_c1e_mask(void)
+ 		zalloc_cpumask_var(&amd_e400_c1e_mask, GFP_KERNEL);
+ }
+ 
++void __init arch_post_acpi_subsys_init(void)
++{
++	u32 lo, hi;
++
++	if (!boot_cpu_has_bug(X86_BUG_AMD_E400))
++		return;
++
++	/*
++	 * AMD E400 detection needs to happen after ACPI has been enabled. If
++	 * the machine is affected K8_INTP_C1E_ACTIVE_MASK bits are set in
++	 * MSR_K8_INT_PENDING_MSG.
++	 */
++	rdmsr(MSR_K8_INT_PENDING_MSG, lo, hi);
++	if (!(lo & K8_INTP_C1E_ACTIVE_MASK))
++		return;
++
++	boot_cpu_set_bug(X86_BUG_AMD_APIC_C1E);
++
++	if (!boot_cpu_has(X86_FEATURE_NONSTOP_TSC))
++		mark_tsc_unstable("TSC halt in AMD C1E");
++	pr_info("System has AMD C1E enabled\n");
++}
++
+ static int __init idle_setup(char *str)
+ {
+ 	if (!str)
+diff --git a/init/main.c b/init/main.c
+index 2858be732f6d..1d7038c1ee19 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -448,6 +448,8 @@ void __init parse_early_param(void)
+ 	done = 1;
+ }
+ 
++void __init __weak arch_post_acpi_subsys_init(void) { }
++
+ void __init __weak smp_setup_processor_id(void)
+ {
+ }
+@@ -649,6 +651,7 @@ asmlinkage __visible void __init start_kernel(void)
+ 	check_bugs();
+ 
+ 	acpi_subsystem_init();
++	arch_post_acpi_subsys_init();
+ 	sfi_init_late();
+ 
+ 	if (efi_enabled(EFI_RUNTIME_SERVICES)) {
+

@@ -1,0 +1,181 @@
+commit 344bbc4de14e70d03f09bff04bb7d161b8a0d28c
+Author: Kristian Høgsberg <krh@redhat.com>
+Date:   Wed Mar 7 12:12:43 2007 -0500
+
+    firewire: Generalize get_config_rom to get_info.
+    
+    Repurpose the get_config_rom ioctl to a general get_info ioctl.
+    This ioctl is now used for version negotiation, and optionally
+    returns the config rom, and the current bus info.
+    
+    Signed-off-by: Kristian Høgsberg <krh@redhat.com>
+    Signed-off-by: Stefan Richter <stefanr@s5r6.in-berlin.de>
+
+diff --git a/drivers/firewire/fw-device-cdev.c b/drivers/firewire/fw-device-cdev.c
+index 79e095ea552d..d9f3bb2be1c2 100644
+--- a/drivers/firewire/fw-device-cdev.c
++++ b/drivers/firewire/fw-device-cdev.c
+@@ -68,6 +68,7 @@ struct iso_interrupt {
+ };
+ 
+ struct client {
++	u32 version;
+ 	struct fw_device *device;
+ 	spinlock_t lock;
+ 	struct list_head handler_list;
+@@ -189,12 +190,26 @@ fw_device_op_read(struct file *file,
+ 	return dequeue_event(client, buffer, count);
+ }
+ 
++static void
++fill_bus_reset_event(struct fw_cdev_event_bus_reset *event,
++		     struct fw_device *device)
++{
++	struct fw_card *card = device->card;
++
++	event->type          = FW_CDEV_EVENT_BUS_RESET;
++	event->node_id       = device->node_id;
++	event->local_node_id = card->local_node->node_id;
++	event->bm_node_id    = 0; /* FIXME: We don't track the BM. */
++	event->irm_node_id   = card->irm_node->node_id;
++	event->root_node_id  = card->root_node->node_id;
++	event->generation    = card->generation;
++}
++
+ static void
+ queue_bus_reset_event(struct client *client)
+ {
+ 	struct bus_reset *bus_reset;
+ 	struct fw_device *device = client->device;
+-	struct fw_card *card = device->card;
+ 
+ 	bus_reset = kzalloc(sizeof *bus_reset, GFP_ATOMIC);
+ 	if (bus_reset == NULL) {
+@@ -202,13 +217,7 @@ queue_bus_reset_event(struct client *client)
+ 		return;
+ 	}
+ 
+-	bus_reset->reset.type          = FW_CDEV_EVENT_BUS_RESET;
+-	bus_reset->reset.node_id       = device->node_id;
+-	bus_reset->reset.local_node_id = card->local_node->node_id;
+-	bus_reset->reset.bm_node_id    = 0; /* FIXME: We don't track the BM. */
+-	bus_reset->reset.irm_node_id   = card->irm_node->node_id;
+-	bus_reset->reset.root_node_id  = card->root_node->node_id;
+-	bus_reset->reset.generation    = card->generation;
++	fill_bus_reset_event(&bus_reset->reset, device);
+ 
+ 	queue_event(client, &bus_reset->event,
+ 		    &bus_reset->reset, sizeof bus_reset->reset, NULL, 0);
+@@ -228,14 +237,36 @@ void fw_device_cdev_update(struct fw_device *device)
+ 	spin_unlock_irqrestore(&card->lock, flags);
+ }
+ 
+-static int ioctl_config_rom(struct client *client, void __user *arg)
++static int ioctl_get_info(struct client *client, void __user *arg)
+ {
+-	struct fw_cdev_get_config_rom rom;
++	struct fw_cdev_get_info get_info;
++	struct fw_cdev_event_bus_reset bus_reset;
++
++	if (copy_from_user(&get_info, arg, sizeof get_info))
++		return -EFAULT;
++
++	client->version = get_info.version;
++	get_info.version = FW_CDEV_VERSION;
++
++	if (get_info.rom != 0) {
++		void __user *uptr = u64_to_uptr(get_info.rom);
++		size_t length = min(get_info.rom_length,
++				    client->device->config_rom_length * 4);
++
++		if (copy_to_user(uptr, client->device->config_rom, length))
++			return -EFAULT;
++	}
++	get_info.rom_length = client->device->config_rom_length * 4;
++
++	if (get_info.bus_reset != 0) {
++		void __user *uptr = u64_to_uptr(get_info.bus_reset);
++
++		fill_bus_reset_event(&bus_reset, client->device);
++		if (copy_to_user(uptr, &bus_reset, sizeof bus_reset))
++			return -EFAULT;
++	}
+ 
+-	rom.length = client->device->config_rom_length;
+-	memcpy(rom.data, client->device->config_rom, rom.length * 4);
+-	if (copy_to_user(arg, &rom,
+-			 (char *)&rom.data[rom.length] - (char *)&rom))
++	if (copy_to_user(arg, &get_info, sizeof get_info))
+ 		return -EFAULT;
+ 
+ 	return 0;
+@@ -290,7 +321,7 @@ static ssize_t ioctl_send_request(struct client *client, void __user *arg)
+ 	}
+ 
+ 	fw_send_request(device->card, &response->transaction,
+-			request.tcode,
++			request.tcode & 0x1f,
+ 			device->node->node_id,
+ 			device->card->generation,
+ 			device->node->max_speed,
+@@ -611,8 +642,8 @@ static int
+ dispatch_ioctl(struct client *client, unsigned int cmd, void __user *arg)
+ {
+ 	switch (cmd) {
+-	case FW_CDEV_IOC_GET_CONFIG_ROM:
+-		return ioctl_config_rom(client, arg);
++	case FW_CDEV_IOC_GET_INFO:
++		return ioctl_get_info(client, arg);
+ 	case FW_CDEV_IOC_SEND_REQUEST:
+ 		return ioctl_send_request(client, arg);
+ 	case FW_CDEV_IOC_ALLOCATE:
+diff --git a/drivers/firewire/fw-device-cdev.h b/drivers/firewire/fw-device-cdev.h
+index 8a8b390d5996..c6ea6f32a94b 100644
+--- a/drivers/firewire/fw-device-cdev.h
++++ b/drivers/firewire/fw-device-cdev.h
+@@ -104,7 +104,7 @@ struct fw_cdev_event_iso_interrupt {
+ 	__u32 header[0];
+ };
+ 
+-#define FW_CDEV_IOC_GET_CONFIG_ROM	_IOR('#', 0x00, struct fw_cdev_get_config_rom)
++#define FW_CDEV_IOC_GET_INFO		_IO('#', 0x00)
+ #define FW_CDEV_IOC_SEND_REQUEST	_IO('#', 0x01)
+ #define FW_CDEV_IOC_ALLOCATE		_IO('#', 0x02)
+ #define FW_CDEV_IOC_SEND_RESPONSE	_IO('#', 0x03)
+@@ -114,9 +114,32 @@ struct fw_cdev_event_iso_interrupt {
+ #define FW_CDEV_IOC_START_ISO		_IO('#', 0x07)
+ #define FW_CDEV_IOC_STOP_ISO		_IO('#', 0x08)
+ 
+-struct fw_cdev_get_config_rom {
+-	__u32 length;
+-	__u32 data[256];
++/* FW_CDEV_VERSION History
++ *
++ * 1	Feb 18, 2007:  Initial version.
++ */
++#define FW_CDEV_VERSION		1
++
++struct fw_cdev_get_info {
++	/* The version field is just a running serial number.  We
++	 * never break backwards compatibility.  Userspace passes in
++	 * the version it expects and the kernel passes back the
++	 * highest version it can provide.  Even if the structs in
++	 * this interface are extended in a later version, the kernel
++	 * will not copy back more data than what was present in the
++	 * interface version userspace expects. */
++	__u32 version;
++
++	/* If non-zero, at most rom_length bytes of config rom will be
++	 * copied into that user space address.  In either case,
++	 * rom_length is updated with the actual length of the config
++	 * rom. */
++	__u32 rom_length;
++	__u64 rom;
++
++	/* If non-zero, a fw_cdev_event_bus_reset struct will be
++	 * copied here with the current state of the bus. */
++	__u64 bus_reset;
+ };
+ 
+ struct fw_cdev_send_request {
+

@@ -1,0 +1,167 @@
+commit e7e0f7d4b4c0187e9838a466f22e9131a49c9a17
+Author: Zeev Suraski <zeev@php.net>
+Date:   Thu Feb 12 13:49:55 2004 +0000
+
+    - Check return-by-reference bit when implementing interface prototypes
+    - Add infrastructure for built-in functions to hint whether they
+      return by reference or not.  It is NOT currently used for anything,
+      except for interface prototypes (you can use it to request that the
+      function that implements your prototype returns by reference or
+      doesn't return by reference).
+      For downwards compatibility - by default, interface prototypes are
+      agnostic as to whether the function that implements them returns
+      by reference or not.  Use ZEND_BEGIN_ARG_INFO_EX() with
+      ZEND_RETURN_VALUE/ZEND_RETURN_REFERENCE to change that.
+    - Fix ArrayAccess::getOffset() to conduct additional checks.
+      If your getOffset() should work with multidimensional arrays - it
+      must return by reference.
+
+diff --git a/Zend/zend_API.c b/Zend/zend_API.c
+index 40e80ff366..0cf80acad0 100644
+--- a/Zend/zend_API.c
++++ b/Zend/zend_API.c
+@@ -1221,10 +1221,12 @@ ZEND_API int zend_register_functions(zend_class_entry *scope, zend_function_entr
+ 			internal_function->arg_info = ptr->arg_info+1;
+ 			internal_function->num_args = ptr->num_args;
+ 			internal_function->pass_rest_by_reference = ptr->arg_info[0].pass_by_reference;
++			internal_function->return_reference = ptr->arg_info[0].return_reference;
+ 		} else {
+ 			internal_function->arg_info = NULL;
+ 			internal_function->num_args = 0;
+ 			internal_function->pass_rest_by_reference = 0;
++			internal_function->return_reference = 0;
+ 		}
+ 		if (ptr->flags) {
+ 			if (!(ptr->flags & ZEND_ACC_PPP_MASK)) {
+diff --git a/Zend/zend_API.h b/Zend/zend_API.h
+index a869f2950c..a3d4cf79db 100644
+--- a/Zend/zend_API.h
++++ b/Zend/zend_API.h
+@@ -57,12 +57,14 @@ typedef struct _zend_function_entry {
+                                                     ZEND_FENTRY(name, ZEND_FN(classname##_##alias), arg_info, flags)
+ #define ZEND_ME_MAPPING(name, func_name, arg_types) ZEND_NAMED_FE(name, ZEND_FN(func_name), arg_types)
+ 
+-#define ZEND_ARG_INFO(pass_by_ref, name)							{ #name, sizeof(#name)-1, NULL, 0, 0, pass_by_ref },
+-#define ZEND_ARG_PASS_INFO(pass_by_ref)								{ NULL, 0, NULL, 0, 0, pass_by_ref },
+-#define ZEND_ARG_OBJ_INFO(pass_by_ref, name, classname, allow_null) { #name, sizeof(#name)-1, #classname, sizeof(#classname)-1, allow_null, pass_by_ref },
+-#define ZEND_BEGIN_ARG_INFO(name, pass_rest_by_reference)					\
+-	zend_arg_info name[] = {									\
+-		ZEND_ARG_PASS_INFO(pass_rest_by_reference)
++#define ZEND_ARG_INFO(pass_by_ref, name)							{ #name, sizeof(#name)-1, NULL, 0, 0, pass_by_ref, 0 },
++#define ZEND_ARG_PASS_INFO(pass_by_ref)								{ NULL, 0, NULL, 0, 0, pass_by_ref, 0 },
++#define ZEND_ARG_OBJ_INFO(pass_by_ref, name, classname, allow_null) { #name, sizeof(#name)-1, #classname, sizeof(#classname)-1, allow_null, pass_by_ref, 0 },
++#define ZEND_BEGIN_ARG_INFO_EX(name, pass_rest_by_reference, return_reference)					\
++	zend_arg_info name[] = {																\
++		{ NULL, 0, NULL, 0, 0, pass_rest_by_reference, return_reference },
++#define ZEND_BEGIN_ARG_INFO(name, pass_rest_by_reference)	\
++	ZEND_BEGIN_ARG_INFO_EX(name, pass_rest_by_reference, ZEND_RETURN_REFERENCE_AGNOSTIC)
+ #define ZEND_END_ARG_INFO()		};
+ 
+ /* Name macros */
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index de45f3b6cb..256f9f5bdf 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -1718,6 +1718,11 @@ static zend_bool zend_do_perform_implementation_check(zend_function *fe)
+ 		return 0;
+ 	}
+ 
++	if (fe->common.prototype->common.return_reference != ZEND_RETURN_REFERENCE_AGNOSTIC
++		&& fe->common.return_reference != fe->common.prototype->common.return_reference) {
++		return 0;
++	}
++
+ 	for (i=0; i< fe->common.num_args; i++) {
+ 		if (ZEND_LOG_XOR(fe->common.arg_info[i].class_name, fe->common.prototype->common.arg_info[i].class_name)) {
+ 			/* Only one has a type hint and the other one doesn't */
+diff --git a/Zend/zend_compile.h b/Zend/zend_compile.h
+index f138561671..65f4d75421 100644
+--- a/Zend/zend_compile.h
++++ b/Zend/zend_compile.h
+@@ -140,6 +140,7 @@ typedef struct _zend_arg_info {
+ 	zend_uint class_name_len;
+ 	zend_bool allow_null;
+ 	zend_bool pass_by_reference;
++	zend_bool return_reference;
+ } zend_arg_info;
+ 
+ struct _zend_op_array {
+@@ -152,6 +153,7 @@ struct _zend_op_array {
+ 	zend_uint num_args;
+ 	zend_arg_info *arg_info;
+ 	zend_bool pass_rest_by_reference;
++	unsigned char return_reference;
+ 	/* END of common elements */
+ 
+ 	zend_uint *refcount;
+@@ -174,7 +176,6 @@ struct _zend_op_array {
+ 	zend_op *start_op;
+ 	int backpatch_count;
+ 
+-	zend_bool return_reference;
+ 	zend_bool done_pass_two;
+ 	zend_bool uses_this;
+ 
+@@ -188,6 +189,10 @@ struct _zend_op_array {
+ };
+ 
+ 
++#define ZEND_RETURN_VALUE				0
++#define ZEND_RETURN_REFERENCE			1
++#define ZEND_RETURN_REFERENCE_AGNOSTIC	2
++
+ typedef struct _zend_internal_function {
+ 	/* Common elements */
+ 	zend_uchar type;
+@@ -198,6 +203,7 @@ typedef struct _zend_internal_function {
+ 	zend_uint num_args;
+ 	zend_arg_info *arg_info;
+ 	zend_bool pass_rest_by_reference;
++	unsigned char return_reference;
+ 	/* END of common elements */
+ 
+ 	void (*handler)(INTERNAL_FUNCTION_PARAMETERS);
+@@ -217,6 +223,7 @@ typedef union _zend_function {
+ 		zend_uint num_args;
+ 		zend_arg_info *arg_info;
+ 		zend_bool pass_rest_by_reference;
++		unsigned char return_reference;
+ 	} common;
+ 	
+ 	zend_op_array op_array;
+diff --git a/Zend/zend_interfaces.c b/Zend/zend_interfaces.c
+index 0a28ff7bbb..cff986a7da 100755
+--- a/Zend/zend_interfaces.c
++++ b/Zend/zend_interfaces.c
+@@ -385,7 +385,7 @@ zend_function_entry zend_funcs_iterator[] = {
+ zend_function_entry *zend_funcs_traversable    = NULL;
+ 
+ static
+-ZEND_BEGIN_ARG_INFO(arginfo_arrayaccess_offset, 0) 
++ZEND_BEGIN_ARG_INFO(arginfo_arrayaccess_offset, 0)
+ 	ZEND_ARG_INFO(0, offset)
+ ZEND_END_ARG_INFO();
+ 
+diff --git a/Zend/zend_object_handlers.c b/Zend/zend_object_handlers.c
+index b578b97be8..3aa12f5148 100644
+--- a/Zend/zend_object_handlers.c
++++ b/Zend/zend_object_handlers.c
+@@ -386,9 +386,15 @@ zval *zend_std_read_dimension(zval *object, zval *offset, int type TSRMLS_DC)
+ 			}
+ 			return 0;
+ 		}
+-		if (retval->refcount > 0) { /* Should always  be  the case */
+-			retval->refcount--;
++
++		if ((type == BP_VAR_W || type == BP_VAR_RW)
++			&& !retval->is_ref) {
++			zend_error(E_ERROR, "offsetGet() must return by reference for multi-dimensional array support");
+ 		}
++
++		/* Undo PZVAL_LOCK() */
++		retval->refcount--;
++
+ 		return retval;
+ 	} else {
+ 		zend_error(E_ERROR, "Cannot use object of type %s as array", ce->name);
+

@@ -1,0 +1,48 @@
+commit b93f995081cc32e56071fef179161d2907d0491e
+Author: Max Reitz <mreitz@redhat.com>
+Date:   Tue Apr 29 19:03:14 2014 +0200
+
+    qcow2: Check min_size in qcow2_grow_l1_table()
+    
+    First, new_l1_size is an int64_t, whereas min_size is a uint64_t.
+    Therefore, during the loop which adjusts new_l1_size until it equals or
+    exceeds min_size, new_l1_size might overflow and become negative. The
+    comparison in the loop condition however will take it as an unsigned
+    value (because min_size is unsigned) and therefore recognize it as
+    exceeding min_size. Therefore, the loop is left with a negative
+    new_l1_size, which is not correct. This could be fixed by making
+    new_l1_size uint64_t.
+    
+    On the other hand, however, by doing this, the while loop may take
+    forever. If min_size is e.g. UINT64_MAX, it will take new_l1_size
+    probably multiple overflows to reach the exact same value (if it reaches
+    it at all). Then, right after the loop, new_l1_size will be recognized
+    as being too big anyway.
+    
+    Both problems require a ridiculously high min_size value, which is very
+    unlikely to occur; but both problems are also simply avoided by checking
+    whether min_size is sane before calculating new_l1_size (which should
+    still be checked separately, though).
+    
+    Signed-off-by: Max Reitz <mreitz@redhat.com>
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+
+diff --git a/block/qcow2-cluster.c b/block/qcow2-cluster.c
+index b746429def..76d2bcf63a 100644
+--- a/block/qcow2-cluster.c
++++ b/block/qcow2-cluster.c
+@@ -42,6 +42,13 @@ int qcow2_grow_l1_table(BlockDriverState *bs, uint64_t min_size,
+     if (min_size <= s->l1_size)
+         return 0;
+ 
++    /* Do a sanity check on min_size before trying to calculate new_l1_size
++     * (this prevents overflows during the while loop for the calculation of
++     * new_l1_size) */
++    if (min_size > INT_MAX / sizeof(uint64_t)) {
++        return -EFBIG;
++    }
++
+     if (exact_size) {
+         new_l1_size = min_size;
+     } else {
+

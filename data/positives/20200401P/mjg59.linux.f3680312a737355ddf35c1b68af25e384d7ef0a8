@@ -1,0 +1,38 @@
+commit f3680312a737355ddf35c1b68af25e384d7ef0a8
+Author: J. Bruce Fields <bfields@fieldses.org>
+Date:   Thu Oct 13 16:54:48 2005 -0400
+
+    SUNRPC: Retry wrap in case of memory allocation failure.
+    
+     For privacy we need to allocate extra pages to hold encrypted page data when
+     wrapping requests.  This allocation may fail, and we handle that case by
+     waiting and retrying.
+    
+     Signed-off-by: J. Bruce Fields <bfields@citi.umich.edu>
+     Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/net/sunrpc/clnt.c b/net/sunrpc/clnt.c
+index 534274056329..702ede309b06 100644
+--- a/net/sunrpc/clnt.c
++++ b/net/sunrpc/clnt.c
+@@ -710,9 +710,16 @@ call_encode(struct rpc_task *task)
+ 		rpc_exit(task, -EIO);
+ 		return;
+ 	}
+-	if (encode != NULL)
+-		task->tk_status = rpcauth_wrap_req(task, encode, req, p,
+-				task->tk_msg.rpc_argp);
++	if (encode == NULL)
++		return;
++
++	task->tk_status = rpcauth_wrap_req(task, encode, req, p,
++			task->tk_msg.rpc_argp);
++	if (task->tk_status == -ENOMEM) {
++		/* XXX: Is this sane? */
++		rpc_delay(task, 3*HZ);
++		task->tk_status = -EAGAIN;
++	}
+ }
+ 
+ /*
+

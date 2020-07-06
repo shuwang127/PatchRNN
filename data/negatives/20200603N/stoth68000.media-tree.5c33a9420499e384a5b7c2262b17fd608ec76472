@@ -1,0 +1,71 @@
+commit 5c33a9420499e384a5b7c2262b17fd608ec76472
+Author: Hante Meuleman <meuleman@broadcom.com>
+Date:   Tue Apr 2 21:06:18 2013 +0200
+
+    brcmfmac: fix stopping AP.
+    
+    on stop_ap the dongle was not properly shutdown. As a result it was
+    not possible to restart AP or STA after AP operation without
+    restarting the device. This patch will fix that.
+    
+    Reviewed-by: Arend Van Spriel <arend@broadcom.com>
+    Reviewed-by: Pieter-Paul Giesberts <pieterpg@broadcom.com>
+    Reviewed-by: Piotr Haber <phaber@broadcom.com>
+    Signed-off-by: Hante Meuleman <meuleman@broadcom.com>
+    Signed-off-by: Arend van Spriel <arend@broadcom.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/brcm80211/brcmfmac/wl_cfg80211.c b/drivers/net/wireless/brcm80211/brcmfmac/wl_cfg80211.c
+index 3bc47eaf167a..b9dbf2c0f63c 100644
+--- a/drivers/net/wireless/brcm80211/brcmfmac/wl_cfg80211.c
++++ b/drivers/net/wireless/brcm80211/brcmfmac/wl_cfg80211.c
+@@ -3827,8 +3827,9 @@ brcmf_cfg80211_start_ap(struct wiphy *wiphy, struct net_device *ndev,
+ static int brcmf_cfg80211_stop_ap(struct wiphy *wiphy, struct net_device *ndev)
+ {
+ 	struct brcmf_if *ifp = netdev_priv(ndev);
+-	s32 err = -EPERM;
++	s32 err;
+ 	struct brcmf_fil_bss_enable_le bss_enable;
++	struct brcmf_join_params join_params;
+ 
+ 	brcmf_dbg(TRACE, "Enter\n");
+ 
+@@ -3836,16 +3837,21 @@ static int brcmf_cfg80211_stop_ap(struct wiphy *wiphy, struct net_device *ndev)
+ 		/* Due to most likely deauths outstanding we sleep */
+ 		/* first to make sure they get processed by fw. */
+ 		msleep(400);
+-		err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_AP, 0);
+-		if (err < 0) {
+-			brcmf_err("setting AP mode failed %d\n", err);
+-			goto exit;
+-		}
++
++		memset(&join_params, 0, sizeof(join_params));
++		err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SET_SSID,
++					     &join_params, sizeof(join_params));
++		if (err < 0)
++			brcmf_err("SET SSID error (%d)\n", err);
+ 		err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_UP, 0);
+-		if (err < 0) {
++		if (err < 0)
+ 			brcmf_err("BRCMF_C_UP error %d\n", err);
+-			goto exit;
+-		}
++		err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_AP, 0);
++		if (err < 0)
++			brcmf_err("setting AP mode failed %d\n", err);
++		err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_INFRA, 0);
++		if (err < 0)
++			brcmf_err("setting INFRA mode failed %d\n", err);
+ 	} else {
+ 		bss_enable.bsscfg_idx = cpu_to_le32(ifp->bssidx);
+ 		bss_enable.enable = cpu_to_le32(0);
+@@ -3858,7 +3864,6 @@ static int brcmf_cfg80211_stop_ap(struct wiphy *wiphy, struct net_device *ndev)
+ 	set_bit(BRCMF_VIF_STATUS_AP_CREATING, &ifp->vif->sme_state);
+ 	clear_bit(BRCMF_VIF_STATUS_AP_CREATED, &ifp->vif->sme_state);
+ 
+-exit:
+ 	return err;
+ }
+ 
+

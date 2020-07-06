@@ -1,0 +1,220 @@
+commit 8ea6ecc8b0759756a766c05dc7c98c51ec90de37
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Tue Dec 14 15:05:52 2010 +0000
+
+    lockd: Create client-side nlm_host cache
+    
+    NFS clients don't need the garbage collection processing that is
+    performed on nlm_host structures.  The client picks up an nlm_host at
+    mount time and holds a reference to it until the file system is
+    unmounted.
+    
+    Servers, on the other hand, don't have a precise way to tell when an
+    nlm_host is no longer being used, so zero refcount nlm_host entries
+    are left to expire in the cache after a time.
+    
+    Basically there's nothing holding a reference to an nlm_host between
+    individual server-side NLM requests, but we can't afford the expense
+    of recreating them for every new NLM request from a client.  The
+    nlm_host cache adds some lifetime hysteresis to entries in the cache
+    so the next time a particular nlm_host is needed, it's likely to be
+    discovered by a lookup rather than created from whole cloth.
+    
+    With the new implementation, client nlm_host cache items are no longer
+    garbage collected, and are destroyed directly by a new release
+    function specialized for client entries, nlmclnt_release_host().  They
+    are cached in their own data structure, and have their own lookup
+    logic, simplified and specialized for client nlm_host entries.
+    
+    However, the client nlm_host cache still shares reboot recovery logic
+    with the server nlm_host cache.  The NSM "peer rebooted" downcall for
+    clients and servers still come through the same RPC call.  This is a
+    legacy formal API that would be difficult to alter, and besides, the
+    user space NSM implementation can't tell the difference between peers
+    that are clients or servers.
+    
+    For this reason, the client cache continues to share the
+    nlm_host_mutex (and reboot recovery logic) with the server cache.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/fs/lockd/clntlock.c b/fs/lockd/clntlock.c
+index 25509eb28fd7..8d4ea8351e3d 100644
+--- a/fs/lockd/clntlock.c
++++ b/fs/lockd/clntlock.c
+@@ -79,7 +79,7 @@ EXPORT_SYMBOL_GPL(nlmclnt_init);
+  */
+ void nlmclnt_done(struct nlm_host *host)
+ {
+-	nlm_release_host(host);
++	nlmclnt_release_host(host);
+ 	lockd_down();
+ }
+ EXPORT_SYMBOL_GPL(nlmclnt_done);
+@@ -273,7 +273,7 @@ reclaimer(void *ptr)
+ 	spin_unlock(&nlm_blocked_lock);
+ 
+ 	/* Release host handle after use */
+-	nlm_release_host(host);
++	nlmclnt_release_host(host);
+ 	lockd_down();
+ 	return 0;
+ }
+diff --git a/fs/lockd/clntproc.c b/fs/lockd/clntproc.c
+index fbc6617f76c4..adb45ec9038c 100644
+--- a/fs/lockd/clntproc.c
++++ b/fs/lockd/clntproc.c
+@@ -58,7 +58,7 @@ static void nlm_put_lockowner(struct nlm_lockowner *lockowner)
+ 		return;
+ 	list_del(&lockowner->list);
+ 	spin_unlock(&lockowner->host->h_lock);
+-	nlm_release_host(lockowner->host);
++	nlmclnt_release_host(lockowner->host);
+ 	kfree(lockowner);
+ }
+ 
+@@ -207,7 +207,7 @@ struct nlm_rqst *nlm_alloc_call(struct nlm_host *host)
+ 		printk("nlm_alloc_call: failed, waiting for memory\n");
+ 		schedule_timeout_interruptible(5*HZ);
+ 	}
+-	nlm_release_host(host);
++	nlmclnt_release_host(host);
+ 	return NULL;
+ }
+ 
+@@ -215,7 +215,7 @@ void nlmclnt_release_call(struct nlm_rqst *call)
+ {
+ 	if (!atomic_dec_and_test(&call->a_count))
+ 		return;
+-	nlm_release_host(call->a_host);
++	nlmclnt_release_host(call->a_host);
+ 	nlmclnt_release_lockargs(call);
+ 	kfree(call);
+ }
+diff --git a/fs/lockd/host.c b/fs/lockd/host.c
+index e58e1426d161..c6942fb4bd0d 100644
+--- a/fs/lockd/host.c
++++ b/fs/lockd/host.c
+@@ -26,6 +26,7 @@
+ #define NLM_HOST_COLLECT	(120 * HZ)
+ 
+ static struct hlist_head	nlm_hosts[NLM_HOST_NRHASH];
++static struct hlist_head	nlm_client_hosts[NLM_HOST_NRHASH];
+ 
+ #define for_each_host(host, pos, chain, table) \
+ 	for ((chain) = (table); \
+@@ -288,12 +289,76 @@ struct nlm_host *nlmclnt_lookup_host(const struct sockaddr *sap,
+ 		.hostname_len	= strlen(hostname),
+ 		.noresvport	= noresvport,
+ 	};
++	struct hlist_head *chain;
++	struct hlist_node *pos;
++	struct nlm_host	*host;
++	struct nsm_handle *nsm = NULL;
+ 
+ 	dprintk("lockd: %s(host='%s', vers=%u, proto=%s)\n", __func__,
+ 			(hostname ? hostname : "<none>"), version,
+ 			(protocol == IPPROTO_UDP ? "udp" : "tcp"));
+ 
+-	return nlm_lookup_host(&ni);
++	mutex_lock(&nlm_host_mutex);
++
++	chain = &nlm_client_hosts[nlm_hash_address(sap)];
++	hlist_for_each_entry(host, pos, chain, h_hash) {
++		if (!rpc_cmp_addr(nlm_addr(host), sap))
++			continue;
++
++		/* Same address. Share an NSM handle if we already have one */
++		if (nsm == NULL)
++			nsm = host->h_nsmhandle;
++
++		if (host->h_proto != protocol)
++			continue;
++		if (host->h_version != version)
++			continue;
++
++		nlm_get_host(host);
++		dprintk("lockd: %s found host %s (%s)\n", __func__,
++			host->h_name, host->h_addrbuf);
++		goto out;
++	}
++
++	host = nlm_alloc_host(&ni, nsm);
++	if (unlikely(host == NULL))
++		goto out;
++
++	hlist_add_head(&host->h_hash, chain);
++	nrhosts++;
++
++	dprintk("lockd: %s created host %s (%s)\n", __func__,
++		host->h_name, host->h_addrbuf);
++
++out:
++	mutex_unlock(&nlm_host_mutex);
++	return host;
++}
++
++/**
++ * nlmclnt_release_host - release client nlm_host
++ * @host: nlm_host to release
++ *
++ */
++void nlmclnt_release_host(struct nlm_host *host)
++{
++	if (host == NULL)
++		return;
++
++	dprintk("lockd: release client host %s\n", host->h_name);
++
++	BUG_ON(atomic_read(&host->h_count) < 0);
++	BUG_ON(host->h_server);
++
++	if (atomic_dec_and_test(&host->h_count)) {
++		BUG_ON(!list_empty(&host->h_lockowners));
++		BUG_ON(!list_empty(&host->h_granted));
++		BUG_ON(!list_empty(&host->h_reclaim));
++
++		mutex_lock(&nlm_host_mutex);
++		nlm_destroy_host_locked(host);
++		mutex_unlock(&nlm_host_mutex);
++	}
+ }
+ 
+ /**
+@@ -515,16 +580,14 @@ void nlm_host_rebooted(const struct nlm_reboot *info)
+ 	 * To avoid processing a host several times, we match the nsmstate.
+ 	 */
+ 	while ((host = next_host_state(nlm_hosts, nsm, info)) != NULL) {
+-		if (host->h_server) {
+-			/* We're server for this guy, just ditch
+-			 * all the locks he held. */
+-			nlmsvc_free_host_resources(host);
+-		} else {
+-			/* He's the server, initiate lock recovery. */
+-			nlmclnt_recovery(host);
+-		}
++		nlmsvc_free_host_resources(host);
+ 		nlm_release_host(host);
+ 	}
++	while ((host = next_host_state(nlm_client_hosts, nsm, info)) != NULL) {
++		nlmclnt_recovery(host);
++		nlmclnt_release_host(host);
++	}
++
+ 	nsm_release(nsm);
+ }
+ 
+diff --git a/include/linux/lockd/lockd.h b/include/linux/lockd/lockd.h
+index a32ba62455af..6c2a0e2f298e 100644
+--- a/include/linux/lockd/lockd.h
++++ b/include/linux/lockd/lockd.h
+@@ -223,6 +223,7 @@ struct nlm_host  *nlmclnt_lookup_host(const struct sockaddr *sap,
+ 					const u32 version,
+ 					const char *hostname,
+ 					int noresvport);
++void		  nlmclnt_release_host(struct nlm_host *);
+ struct nlm_host  *nlmsvc_lookup_host(const struct svc_rqst *rqstp,
+ 					const char *hostname,
+ 					const size_t hostname_len);
+

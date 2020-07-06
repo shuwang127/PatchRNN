@@ -1,0 +1,284 @@
+commit 0088cbbc4b66b287132a8a04b3e2509d44a6387c
+Author: Tal Gilboa <talgi@mellanox.com>
+Date:   Tue Sep 26 16:20:43 2017 +0300
+
+    net/mlx5e: Enable CQE based moderation on TX CQ
+    
+    By using CQE based moderation on TX CQ we can reduce the number of TX
+    interrupt rate. Besides the benefit of less interrupts, this also
+    allows the kernel to better utilize TSO. Since TSO has some CPU overhead,
+    it might not aggregate when CPU is under high stress. By reducing the
+    interrupt rate and the CPU utilization, we can get better aggregation
+    and better overall throughput.
+    The feature is enabled by default and has a private flag in ethtool
+    for control.
+    
+    Throughput, interrupt rate and TSO utilization improvements:
+    (ConnectX-4Lx 40GbE, unidirectional, 1/16 TCP streams, 64B packets)
+    ---------------------------------------------------------
+    Metric   | Streams | CQE Based | EQE Based | improvement
+    ---------------------------------------------------------
+    BW       |    1    |  2.4Gb/s  | 2.15Gb/s  |  +11.6%
+    IR       |    1    |  27Kips   | 50.6Kips  |  -46.7%
+    TSO Util |    1    |  74.6%    | 71%       |  +5%
+    BW       |    16   |  29Gb/s   | 25.85Gb/s |  +12.2%
+    IR       |    16   |  482Kips  | 745Kips   |  -35.3%
+    TSO Util |    16   |  69.1%    | 49%       |  +41.1%
+    
+    *BW = Bandwidth, IR = Interrupt rate, ips = interrupt per second.
+    TSO Util = bytes in TSO sessions / all bytes transferred
+    
+    Signed-off-by: Tal Gilboa <talgi@mellanox.com>
+    Signed-off-by: Saeed Mahameed <saeedm@mellanox.com>
+
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en.h b/drivers/net/ethernet/mellanox/mlx5/core/en.h
+index 95facdf62c77..751f62cae969 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en.h
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en.h
+@@ -106,6 +106,7 @@
+ #define MLX5E_PARAMS_DEFAULT_RX_CQ_MODERATION_USEC_FROM_CQE 0x3
+ #define MLX5E_PARAMS_DEFAULT_RX_CQ_MODERATION_PKTS      0x20
+ #define MLX5E_PARAMS_DEFAULT_TX_CQ_MODERATION_USEC      0x10
++#define MLX5E_PARAMS_DEFAULT_TX_CQ_MODERATION_USEC_FROM_CQE 0x10
+ #define MLX5E_PARAMS_DEFAULT_TX_CQ_MODERATION_PKTS      0x20
+ #define MLX5E_PARAMS_DEFAULT_MIN_RX_WQES                0x80
+ #define MLX5E_PARAMS_DEFAULT_MIN_RX_WQES_MPW            0x2
+@@ -198,12 +199,14 @@ extern const char mlx5e_self_tests[][ETH_GSTRING_LEN];
+ 
+ static const char mlx5e_priv_flags[][ETH_GSTRING_LEN] = {
+ 	"rx_cqe_moder",
++	"tx_cqe_moder",
+ 	"rx_cqe_compress",
+ };
+ 
+ enum mlx5e_priv_flag {
+ 	MLX5E_PFLAG_RX_CQE_BASED_MODER = (1 << 0),
+-	MLX5E_PFLAG_RX_CQE_COMPRESS = (1 << 1),
++	MLX5E_PFLAG_TX_CQE_BASED_MODER = (1 << 1),
++	MLX5E_PFLAG_RX_CQE_COMPRESS = (1 << 2),
+ };
+ 
+ #define MLX5E_SET_PFLAG(params, pflag, enable)			\
+@@ -223,6 +226,7 @@ enum mlx5e_priv_flag {
+ struct mlx5e_cq_moder {
+ 	u16 usec;
+ 	u16 pkts;
++	u8 cq_period_mode;
+ };
+ 
+ struct mlx5e_params {
+@@ -234,7 +238,6 @@ struct mlx5e_params {
+ 	u8  log_rq_size;
+ 	u16 num_channels;
+ 	u8  num_tc;
+-	u8  rx_cq_period_mode;
+ 	bool rx_cqe_compress_def;
+ 	struct mlx5e_cq_moder rx_cq_moderation;
+ 	struct mlx5e_cq_moder tx_cq_moderation;
+@@ -926,6 +929,8 @@ void mlx5e_build_default_indir_rqt(u32 *indirection_rqt, int len,
+ 				   int num_channels);
+ int mlx5e_get_max_linkspeed(struct mlx5_core_dev *mdev, u32 *speed);
+ 
++void mlx5e_set_tx_cq_mode_params(struct mlx5e_params *params,
++				 u8 cq_period_mode);
+ void mlx5e_set_rx_cq_mode_params(struct mlx5e_params *params,
+ 				 u8 cq_period_mode);
+ void mlx5e_set_rq_type_params(struct mlx5_core_dev *mdev,
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en_ethtool.c b/drivers/net/ethernet/mellanox/mlx5/core/en_ethtool.c
+index 63d1ac695a75..23425f028405 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en_ethtool.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en_ethtool.c
+@@ -1454,29 +1454,36 @@ static int mlx5e_get_module_eeprom(struct net_device *netdev,
+ 
+ typedef int (*mlx5e_pflag_handler)(struct net_device *netdev, bool enable);
+ 
+-static int set_pflag_rx_cqe_based_moder(struct net_device *netdev, bool enable)
++static int set_pflag_cqe_based_moder(struct net_device *netdev, bool enable,
++				     bool is_rx_cq)
+ {
+ 	struct mlx5e_priv *priv = netdev_priv(netdev);
+ 	struct mlx5_core_dev *mdev = priv->mdev;
+ 	struct mlx5e_channels new_channels = {};
+-	bool rx_mode_changed;
+-	u8 rx_cq_period_mode;
++	bool mode_changed;
++	u8 cq_period_mode, current_cq_period_mode;
+ 	int err = 0;
+ 
+-	rx_cq_period_mode = enable ?
++	cq_period_mode = enable ?
+ 		MLX5_CQ_PERIOD_MODE_START_FROM_CQE :
+ 		MLX5_CQ_PERIOD_MODE_START_FROM_EQE;
+-	rx_mode_changed = rx_cq_period_mode != priv->channels.params.rx_cq_period_mode;
++	current_cq_period_mode = is_rx_cq ?
++		priv->channels.params.rx_cq_moderation.cq_period_mode :
++		priv->channels.params.tx_cq_moderation.cq_period_mode;
++	mode_changed = cq_period_mode != current_cq_period_mode;
+ 
+-	if (rx_cq_period_mode == MLX5_CQ_PERIOD_MODE_START_FROM_CQE &&
++	if (cq_period_mode == MLX5_CQ_PERIOD_MODE_START_FROM_CQE &&
+ 	    !MLX5_CAP_GEN(mdev, cq_period_start_from_cqe))
+ 		return -EOPNOTSUPP;
+ 
+-	if (!rx_mode_changed)
++	if (!mode_changed)
+ 		return 0;
+ 
+ 	new_channels.params = priv->channels.params;
+-	mlx5e_set_rx_cq_mode_params(&new_channels.params, rx_cq_period_mode);
++	if (is_rx_cq)
++		mlx5e_set_rx_cq_mode_params(&new_channels.params, cq_period_mode);
++	else
++		mlx5e_set_tx_cq_mode_params(&new_channels.params, cq_period_mode);
+ 
+ 	if (!test_bit(MLX5E_STATE_OPENED, &priv->state)) {
+ 		priv->channels.params = new_channels.params;
+@@ -1491,6 +1498,16 @@ static int set_pflag_rx_cqe_based_moder(struct net_device *netdev, bool enable)
+ 	return 0;
+ }
+ 
++static int set_pflag_tx_cqe_based_moder(struct net_device *netdev, bool enable)
++{
++	return set_pflag_cqe_based_moder(netdev, enable, false);
++}
++
++static int set_pflag_rx_cqe_based_moder(struct net_device *netdev, bool enable)
++{
++	return set_pflag_cqe_based_moder(netdev, enable, true);
++}
++
+ int mlx5e_modify_rx_cqe_compression_locked(struct mlx5e_priv *priv, bool new_val)
+ {
+ 	bool curr_val = MLX5E_GET_PFLAG(&priv->channels.params, MLX5E_PFLAG_RX_CQE_COMPRESS);
+@@ -1578,6 +1595,12 @@ static int mlx5e_set_priv_flags(struct net_device *netdev, u32 pflags)
+ 	if (err)
+ 		goto out;
+ 
++	err = mlx5e_handle_pflag(netdev, pflags,
++				 MLX5E_PFLAG_TX_CQE_BASED_MODER,
++				 set_pflag_tx_cqe_based_moder);
++	if (err)
++		goto out;
++
+ 	err = mlx5e_handle_pflag(netdev, pflags,
+ 				 MLX5E_PFLAG_RX_CQE_COMPRESS,
+ 				 set_pflag_rx_cqe_compress);
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en_main.c b/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
+index 73d7c672c4ff..d1c3dc946486 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
+@@ -681,7 +681,7 @@ static int mlx5e_alloc_rq(struct mlx5e_channel *c,
+ 	}
+ 
+ 	INIT_WORK(&rq->am.work, mlx5e_rx_am_work);
+-	rq->am.mode = params->rx_cq_period_mode;
++	rq->am.mode = params->rx_cq_moderation.cq_period_mode;
+ 	rq->page_cache.head = 0;
+ 	rq->page_cache.tail = 0;
+ 
+@@ -1974,7 +1974,7 @@ static void mlx5e_build_rx_cq_param(struct mlx5e_priv *priv,
+ 	}
+ 
+ 	mlx5e_build_common_cq_param(priv, param);
+-	param->cq_period_mode = params->rx_cq_period_mode;
++	param->cq_period_mode = params->rx_cq_moderation.cq_period_mode;
+ }
+ 
+ static void mlx5e_build_tx_cq_param(struct mlx5e_priv *priv,
+@@ -1986,8 +1986,7 @@ static void mlx5e_build_tx_cq_param(struct mlx5e_priv *priv,
+ 	MLX5_SET(cqc, cqc, log_cq_size, params->log_sq_size);
+ 
+ 	mlx5e_build_common_cq_param(priv, param);
+-
+-	param->cq_period_mode = MLX5_CQ_PERIOD_MODE_START_FROM_EQE;
++	param->cq_period_mode = params->tx_cq_moderation.cq_period_mode;
+ }
+ 
+ static void mlx5e_build_ico_cq_param(struct mlx5e_priv *priv,
+@@ -3987,14 +3986,32 @@ static bool hw_lro_heuristic(u32 link_speed, u32 pci_bw)
+ 		 (pci_bw <= 16000) && (pci_bw < link_speed));
+ }
+ 
++void mlx5e_set_tx_cq_mode_params(struct mlx5e_params *params, u8 cq_period_mode)
++{
++	params->tx_cq_moderation.cq_period_mode = cq_period_mode;
++
++	params->tx_cq_moderation.pkts =
++		MLX5E_PARAMS_DEFAULT_TX_CQ_MODERATION_PKTS;
++	params->tx_cq_moderation.usec =
++		MLX5E_PARAMS_DEFAULT_TX_CQ_MODERATION_USEC;
++
++	if (cq_period_mode == MLX5_CQ_PERIOD_MODE_START_FROM_CQE)
++		params->tx_cq_moderation.usec =
++			MLX5E_PARAMS_DEFAULT_TX_CQ_MODERATION_USEC_FROM_CQE;
++
++	MLX5E_SET_PFLAG(params, MLX5E_PFLAG_TX_CQE_BASED_MODER,
++			params->tx_cq_moderation.cq_period_mode ==
++				MLX5_CQ_PERIOD_MODE_START_FROM_CQE);
++}
++
+ void mlx5e_set_rx_cq_mode_params(struct mlx5e_params *params, u8 cq_period_mode)
+ {
+-	params->rx_cq_period_mode = cq_period_mode;
++	params->rx_cq_moderation.cq_period_mode = cq_period_mode;
+ 
+ 	params->rx_cq_moderation.pkts =
+ 		MLX5E_PARAMS_DEFAULT_RX_CQ_MODERATION_PKTS;
+ 	params->rx_cq_moderation.usec =
+-			MLX5E_PARAMS_DEFAULT_RX_CQ_MODERATION_USEC;
++		MLX5E_PARAMS_DEFAULT_RX_CQ_MODERATION_USEC;
+ 
+ 	if (cq_period_mode == MLX5_CQ_PERIOD_MODE_START_FROM_CQE)
+ 		params->rx_cq_moderation.usec =
+@@ -4002,10 +4019,11 @@ void mlx5e_set_rx_cq_mode_params(struct mlx5e_params *params, u8 cq_period_mode)
+ 
+ 	if (params->rx_am_enabled)
+ 		params->rx_cq_moderation =
+-			mlx5e_am_get_def_profile(params->rx_cq_period_mode);
++			mlx5e_am_get_def_profile(cq_period_mode);
+ 
+ 	MLX5E_SET_PFLAG(params, MLX5E_PFLAG_RX_CQE_BASED_MODER,
+-			params->rx_cq_period_mode == MLX5_CQ_PERIOD_MODE_START_FROM_CQE);
++			params->rx_cq_moderation.cq_period_mode ==
++				MLX5_CQ_PERIOD_MODE_START_FROM_CQE);
+ }
+ 
+ u32 mlx5e_choose_lro_timeout(struct mlx5_core_dev *mdev, u32 wanted_timeout)
+@@ -4065,9 +4083,7 @@ void mlx5e_build_nic_params(struct mlx5_core_dev *mdev,
+ 			MLX5_CQ_PERIOD_MODE_START_FROM_EQE;
+ 	params->rx_am_enabled = MLX5_CAP_GEN(mdev, cq_moderation);
+ 	mlx5e_set_rx_cq_mode_params(params, cq_period_mode);
+-
+-	params->tx_cq_moderation.usec = MLX5E_PARAMS_DEFAULT_TX_CQ_MODERATION_USEC;
+-	params->tx_cq_moderation.pkts = MLX5E_PARAMS_DEFAULT_TX_CQ_MODERATION_PKTS;
++	mlx5e_set_tx_cq_mode_params(params, cq_period_mode);
+ 
+ 	/* TX inline */
+ 	params->tx_max_inline = mlx5e_get_max_inline_cap(mdev);
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en_rx_am.c b/drivers/net/ethernet/mellanox/mlx5/core/en_rx_am.c
+index acf32fe952cd..e401d9d245f3 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en_rx_am.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en_rx_am.c
+@@ -63,7 +63,11 @@ profile[MLX5_CQ_PERIOD_NUM_MODES][MLX5E_PARAMS_AM_NUM_PROFILES] = {
+ 
+ static inline struct mlx5e_cq_moder mlx5e_am_get_profile(u8 cq_period_mode, int ix)
+ {
+-	return profile[cq_period_mode][ix];
++	struct mlx5e_cq_moder cq_moder;
++
++	cq_moder = profile[cq_period_mode][ix];
++	cq_moder.cq_period_mode = cq_period_mode;
++	return cq_moder;
+ }
+ 
+ struct mlx5e_cq_moder mlx5e_am_get_def_profile(u8 rx_cq_period_mode)
+@@ -75,7 +79,7 @@ struct mlx5e_cq_moder mlx5e_am_get_def_profile(u8 rx_cq_period_mode)
+ 	else /* MLX5_CQ_PERIOD_MODE_START_FROM_EQE */
+ 		default_profile_ix = MLX5E_RX_AM_DEF_PROFILE_EQE;
+ 
+-	return profile[rx_cq_period_mode][default_profile_ix];
++	return mlx5e_am_get_profile(rx_cq_period_mode, default_profile_ix);
+ }
+ 
+ /* Adaptive moderation logic */
+

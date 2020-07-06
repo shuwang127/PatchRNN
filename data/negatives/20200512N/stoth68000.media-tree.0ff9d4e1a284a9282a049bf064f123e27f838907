@@ -1,0 +1,83 @@
+commit 0ff9d4e1a284a9282a049bf064f123e27f838907
+Author: Keith Busch <keith.busch@intel.com>
+Date:   Thu May 12 08:37:14 2016 -0600
+
+    NVMe: Short-cut removal on surprise hot-unplug
+    
+    This patch adds a new state that when set has the core automatically
+    kill request queues prior to removing namespaces.
+    
+    If PCI device is not present at the time the nvme driver's remove is
+    called, we can kill all IO queues immediately instead of waiting for
+    the watchdog thread to do that at its polling interval. This improves
+    scenarios where multiple hot plug events occur at the same time since
+    it doesn't block the pci enumeration for as long.
+    
+    Signed-off-by: Keith Busch <keith.busch@intel.com>
+    Reviewed-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Jens Axboe <axboe@fb.com>
+
+diff --git a/drivers/nvme/host/core.c b/drivers/nvme/host/core.c
+index acc05adaa0d4..beed3940786b 100644
+--- a/drivers/nvme/host/core.c
++++ b/drivers/nvme/host/core.c
+@@ -95,6 +95,15 @@ bool nvme_change_ctrl_state(struct nvme_ctrl *ctrl,
+ 			break;
+ 		}
+ 		break;
++	case NVME_CTRL_DEAD:
++		switch (old_state) {
++		case NVME_CTRL_DELETING:
++			changed = true;
++			/* FALLTHRU */
++		default:
++			break;
++		}
++		break;
+ 	default:
+ 		break;
+ 	}
+@@ -1595,6 +1604,15 @@ void nvme_remove_namespaces(struct nvme_ctrl *ctrl)
+ {
+ 	struct nvme_ns *ns, *next;
+ 
++	/*
++	 * The dead states indicates the controller was not gracefully
++	 * disconnected. In that case, we won't be able to flush any data while
++	 * removing the namespaces' disks; fail all the queues now to avoid
++	 * potentially having to clean up the failed sync later.
++	 */
++	if (ctrl->state == NVME_CTRL_DEAD)
++		nvme_kill_queues(ctrl);
++
+ 	mutex_lock(&ctrl->namespaces_mutex);
+ 	list_for_each_entry_safe(ns, next, &ctrl->namespaces, list)
+ 		nvme_ns_remove(ns);
+diff --git a/drivers/nvme/host/nvme.h b/drivers/nvme/host/nvme.h
+index 114b92873894..1daa0482de0e 100644
+--- a/drivers/nvme/host/nvme.h
++++ b/drivers/nvme/host/nvme.h
+@@ -72,6 +72,7 @@ enum nvme_ctrl_state {
+ 	NVME_CTRL_LIVE,
+ 	NVME_CTRL_RESETTING,
+ 	NVME_CTRL_DELETING,
++	NVME_CTRL_DEAD,
+ };
+ 
+ struct nvme_ctrl {
+diff --git a/drivers/nvme/host/pci.c b/drivers/nvme/host/pci.c
+index 4feaed591e83..3bdcf0e34fd6 100644
+--- a/drivers/nvme/host/pci.c
++++ b/drivers/nvme/host/pci.c
+@@ -2017,6 +2017,10 @@ static void nvme_remove(struct pci_dev *pdev)
+ 	nvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_DELETING);
+ 
+ 	pci_set_drvdata(pdev, NULL);
++
++	if (!pci_device_is_present(pdev))
++		nvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_DEAD);
++
+ 	flush_work(&dev->reset_work);
+ 	nvme_uninit_ctrl(&dev->ctrl);
+ 	nvme_dev_disable(dev, true);
+

@@ -1,0 +1,83 @@
+commit fc9ced41e48f7a10f0f472766e21d3103b93cc9a
+Author: Michael Niedermayer <michaelni@gmx.at>
+Date:   Sat Nov 29 19:22:54 2014 +0100
+
+    avcodec/twinvq: Use avpriv_float_dsp_alloc()
+    
+    Signed-off-by: Michael Niedermayer <michaelni@gmx.at>
+
+diff --git a/libavcodec/twinvq.c b/libavcodec/twinvq.c
+index b37fdee59f..4c289b0c92 100644
+--- a/libavcodec/twinvq.c
++++ b/libavcodec/twinvq.c
+@@ -358,7 +358,7 @@ static void imdct_and_window(TwinVQContext *tctx, enum TwinVQFrameType ftype,
+ 
+         mdct->imdct_half(mdct, buf1 + bsize * j, in + bsize * j);
+ 
+-        tctx->fdsp.vector_fmul_window(out2, prev_buf + (bsize - wsize) / 2,
++        tctx->fdsp->vector_fmul_window(out2, prev_buf + (bsize - wsize) / 2,
+                                       buf1 + bsize * j,
+                                       ff_sine_windows[av_log2(wsize)],
+                                       wsize / 2);
+@@ -405,7 +405,7 @@ static void imdct_output(TwinVQContext *tctx, enum TwinVQFrameType ftype,
+                size1 * sizeof(*out2));
+         memcpy(out2 + size1, &tctx->curr_frame[2 * mtab->size],
+                size2 * sizeof(*out2));
+-        tctx->fdsp.butterflies_float(out1, out2, mtab->size);
++        tctx->fdsp->butterflies_float(out1, out2, mtab->size);
+     }
+ }
+ 
+@@ -446,7 +446,7 @@ static void read_and_decode_spectrum(TwinVQContext *tctx, float *out,
+                                bits->bark_use_hist[i][j], i,
+                                tctx->tmp_buf, gain[sub * i + j], ftype);
+ 
+-            tctx->fdsp.vector_fmul(chunk + block_size * j,
++            tctx->fdsp->vector_fmul(chunk + block_size * j,
+                                    chunk + block_size * j,
+                                    tctx->tmp_buf, block_size);
+         }
+@@ -461,7 +461,7 @@ static void read_and_decode_spectrum(TwinVQContext *tctx, float *out,
+         dec_lpc_spectrum_inv(tctx, lsp, ftype, tctx->tmp_buf);
+ 
+         for (j = 0; j < mtab->fmode[ftype].sub; j++) {
+-            tctx->fdsp.vector_fmul(chunk, chunk, tctx->tmp_buf, block_size);
++            tctx->fdsp->vector_fmul(chunk, chunk, tctx->tmp_buf, block_size);
+             chunk += block_size;
+         }
+     }
+@@ -762,6 +762,7 @@ av_cold int ff_twinvq_decode_close(AVCodecContext *avctx)
+     av_freep(&tctx->spectrum);
+     av_freep(&tctx->prev_frame);
+     av_freep(&tctx->tmp_buf);
++    av_freep(&tctx->fdsp);
+ 
+     return 0;
+ }
+@@ -788,7 +789,11 @@ av_cold int ff_twinvq_decode_init(AVCodecContext *avctx)
+         return AVERROR_INVALIDDATA;
+     }
+ 
+-    avpriv_float_dsp_init(&tctx->fdsp, avctx->flags & CODEC_FLAG_BITEXACT);
++    tctx->fdsp = avpriv_float_dsp_alloc(avctx->flags & CODEC_FLAG_BITEXACT);
++    if (!tctx->fdsp) {
++        ff_twinvq_decode_close(avctx);
++        return AVERROR(ENOMEM);
++    }
+     if ((ret = init_mdct_win(tctx))) {
+         av_log(avctx, AV_LOG_ERROR, "Error initializing MDCT\n");
+         ff_twinvq_decode_close(avctx);
+diff --git a/libavcodec/twinvq.h b/libavcodec/twinvq.h
+index c4e9688d46..ae0f595d3c 100644
+--- a/libavcodec/twinvq.h
++++ b/libavcodec/twinvq.h
+@@ -136,7 +136,7 @@ typedef struct TwinVQModeTab {
+ 
+ typedef struct TwinVQContext {
+     AVCodecContext *avctx;
+-    AVFloatDSPContext fdsp;
++    AVFloatDSPContext *fdsp;
+     FFTContext mdct_ctx[3];
+ 
+     const TwinVQModeTab *mtab;
+

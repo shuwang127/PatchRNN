@@ -1,0 +1,184 @@
+commit 3cd12f91514da6893954de479dc60b16d3b381f4
+Author: Dan Williams <dan.j.williams@intel.com>
+Date:   Thu May 29 12:58:46 2014 -0700
+
+    usb: force warm reset to break link re-connect livelock
+    
+    Resuming a powered down port sometimes results in the port state being
+    stuck in the training sequence.
+    
+     hub 3-0:1.0: debounce: port 1: total 2000ms stable 0ms status 0x2e0
+     port1: can't get reconnection after setting port  power on, status -110
+     hub 3-0:1.0: port 1 status 0000.02e0 after resume, -19
+     usb 3-1: can't resume, status -19
+     hub 3-0:1.0: logical disconnect on port 1
+    
+    In the case above we wait for the port re-connect timeout of 2 seconds
+    and observe that the port status is USB_SS_PORT_LS_POLLING (although it
+    is likely toggling between this state and USB_SS_PORT_LS_RX_DETECT).
+    This is indicative of a case where the device is failing to progress the
+    link training state machine.
+    
+    It is resolved by issuing a warm reset to get the hub and device link
+    state machines back in sync.
+    
+     hub 3-0:1.0: debounce: port 1: total 2000ms stable 0ms status 0x2e0
+     usb usb3: port1 usb_port_runtime_resume requires warm reset
+     hub 3-0:1.0: port 1 not warm reset yet, waiting 50ms
+     usb 3-1: reset SuperSpeed USB device number 2 using xhci_hcd
+    
+    After a reconnect timeout when we expect the device to be present, force
+    a warm reset of the device.  Note that we can not simply look at the
+    link status to determine if a warm reset is required as any of the
+    training states USB_SS_PORT_LS_POLLING, USB_SS_PORT_LS_RX_DETECT, or
+    USB_SS_PORT_LS_COMP_MOD are valid states that do not indicate the need
+    for warm reset by themselves.
+    
+    Cc: Alan Stern <stern@rowland.harvard.edu>
+    Cc: Kukjin Kim <kgene.kim@samsung.com>
+    Cc: Vincent Palatin <vpalatin@chromium.org>
+    Cc: Lan Tianyu <tianyu.lan@intel.com>
+    Cc: Ksenia Ragiadakou <burzalodowa@gmail.com>
+    Cc: Vivek Gautam <gautam.vivek@samsung.com>
+    Cc: Douglas Anderson <dianders@chromium.org>
+    Cc: Felipe Balbi <balbi@ti.com>
+    Cc: Sunil Joshi <joshi@samsung.com>
+    Cc: Hans de Goede <hdegoede@redhat.com>
+    Acked-by: Julius Werner <jwerner@chromium.org>
+    Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+    Acked-by: Alan Stern <stern@rowland.harvard.edu>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index b90c6287bf47..88f1db27e0af 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -2587,13 +2587,20 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
+ /* Is a USB 3.0 port in the Inactive or Compliance Mode state?
+  * Port worm reset is required to recover
+  */
+-static bool hub_port_warm_reset_required(struct usb_hub *hub, u16 portstatus)
++static bool hub_port_warm_reset_required(struct usb_hub *hub, int port1,
++		u16 portstatus)
+ {
+-	return hub_is_superspeed(hub->hdev) &&
+-		(((portstatus & USB_PORT_STAT_LINK_STATE) ==
+-		  USB_SS_PORT_LS_SS_INACTIVE) ||
+-		 ((portstatus & USB_PORT_STAT_LINK_STATE) ==
+-		  USB_SS_PORT_LS_COMP_MOD)) ;
++	u16 link_state;
++
++	if (!hub_is_superspeed(hub->hdev))
++		return false;
++
++	if (test_bit(port1, hub->warm_reset_bits))
++		return true;
++
++	link_state = portstatus & USB_PORT_STAT_LINK_STATE;
++	return link_state == USB_SS_PORT_LS_SS_INACTIVE
++		|| link_state == USB_SS_PORT_LS_COMP_MOD;
+ }
+ 
+ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
+@@ -2630,7 +2637,7 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
+ 	if ((portstatus & USB_PORT_STAT_RESET))
+ 		return -EBUSY;
+ 
+-	if (hub_port_warm_reset_required(hub, portstatus))
++	if (hub_port_warm_reset_required(hub, port1, portstatus))
+ 		return -ENOTCONN;
+ 
+ 	/* Device went away? */
+@@ -2730,9 +2737,10 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
+ 		if (status < 0)
+ 			goto done;
+ 
+-		if (hub_port_warm_reset_required(hub, portstatus))
++		if (hub_port_warm_reset_required(hub, port1, portstatus))
+ 			warm = true;
+ 	}
++	clear_bit(port1, hub->warm_reset_bits);
+ 
+ 	/* Reset the port */
+ 	for (i = 0; i < PORT_RESET_TRIES; i++) {
+@@ -2769,7 +2777,8 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
+ 					&portstatus, &portchange) < 0)
+ 				goto done;
+ 
+-			if (!hub_port_warm_reset_required(hub, portstatus))
++			if (!hub_port_warm_reset_required(hub, port1,
++					portstatus))
+ 				goto done;
+ 
+ 			/*
+@@ -2856,8 +2865,13 @@ static int check_port_resume_type(struct usb_device *udev,
+ {
+ 	struct usb_port *port_dev = hub->ports[port1 - 1];
+ 
++	/* Is a warm reset needed to recover the connection? */
++	if (status == 0 && udev->reset_resume
++		&& hub_port_warm_reset_required(hub, port1, portstatus)) {
++		/* pass */;
++	}
+ 	/* Is the device still present? */
+-	if (status || port_is_suspended(hub, portstatus) ||
++	else if (status || port_is_suspended(hub, portstatus) ||
+ 			!port_is_power_on(hub, portstatus) ||
+ 			!(portstatus & USB_PORT_STAT_CONNECTION)) {
+ 		if (status >= 0)
+@@ -4872,7 +4886,7 @@ static void port_event(struct usb_hub *hub, int port1)
+ 	 * Warm reset a USB3 protocol port if it's in
+ 	 * SS.Inactive state.
+ 	 */
+-	if (hub_port_warm_reset_required(hub, portstatus)) {
++	if (hub_port_warm_reset_required(hub, port1, portstatus)) {
+ 		dev_dbg(&port_dev->dev, "do warm reset\n");
+ 		if (!udev || !(portstatus & USB_PORT_STAT_CONNECTION)
+ 				|| udev->state == USB_STATE_NOTATTACHED) {
+diff --git a/drivers/usb/core/hub.h b/drivers/usb/core/hub.h
+index 326308e53961..c77d8778af4b 100644
+--- a/drivers/usb/core/hub.h
++++ b/drivers/usb/core/hub.h
+@@ -52,6 +52,8 @@ struct usb_hub {
+ 	unsigned long		power_bits[1]; /* ports that are powered */
+ 	unsigned long		child_usage_bits[1]; /* ports powered on for
+ 							children */
++	unsigned long		warm_reset_bits[1]; /* ports requesting warm
++							reset recovery */
+ #if USB_MAXCHILDREN > 31 /* 8*sizeof(unsigned long) - 1 */
+ #error event_bits[] is too short!
+ #endif
+diff --git a/drivers/usb/core/port.c b/drivers/usb/core/port.c
+index fe1b6d0967e3..cd3f9dc24a06 100644
+--- a/drivers/usb/core/port.c
++++ b/drivers/usb/core/port.c
+@@ -103,16 +103,19 @@ static int usb_port_runtime_resume(struct device *dev)
+ 	msleep(hub_power_on_good_delay(hub));
+ 	if (udev && !retval) {
+ 		/*
+-		 * Attempt to wait for usb hub port to be reconnected in order
+-		 * to make the resume procedure successful.  The device may have
+-		 * disconnected while the port was powered off, so ignore the
+-		 * return status.
++		 * Our preference is to simply wait for the port to reconnect,
++		 * as that is the lowest latency method to restart the port.
++		 * However, there are cases where toggling port power results in
++		 * the host port and the device port getting out of sync causing
++		 * a link training live lock.  Upon timeout, flag the port as
++		 * needing warm reset recovery (to be performed later by
++		 * usb_port_resume() as requested via usb_wakeup_notification())
+ 		 */
+-		retval = hub_port_debounce_be_connected(hub, port1);
+-		if (retval < 0)
+-			dev_dbg(&port_dev->dev, "can't get reconnection after setting port  power on, status %d\n",
+-					retval);
+-		retval = 0;
++		if (hub_port_debounce_be_connected(hub, port1) < 0) {
++			dev_dbg(&port_dev->dev, "reconnect timeout\n");
++			if (hub_is_superspeed(hdev))
++				set_bit(port1, hub->warm_reset_bits);
++		}
+ 
+ 		/* Force the child awake to revalidate after the power loss. */
+ 		if (!test_and_set_bit(port1, hub->child_usage_bits)) {
+

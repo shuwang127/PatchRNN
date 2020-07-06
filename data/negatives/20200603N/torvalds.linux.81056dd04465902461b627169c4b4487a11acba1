@@ -1,0 +1,64 @@
+commit 81056dd04465902461b627169c4b4487a11acba1
+Author: Jan Kara <jack@suse.cz>
+Date:   Thu Jul 16 18:02:25 2009 +0200
+
+    udf: Perform preallocation only for regular files
+    
+    So far we preallocated blocks also for directories but that brings a
+    problem, when to get rid of preallocated blocks we don't need. So far
+    we removed them in udf_clear_inode() which has a disadvantage that
+    1) blocks are unavailable long after writing to a directory finished
+       and thus one can get out of space unnecessarily early
+    2) releasing blocks from udf_clear_inode is problematic because VFS
+       does not expect us to redirty inode there and it also slows down
+       memory reclaim.
+    
+    So preallocate blocks only for regular files where we can drop preallocation
+    in udf_release_file.
+    
+    Signed-off-by: Jan Kara <jack@suse.cz>
+
+diff --git a/fs/udf/inode.c b/fs/udf/inode.c
+index e7533f785636..6d24c2c63f93 100644
+--- a/fs/udf/inode.c
++++ b/fs/udf/inode.c
+@@ -90,19 +90,16 @@ void udf_delete_inode(struct inode *inode)
+ }
+ 
+ /*
+- * If we are going to release inode from memory, we discard preallocation and
+- * truncate last inode extent to proper length. We could use drop_inode() but
+- * it's called under inode_lock and thus we cannot mark inode dirty there.  We
+- * use clear_inode() but we have to make sure to write inode as it's not written
+- * automatically.
++ * If we are going to release inode from memory, we truncate last inode extent
++ * to proper length. We could use drop_inode() but it's called under inode_lock
++ * and thus we cannot mark inode dirty there.  We use clear_inode() but we have
++ * to make sure to write inode as it's not written automatically.
+  */
+ void udf_clear_inode(struct inode *inode)
+ {
+ 	struct udf_inode_info *iinfo;
+ 	if (!(inode->i_sb->s_flags & MS_RDONLY)) {
+ 		lock_kernel();
+-		/* Discard preallocation for directories, symlinks, etc. */
+-		udf_discard_prealloc(inode);
+ 		udf_truncate_tail_extent(inode);
+ 		unlock_kernel();
+ 		write_inode_now(inode, 0);
+@@ -664,8 +661,12 @@ static struct buffer_head *inode_getblk(struct inode *inode, sector_t block,
+ 	udf_split_extents(inode, &c, offset, newblocknum, laarr, &endnum);
+ 
+ #ifdef UDF_PREALLOCATE
+-	/* preallocate blocks */
+-	udf_prealloc_extents(inode, c, lastblock, laarr, &endnum);
++	/* We preallocate blocks only for regular files. It also makes sense
++	 * for directories but there's a problem when to drop the
++	 * preallocation. We might use some delayed work for that but I feel
++	 * it's overengineering for a filesystem like UDF. */
++	if (S_ISREG(inode->i_mode))
++		udf_prealloc_extents(inode, c, lastblock, laarr, &endnum);
+ #endif
+ 
+ 	/* merge any continuous blocks in laarr */
+

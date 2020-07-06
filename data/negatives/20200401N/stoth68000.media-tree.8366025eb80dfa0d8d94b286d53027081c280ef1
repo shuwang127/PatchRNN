@@ -1,0 +1,105 @@
+commit 8366025eb80dfa0d8d94b286d53027081c280ef1
+Author: Dave Hansen <haveblue@us.ibm.com>
+Date:   Fri Feb 15 14:37:30 2008 -0800
+
+    [PATCH] r/o bind mounts: stub functions
+    
+    This patch adds two function mnt_want_write() and mnt_drop_write().  These are
+    used like a lock pair around and fs operations that might cause a write to the
+    filesystem.
+    
+    Before these can become useful, we must first cover each place in the VFS
+    where writes are performed with a want/drop pair.  When that is complete, we
+    can actually introduce code that will safely check the counts before allowing
+    r/w<->r/o transitions to occur.
+    
+    Acked-by: Serge Hallyn <serue@us.ibm.com>
+    Acked-by: Al Viro <viro@ZenIV.linux.org.uk>
+    Signed-off-by: Christoph Hellwig <hch@infradead.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Dave Hansen <haveblue@us.ibm.com>
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 94f026ec990a..066b393578c1 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -80,6 +80,60 @@ struct vfsmount *alloc_vfsmnt(const char *name)
+ 	return mnt;
+ }
+ 
++/*
++ * Most r/o checks on a fs are for operations that take
++ * discrete amounts of time, like a write() or unlink().
++ * We must keep track of when those operations start
++ * (for permission checks) and when they end, so that
++ * we can determine when writes are able to occur to
++ * a filesystem.
++ */
++/**
++ * mnt_want_write - get write access to a mount
++ * @mnt: the mount on which to take a write
++ *
++ * This tells the low-level filesystem that a write is
++ * about to be performed to it, and makes sure that
++ * writes are allowed before returning success.  When
++ * the write operation is finished, mnt_drop_write()
++ * must be called.  This is effectively a refcount.
++ */
++int mnt_want_write(struct vfsmount *mnt)
++{
++	if (__mnt_is_readonly(mnt))
++		return -EROFS;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mnt_want_write);
++
++/**
++ * mnt_drop_write - give up write access to a mount
++ * @mnt: the mount on which to give up write access
++ *
++ * Tells the low-level filesystem that we are done
++ * performing writes to it.  Must be matched with
++ * mnt_want_write() call above.
++ */
++void mnt_drop_write(struct vfsmount *mnt)
++{
++}
++EXPORT_SYMBOL_GPL(mnt_drop_write);
++
++/*
++ * __mnt_is_readonly: check whether a mount is read-only
++ * @mnt: the mount to check for its write status
++ *
++ * This shouldn't be used directly ouside of the VFS.
++ * It does not guarantee that the filesystem will stay
++ * r/w, just that it is right *now*.  This can not and
++ * should not be used in place of IS_RDONLY(inode).
++ */
++int __mnt_is_readonly(struct vfsmount *mnt)
++{
++	return (mnt->mnt_sb->s_flags & MS_RDONLY);
++}
++EXPORT_SYMBOL_GPL(__mnt_is_readonly);
++
+ int simple_set_mnt(struct vfsmount *mnt, struct super_block *sb)
+ {
+ 	mnt->mnt_sb = sb;
+diff --git a/include/linux/mount.h b/include/linux/mount.h
+index 5ee2df217cdf..2eecd2c8c760 100644
+--- a/include/linux/mount.h
++++ b/include/linux/mount.h
+@@ -71,9 +71,12 @@ static inline struct vfsmount *mntget(struct vfsmount *mnt)
+ 	return mnt;
+ }
+ 
++extern int mnt_want_write(struct vfsmount *mnt);
++extern void mnt_drop_write(struct vfsmount *mnt);
+ extern void mntput_no_expire(struct vfsmount *mnt);
+ extern void mnt_pin(struct vfsmount *mnt);
+ extern void mnt_unpin(struct vfsmount *mnt);
++extern int __mnt_is_readonly(struct vfsmount *mnt);
+ 
+ static inline void mntput(struct vfsmount *mnt)
+ {
+

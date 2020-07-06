@@ -1,0 +1,111 @@
+commit 6dbe31f7baf6d50fa396440dae0808bb712e9a37
+Author: Masami Hiramatsu <masami.hiramatsu.pt@hitachi.com>
+Date:   Thu Apr 23 22:46:14 2015 +0900
+
+    perf probe: Remove all probes matches given pattern at once
+    
+    Fix perf-probe --del option to delete all matched probes in both
+    of kprobes and uprobes at once.
+    
+    When we have 2 or more events on different binaries as below,
+    
+      ----
+      # ./perf probe -l
+      probe:vfs_read       (on vfs_read@ksrc/linux-3/fs/read_write.c)
+      probe_libc:malloc    (on __libc_malloc@malloc/malloc.c in /usr/lib64/libc-2.17
+      ----
+    
+    Trying to remove all event with '*' just removes kprobe events at first.
+      ----
+      # ./perf probe -d \*
+      Removed event: probe:vfs_read
+      ----
+    
+    And in 2nd try, it removes all uprobe events.
+      ----
+      # ./perf probe -d \*
+      Removed event: probe_libc:malloc
+      ----
+    
+    This fixes to remove all event at once as below.
+      ----
+      # ./perf probe -d \*
+      Removed event: probe:vfs_read
+      Removed event: probe_libc:malloc
+      ----
+    
+    Reported-by: Arnaldo Carvalho de Melo <acme@kernel.org>
+    Signed-off-by: Masami Hiramatsu <masami.hiramatsu.pt@hitachi.com>
+    Tested-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+    Cc: David Ahern <dsahern@gmail.com>
+    Cc: Jiri Olsa <jolsa@redhat.com>
+    Cc: Namhyung Kim <namhyung@kernel.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Link: http://lkml.kernel.org/r/20150423134614.26128.18106.stgit@localhost.localdomain
+    Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+
+diff --git a/tools/perf/util/probe-event.c b/tools/perf/util/probe-event.c
+index d8bb616ff57c..291bf23a5013 100644
+--- a/tools/perf/util/probe-event.c
++++ b/tools/perf/util/probe-event.c
+@@ -2686,7 +2686,7 @@ static int del_trace_probe_event(int fd, const char *buf,
+ 						  struct strlist *namelist)
+ {
+ 	struct str_node *ent, *n;
+-	int ret = -1;
++	int ret = -ENOENT;
+ 
+ 	if (strpbrk(buf, "*?")) { /* Glob-exp */
+ 		strlist__for_each_safe(ent, n, namelist)
+@@ -2710,7 +2710,7 @@ static int del_trace_probe_event(int fd, const char *buf,
+ 
+ int del_perf_probe_events(struct strlist *dellist)
+ {
+-	int ret = -1, ufd = -1, kfd = -1;
++	int ret = -1, ret2, ufd = -1, kfd = -1;
+ 	char buf[128];
+ 	const char *group, *event;
+ 	char *p, *str;
+@@ -2731,8 +2731,10 @@ int del_perf_probe_events(struct strlist *dellist)
+ 		goto error;
+ 	}
+ 
+-	if (namelist == NULL && unamelist == NULL)
++	if (namelist == NULL && unamelist == NULL) {
++		ret = -ENOENT;
+ 		goto error;
++	}
+ 
+ 	strlist__for_each(ent, dellist) {
+ 		str = strdup(ent->s);
+@@ -2759,17 +2761,23 @@ int del_perf_probe_events(struct strlist *dellist)
+ 		}
+ 
+ 		pr_debug("Group: %s, Event: %s\n", group, event);
++		free(str);
+ 
++		ret = ret2 = -ENOENT;
+ 		if (namelist)
+ 			ret = del_trace_probe_event(kfd, buf, namelist);
+ 
+-		if (unamelist && ret != 0)
+-			ret = del_trace_probe_event(ufd, buf, unamelist);
+-
+-		if (ret != 0)
+-			pr_info("Info: Event \"%s\" does not exist.\n", buf);
++		if ((ret >= 0 || ret == -ENOENT) && unamelist)
++			ret2 = del_trace_probe_event(ufd, buf, unamelist);
+ 
+-		free(str);
++		/* Since we can remove probes which already removed, don't check it */
++		if (ret == -ENOENT && ret2 == -ENOENT)
++			pr_debug("Event \"%s\" does not exist.\n", buf);
++		else if (ret < 0 || ret2 < 0) {
++			if (ret >= 0)
++				ret = ret2;
++			break;
++		}
+ 	}
+ 
+ error:
+

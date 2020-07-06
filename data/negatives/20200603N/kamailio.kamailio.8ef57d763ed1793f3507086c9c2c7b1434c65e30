@@ -1,0 +1,209 @@
+commit 8ef57d763ed1793f3507086c9c2c7b1434c65e30
+Author: Maxim Sobolev <sobomax@sippysoft.com>
+Date:   Thu May 29 02:26:35 2008 +0000
+
+    Change the way we append parameter to the end of SDP: instead of
+    appending before the terminating CRLF, append it before any number
+    trailing CRs and LFs and prepend CFLF before appending. This should
+    prevent nathelper from generating broken SDPs when brain-damaged UA
+    sends us a request that has arbitrary number of CRs/LFs at the end of
+    SDP (such as Fring 3.30 for example).
+    
+    Before:
+    
+    ----
+    v=0
+    o=- 1212022997 1212022997 IN IP4 xx.xxx.xxx.xx
+    s=OSS RTP Session
+    c=IN IP4 xx.xxx.xxx.xx
+    t=0 0
+    m=audio 9 RTP/AVP 96 3 107 8 0 101
+    a=rtpmap:96 AMR/8000
+    a=fmtp:96 mode-set=0
+    a=rtpmap:3 GSM/8000
+    a=rtpmap:107 iLBC/8000
+    a=rtpmap:8 PCMA/8000
+    a=rtpmap:0 PCMU/8000
+    a=rtpmap:101 telephone-event/8000
+    a=fmtp:101 0-15
+    
+    
+    a=direction:active
+    ----
+    
+    After:
+    
+    ----
+    v=0
+    o=- 1212026907 1212026907 IN IP4 xx.xxx.xxx.xx
+    s=OSS RTP Session
+    c=IN IP4 xx.xxx.xxx.xx
+    t=0 0
+    m=audio 9 RTP/AVP 96 3 107 8 0 101
+    a=rtpmap:96 AMR/8000
+    a=fmtp:96 mode-set=0
+    a=rtpmap:3 GSM/8000
+    a=rtpmap:107 iLBC/8000
+    a=rtpmap:8 PCMA/8000
+    a=rtpmap:0 PCMU/8000
+    a=rtpmap:101 telephone-event/8000
+    a=fmtp:101 0-15
+    a=direction:active
+    
+    
+    ----
+    
+    
+    
+    git-svn-id: https://openser.svn.sourceforge.net/svnroot/openser/trunk@4262 689a6050-402a-0410-94f2-e92a70836424
+
+diff --git a/modules_k/nathelper/nathelper.c b/modules_k/nathelper/nathelper.c
+index 1fb8378f4..a775cf645 100644
+--- a/modules_k/nathelper/nathelper.c
++++ b/modules_k/nathelper/nathelper.c
+@@ -351,7 +351,7 @@ static int rtpproxy_retr = 5;
+ static int rtpproxy_tout = 1;
+ static pid_t mypid;
+ static unsigned int myseqn = 0;
+-static str nortpproxy_str = str_init("a=nortpproxy:yes\r\n");
++static str nortpproxy_str = str_init("a=nortpproxy:yes");
+ static int sipping_flag = -1;
+ static int natping_processes = 1;
+ 
+@@ -1025,6 +1025,11 @@ mod_init(void)
+ 		nortpproxy_str.s = NULL;
+ 	} else {
+ 		nortpproxy_str.len = strlen(nortpproxy_str.s);
++		while (nortpproxy_str.len > 0 && (nortpproxy_str.s[nortpproxy_str.len - 1] == '\r' ||
++		    nortpproxy_str.s[nortpproxy_str.len - 1] == '\n'))
++			nortpproxy_str.len--;
++		if (nortpproxy_str.len == 0)
++			nortpproxy_str.s = NULL;
+ 	}
+ 
+ 	if (natping_interval > 0) {
+@@ -1558,7 +1563,7 @@ nat_uac_test_f(struct sip_msg* msg, char* str1, char* str2)
+ #define	ADD_ANORTPPROXY	0x04
+ #define	FIX_ORGIP	0x08
+ 
+-#define	ADIRECTION	"a=direction:active\r\n"
++#define	ADIRECTION	"a=direction:active"
+ #define	ADIRECTION_LEN	(sizeof(ADIRECTION) - 1)
+ 
+ #define	AOLDMEDIP	"a=oldmediaip:"
+@@ -1645,26 +1650,28 @@ fix_nated_sdp_f(struct sip_msg* msg, char* str1, char* str2)
+ 			return -1;
+ 		}
+ 		if (level & ADD_ADIRECTION) {
+-			buf = pkg_malloc(ADIRECTION_LEN * sizeof(char));
++			buf = pkg_malloc((ADIRECTION_LEN + CRLF_LEN) * sizeof(char));
+ 			if (buf == NULL) {
+ 				LM_ERR("out of pkg memory\n");
+ 				return -1;
+ 			}
+-			memcpy(buf, ADIRECTION, ADIRECTION_LEN);
+-			if (insert_new_lump_after(anchor, buf, ADIRECTION_LEN, 0)==NULL) {
++			memcpy(buf, CRLF, CRLF_LEN);
++			memcpy(buf + CRLF_LEN, ADIRECTION, ADIRECTION_LEN);
++			if (insert_new_lump_after(anchor, buf, ADIRECTION_LEN + CRLF_LEN, 0) == NULL) {
+ 				LM_ERR("insert_new_lump_after failed\n");
+ 				pkg_free(buf);
+ 				return -1;
+ 			}
+ 		}
+ 		if ((level & ADD_ANORTPPROXY) && nortpproxy_str.len) {
+-			buf = pkg_malloc(nortpproxy_str.len * sizeof(char));
++			buf = pkg_malloc((nortpproxy_str.len + CRLF_LEN) * sizeof(char));
+ 			if (buf == NULL) {
+ 				LM_ERR("out of pkg memory\n");
+ 				return -1;
+ 			}
+-			memcpy(buf, nortpproxy_str.s, nortpproxy_str.len);
+-			if (insert_new_lump_after(anchor, buf, nortpproxy_str.len, 0)==NULL) {
++			memcpy(buf, CRLF, CRLF_LEN);
++			memcpy(buf + CRLF_LEN, nortpproxy_str.s, nortpproxy_str.len);
++			if (insert_new_lump_after(anchor, buf, nortpproxy_str.len + CRLF_LEN, 0) == NULL) {
+ 				LM_ERR("insert_new_lump_after failed\n");
+ 				pkg_free(buf);
+ 				return -1;
+@@ -1846,9 +1853,9 @@ alter_mediaip(struct sip_msg *msg, str *body, str *oldip, int oldpf,
+ 			LM_ERR("out of pkg memory\n");
+ 			return -1;
+ 		}
+-		memcpy(buf, omip.s, omip.len);
+-		memcpy(buf + omip.len, oldip->s, oldip->len);
+-		memcpy(buf + omip.len + oldip->len, CRLF, CRLF_LEN);
++		memcpy(buf, CRLF, CRLF_LEN);
++		memcpy(buf + CRLF_LEN, omip.s, omip.len);
++		memcpy(buf + CRLF_LEN + omip.len, oldip->s, oldip->len);
+ 		if (insert_new_lump_after(anchor, buf,
+ 		    omip.len + oldip->len + CRLF_LEN, 0) == NULL) {
+ 			LM_ERR("insert_new_lump_after failed\n");
+@@ -1939,9 +1946,9 @@ alter_mediaport(struct sip_msg *msg, str *body, str *oldport, str *newport,
+ 			LM_ERR("out of pkg memory\n");
+ 			return -1;
+ 		}
+-		memcpy(buf, AOLDMEDPRT, AOLDMEDPRT_LEN);
+-		memcpy(buf + AOLDMEDPRT_LEN, oldport->s, oldport->len);
+-		memcpy(buf + AOLDMEDPRT_LEN + oldport->len, CRLF, CRLF_LEN);
++		memcpy(buf, CRLF, CRLF_LEN);
++		memcpy(buf + CRLF_LEN, AOLDMEDPRT, AOLDMEDPRT_LEN);
++		memcpy(buf + CRLF_LEN + AOLDMEDPRT_LEN, oldport->s, oldport->len);
+ 		if (insert_new_lump_after(anchor, buf,
+ 		    AOLDMEDPRT_LEN + oldport->len + CRLF_LEN, 0) == NULL) {
+ 			LM_ERR("insert_new_lump_after failed\n");
+@@ -2730,7 +2737,7 @@ force_rtp_proxy2_f(struct sip_msg* msg, char* str1, char* str2)
+ 	} /* Iterate sessions */
+ 
+ 	if (proxied == 0 && nortpproxy_str.len) {
+-		cp = pkg_malloc(nortpproxy_str.len * sizeof(char));
++		cp = pkg_malloc((nortpproxy_str.len + sizeof(CRLF)) * sizeof(char));
+ 		if (cp == NULL) {
+ 			LM_ERR("out of pkg memory\n");
+ 			return -1;
+@@ -2741,8 +2748,9 @@ force_rtp_proxy2_f(struct sip_msg* msg, char* str1, char* str2)
+ 			pkg_free(cp);
+ 			return -1;
+ 		}
+-		memcpy(cp, nortpproxy_str.s, nortpproxy_str.len);
+-		if (insert_new_lump_after(anchor, cp, nortpproxy_str.len, 0) == NULL) {
++		memcpy(cp, CRLF, sizeof(CRLF));
++		memcpy(cp + sizeof(CRLF), nortpproxy_str.s, nortpproxy_str.len);
++		if (insert_new_lump_after(anchor, cp, nortpproxy_str.len + sizeof(CRLF), 0) == NULL) {
+ 			LM_ERR("insert_new_lump_after failed\n");
+ 			pkg_free(cp);
+ 			return -1;
+diff --git a/modules_k/nathelper/nhelpr_funcs.c b/modules_k/nathelper/nhelpr_funcs.c
+index fe3bb9dc3..06f7d7c07 100644
+--- a/modules_k/nathelper/nhelpr_funcs.c
++++ b/modules_k/nathelper/nhelpr_funcs.c
+@@ -151,6 +151,8 @@ other:
+  */
+ int extract_body(struct sip_msg *msg, str *body )
+ {
++	char c;
++	int skip;
+ 	
+ 	body->s = get_body(msg);
+ 	if (body->s==0) {
+@@ -171,7 +173,18 @@ int extract_body(struct sip_msg *msg, str *body )
+ 		LM_ERR("content type mismatching\n");
+ 		goto error;
+ 	}
+-	
++
++	for (skip = 0; skip < body->len; skip++) {
++		c = body->s[body->len - skip - 1];
++		if (c != '\r' && c != '\n')
++			break;
++	}
++	if (skip == body->len) {
++		LM_ERR("empty body");
++		goto error;
++	}
++	body->len -= skip;
++
+ 	/*LM_DBG("DEBUG:extract_body:=|%.*s|\n",body->len,body->s);*/
+ 
+ 	return 1;
+

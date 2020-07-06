@@ -1,0 +1,68 @@
+commit 181edb2bfa22b50817684135ab6430ed2808abf0
+Author: Alexander Duyck <alexander.h.duyck@redhat.com>
+Date:   Wed May 6 21:12:03 2015 -0700
+
+    net: Add skb_free_frag to replace use of put_page in freeing skb->head
+    
+    This change adds a function called skb_free_frag which is meant to
+    compliment the function netdev_alloc_frag.  The general idea is to enable a
+    more lightweight version of page freeing since we don't actually need all
+    the overhead of a put_page, and we don't quite fit the model of __free_pages.
+    
+    Signed-off-by: Alexander Duyck <alexander.h.duyck@redhat.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 0039fcc45b3b..c0b574a414e7 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -2182,6 +2182,11 @@ static inline struct sk_buff *netdev_alloc_skb_ip_align(struct net_device *dev,
+ 	return __netdev_alloc_skb_ip_align(dev, length, GFP_ATOMIC);
+ }
+ 
++static inline void skb_free_frag(void *addr)
++{
++	__free_page_frag(addr);
++}
++
+ void *napi_alloc_frag(unsigned int fragsz);
+ struct sk_buff *__napi_alloc_skb(struct napi_struct *napi,
+ 				 unsigned int length, gfp_t gfp_mask);
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index dcc0e07abf47..d67e612bf0ef 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -436,7 +436,7 @@ struct sk_buff *__netdev_alloc_skb(struct net_device *dev, unsigned int len,
+ 
+ 	skb = __build_skb(data, len);
+ 	if (unlikely(!skb)) {
+-		put_page(virt_to_head_page(data));
++		skb_free_frag(data);
+ 		return NULL;
+ 	}
+ 
+@@ -490,7 +490,7 @@ struct sk_buff *__napi_alloc_skb(struct napi_struct *napi, unsigned int len,
+ 
+ 	skb = __build_skb(data, len);
+ 	if (unlikely(!skb)) {
+-		put_page(virt_to_head_page(data));
++		skb_free_frag(data);
+ 		return NULL;
+ 	}
+ 
+@@ -549,10 +549,12 @@ static void skb_clone_fraglist(struct sk_buff *skb)
+ 
+ static void skb_free_head(struct sk_buff *skb)
+ {
++	unsigned char *head = skb->head;
++
+ 	if (skb->head_frag)
+-		put_page(virt_to_head_page(skb->head));
++		skb_free_frag(head);
+ 	else
+-		kfree(skb->head);
++		kfree(head);
+ }
+ 
+ static void skb_release_data(struct sk_buff *skb)
+

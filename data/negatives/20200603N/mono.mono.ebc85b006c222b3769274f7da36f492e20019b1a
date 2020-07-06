@@ -1,0 +1,44 @@
+commit ebc85b006c222b3769274f7da36f492e20019b1a
+Author: Zoltan Varga <vargaz@gmail.com>
+Date:   Tue Feb 22 05:32:43 2011 +0100
+
+    Avoid returning TRUE from mono_domain_finalize () if it is interrupted by sdb. Fixes #673592.
+
+diff --git a/mono/metadata/gc.c b/mono/metadata/gc.c
+index 64a2d61ba5a..d2fc1708e0b 100644
+--- a/mono/metadata/gc.c
++++ b/mono/metadata/gc.c
+@@ -347,6 +347,7 @@ mono_domain_finalize (MonoDomain *domain, guint32 timeout)
+ 	DomainFinalizationReq *req;
+ 	guint32 res;
+ 	HANDLE done_event;
++	MonoInternalThread *thread = mono_thread_internal_current ();
+ 
+ 	if (mono_thread_internal_current () == gc_thread)
+ 		/* We are called from inside a finalizer, not much we can do here */
+@@ -387,12 +388,19 @@ mono_domain_finalize (MonoDomain *domain, guint32 timeout)
+ 	if (timeout == -1)
+ 		timeout = INFINITE;
+ 
+-	res = WaitForSingleObjectEx (done_event, timeout, TRUE);
++	while (TRUE) {
++		res = WaitForSingleObjectEx (done_event, timeout, TRUE);
++		/* printf ("WAIT RES: %d.\n", res); */
+ 
+-	/* printf ("WAIT RES: %d.\n", res); */
+-	if (res == WAIT_TIMEOUT) {
+-		/* We leak the handle here */
+-		return FALSE;
++		if (res == WAIT_IO_COMPLETION) {
++			if ((thread->state & (ThreadState_StopRequested | ThreadState_SuspendRequested)) != 0)
++				return FALSE;
++		} else if (res == WAIT_TIMEOUT) {
++			/* We leak the handle here */
++			return FALSE;
++		} else {
++			break;
++		}
+ 	}
+ 
+ 	CloseHandle (done_event);
+

@@ -1,0 +1,51 @@
+commit 901f0ba3d4c3864ba712546522176f3bcf4eafc6
+Author: jonas@perch.ndb.mysql.com <>
+Date:   Tue Apr 18 15:21:39 2006 +0200
+
+    ndb - replication
+      Make sure that SUB_GCP_COMPLETE_ACK is sent uncond, failure to do so can lead to problems...
+
+diff --git a/storage/ndb/src/kernel/blocks/ndbfs/AsyncFile.cpp b/storage/ndb/src/kernel/blocks/ndbfs/AsyncFile.cpp
+index 528e70a7ff2..b0a4d6264fb 100644
+--- a/storage/ndb/src/kernel/blocks/ndbfs/AsyncFile.cpp
++++ b/storage/ndb/src/kernel/blocks/ndbfs/AsyncFile.cpp
+@@ -385,16 +385,23 @@ void AsyncFile::openReq(Request* request)
+     }
+     new_flags |= O_CREAT;
+   }
+-  
++
+ no_odirect:
+   if (-1 == (theFd = ::open(theFileName.c_str(), new_flags, mode))) 
+   {
+     PRINT_ERRORANDFLAGS(new_flags);
+-    if ((errno == ENOENT ) && (new_flags & O_CREAT)) 
++    if ((errno == ENOENT) && (new_flags & O_CREAT)) 
+     {
+       createDirectories();
+       if (-1 == (theFd = ::open(theFileName.c_str(), new_flags, mode))) 
+       {
++#ifdef O_DIRECT
++	if (new_flags & O_DIRECT)
++	{
++	  new_flags &= ~O_DIRECT;
++	  goto no_odirect;
++	}
++#endif
+         PRINT_ERRORANDFLAGS(new_flags);
+         request->error = errno;
+ 	return;
+diff --git a/storage/ndb/src/ndbapi/TransporterFacade.cpp b/storage/ndb/src/ndbapi/TransporterFacade.cpp
+index 59ccbd0a754..15127953051 100644
+--- a/storage/ndb/src/ndbapi/TransporterFacade.cpp
++++ b/storage/ndb/src/ndbapi/TransporterFacade.cpp
+@@ -343,7 +343,7 @@ execute(void * callbackObj, SignalHeader * const header,
+ 	 Uint32 aNodeId= refToNode(ref);
+ 	 tSignal.theReceiversBlockNumber= refToBlock(ref);
+ 	 tSignal.theVerId_signalNumber= GSN_SUB_GCP_COMPLETE_ACK;
+-	 theFacade->sendSignal(&tSignal, aNodeId);
++	 theFacade->sendSignalUnCond(&tSignal, aNodeId);
+        }
+        break;
+      }
+

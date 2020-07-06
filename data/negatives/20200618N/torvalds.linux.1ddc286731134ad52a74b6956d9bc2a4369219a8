@@ -1,0 +1,60 @@
+commit 1ddc286731134ad52a74b6956d9bc2a4369219a8
+Author: Rajkumar Manoharan <rmanoharan@atheros.com>
+Date:   Tue May 3 17:03:59 2011 +0530
+
+    mac80211: Postpond ps timer if tx is stopped by others
+    
+    Whenever the driver's queue depth reaches the max, the queues are
+    stopped by the driver till the driver can accept the frames.
+    At the mean time dynamic_ps_timer can be expired due to not
+    receiving packet from upper layer which could restart the transmission
+    at the end of ps work. Due to the mismatch with driver state,
+    mac80211 is unneccesarity buffering all the frames till the driver
+    wakes up the queue.
+    
+    Check whether there is no transmit or the tx queues were stopped by some
+    reasons. If any of the queue was stopped, the postpond ps timer and
+    do not restart netif_tx.
+    
+    Signed-off-by: Rajkumar Manoharan <rmanoharan@atheros.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 8d752b4d72ce..4f6b2675e41d 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -750,6 +750,8 @@ void ieee80211_dynamic_ps_enable_work(struct work_struct *work)
+ 			     dynamic_ps_enable_work);
+ 	struct ieee80211_sub_if_data *sdata = local->ps_sdata;
+ 	struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
++	unsigned long flags;
++	int q;
+ 
+ 	/* can only happen when PS was just disabled anyway */
+ 	if (!sdata)
+@@ -758,6 +760,24 @@ void ieee80211_dynamic_ps_enable_work(struct work_struct *work)
+ 	if (local->hw.conf.flags & IEEE80211_CONF_PS)
+ 		return;
+ 
++	/*
++	 * transmission can be stopped by others which leads to
++	 * dynamic_ps_timer expiry. Postpond the ps timer if it
++	 * is not the actual idle state.
++	 */
++	spin_lock_irqsave(&local->queue_stop_reason_lock, flags);
++	for (q = 0; q < local->hw.queues; q++) {
++		if (local->queue_stop_reasons[q]) {
++			spin_unlock_irqrestore(&local->queue_stop_reason_lock,
++					       flags);
++			mod_timer(&local->dynamic_ps_timer, jiffies +
++				  msecs_to_jiffies(
++				  local->hw.conf.dynamic_ps_timeout));
++			return;
++		}
++	}
++	spin_unlock_irqrestore(&local->queue_stop_reason_lock, flags);
++
+ 	if ((local->hw.flags & IEEE80211_HW_PS_NULLFUNC_STACK) &&
+ 	    (!(ifmgd->flags & IEEE80211_STA_NULLFUNC_ACKED))) {
+ 		netif_tx_stop_all_queues(sdata->dev);
+

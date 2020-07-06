@@ -1,0 +1,39 @@
+commit 3e5b1101f59fb3e17a8eb32cca100ae07fd7100e
+Author: Felix Fietkau <nbd@openwrt.org>
+Date:   Sat Nov 14 03:29:38 2009 +0100
+
+    mac80211: reduce the amount of unnecessary traffic on cooked monitor interfaces
+    
+    In order to handle association and authentication in AP mode,
+    hostapd needs access to the tx status info of its own frames
+    through a cooked monitor interface. Without this patch the
+    cooked monitor interfaces also passed on tx status information
+    for packets from other virtual interfaces. This creates a
+    significant performance issue on embedded system. Hostapd
+    tries to work around this by installing a Linux Socket Filter
+    that only captures the frames it's interested in, however
+    data duplication and socket filter matching still uses up
+    enough CPU cycles to be very noticeable on small systems.
+    This patch ensures that tx status information of non-injected
+    frames does not make it to cooked monitor interfaces.
+    
+    Signed-off-by: Felix Fietkau <nbd@openwrt.org>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/main.c b/net/mac80211/main.c
+index beb8718d905e..c74a6a1935b3 100644
+--- a/net/mac80211/main.c
++++ b/net/mac80211/main.c
+@@ -587,6 +587,11 @@ void ieee80211_tx_status(struct ieee80211_hw *hw, struct sk_buff *skb)
+ 			if (!netif_running(sdata->dev))
+ 				continue;
+ 
++			if ((sdata->u.mntr_flags & MONITOR_FLAG_COOK_FRAMES) &&
++			    !(info->flags & IEEE80211_TX_CTL_INJECTED) &&
++			    (type == IEEE80211_FTYPE_DATA))
++				continue;
++
+ 			if (prev_dev) {
+ 				skb2 = skb_clone(skb, GFP_ATOMIC);
+ 				if (skb2) {
+

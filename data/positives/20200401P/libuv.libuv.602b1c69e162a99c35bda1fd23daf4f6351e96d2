@@ -1,0 +1,63 @@
+commit 602b1c69e162a99c35bda1fd23daf4f6351e96d2
+Author: Ben Noordhuis <info@bnoordhuis.nl>
+Date:   Mon Aug 19 22:18:36 2013 +0200
+
+    unix, windows: fix ipv6 link-local address parsing
+    
+    uv_ip6_addr() copies the address part to a temporary buffer when it
+    contains a link-local suffix ('<address>%<interface>'). Before this
+    commit, it didn't zero-terminate the address properly: it put the nul
+    byte at the end of the temporary buffer rather than at the end of the
+    address string, meaning the buffer looked like this:
+    
+        <address> <garbage> '\0'
+    
+    Fixes the following valgrind warning:
+    
+        ==16170== Conditional jump or move depends on uninitialised value(s)
+        ==16170==    at 0x43602C: inet_pton6 (inet.c:228)
+        ==16170==    by 0x435CE1: uv_inet_pton (inet.c:163)
+        ==16170==    by 0x436FD0: uv_ip6_addr (uv-common.c:175)
+        ==16170==    by 0x434717: test_ip6_addr_scope (test-ip6-addr.c:89)
+        ==16170==    by 0x43455B: call_iface_info_cb (test-ip6-addr.c:45)
+        ==16170==    by 0x43462B: foreach_ip6_interface (test-ip6-addr.c:59)
+        ==16170==    by 0x434791: run_test_ip6_addr_link_local (test-ip6-add
+        ==16170==    by 0x4061E8: run_test_part (runner.c:396)
+        ==16170==    by 0x404F4B: main (run-tests.c:58)
+        ==16170==
+        ==16170== Conditional jump or move depends on uninitialised value(s)
+        ==16170==    at 0x4C2AD8A: __GI_strchr (mc_replace_strmem.c:224)
+        ==16170==    by 0x435ECB: inet_pton6 (inet.c:231)
+        ==16170==    by 0x435CE1: uv_inet_pton (inet.c:163)
+        ==16170==    by 0x436FD0: uv_ip6_addr (uv-common.c:175)
+        ==16170==    by 0x434717: test_ip6_addr_scope (test-ip6-addr.c:89)
+        ==16170==    by 0x43455B: call_iface_info_cb (test-ip6-addr.c:45)
+        ==16170==    by 0x43462B: foreach_ip6_interface (test-ip6-addr.c:59)
+        ==16170==    by 0x434791: run_test_ip6_addr_link_local (test-ip6-add
+        ==16170==    by 0x4061E8: run_test_part (runner.c:396)
+        ==16170==    by 0x404F4B: main (run-tests.c:58)
+    
+    Fixes #890.
+
+diff --git a/src/uv-common.c b/src/uv-common.c
+index ceb65811..95f5011f 100644
+--- a/src/uv-common.c
++++ b/src/uv-common.c
+@@ -154,11 +154,12 @@ struct sockaddr_in6 uv_ip6_addr(const char* ip, int port) {
+ #if defined(UV_PLATFORM_HAS_IP6_LINK_LOCAL_ADDRESS)
+   zone_index = strchr(ip, '%');
+   if (zone_index != NULL) {
+-    address_part_size = sizeof(address_part);
+-    assert((unsigned)(zone_index - ip) < address_part_size);
+-    strncpy(address_part, ip, zone_index - ip);
+-    address_part[address_part_size - 1] = '\0';
++    address_part_size = zone_index - ip;
++    if (address_part_size >= sizeof(address_part))
++      address_part_size = sizeof(address_part) - 1;
+ 
++    memcpy(address_part, ip, address_part_size);
++    address_part[address_part_size] = '\0';
+     ip = address_part;
+ 
+     zone_index++; /* skip '%' */
+

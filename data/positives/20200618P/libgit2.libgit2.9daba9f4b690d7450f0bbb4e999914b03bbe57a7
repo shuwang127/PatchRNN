@@ -1,0 +1,38 @@
+commit 9daba9f4b690d7450f0bbb4e999914b03bbe57a7
+Author: Patrick Steinhardt <ps@pks.im>
+Date:   Tue Mar 28 10:12:23 2017 +0200
+
+    fileops: do not overwrite correct error message on mmap
+    
+    When executing `git_futils_mmap_ro_file`, we first try to guess whether
+    the file is mmapable at all. Part of this check is whether the file is
+    too large to be mmaped, which can be true on systems with 32 bit
+    `size_t` types.
+    
+    The check is performed by first getting the file size wtih
+    `git_futils_filesize` and then checking whether the returned size can be
+    represented as `size_t`, returning an error if so. While this test also
+    catches the case where the function returned an error (as `-1` is not
+    representable by `size_t`), we will set the misleading error message
+    "file too large to mmap". But in fact, a negative return value from
+    `git_futils_filesize` will be caused by the inability to fstat the file.
+    
+    Fix the error message by handling negative return values separately and
+    not overwriting the error message in that case.
+
+diff --git a/src/fileops.c b/src/fileops.c
+index ad2a988a9..f9552a5f8 100644
+--- a/src/fileops.c
++++ b/src/fileops.c
+@@ -304,7 +304,9 @@ int git_futils_mmap_ro_file(git_map *out, const char *path)
+ 	if (fd < 0)
+ 		return fd;
+ 
+-	len = git_futils_filesize(fd);
++	if ((len = git_futils_filesize(fd)) < 0)
++		return -1;
++
+ 	if (!git__is_sizet(len)) {
+ 		giterr_set(GITERR_OS, "file `%s` too large to mmap", path);
+ 		return -1;
+

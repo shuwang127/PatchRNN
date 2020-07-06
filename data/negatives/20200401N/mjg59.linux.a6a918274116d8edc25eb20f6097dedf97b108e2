@@ -1,0 +1,490 @@
+commit a6a918274116d8edc25eb20f6097dedf97b108e2
+Author: Rob Clark <rob@ti.com>
+Date:   Fri Dec 9 23:26:08 2011 -0600
+
+    staging: drm/omap: DMM based hardware scrolling console
+    
+    Add support for YWRAP scrolling by shuffling pages around in DMM
+    instead of sw blits.
+    
+    Note that fbcon only utilizes this mode if the y resolution is
+    divided evenly by the font height.  So, for example, a 1920x1080
+    display using a 16 pixel tall font will not utilize this, but a
+    1280x1024 display would.
+    
+    Signed-off-by: Rob Clark <rob@ti.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/staging/omapdrm/omap_dmm_priv.h b/drivers/staging/omapdrm/omap_dmm_priv.h
+index 65b990c8e16a..2f529ab4b7c7 100644
+--- a/drivers/staging/omapdrm/omap_dmm_priv.h
++++ b/drivers/staging/omapdrm/omap_dmm_priv.h
+@@ -79,12 +79,12 @@
+ #define DMM_PATSTATUS_ERR_UPD_DATA	(1<<14)
+ #define DMM_PATSTATUS_ERR_ACCESS	(1<<15)
+ 
++/* note: don't treat DMM_PATSTATUS_ERR_ACCESS as an error */
+ #define DMM_PATSTATUS_ERR	(DMM_PATSTATUS_ERR_INV_DESCR | \
+ 				DMM_PATSTATUS_ERR_INV_DATA | \
+ 				DMM_PATSTATUS_ERR_UPD_AREA | \
+ 				DMM_PATSTATUS_ERR_UPD_CTRL | \
+-				DMM_PATSTATUS_ERR_UPD_DATA | \
+-				DMM_PATSTATUS_ERR_ACCESS)
++				DMM_PATSTATUS_ERR_UPD_DATA)
+ 
+ 
+ 
+diff --git a/drivers/staging/omapdrm/omap_dmm_tiler.c b/drivers/staging/omapdrm/omap_dmm_tiler.c
+index 9ed5215c65ac..b182de537b47 100644
+--- a/drivers/staging/omapdrm/omap_dmm_tiler.c
++++ b/drivers/staging/omapdrm/omap_dmm_tiler.c
+@@ -170,7 +170,7 @@ static struct dmm_txn *dmm_txn_init(struct dmm *dmm, struct tcm *tcm)
+  * corresponding slot is cleared (ie. dummy_pa is programmed)
+  */
+ static int dmm_txn_append(struct dmm_txn *txn, struct pat_area *area,
+-			struct page **pages)
++		struct page **pages, uint32_t npages, uint32_t roll)
+ {
+ 	dma_addr_t pat_pa = 0;
+ 	uint32_t *data;
+@@ -197,8 +197,11 @@ static int dmm_txn_append(struct dmm_txn *txn, struct pat_area *area,
+ 	data = alloc_dma(txn, 4*i, &pat->data_pa);
+ 
+ 	while (i--) {
+-		data[i] = (pages && pages[i]) ?
+-		page_to_phys(pages[i]) : engine->dmm->dummy_pa;
++		int n = i + roll;
++		if (n >= npages)
++			n -= npages;
++		data[i] = (pages && pages[n]) ?
++			page_to_phys(pages[n]) : engine->dmm->dummy_pa;
+ 	}
+ 
+ 	/* fill in lut with new addresses */
+@@ -262,7 +265,8 @@ cleanup:
+ /*
+  * DMM programming
+  */
+-static int fill(struct tcm_area *area, struct page **pages, bool wait)
++static int fill(struct tcm_area *area, struct page **pages,
++		uint32_t npages, uint32_t roll, bool wait)
+ {
+ 	int ret = 0;
+ 	struct tcm_area slice, area_s;
+@@ -278,12 +282,11 @@ static int fill(struct tcm_area *area, struct page **pages, bool wait)
+ 				.x1 = slice.p1.x,  .y1 = slice.p1.y,
+ 		};
+ 
+-		ret = dmm_txn_append(txn, &p_area, pages);
++		ret = dmm_txn_append(txn, &p_area, pages, npages, roll);
+ 		if (ret)
+ 			goto fail;
+ 
+-		if (pages)
+-			pages += tcm_sizeof(slice);
++		roll += tcm_sizeof(slice);
+ 	}
+ 
+ 	ret = dmm_txn_commit(txn, wait);
+@@ -298,11 +301,12 @@ fail:
+ 
+ /* note: slots for which pages[i] == NULL are filled w/ dummy page
+  */
+-int tiler_pin(struct tiler_block *block, struct page **pages, bool wait)
++int tiler_pin(struct tiler_block *block, struct page **pages,
++		uint32_t npages, uint32_t roll, bool wait)
+ {
+ 	int ret;
+ 
+-	ret = fill(&block->area, pages, wait);
++	ret = fill(&block->area, pages, npages, roll, wait);
+ 
+ 	if (ret)
+ 		tiler_unpin(block);
+@@ -312,7 +316,7 @@ int tiler_pin(struct tiler_block *block, struct page **pages, bool wait)
+ 
+ int tiler_unpin(struct tiler_block *block)
+ {
+-	return fill(&block->area, NULL, false);
++	return fill(&block->area, NULL, 0, 0, false);
+ }
+ 
+ /*
+@@ -558,8 +562,13 @@ int omap_dmm_init(struct drm_device *dev)
+ 		goto fail;
+ 	}
+ 
+-	/* enable some interrupts! */
+-	writel(0xfefefefe, omap_dmm->base + DMM_PAT_IRQENABLE_SET);
++	/* Enable all interrupts for each refill engine except
++	 * ERR_LUT_MISS<n> (which is just advisory, and we don't care
++	 * about because we want to be able to refill live scanout
++	 * buffers for accelerated pan/scroll) and FILL_DSC<n> which
++	 * we just generally don't care about.
++	 */
++	writel(0x7e7e7e7e, omap_dmm->base + DMM_PAT_IRQENABLE_SET);
+ 
+ 	lut_table_size = omap_dmm->lut_width * omap_dmm->lut_height *
+ 			omap_dmm->num_lut;
+@@ -658,7 +667,7 @@ int omap_dmm_init(struct drm_device *dev)
+ 	/* initialize all LUTs to dummy page entries */
+ 	for (i = 0; i < omap_dmm->num_lut; i++) {
+ 		area.tcm = omap_dmm->tcm[i];
+-		if (fill(&area, NULL, true))
++		if (fill(&area, NULL, 0, 0, true))
+ 			dev_err(omap_dmm->dev, "refill failed");
+ 	}
+ 
+diff --git a/drivers/staging/omapdrm/omap_dmm_tiler.h b/drivers/staging/omapdrm/omap_dmm_tiler.h
+index 7e63b6be29f7..58aa046233c7 100644
+--- a/drivers/staging/omapdrm/omap_dmm_tiler.h
++++ b/drivers/staging/omapdrm/omap_dmm_tiler.h
+@@ -77,7 +77,8 @@ int omap_dmm_init(struct drm_device *dev);
+ int omap_dmm_remove(void);
+ 
+ /* pin/unpin */
+-int tiler_pin(struct tiler_block *block, struct page **pages, bool wait);
++int tiler_pin(struct tiler_block *block, struct page **pages,
++		uint32_t npages, uint32_t roll, bool wait);
+ int tiler_unpin(struct tiler_block *block);
+ 
+ /* reserve/release */
+diff --git a/drivers/staging/omapdrm/omap_drv.h b/drivers/staging/omapdrm/omap_drv.h
+index 9d0783d8c6be..263057ad621d 100644
+--- a/drivers/staging/omapdrm/omap_drv.h
++++ b/drivers/staging/omapdrm/omap_drv.h
+@@ -47,6 +47,8 @@ struct omap_drm_private {
+ 	struct drm_connector *connectors[8];
+ 
+ 	struct drm_fb_helper *fbdev;
++
++	bool has_dmm;
+ };
+ 
+ struct drm_fb_helper *omap_fbdev_init(struct drm_device *dev);
+@@ -107,6 +109,7 @@ int omap_gem_op_finish(struct drm_gem_object *obj, enum omap_gem_op op);
+ int omap_gem_op_sync(struct drm_gem_object *obj, enum omap_gem_op op);
+ int omap_gem_op_async(struct drm_gem_object *obj, enum omap_gem_op op,
+ 		void (*fxn)(void *arg), void *arg);
++int omap_gem_roll(struct drm_gem_object *obj, uint32_t roll);
+ int omap_gem_get_paddr(struct drm_gem_object *obj,
+ 		dma_addr_t *paddr, bool remap);
+ int omap_gem_put_paddr(struct drm_gem_object *obj);
+diff --git a/drivers/staging/omapdrm/omap_fb.c b/drivers/staging/omapdrm/omap_fb.c
+index 3f62505813c2..0b50c5b3b564 100644
+--- a/drivers/staging/omapdrm/omap_fb.c
++++ b/drivers/staging/omapdrm/omap_fb.c
+@@ -218,25 +218,9 @@ struct drm_framebuffer *omap_framebuffer_init(struct drm_device *dev,
+ 
+ 	size = PAGE_ALIGN(mode_cmd->pitch * mode_cmd->height);
+ 
+-	if (bo) {
+-		DBG("using existing %d byte buffer (needed %d)", bo->size, size);
+-		if (size > bo->size) {
+-			dev_err(dev->dev, "provided buffer object is too small!\n");
+-			goto fail;
+-		}
+-	} else {
+-		/* for convenience of all the various callers who don't want
+-		 * to be bothered to allocate their own buffer..
+-		 */
+-		union omap_gem_size gsize = {
+-				.bytes = size,
+-		};
+-		DBG("allocating %d bytes for fb %d", size, dev->primary->index);
+-		bo = omap_gem_new(dev, gsize, OMAP_BO_SCANOUT | OMAP_BO_WC);
+-		if (!bo) {
+-			dev_err(dev->dev, "failed to allocate buffer object\n");
+-			goto fail;
+-		}
++	if (size > bo->size) {
++		dev_err(dev->dev, "provided buffer object is too small!\n");
++		goto fail;
+ 	}
+ 
+ 	omap_fb->bo = bo;
+diff --git a/drivers/staging/omapdrm/omap_fbdev.c b/drivers/staging/omapdrm/omap_fbdev.c
+index 048077cd77c9..d8962e81e4cb 100644
+--- a/drivers/staging/omapdrm/omap_fbdev.c
++++ b/drivers/staging/omapdrm/omap_fbdev.c
+@@ -31,9 +31,11 @@
+ struct omap_fbdev {
+ 	struct drm_fb_helper base;
+ 	struct drm_framebuffer *fb;
++	struct drm_gem_object *bo;
+ };
+ 
+ static void omap_fbdev_flush(struct fb_info *fbi, int x, int y, int w, int h);
++static struct drm_fb_helper *get_fb(struct fb_info *fbi);
+ 
+ static ssize_t omap_fbdev_write(struct fb_info *fbi, const char __user *buf,
+ 		size_t count, loff_t *ppos)
+@@ -68,6 +70,31 @@ static void omap_fbdev_imageblit(struct fb_info *fbi,
+ 				image->width, image->height);
+ }
+ 
++static int omap_fbdev_pan_display(struct fb_var_screeninfo *var,
++		struct fb_info *fbi)
++{
++	struct drm_fb_helper *helper = get_fb(fbi);
++	struct omap_fbdev *fbdev = to_omap_fbdev(helper);
++	struct omap_drm_private *priv;
++	int npages;
++
++	if (!helper)
++		goto fallback;
++
++	priv = helper->dev->dev_private;
++	if (!priv->has_dmm)
++		goto fallback;
++
++	/* DMM roll shifts in 4K pages: */
++	npages = fbi->fix.line_length >> PAGE_SHIFT;
++	omap_gem_roll(fbdev->bo, var->yoffset * npages);
++
++	return 0;
++
++fallback:
++	return drm_fb_helper_pan_display(var, fbi);
++}
++
+ static struct fb_ops omap_fb_ops = {
+ 	.owner = THIS_MODULE,
+ 
+@@ -82,7 +109,7 @@ static struct fb_ops omap_fb_ops = {
+ 
+ 	.fb_check_var = drm_fb_helper_check_var,
+ 	.fb_set_par = drm_fb_helper_set_par,
+-	.fb_pan_display = drm_fb_helper_pan_display,
++	.fb_pan_display = omap_fbdev_pan_display,
+ 	.fb_blank = drm_fb_helper_blank,
+ 	.fb_setcmap = drm_fb_helper_setcmap,
+ 
+@@ -95,7 +122,9 @@ static int omap_fbdev_create(struct drm_fb_helper *helper,
+ {
+ 	struct omap_fbdev *fbdev = to_omap_fbdev(helper);
+ 	struct drm_device *dev = helper->dev;
++	struct omap_drm_private *priv = dev->dev_private;
+ 	struct drm_framebuffer *fb = NULL;
++	union omap_gem_size gsize;
+ 	struct fb_info *fbi = NULL;
+ 	struct drm_mode_fb_cmd mode_cmd = {0};
+ 	dma_addr_t paddr;
+@@ -109,8 +138,9 @@ static int omap_fbdev_create(struct drm_fb_helper *helper,
+ 	sizes->surface_bpp = 32;
+ 	sizes->surface_depth = 32;
+ 
+-	DBG("create fbdev: %dx%d@%d", sizes->surface_width,
+-			sizes->surface_height, sizes->surface_bpp);
++	DBG("create fbdev: %dx%d@%d (%dx%d)", sizes->surface_width,
++			sizes->surface_height, sizes->surface_bpp,
++			sizes->fb_width, sizes->fb_height);
+ 
+ 	mode_cmd.width = sizes->surface_width;
+ 	mode_cmd.height = sizes->surface_height;
+@@ -118,7 +148,27 @@ static int omap_fbdev_create(struct drm_fb_helper *helper,
+ 	mode_cmd.bpp = sizes->surface_bpp;
+ 	mode_cmd.depth = sizes->surface_depth;
+ 
+-	fb = omap_framebuffer_init(dev, &mode_cmd, NULL);
++	mode_cmd.pitch = align_pitch(
++			mode_cmd.width * ((mode_cmd.bpp + 7) / 8),
++			mode_cmd.width, mode_cmd.bpp);
++
++	if (priv->has_dmm) {
++		/* need to align pitch to page size if using DMM scrolling */
++		mode_cmd.pitch = ALIGN(mode_cmd.pitch, PAGE_SIZE);
++	}
++
++	/* allocate backing bo */
++	gsize = (union omap_gem_size){
++		.bytes = PAGE_ALIGN(mode_cmd.pitch * mode_cmd.height),
++	};
++	DBG("allocating %d bytes for fb %d", gsize.bytes, dev->primary->index);
++	fbdev->bo = omap_gem_new(dev, gsize, OMAP_BO_SCANOUT | OMAP_BO_WC);
++	if (!fbdev->bo) {
++		dev_err(dev->dev, "failed to allocate buffer object\n");
++		goto fail;
++	}
++
++	fb = omap_framebuffer_init(dev, &mode_cmd, fbdev->bo);
+ 	if (!fb) {
+ 		dev_err(dev->dev, "failed to allocate fb\n");
+ 		ret = -ENOMEM;
+@@ -153,7 +203,7 @@ static int omap_fbdev_create(struct drm_fb_helper *helper,
+ 	}
+ 
+ 	drm_fb_helper_fill_fix(fbi, fb->pitch, fb->depth);
+-	drm_fb_helper_fill_var(fbi, helper, fb->width, fb->height);
++	drm_fb_helper_fill_var(fbi, helper, sizes->fb_width, sizes->fb_height);
+ 
+ 	size = omap_framebuffer_get_buffer(fb, 0, 0,
+ 			&vaddr, &paddr, &screen_width);
+@@ -165,6 +215,15 @@ static int omap_fbdev_create(struct drm_fb_helper *helper,
+ 	fbi->fix.smem_start = paddr;
+ 	fbi->fix.smem_len = size;
+ 
++	/* if we have DMM, then we can use it for scrolling by just
++	 * shuffling pages around in DMM rather than doing sw blit.
++	 */
++	if (priv->has_dmm) {
++		DRM_INFO("Enabling DMM ywrap scrolling\n");
++		fbi->flags |= FBINFO_HWACCEL_YWRAP | FBINFO_READS_FAST;
++		fbi->fix.ywrapstep = 1;
++	}
++
+ 	DBG("par=%p, %dx%d", fbi->par, fbi->var.xres, fbi->var.yres);
+ 	DBG("allocated %dx%d fb", fbdev->fb->width, fbdev->fb->height);
+ 
+@@ -300,5 +359,9 @@ void omap_fbdev_free(struct drm_device *dev)
+ 
+ 	kfree(fbdev);
+ 
++	/* this will free the backing object */
++	if (fbdev->fb)
++		fbdev->fb->funcs->destroy(fbdev->fb);
++
+ 	priv->fbdev = NULL;
+ }
+diff --git a/drivers/staging/omapdrm/omap_gem.c b/drivers/staging/omapdrm/omap_gem.c
+index a451c572a59d..96848913085f 100644
+--- a/drivers/staging/omapdrm/omap_gem.c
++++ b/drivers/staging/omapdrm/omap_gem.c
+@@ -50,6 +50,9 @@ struct omap_gem_object {
+ 	/** width/height for tiled formats (rounded up to slot boundaries) */
+ 	uint16_t width, height;
+ 
++	/** roll applied when mapping to DMM */
++	uint32_t roll;
++
+ 	/**
+ 	 * If buffer is allocated physically contiguous, the OMAP_BO_DMA flag
+ 	 * is set and the paddr is valid.  Also if the buffer is remapped in
+@@ -338,7 +341,7 @@ static int fault_2d(struct drm_gem_object *obj,
+ 	memset(pages + slots, 0,
+ 			sizeof(struct page *) * (usergart[fmt].height - slots));
+ 
+-	ret = tiler_pin(entry->block, pages, true);
++	ret = tiler_pin(entry->block, pages, ARRAY_SIZE(pages), 0, true);
+ 	if (ret) {
+ 		dev_err(obj->dev->dev, "failed to pin: %d\n", ret);
+ 		return ret;
+@@ -521,6 +524,41 @@ fail:
+ 	return ret;
+ }
+ 
++/* Set scrolling position.  This allows us to implement fast scrolling
++ * for console.
++ */
++int omap_gem_roll(struct drm_gem_object *obj, uint32_t roll)
++{
++	struct omap_gem_object *omap_obj = to_omap_bo(obj);
++	uint32_t npages = obj->size >> PAGE_SHIFT;
++	int ret = 0;
++
++	if (roll > npages) {
++		dev_err(obj->dev->dev, "invalid roll: %d\n", roll);
++		return -EINVAL;
++	}
++
++	mutex_lock(&obj->dev->struct_mutex);
++
++	omap_obj->roll = roll;
++
++	/* if we aren't mapped yet, we don't need to do anything */
++	if (omap_obj->block) {
++		struct page **pages;
++		ret = get_pages(obj, &pages);
++		if (ret)
++			goto fail;
++		ret = tiler_pin(omap_obj->block, pages, npages, roll, true);
++		if (ret)
++			dev_err(obj->dev->dev, "could not repin: %d\n", ret);
++	}
++
++fail:
++	mutex_unlock(&obj->dev->struct_mutex);
++
++	return ret;
++}
++
+ /* Get physical address for DMA.. if 'remap' is true, and the buffer is not
+  * already contiguous, remap it to pin in physically contiguous memory.. (ie.
+  * map in TILER)
+@@ -528,23 +566,25 @@ fail:
+ int omap_gem_get_paddr(struct drm_gem_object *obj,
+ 		dma_addr_t *paddr, bool remap)
+ {
++	struct omap_drm_private *priv = obj->dev->dev_private;
+ 	struct omap_gem_object *omap_obj = to_omap_bo(obj);
+ 	int ret = 0;
+ 
+ 	mutex_lock(&obj->dev->struct_mutex);
+ 
+-	if (remap && is_shmem(obj)) {
++	if (remap && is_shmem(obj) && priv->has_dmm) {
+ 		if (omap_obj->paddr_cnt == 0) {
+ 			struct page **pages;
++			uint32_t npages = obj->size >> PAGE_SHIFT;
+ 			enum tiler_fmt fmt = gem2fmt(omap_obj->flags);
+ 			struct tiler_block *block;
++
+ 			BUG_ON(omap_obj->block);
+ 
+ 			ret = get_pages(obj, &pages);
+ 			if (ret)
+ 				goto fail;
+ 
+-
+ 			if (omap_obj->flags & OMAP_BO_TILED) {
+ 				block = tiler_reserve_2d(fmt,
+ 						omap_obj->width,
+@@ -561,7 +601,8 @@ int omap_gem_get_paddr(struct drm_gem_object *obj,
+ 			}
+ 
+ 			/* TODO: enable async refill.. */
+-			ret = tiler_pin(block, pages, true);
++			ret = tiler_pin(block, pages, npages,
++					omap_obj->roll, true);
+ 			if (ret) {
+ 				tiler_release(block);
+ 				dev_err(obj->dev->dev,
+@@ -1002,6 +1043,7 @@ int omap_gem_new_handle(struct drm_device *dev, struct drm_file *file,
+ struct drm_gem_object *omap_gem_new(struct drm_device *dev,
+ 		union omap_gem_size gsize, uint32_t flags)
+ {
++	struct omap_drm_private *priv = dev->dev_private;
+ 	struct omap_gem_object *omap_obj;
+ 	struct drm_gem_object *obj = NULL;
+ 	size_t size;
+@@ -1043,8 +1085,10 @@ struct drm_gem_object *omap_gem_new(struct drm_device *dev,
+ 
+ 	obj = &omap_obj->base;
+ 
+-	if (flags & OMAP_BO_SCANOUT) {
+-		/* attempt to allocate contiguous memory */
++	if ((flags & OMAP_BO_SCANOUT) && !priv->has_dmm) {
++		/* attempt to allocate contiguous memory if we don't
++		 * have DMM for remappign discontiguous buffers
++		 */
+ 		omap_obj->vaddr =  dma_alloc_writecombine(dev->dev, size,
+ 				&omap_obj->paddr, GFP_KERNEL);
+ 		if (omap_obj->vaddr) {
+@@ -1081,6 +1125,7 @@ fail:
+ /* init/cleanup.. if DMM is used, we need to set some stuff up.. */
+ void omap_gem_init(struct drm_device *dev)
+ {
++	struct omap_drm_private *priv = dev->dev_private;
+ 	const enum tiler_fmt fmts[] = {
+ 			TILFMT_8BIT, TILFMT_16BIT, TILFMT_32BIT
+ 	};
+@@ -1130,6 +1175,8 @@ void omap_gem_init(struct drm_device *dev)
+ 					usergart[i].stride_pfn << PAGE_SHIFT);
+ 		}
+ 	}
++
++	priv->has_dmm = true;
+ }
+ 
+ void omap_gem_deinit(struct drm_device *dev)
+

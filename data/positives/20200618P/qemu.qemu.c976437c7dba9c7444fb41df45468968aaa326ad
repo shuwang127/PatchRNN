@@ -1,0 +1,69 @@
+commit c976437c7dba9c7444fb41df45468968aaa326ad
+Author: Zhenzhong Duan <zhenzhong.duan@oracle.com>
+Date:   Wed May 7 13:41:48 2014 +0000
+
+    qemu-xen: free all the pirqs for msi/msix when driver unload
+    
+    Pirqs are not freed when driver unload, then new pirqs are allocated when
+    driver reload. This could exhaust pirqs if do it in a loop.
+    
+    This patch fixes the bug by freeing pirqs when ENABLE bit is cleared in
+    msi/msix control reg.
+    
+    There is also other way of fixing it such as reuse pirqs between driver reload,
+    but this way is better.
+    Xen-devel: http://marc.info/?l=xen-devel&m=136800120304275&w=2
+    
+    Signed-off-by: Zhenzhong Duan <zhenzhong.duan@oracle.com>
+    Signed-off-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+    Signed-off-by: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+
+diff --git a/hw/xen/xen_pt_config_init.c b/hw/xen/xen_pt_config_init.c
+index 8ccc2e4b9c..de9a20f437 100644
+--- a/hw/xen/xen_pt_config_init.c
++++ b/hw/xen/xen_pt_config_init.c
+@@ -1123,8 +1123,8 @@ static int xen_pt_msgctrl_reg_write(XenPCIPassthroughState *s,
+             msi->mapped = true;
+         }
+         msi->flags |= PCI_MSI_FLAGS_ENABLE;
+-    } else {
+-        msi->flags &= ~PCI_MSI_FLAGS_ENABLE;
++    } else if (msi->mapped) {
++        xen_pt_msi_disable(s);
+     }
+ 
+     /* pass through MSI_ENABLE bit */
+@@ -1397,6 +1397,8 @@ static int xen_pt_msixctrl_reg_write(XenPCIPassthroughState *s,
+     if ((*val & PCI_MSIX_FLAGS_ENABLE)
+         && !(*val & PCI_MSIX_FLAGS_MASKALL)) {
+         xen_pt_msix_update(s);
++    } else if (!(*val & PCI_MSIX_FLAGS_ENABLE) && s->msix->enabled) {
++        xen_pt_msix_disable(s);
+     }
+ 
+     debug_msix_enabled_old = s->msix->enabled;
+diff --git a/hw/xen/xen_pt_msi.c b/hw/xen/xen_pt_msi.c
+index 6fbe0cc86b..12b4c4560c 100644
+--- a/hw/xen/xen_pt_msi.c
++++ b/hw/xen/xen_pt_msi.c
+@@ -282,7 +282,8 @@ void xen_pt_msi_disable(XenPCIPassthroughState *s)
+                      msi->initialized);
+ 
+     /* clear msi info */
+-    msi->flags = 0;
++    msi->flags &= ~PCI_MSI_FLAGS_ENABLE;
++    msi->initialized = false;
+     msi->mapped = false;
+     msi->pirq = XEN_PT_UNASSIGNED_PIRQ;
+ }
+@@ -446,7 +447,8 @@ static void pci_msix_write(void *opaque, hwaddr addr,
+     if (offset != PCI_MSIX_ENTRY_VECTOR_CTRL) {
+         const volatile uint32_t *vec_ctrl;
+ 
+-        if (get_entry_value(entry, offset) == val) {
++        if (get_entry_value(entry, offset) == val
++            && entry->pirq != XEN_PT_UNASSIGNED_PIRQ) {
+             return;
+         }
+ 
+

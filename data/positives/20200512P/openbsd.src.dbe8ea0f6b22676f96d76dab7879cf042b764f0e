@@ -1,0 +1,91 @@
+commit dbe8ea0f6b22676f96d76dab7879cf042b764f0e
+Author: millert <millert@openbsd.org>
+Date:   Tue Dec 30 23:27:23 2014 +0000
+
+    Use a 1MB realloc() increment instead of an 8KB one for the config
+    connection buffer.  Significantly speeds up spamd-setup for lage
+    blacklists.  Also free the buffer when we are done with it so memory
+    can be returned to the system (as it can grow quite large).
+    OK deraadt@
+
+diff --git a/libexec/spamd/spamd.c b/libexec/spamd/spamd.c
+index ae82ebf1f60..b419ef34fe7 100644
+--- a/libexec/spamd/spamd.c
++++ b/libexec/spamd/spamd.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: spamd.c,v 1.117 2014/12/29 20:39:27 millert Exp $	*/
++/*	$OpenBSD: spamd.c,v 1.118 2014/12/30 23:27:23 millert Exp $	*/
+ 
+ /*
+  * Copyright (c) 2002-2007 Bob Beck.  All rights reserved.
+@@ -267,23 +267,9 @@ void
+ parse_configs(void)
+ {
+ 	char *start, *end;
+-	int i;
++	size_t i;
+ 
+-	if (cbu == cbs) {
+-		char *tmp;
+-
+-		tmp = realloc(cb, cbs + 8192);
+-		if (tmp == NULL) {
+-			if (debug > 0)
+-				warn("realloc");
+-			free(cb);
+-			cb = NULL;
+-			cbs = cbu = 0;
+-			return;
+-		}
+-		cbs += 8192;
+-		cb = tmp;
+-	}
++	/* We always leave an extra byte for the NUL. */
+ 	cb[cbu++] = '\0';
+ 
+ 	start = cb;
+@@ -309,19 +295,17 @@ do_config(void)
+ 	if (debug > 0)
+ 		printf("got configuration connection\n");
+ 
+-	if (cbu == cbs) {
++	/* Leave an extra byte for the terminating NUL. */
++	if (cbu + 1 >= cbs) {
+ 		char *tmp;
+ 
+-		tmp = realloc(cb, cbs + 8192);
++		tmp = realloc(cb, cbs + (1024 * 1024));
+ 		if (tmp == NULL) {
+ 			if (debug > 0)
+ 				warn("realloc");
+-			free(cb);
+-			cb = NULL;
+-			cbs = 0;
+ 			goto configdone;
+ 		}
+-		cbs += 8192;
++		cbs += 1024 * 1024;
+ 		cb = tmp;
+ 	}
+ 
+@@ -329,7 +313,8 @@ do_config(void)
+ 	if (debug > 0)
+ 		printf("read %d config bytes\n", n);
+ 	if (n == 0) {
+-		parse_configs();
++		if (cbu != 0)
++			parse_configs();
+ 		goto configdone;
+ 	} else if (n == -1) {
+ 		if (debug > 0)
+@@ -340,6 +325,9 @@ do_config(void)
+ 	return;
+ 
+ configdone:
++	free(cb);
++	cb = NULL;
++	cbs = 0;
+ 	cbu = 0;
+ 	close(conffd);
+ 	conffd = -1;
+

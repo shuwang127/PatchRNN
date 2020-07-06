@@ -1,0 +1,102 @@
+commit 5dcd6495fcd56a199cbc42c3ab99874e993ff2c2
+Author: Alan T. DeKok <aland@freeradius.org>
+Date:   Fri Oct 9 11:59:26 2009 +0200
+
+    Fix VSA tunnel encryption.  Allow sub-TLVs to be encrypted
+
+diff --git a/src/lib/dict.c b/src/lib/dict.c
+index d2f6baaf2..dfa7fb2db 100644
+--- a/src/lib/dict.c
++++ b/src/lib/dict.c
+@@ -533,11 +533,6 @@ int dict_addattr(const char *name, int attr, int vendor, int type,
+ 		DICT_VENDOR *dv;
+ 		static DICT_VENDOR *last_vendor = NULL;
+ 
+-		if (flags.is_tlv && (flags.encrypt != FLAG_ENCRYPT_NONE)) {
+-			fr_strerror_printf("Sub-TLV's cannot be encrypted");
+-			return -1;
+-		}
+-
+ 		if (flags.has_tlv && (flags.encrypt != FLAG_ENCRYPT_NONE)) {
+ 			fr_strerror_printf("TLV's cannot be encrypted");
+ 			return -1;
+@@ -982,12 +977,6 @@ static int process_attribute(const char* fn, const int line,
+ 			return -1;
+ 		}
+ 
+-		if (flags.encrypt != FLAG_ENCRYPT_NONE) {
+-			fr_strerror_printf( "dict_init: %s[%d]: sub-tlv's cannot be encrypted",
+-				    fn, line);
+-			return -1;
+-		}
+-
+ 		/*
+ 		 *	
+ 		 */
+@@ -1226,7 +1215,8 @@ static int process_vendor(const char* fn, const int line, char **argv,
+ 			}
+ 			continuation = 1;
+ 
+-			if (value != VENDORPEC_WIMAX) {
++			if ((value != VENDORPEC_WIMAX) ||
++			    (type != 1) || (length != 1)) {
+ 				fr_strerror_printf("dict_init: %s[%d]: Only WiMAX VSAs can have continuations",
+ 					   fn, line);
+ 				return -1;
+diff --git a/src/lib/radius.c b/src/lib/radius.c
+index 768364d6a..7447f3f7e 100644
+--- a/src/lib/radius.c
++++ b/src/lib/radius.c
+@@ -626,6 +626,7 @@ static void make_tunnel_passwd(uint8_t *output, size_t *outlen,
+ 		}
+ 
+ 		fr_MD5Final(digest, &context);
++
+ 		for (i = 0; i < AUTH_PASS_LEN; i++) {
+ 			passwd[i + 2 + n] ^= digest[i];
+ 		}
+@@ -738,6 +739,9 @@ static int vp2data(const RADIUS_PACKET *packet, const RADIUS_PACKET *original,
+ 		break;
+ 
+ 	case FLAG_ENCRYPT_TUNNEL_PASSWORD:
++		lvalue = 0;
++		if (vp->flags.has_tag) lvalue = 1;
++
+ 		/*
+ 		 *	Check if there's enough room.  If there isn't,
+ 		 *	we discard the attribute.
+@@ -745,7 +749,7 @@ static int vp2data(const RADIUS_PACKET *packet, const RADIUS_PACKET *original,
+ 		 *	This is ONLY a problem if we have multiple VSA's
+ 		 *	in one Vendor-Specific, though.
+ 		 */
+-		if (room < 19) return 0;
++		if (room < (18 + lvalue)) return 0;
+ 
+         	switch (packet->code) {
+ 	        case PW_AUTHENTICATION_ACK:
+@@ -756,8 +760,10 @@ static int vp2data(const RADIUS_PACKET *packet, const RADIUS_PACKET *original,
+ 				fr_strerror_printf("ERROR: No request packet, cannot encrypt %s attribute in the vp.", vp->name);
+ 				return -1;
+ 			}
+-			ptr[0] = vp->flags.tag;
+-			make_tunnel_passwd(ptr + 1, &len, data, len, room - 1,
++
++			if (lvalue) ptr[0] = vp->flags.tag;
++			make_tunnel_passwd(ptr + lvalue, &len, data, len,
++					   room - lvalue,
+ 					   secret, original->vector);
+                 	break;
+ 	        case PW_ACCOUNTING_REQUEST:
+@@ -2186,7 +2192,10 @@ static VALUE_PAIR *data2vp(const RADIUS_PACKET *packet,
+ 			vp->flags.tag = data[0];
+ 
+ 			if ((vp->type == PW_TYPE_STRING) ||
+-			    (vp->type == PW_TYPE_OCTETS)) offset = 1;
++			    (vp->type == PW_TYPE_OCTETS)) {
++				if (length == 0) goto raw;
++				offset = 1;
++			}
+ 		}
+ 	}
+ 
+

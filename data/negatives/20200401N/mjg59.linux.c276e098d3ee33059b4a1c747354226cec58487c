@@ -1,0 +1,65 @@
+commit c276e098d3ee33059b4a1c747354226cec58487c
+Author: David S. Miller <davem@davemloft.net>
+Date:   Mon Jan 5 16:01:51 2009 -0800
+
+    Revert "net: Fix for initial link state in 2.6.28"
+    
+    This reverts commit 22604c866889c4b2e12b73cbf1683bda1b72a313.
+    
+    We can't fix this issue in this way, because we now can try
+    to take the dev_base_lock rwlock as a writer in software interrupt
+    context and that is not allowed without major surgery elsewhere.
+    
+    This initial link state problem needs to be solved in some other
+    way.
+    
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/core/link_watch.c b/net/core/link_watch.c
+index 1e401e12dc72..bf8f7af699d7 100644
+--- a/net/core/link_watch.c
++++ b/net/core/link_watch.c
+@@ -178,6 +178,7 @@ static void __linkwatch_run_queue(int urgent_only)
+ 		 */
+ 		clear_bit(__LINK_STATE_LINKWATCH_PENDING, &dev->state);
+ 
++		rfc2863_policy(dev);
+ 		if (dev->flags & IFF_UP) {
+ 			if (netif_carrier_ok(dev))
+ 				dev_activate(dev);
+@@ -214,12 +215,6 @@ void linkwatch_fire_event(struct net_device *dev)
+ {
+ 	bool urgent = linkwatch_urgent_event(dev);
+ 
+-	rfc2863_policy(dev);
+-
+-	/* Some drivers call netif_carrier_off early */
+-	if (dev->reg_state == NETREG_UNINITIALIZED)
+-		return;
+-
+ 	if (!test_and_set_bit(__LINK_STATE_LINKWATCH_PENDING, &dev->state)) {
+ 		dev_hold(dev);
+ 
+diff --git a/net/sched/sch_generic.c b/net/sched/sch_generic.c
+index 23a8e6141a00..5f5efe4e6072 100644
+--- a/net/sched/sch_generic.c
++++ b/net/sched/sch_generic.c
+@@ -270,6 +270,8 @@ static void dev_watchdog_down(struct net_device *dev)
+ void netif_carrier_on(struct net_device *dev)
+ {
+ 	if (test_and_clear_bit(__LINK_STATE_NOCARRIER, &dev->state)) {
++		if (dev->reg_state == NETREG_UNINITIALIZED)
++			return;
+ 		linkwatch_fire_event(dev);
+ 		if (netif_running(dev))
+ 			__netdev_watchdog_up(dev);
+@@ -286,6 +288,8 @@ EXPORT_SYMBOL(netif_carrier_on);
+ void netif_carrier_off(struct net_device *dev)
+ {
+ 	if (!test_and_set_bit(__LINK_STATE_NOCARRIER, &dev->state)) {
++		if (dev->reg_state == NETREG_UNINITIALIZED)
++			return;
+ 		linkwatch_fire_event(dev);
+ 	}
+ }
+

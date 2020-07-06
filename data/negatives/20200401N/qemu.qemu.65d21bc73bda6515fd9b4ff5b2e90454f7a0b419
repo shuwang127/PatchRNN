@@ -1,0 +1,97 @@
+commit 65d21bc73bda6515fd9b4ff5b2e90454f7a0b419
+Author: Markus Armbruster <armbru@redhat.com>
+Date:   Mon Jun 28 10:25:20 2010 +0200
+
+    raw-posix: Fix test for host CD-ROM
+    
+    raw_pread_aligned() retries up to two times if the block device backs
+    a virtual CD-ROM (a drive with media=cdrom and if=ide, scsi, xen or
+    none).  This makes no sense.  Whether retrying reads can correct read
+    errors can only depend on what we're reading, not on how the result
+    gets used.  We need to check what whether we're reading from a
+    physical CD-ROM or floppy here.
+    
+    I doubt retrying is useful even then.  Left for another day.
+    
+    Impact:
+    
+    * Virtual CD-ROM backed by host_cdrom behaves the same.
+    
+    * Virtual CD-ROM backed by file or host_device no longer retries.
+    
+    * A drive backed by host_cdrom now retries even if it's not a virtual
+      CD-ROM.
+    
+    * Any drive backed by host_floppy now retries.
+    
+    While there, clean up gratuitous use of goto.
+    
+    Signed-off-by: Markus Armbruster <armbru@redhat.com>
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+
+diff --git a/block/raw-posix.c b/block/raw-posix.c
+index 3f0701b8a4..291699fbc3 100644
+--- a/block/raw-posix.c
++++ b/block/raw-posix.c
+@@ -242,15 +242,14 @@ static int raw_pread_aligned(BlockDriverState *bs, int64_t offset,
+ 
+     ret = pread(s->fd, buf, count, offset);
+     if (ret == count)
+-        goto label__raw_read__success;
++        return ret;
+ 
+     /* Allow reads beyond the end (needed for pwrite) */
+     if ((ret == 0) && bs->growable) {
+         int64_t size = raw_getlength(bs);
+         if (offset >= size) {
+             memset(buf, 0, count);
+-            ret = count;
+-            goto label__raw_read__success;
++            return count;
+         }
+     }
+ 
+@@ -260,13 +259,13 @@ static int raw_pread_aligned(BlockDriverState *bs, int64_t offset,
+                       bs->total_sectors, ret, errno, strerror(errno));
+ 
+     /* Try harder for CDrom. */
+-    if (bs->type == BDRV_TYPE_CDROM) {
++    if (s->type != FTYPE_FILE) {
+         ret = pread(s->fd, buf, count, offset);
+         if (ret == count)
+-            goto label__raw_read__success;
++            return ret;
+         ret = pread(s->fd, buf, count, offset);
+         if (ret == count)
+-            goto label__raw_read__success;
++            return ret;
+ 
+         DEBUG_BLOCK_PRINT("raw_pread(%d:%s, %" PRId64 ", %p, %d) [%" PRId64
+                           "] retry read failed %d : %d = %s\n",
+@@ -274,8 +273,6 @@ static int raw_pread_aligned(BlockDriverState *bs, int64_t offset,
+                           bs->total_sectors, ret, errno, strerror(errno));
+     }
+ 
+-label__raw_read__success:
+-
+     return  (ret < 0) ? -errno : ret;
+ }
+ 
+@@ -298,15 +295,13 @@ static int raw_pwrite_aligned(BlockDriverState *bs, int64_t offset,
+ 
+     ret = pwrite(s->fd, buf, count, offset);
+     if (ret == count)
+-        goto label__raw_write__success;
++        return ret;
+ 
+     DEBUG_BLOCK_PRINT("raw_pwrite(%d:%s, %" PRId64 ", %p, %d) [%" PRId64
+                       "] write failed %d : %d = %s\n",
+                       s->fd, bs->filename, offset, buf, count,
+                       bs->total_sectors, ret, errno, strerror(errno));
+ 
+-label__raw_write__success:
+-
+     return  (ret < 0) ? -errno : ret;
+ }
+ 
+

@@ -1,0 +1,318 @@
+commit 7a5a56327b4d03ac0fdf088504a3fb100b25663f
+Author: krw <krw@openbsd.org>
+Date:   Thu Aug 10 17:15:05 2017 +0000
+
+    Add IMSG_SET_RESOLV_CONF and keep the cached contents
+    in the priv process, so that they do not have to be
+    continually retransmitted. IMSG_WRITE_RESOLV_CONF
+    now just triggers a write of the cached info.
+    
+    Simplifies a bunch of logic.
+
+diff --git a/sbin/dhclient/dhclient.c b/sbin/dhclient/dhclient.c
+index a6f42c894f7..6c018fd4cce 100644
+--- a/sbin/dhclient/dhclient.c
++++ b/sbin/dhclient/dhclient.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: dhclient.c,v 1.491 2017/08/09 19:35:59 krw Exp $	*/
++/*	$OpenBSD: dhclient.c,v 1.492 2017/08/10 17:15:05 krw Exp $	*/
+ 
+ /*
+  * Copyright 2004 Henning Brauer <henning@openbsd.org>
+@@ -416,10 +416,8 @@ routehandler(struct interface_info *ifi, int routefd)
+ 	}
+ 
+ 	/* Something has happened. Try to write out the resolv.conf. */
+-	if (ifi->active != NULL && ifi->active->resolv_conf != NULL &&
+-	    (ifi->flags & IFI_IN_CHARGE) != 0)
+-		write_resolv_conf(ifi->active->resolv_conf,
+-		    strlen(ifi->active->resolv_conf));
++	if (ifi->active != NULL && (ifi->flags & IFI_IN_CHARGE) != 0)
++		write_resolv_conf();
+ 
+ done:
+ 	free(rtmmsg);
+@@ -989,13 +987,6 @@ bind_lease(struct interface_info *ifi)
+ 	time_t			 cur_time;
+ 	int			 seen;
+ 
+-	/*
+-	 * Clear out any old resolv_conf in case the lease has been here
+-	 * before (e.g. static lease).
+-	 */
+-	free(ifi->offer->resolv_conf);
+-	ifi->offer->resolv_conf = NULL;
+-
+ 	lease = apply_defaults(ifi->offer);
+ 
+ 	set_lease_times(lease);
+@@ -1013,8 +1004,6 @@ bind_lease(struct interface_info *ifi)
+ 		offered_proposal = lease_as_proposal(ifi->offer);
+ 		if (memcmp(active_proposal, offered_proposal,
+ 		    sizeof(*active_proposal)) == 0) {
+-			ifi->offer->resolv_conf = ifi->active->resolv_conf;
+-			ifi->active->resolv_conf = NULL;
+ 			ifi->active = ifi->offer;
+ 			ifi->offer = NULL;
+ 			goto newlease;
+@@ -1026,7 +1015,7 @@ bind_lease(struct interface_info *ifi)
+ 	ifi->offer = NULL;
+ 	effective_proposal = lease_as_proposal(lease);
+ 
+-	ifi->active->resolv_conf = resolv_conf_contents(ifi->name,
++	set_resolv_conf(ifi->name,
+ 	    effective_proposal->rtsearch,
+ 	    effective_proposal->rtsearch_len,
+ 	    effective_proposal->rtdns,
+@@ -1041,6 +1030,7 @@ bind_lease(struct interface_info *ifi)
+ 	    effective_proposal->rtstatic, effective_proposal->rtstatic_len);
+ 
+ newlease:
++	write_resolv_conf();
+ 	log_info("bound to %s -- renewal in %lld seconds.",
+ 	    inet_ntoa(ifi->active->address),
+ 	    (long long)(ifi->active->renewal - time(NULL)));
+@@ -1722,7 +1712,6 @@ free_client_lease(struct client_lease *lease)
+ 
+ 	free(lease->server_name);
+ 	free(lease->filename);
+-	free(lease->resolv_conf);
+ 	for (i = 0; i < DHO_COUNT; i++)
+ 		free(lease->options[i].data);
+ 
+@@ -2385,11 +2374,6 @@ clone_lease(struct client_lease *oldlease)
+ 		if (newlease->filename == NULL)
+ 			goto cleanup;
+ 	}
+-	if (oldlease->resolv_conf != NULL) {
+-		newlease->resolv_conf = strdup(oldlease->resolv_conf);
+-		if (newlease->resolv_conf == NULL)
+-			goto cleanup;
+-	}
+ 
+ 	for (i = 0; i < DHO_COUNT; i++) {
+ 		if (oldlease->options[i].len == 0)
+diff --git a/sbin/dhclient/dhcpd.h b/sbin/dhclient/dhcpd.h
+index 856a258dccc..47a1e63bc59 100644
+--- a/sbin/dhclient/dhcpd.h
++++ b/sbin/dhclient/dhcpd.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: dhcpd.h,v 1.221 2017/08/09 19:57:54 krw Exp $	*/
++/*	$OpenBSD: dhcpd.h,v 1.222 2017/08/10 17:15:05 krw Exp $	*/
+ 
+ /*
+  * Copyright (c) 2004 Henning Brauer <henning@openbsd.org>
+@@ -61,7 +61,6 @@ struct client_lease {
+ 	struct in_addr		 next_server;
+ 	char			*server_name;
+ 	char			*filename;
+-	char			*resolv_conf;
+ 	char			 ssid[32];
+ 	uint8_t			 ssid_len;
+ 	unsigned int		 is_static;
+@@ -234,7 +233,9 @@ void		 read_client_leases(char *, struct client_lease_tq *);
+ 
+ /* kroute.c */
+ void		 delete_address(struct in_addr);
+-void		 write_resolv_conf(uint8_t *, size_t);
++void		 set_resolv_conf(char *, uint8_t *, unsigned int,
++    uint8_t *, unsigned int);
++void		 write_resolv_conf(void);
+ void		 set_mtu(int, uint16_t);
+ void		 set_address(char *, struct in_addr, struct in_addr);
+ void		 set_routes(struct in_addr, struct in_addr, uint8_t *,
+diff --git a/sbin/dhclient/kroute.c b/sbin/dhclient/kroute.c
+index 6b737ef5b28..ef32b7a41e4 100644
+--- a/sbin/dhclient/kroute.c
++++ b/sbin/dhclient/kroute.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: kroute.c,v 1.135 2017/08/09 19:57:54 krw Exp $	*/
++/*	$OpenBSD: kroute.c,v 1.136 2017/08/10 17:15:05 krw Exp $	*/
+ 
+ /*
+  * Copyright 2012 Kenneth R Westerback <krw@openbsd.org>
+@@ -648,21 +648,22 @@ priv_set_address(char *name, int ioctlfd, struct imsg_set_address *imsg)
+  * [priv_]write_resolv_conf write out a new resolv.conf.
+  */
+ void
+-write_resolv_conf(uint8_t *contents, size_t sz)
++write_resolv_conf(void)
+ {
+ 	int	 rslt;
+ 
+ 	rslt = imsg_compose(unpriv_ibuf, IMSG_WRITE_RESOLV_CONF,
+-	    0, 0, -1, contents, sz);
++	    0, 0, -1, NULL, 0);
+ 	if (rslt == -1)
+ 		log_warn("write_resolv_conf: imsg_compose");
+ }
+ 
+ void
+-priv_write_resolv_conf(uint8_t *contents, size_t sz)
++priv_write_resolv_conf(char *contents)
+ {
+ 	const char	*path = "/etc/resolv.conf";
+ 	ssize_t		 n;
++	size_t		 sz;
+ 	int		 fd;
+ 
+ 	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC,
+@@ -673,12 +674,15 @@ priv_write_resolv_conf(uint8_t *contents, size_t sz)
+ 		return;
+ 	}
+ 
+-	n = write(fd, contents, sz);
+-	if (n == -1)
+-		log_warn("Couldn't write contents to '%s'", path);
+-	else if ((size_t)n < sz)
+-		log_warnx("Short contents write to '%s' (%zd vs %zu)",
+-		    path, n, sz);
++	if (contents != NULL) {
++		sz = strlen(contents);
++		n = write(fd, contents, sz);
++		if (n == -1)
++			log_warn("Couldn't write contents to '%s'", path);
++		else if ((size_t)n < sz)
++			log_warnx("Short contents write to '%s' (%zd vs %zu)",
++			    path, n, sz);
++	}
+ 
+ 	close(fd);
+ }
+@@ -760,13 +764,12 @@ done:
+ }
+ 
+ /*
+- * resolv_conf_contents creates a string that are the resolv.conf contents
++ * set_resolv_conf creates a string that are the resolv.conf contents
+  * that should be used when the interface is determined to be the one to
+  * create /etc/resolv.conf
+  */
+-char *
+-resolv_conf_contents(char *name,
+-    uint8_t *rtsearch, unsigned int rtsearch_len,
++void
++set_resolv_conf(char *name, uint8_t *rtsearch, unsigned int rtsearch_len,
+     uint8_t *rtdns, unsigned int rtdns_len)
+ {
+ 	char		*dn, *nss[MAXNS], *contents, *courtesy;
+@@ -814,7 +817,7 @@ resolv_conf_contents(char *name,
+ 
+ 	if (len == 0) {
+ 		free(dn);
+-		return NULL;
++		return;
+ 	}
+ 
+ 	rslt = asprintf(&courtesy, "# Generated by %s dhclient\n", name);
+@@ -843,7 +846,10 @@ resolv_conf_contents(char *name,
+ 	if (config->resolv_tail != NULL)
+ 		strlcat(contents, config->resolv_tail, len);
+ 
+-	return contents;
++	rslt = imsg_compose(unpriv_ibuf, IMSG_SET_RESOLV_CONF,
++	    0, 0, -1, contents, len);
++	if (rslt == -1)
++		log_warn("set_resolv_conf: imsg_compose");
+ }
+ 
+ /*
+diff --git a/sbin/dhclient/privsep.c b/sbin/dhclient/privsep.c
+index a2d48687d0a..7d77fc1662b 100644
+--- a/sbin/dhclient/privsep.c
++++ b/sbin/dhclient/privsep.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: privsep.c,v 1.62 2017/08/08 17:54:24 krw Exp $ */
++/*	$OpenBSD: privsep.c,v 1.63 2017/08/10 17:15:05 krw Exp $ */
+ 
+ /*
+  * Copyright (c) 2004 Henning Brauer <henning@openbsd.org>
+@@ -28,6 +28,7 @@
+ #include <imsg.h>
+ #include <signal.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ 
+ #include "dhcp.h"
+@@ -39,9 +40,11 @@ int
+ dispatch_imsg(char *name, int rdomain, int ioctlfd, int routefd,
+     struct imsgbuf *ibuf)
+ {
+-	struct imsg	imsg;
+-	ssize_t		n;
+-	int		index;
++	static char	*resolv_conf;
++	struct imsg	 imsg;
++	ssize_t		 n;
++	size_t		 sz;
++	int		 index;
+ 
+ 	index = if_nametoindex(name);
+ 	if (index == 0)
+@@ -95,13 +98,31 @@ dispatch_imsg(char *name, int rdomain, int ioctlfd, int routefd,
+ 				priv_set_mtu(name, ioctlfd, imsg.data);
+ 			break;
+ 
++		case IMSG_SET_RESOLV_CONF:
++			if (imsg.hdr.len < IMSG_HEADER_SIZE)
++				log_warnx("bad IMSG_SET_RESOLV_CONF");
++			else {
++				free(resolv_conf);
++				resolv_conf = NULL;
++				sz = imsg.hdr.len - IMSG_HEADER_SIZE;
++				if (sz > 0) {
++					resolv_conf = malloc(sz);
++					if (resolv_conf == NULL)
++						log_warnx("no memory for "
++						    "resolv_conf");
++					else
++						strlcpy(resolv_conf,
++						    imsg.data, sz);
++				}
++			}
++			break;
++
+ 		case IMSG_WRITE_RESOLV_CONF:
+-			if (imsg.hdr.len <= IMSG_HEADER_SIZE)
+-				log_warnx("short IMSG_WRITE_RESOLV_CONF");
++			if (imsg.hdr.len != IMSG_HEADER_SIZE)
++				log_warnx("bad IMSG_WRITE_RESOLV_CONF");
+ 			else if (default_route_index(rdomain, routefd) ==
+ 			    index)
+-				priv_write_resolv_conf(imsg.data,
+-				    imsg.hdr.len - IMSG_HEADER_SIZE);
++				priv_write_resolv_conf(resolv_conf);
+ 			break;
+ 
+ 		case IMSG_HUP:
+diff --git a/sbin/dhclient/privsep.h b/sbin/dhclient/privsep.h
+index 2a67b607344..15a3300cd3a 100644
+--- a/sbin/dhclient/privsep.h
++++ b/sbin/dhclient/privsep.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: privsep.h,v 1.52 2017/08/08 17:54:24 krw Exp $ */
++/*	$OpenBSD: privsep.h,v 1.53 2017/08/10 17:15:05 krw Exp $ */
+ 
+ /*
+  * Copyright (c) 2004 Henning Brauer <henning@openbsd.org>
+@@ -24,6 +24,7 @@ enum imsg_code {
+ 	IMSG_FLUSH_ROUTES,
+ 	IMSG_ADD_ROUTE,
+ 	IMSG_SET_MTU,
++	IMSG_SET_RESOLV_CONF,
+ 	IMSG_WRITE_RESOLV_CONF
+ };
+ 
+@@ -53,9 +54,7 @@ int	default_route_index(int, int);
+ void	priv_add_route(char *, int, int, struct imsg_add_route *);
+ void	priv_flush_routes(char *, int, int);
+ 
+-char	*resolv_conf_contents(char *, uint8_t *, unsigned int, uint8_t *,
+-    unsigned int);
+-void	priv_write_resolv_conf(uint8_t *, size_t);
++void	priv_write_resolv_conf(char *);
+ 
+ void	priv_delete_address(char *, int, struct imsg_delete_address *);
+ void	priv_set_address(char *, int, struct imsg_set_address *);
+

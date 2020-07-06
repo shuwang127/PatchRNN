@@ -1,0 +1,64 @@
+commit 016c1291ce70a22f15f666441a4fd2f0b450375b
+Author: Artem Bityutskiy <artem.bityutskiy@linux.intel.com>
+Date:   Wed Dec 28 17:27:18 2011 +0200
+
+    mtd: mtdoops: do not use mtd->panic_write directly
+    
+    Instead of checking if 'mtd->panic_write' is defined, call 'mtd_panic_write()'
+    and check the error code - '-EOPNOTSUPP' will be returned if the function is
+    not defined.
+    
+    Signed-off-by: Artem Bityutskiy <artem.bityutskiy@linux.intel.com>
+    Signed-off-by: David Woodhouse <David.Woodhouse@intel.com>
+
+diff --git a/drivers/mtd/mtdoops.c b/drivers/mtd/mtdoops.c
+index 69532a34e563..c8540b8a7fc6 100644
+--- a/drivers/mtd/mtdoops.c
++++ b/drivers/mtd/mtdoops.c
+@@ -221,10 +221,14 @@ static void mtdoops_write(struct mtdoops_context *cxt, int panic)
+ 	hdr[0] = cxt->nextcount;
+ 	hdr[1] = MTDOOPS_KERNMSG_MAGIC;
+ 
+-	if (panic)
++	if (panic) {
+ 		ret = mtd_panic_write(mtd, cxt->nextpage * record_size,
+ 				      record_size, &retlen, cxt->oops_buf);
+-	else
++		if (ret == -EOPNOTSUPP) {
++			printk(KERN_ERR "mtdoops: Cannot write from panic without panic_write\n");
++			return;
++		}
++	} else
+ 		ret = mtd_write(mtd, cxt->nextpage * record_size,
+ 				record_size, &retlen, cxt->oops_buf);
+ 
+@@ -330,13 +334,8 @@ static void mtdoops_do_dump(struct kmsg_dumper *dumper,
+ 	memcpy(dst + l1_cpy, s2 + s2_start, l2_cpy);
+ 
+ 	/* Panics must be written immediately */
+-	if (reason != KMSG_DUMP_OOPS) {
+-		if (!cxt->mtd->panic_write)
+-			printk(KERN_ERR "mtdoops: Cannot write from panic without panic_write\n");
+-		else
+-			mtdoops_write(cxt, 1);
+-		return;
+-	}
++	if (reason != KMSG_DUMP_OOPS)
++		mtdoops_write(cxt, 1);
+ 
+ 	/* For other cases, schedule work to write it "nicely" */
+ 	schedule_work(&cxt->work_write);
+diff --git a/include/linux/mtd/mtd.h b/include/linux/mtd/mtd.h
+index 2c2a92247e5a..b72964049cdc 100644
+--- a/include/linux/mtd/mtd.h
++++ b/include/linux/mtd/mtd.h
+@@ -311,6 +311,8 @@ static inline int mtd_panic_write(struct mtd_info *mtd, loff_t to, size_t len,
+ 				  size_t *retlen, const u_char *buf)
+ {
+ 	*retlen = 0;
++	if (!mtd->panic_write)
++		return -EOPNOTSUPP;
+ 	return mtd->panic_write(mtd, to, len, retlen, buf);
+ }
+ 
+

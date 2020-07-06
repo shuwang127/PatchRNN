@@ -1,0 +1,39 @@
+commit 9171f5a991e7613cbee816874ad8c9515dcab50f
+Author: Bob Peterson <rpeterso@redhat.com>
+Date:   Mon Jun 9 12:08:23 2008 -0500
+
+    [GFS2] kernel panic mounting volume
+    
+    This patch fixes Red Hat bugzilla bug 450156.
+    
+    This started with a not-too-improbable mount failure because the
+    locking protocol was never set back to its proper "lock_dlm" after the
+    system was rebooted in the middle of a gfs2_fsck.  That left a
+    (purposely) invalid locking protocol in the superblock, which caused an
+    error when the file system was mounted the next time.
+    
+    When there's an error mounting, vfs calls DQUOT_OFF, which calls
+    vfs_quota_off which calls gfs2_sync_fs.  Next, gfs2_sync_fs calls
+    gfs2_log_flush passing s_fs_info.  But due to the error, s_fs_info
+    had been previously set to NULL, and so we have the kernel oops.
+    
+    My solution in this patch is to test for the NULL value before passing
+    it.  I tested this patch and it fixes the problem.
+    
+    Signed-off-by: Bob Peterson <rpeterso@redhat.com>
+    Signed-off-by: Steven Whitehouse <swhiteho@redhat.com>
+
+diff --git a/fs/gfs2/ops_super.c b/fs/gfs2/ops_super.c
+index 0b7cc920eb89..66907922109f 100644
+--- a/fs/gfs2/ops_super.c
++++ b/fs/gfs2/ops_super.c
+@@ -155,7 +155,7 @@ static void gfs2_write_super(struct super_block *sb)
+ static int gfs2_sync_fs(struct super_block *sb, int wait)
+ {
+ 	sb->s_dirt = 0;
+-	if (wait)
++	if (wait && sb->s_fs_info)
+ 		gfs2_log_flush(sb->s_fs_info, NULL);
+ 	return 0;
+ }
+

@@ -1,0 +1,87 @@
+commit 757fffcfdffb6c0dd46c1b264091c36b4e5a86ae
+Author: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Date:   Mon Nov 13 15:36:22 2017 +0200
+
+    drm/i915: Put all non-blocking modesets onto an ordered wq
+    
+    We have plenty of global registers and whatnot programmed without
+    any further locking by the modeset code. Currently non-bocking
+    modesets are allowed to execute in parallel which could corrupt
+    said registers.
+    
+    To avoid the problem let's run all non-blocking modesets on an
+    ordered workqueue. We still put page flips etc. to system_unbound_wq
+    allowing page flips on one pipe to execute in parallel with page flips
+    or a modeset on a another pipe (assuming no known state is shared
+    between them, at which point they would have been added to the same
+    atomic commit and serialized that way).
+    
+    Blocking modesets are already serialized with each other by
+    connection_mutex, and thus are safe. To serialize them with
+    non-blocking modesets we just flush the workqueue before executing
+    blocking modesets.
+    
+    Cc: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Cc: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+    Fixes: 94f050246b42 ("drm/i915: nonblocking commit")
+    Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20171113133622.8593-1-ville.syrjala@linux.intel.com
+    Acked-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Reviewed-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 4b943cdbd541..19df7b7214ed 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -1960,6 +1960,9 @@ struct drm_i915_private {
+ 	 */
+ 	struct workqueue_struct *wq;
+ 
++	/* ordered wq for modesets */
++	struct workqueue_struct *modeset_wq;
++
+ 	/* Display functions */
+ 	struct drm_i915_display_funcs display;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index b3bde2211128..0cd355978ab4 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -12483,11 +12483,15 @@ static int intel_atomic_commit(struct drm_device *dev,
+ 	INIT_WORK(&state->commit_work, intel_atomic_commit_work);
+ 
+ 	i915_sw_fence_commit(&intel_state->commit_ready);
+-	if (nonblock)
++	if (nonblock && intel_state->modeset) {
++		queue_work(dev_priv->modeset_wq, &state->commit_work);
++	} else if (nonblock) {
+ 		queue_work(system_unbound_wq, &state->commit_work);
+-	else
++	} else {
++		if (intel_state->modeset)
++			flush_workqueue(dev_priv->modeset_wq);
+ 		intel_atomic_commit_tail(state);
+-
++	}
+ 
+ 	return 0;
+ }
+@@ -14450,6 +14454,8 @@ int intel_modeset_init(struct drm_device *dev)
+ 	enum pipe pipe;
+ 	struct intel_crtc *crtc;
+ 
++	dev_priv->modeset_wq = alloc_ordered_workqueue("i915_modeset", 0);
++
+ 	drm_mode_config_init(dev);
+ 
+ 	dev->mode_config.min_width = 0;
+@@ -15254,6 +15260,8 @@ void intel_modeset_cleanup(struct drm_device *dev)
+ 	intel_cleanup_gt_powersave(dev_priv);
+ 
+ 	intel_teardown_gmbus(dev_priv);
++
++	destroy_workqueue(dev_priv->modeset_wq);
+ }
+ 
+ void intel_connector_attach_encoder(struct intel_connector *connector,
+

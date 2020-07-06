@@ -1,0 +1,286 @@
+commit 9b4b9f91de7b8113bb68d9050b6b4e807c5e1f53
+Author: bar@bar.mysql.r18.ru <>
+Date:   Thu Sep 25 13:35:21 2003 +0500
+
+    CHARSET_INFO::instr was extended to return more substring match results:
+    - offset of substr begining
+    - offset of substr end
+    - number of characters (MB compatible)
+
+diff --git a/include/m_ctype.h b/include/m_ctype.h
+index a15fe3097cc..b1557e5293b 100644
+--- a/include/m_ctype.h
++++ b/include/m_ctype.h
+@@ -75,6 +75,12 @@ typedef struct my_uni_idx_st
+   uchar  *tab;
+ } MY_UNI_IDX;
+ 
++typedef struct
++{
++  uint beg;
++  uint end;
++  uint mblen;
++} my_match_t;
+ 
+ enum my_lex_states
+ {
+@@ -116,9 +122,10 @@ typedef struct my_collation_handler_st
+ 
+   int  (*strcasecmp)(struct charset_info_st *, const char *, const char *);
+   
+-  int  (*instr)(struct charset_info_st *,
++  uint (*instr)(struct charset_info_st *,
+                 const char *big,   uint b_length,
+-                const char *small, uint s_length);
++                const char *small, uint s_length,
++                my_match_t *match, uint nmatch);
+   
+   /* Hash calculation */
+   void (*hash_sort)(struct charset_info_st *cs, const uchar *key, uint len,
+@@ -249,9 +256,10 @@ extern void my_hash_sort_simple(CHARSET_INFO *cs,
+ 
+ extern uint my_lengthsp_8bit(CHARSET_INFO *cs, const char *ptr, uint length);
+ 
+-extern int  my_instr_simple(struct charset_info_st *,
++extern uint my_instr_simple(struct charset_info_st *,
+                             const char *big,   uint b_length,
+-                            const char *small, uint s_length);
++                            const char *small, uint s_length,
++                            my_match_t *match, uint nmatch);
+ 
+ 
+ /* Functions for 8bit */
+@@ -317,9 +325,10 @@ int my_wildcmp_mb(CHARSET_INFO *,
+ 		  int escape, int w_one, int w_many);
+ uint my_numchars_mb(CHARSET_INFO *, const char *b, const char *e);
+ uint my_charpos_mb(CHARSET_INFO *, const char *b, const char *e, uint pos);
+-int  my_instr_mb(struct charset_info_st *,
++uint my_instr_mb(struct charset_info_st *,
+                  const char *big,   uint b_length,
+-                 const char *small, uint s_length);
++                 const char *small, uint s_length,
++                 my_match_t *match, uint nmatch);
+ 
+ 
+ extern my_bool my_parse_charset_xml(const char *bug, uint len,
+diff --git a/sql/item_func.cc b/sql/item_func.cc
+index 125f87aecec..b7979e7909c 100644
+--- a/sql/item_func.cc
++++ b/sql/item_func.cc
+@@ -1161,7 +1161,7 @@ longlong Item_func_locate::val_int()
+   null_value=0;
+   uint start=0;
+   uint start0=0;
+-  int  ind;
++  my_match_t match;
+ 
+   if (arg_count == 3)
+   {
+@@ -1175,11 +1175,12 @@ longlong Item_func_locate::val_int()
+   if (!b->length())				// Found empty string at start
+     return (longlong) (start+1);
+   
+-  ind= cmp_collation.collation->coll->instr(cmp_collation.collation,
++  if (!cmp_collation.collation->coll->instr(cmp_collation.collation,
+                                             a->ptr()+start, a->length()-start,
+-                                            b->ptr(), b->length());
+-
+-  return (longlong) (ind >= 0 ? ind + start0 + 1 : ind + 1);
++                                            b->ptr(), b->length(),
++                                            &match, 1))
++    return 0;
++  return (longlong) match.mblen + start0 + 1;
+ }
+ 
+ 
+diff --git a/strings/ctype-bin.c b/strings/ctype-bin.c
+index 75070203239..340084ad848 100644
+--- a/strings/ctype-bin.c
++++ b/strings/ctype-bin.c
+@@ -263,16 +263,25 @@ static int my_strnxfrm_bin(CHARSET_INFO *cs __attribute__((unused)),
+ }
+ 
+ static
+-int my_instr_bin(CHARSET_INFO *cs __attribute__((unused)),
++uint my_instr_bin(CHARSET_INFO *cs __attribute__((unused)),
+                  const char *big,   uint b_length, 
+-		 const char *small, uint s_length)
++		 const char *small, uint s_length,
++		 my_match_t *match, uint nmatch)
+ {
+   register const uchar *str, *search, *end, *search_end;
+   
+   if (s_length <= b_length)
+   {
+     if (!s_length)
+-      return 0;		/* Empty string is always found */
++    {
++      if (nmatch)
++      {
++        match->beg= 0;
++        match->end= 0;
++        match->mblen= 0;
++      }
++      return 1;		/* Empty string is always found */
++    }
+     
+     str= (const uchar*) big;
+     search= (const uchar*) small;
+@@ -293,11 +302,24 @@ int my_instr_bin(CHARSET_INFO *cs __attribute__((unused)),
+ 	  if ((*i++) != (*j++))
+             goto skipp;
+         
+-	return (int) (str- (const uchar*)big) -1;
++        if (nmatch > 0)
++	{
++	  match[0].beg= 0;
++	  match[0].end= str- (const uchar*)big-1;
++	  match[0].mblen= match[0].end;
++	  
++	  if (nmatch > 1)
++	  {
++	    match[1].beg= match[0].end;
++	    match[1].end= match[0].end+s_length;
++	    match[1].mblen= match[1].end-match[1].beg;
++	  }
++	}
++	return 2;
+       }
+     }
+   }
+-  return -1;
++  return 0;
+ }
+ 
+ 
+diff --git a/strings/ctype-mb.c b/strings/ctype-mb.c
+index 03323b3d3a1..ba53ebfb64c 100644
+--- a/strings/ctype-mb.c
++++ b/strings/ctype-mb.c
+@@ -274,18 +274,28 @@ uint my_charpos_mb(CHARSET_INFO *cs __attribute__((unused)),
+   return b-b0;
+ }
+ 
+-int my_instr_mb(CHARSET_INFO *cs,
+-                const char *big,   uint b_length, 
+-                const char *small, uint s_length)
++uint my_instr_mb(CHARSET_INFO *cs,
++                 const char *big,   uint b_length, 
++                 const char *small, uint s_length,
++                 my_match_t *match, uint nmatch)
+ {
+-  register const char *end;
++  register const char *end, *big0;
+   int res= 0;
+   
+   if (s_length <= b_length)
+   {
+     if (!s_length)
+-      return 0;		// Empty string is always found
++    {
++      if (nmatch)
++      {
++        match->beg= 0;
++        match->end= 0;
++        match->mblen= 0;
++      }
++      return 1;		// Empty string is always found
++    }
+     
++    big0= big;
+     end= big+b_length-s_length+1;
+     
+     while (big < end)
+@@ -294,15 +304,28 @@ int my_instr_mb(CHARSET_INFO *cs,
+       
+       if (!cs->coll->strnncoll(cs, (unsigned char*) big,   s_length, 
+       				   (unsigned char*) small, s_length))
+-        return res;
+-      
++      {
++        if (nmatch)
++        {
++          match[0].beg= big0;
++          match[0].end= big-big0;
++          match[0].mblen= res;
++          if (nmatch > 1)
++          {
++            match[1].beg= match[0].end;
++            match[1].end= match[0].end+s_length;
++            match[1].mblen= 0;	/* Not computed */
++          }
++        }
++        return 2;
++      }
+       mblen= (mblen= my_ismbchar(cs, big, end)) ? mblen : 1;
+       big+= mblen;
+       b_length-= mblen;
+       res++;
+     }
+   }
+-  return -1;
++  return 0;
+ }
+ 
+ /* BINARY collations handlers for MB charsets */
+diff --git a/strings/ctype-simple.c b/strings/ctype-simple.c
+index 152980dd305..f85ce5e7a2b 100644
+--- a/strings/ctype-simple.c
++++ b/strings/ctype-simple.c
+@@ -1030,16 +1030,25 @@ uint my_lengthsp_8bit(CHARSET_INFO *cs __attribute__((unused)),
+ }
+ 
+ 
+-int my_instr_simple(CHARSET_INFO *cs,
++uint my_instr_simple(CHARSET_INFO *cs,
+                     const char *big,   uint b_length, 
+-		    const char *small, uint s_length)
++		    const char *small, uint s_length,
++		    my_match_t *match, uint nmatch)
+ {
+   register const uchar *str, *search, *end, *search_end;
+   
+   if (s_length <= b_length)
+   {
+     if (!s_length)
+-      return 0;		// Empty string is always found
++    {
++      if (nmatch)
++      {
++        match->beg= 0;
++        match->end= 0;
++        match->mblen= 0;
++      }
++      return 1;		/* Empty string is always found */
++    }
+     
+     str= (const uchar*) big;
+     search= (const uchar*) small;
+@@ -1060,11 +1069,24 @@ int my_instr_simple(CHARSET_INFO *cs,
+ 	  if (cs->sort_order[*i++] != cs->sort_order[*j++]) 
+             goto skipp;
+         
+-	return (int) (str- (const uchar*)big) -1;
++	if (nmatch > 0)
++	{
++	  match[0].beg= 0;
++	  match[0].end= str- (const uchar*)big-1;
++	  match[0].mblen= match[0].end;
++	  
++	  if (nmatch > 1)
++	  {
++	    match[1].beg= match[0].end;
++	    match[1].end= match[0].end+s_length;
++	    match[1].mblen= match[1].end-match[1].beg;
++	  }
++	}
++	return 2;
+       }
+     }
+   }
+-  return -1;
++  return 0;
+ }
+ 
+ 
+

@@ -1,0 +1,61 @@
+commit 40e26815fafd3b8c4aced17b1f22e68ef33eb8db
+Author: Steven Rostedt <srostedt@redhat.com>
+Date:   Tue Mar 10 11:32:40 2009 -0400
+
+    tracing: do not allow modifying the ftrace events via the event files
+    
+    Impact: fix to prevent crash on calling NULL function pointer
+    
+    The ftrace internal records have their format exported via the event
+    system under the ftrace subsystem. These are only for exporting the
+    format to allow binary readers to be able to parse them in a binary
+    output.
+    
+    The ftrace subsystem events can only be enabled via the ftrace tracers
+    and do not have a registering function. The event files expect the
+    event record to have registering function and will call it directly.
+    Passing in a ftrace subsystem event will cause the kernel to crash
+    because it will execute a NULL pointer.
+    
+    This patch prevents the ftrace subsystem from being viewable to the
+    event enabling files.
+    
+    Signed-off-by: Steven Rostedt <srostedt@redhat.com>
+
+diff --git a/kernel/trace/trace_events.c b/kernel/trace/trace_events.c
+index a0b41cc26f26..85ec10fbb38d 100644
+--- a/kernel/trace/trace_events.c
++++ b/kernel/trace/trace_events.c
+@@ -102,7 +102,7 @@ static int ftrace_set_clr_event(char *buf, int set)
+ 	mutex_lock(&event_mutex);
+ 	events_for_each(call) {
+ 
+-		if (!call->name)
++		if (!call->name || !call->regfunc)
+ 			continue;
+ 
+ 		if (match &&
+@@ -207,8 +207,20 @@ t_next(struct seq_file *m, void *v, loff_t *pos)
+ 
+ 	(*pos)++;
+ 
+-	if ((unsigned long)call >= (unsigned long)__stop_ftrace_events)
+-		return NULL;
++	for (;;) {
++		if ((unsigned long)call >= (unsigned long)__stop_ftrace_events)
++			return NULL;
++
++		/*
++		 * The ftrace subsystem is for showing formats only.
++		 * They can not be enabled or disabled via the event files.
++		 */
++		if (call->regfunc)
++			break;
++
++		call++;
++		next = call;
++	}
+ 
+ 	m->private = ++next;
+ 
+

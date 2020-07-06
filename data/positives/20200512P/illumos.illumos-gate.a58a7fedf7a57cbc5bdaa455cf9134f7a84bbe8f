@@ -1,0 +1,127 @@
+commit a58a7fedf7a57cbc5bdaa455cf9134f7a84bbe8f
+Author: Milan Jurik <milan.jurik@xylab.cz>
+Date:   Sun May 27 16:49:00 2012 +0200
+
+    1991 svccfg describe -t Segmentation Fault
+    2742 minor memory allocation issue in svccfg:upgrade_manifestfiles()
+    Reviewed by: Albert Lee <trisk@nexenta.com>
+    Reviewed by: T Nguyen <truongqnguien@gmail.com>
+    Approved by: Rich Lowe <richlowe@richlowe.net>
+    Approved by: Garrett D'Amore <garrett@damore.org>
+
+diff --git a/usr/src/cmd/svc/svccfg/svccfg_libscf.c b/usr/src/cmd/svc/svccfg/svccfg_libscf.c
+index e00d10e815..d93a12c904 100644
+--- a/usr/src/cmd/svc/svccfg/svccfg_libscf.c
++++ b/usr/src/cmd/svc/svccfg/svccfg_libscf.c
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Milan Jurik. All rights reserved.
+  */
+ 
+ 
+@@ -3900,8 +3901,8 @@ upgrade_manifestfiles(pgroup_t *pg, const entity_t *ient,
+ 	pgroup_t *mfst_pgroup;
+ 	property_t *mfst_prop;
+ 	property_t *old_prop;
+-	char *pname = malloc(MAXPATHLEN);
+-	char *fval = NULL;
++	char *pname;
++	char *fval;
+ 	char *old_pname;
+ 	char *old_fval;
+ 	int no_upgrade_pg;
+@@ -3971,6 +3972,13 @@ upgrade_manifestfiles(pgroup_t *pg, const entity_t *ient,
+ 	    SCF_SUCCESS)
+ 		return (-1);
+ 
++	if ((pname = malloc(MAXPATHLEN)) == NULL)
++		return (ENOMEM);
++	if ((fval = malloc(MAXPATHLEN)) == NULL) {
++		free(pname);
++		return (ENOMEM);
++	}
++
+ 	while ((r = scf_iter_next_property(ud_prop_iter, ud_prop)) == 1) {
+ 		mfst_seen = 0;
+ 		if (scf_property_get_name(ud_prop, pname, MAXPATHLEN) < 0)
+@@ -3990,16 +3998,12 @@ upgrade_manifestfiles(pgroup_t *pg, const entity_t *ient,
+ 		 * property list to get proccessed into the repo.
+ 		 */
+ 		if (mfst_seen == 0) {
+-			if (fval == NULL)
+-				fval = malloc(MAXPATHLEN);
+-
+ 			/*
+ 			 * If we cannot get the value then there is no
+ 			 * reason to attempt to attach the value to
+ 			 * the property group
+ 			 */
+-			if (fval != NULL &&
+-			    prop_get_val(ud_prop, fname_value) == 0 &&
++			if (prop_get_val(ud_prop, fname_value) == 0 &&
+ 			    scf_value_get_astring(fname_value, fval,
+ 			    MAXPATHLEN) != -1)  {
+ 				old_pname = safe_strdup(pname);
+@@ -4016,6 +4020,7 @@ upgrade_manifestfiles(pgroup_t *pg, const entity_t *ient,
+ 			}
+ 		}
+ 	}
++	free(pname);
+ 	free(fval);
+ 
+ 	cbdata.sc_handle = g_hndl;
+diff --git a/usr/src/lib/libscf/common/scf_tmpl.c b/usr/src/lib/libscf/common/scf_tmpl.c
+index 69062e0eb9..cf1517f3d0 100644
+--- a/usr/src/lib/libscf/common/scf_tmpl.c
++++ b/usr/src/lib/libscf/common/scf_tmpl.c
+@@ -20,6 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Milan Jurik. All rights reserved.
+  */
+ 
+ /*
+@@ -913,8 +914,10 @@ _get_snapshot(scf_instance_t *inst, const char *snapshot,
+ 	scf_handle_t *h;
+ 
+ 	h = scf_instance_handle(inst);
+-	if (h == NULL)
++	if (h == NULL) {
++		*snap = NULL;
+ 		return (-1);
++	}
+ 
+ 	if ((*snap = scf_snapshot_create(h)) == NULL) {
+ 		return (-1);
+@@ -2150,7 +2153,8 @@ _get_next_iterator(scf_handle_t *h, scf_pg_tmpl_t *t, const char *snapshot,
+ 				scf_instance_destroy(t->pt_inst);
+ 			t->pt_inst = _get_restarter_inst(h, t->pt_orig_svc,
+ 			    t->pt_orig_inst, t->pt_snap);
+-			scf_service_destroy(t->pt_svc);
++			if (t->pt_svc != t->pt_orig_svc)
++				scf_service_destroy(t->pt_svc);
+ 			t->pt_svc = NULL;
+ 			break;
+ 
+@@ -2159,7 +2163,8 @@ _get_next_iterator(scf_handle_t *h, scf_pg_tmpl_t *t, const char *snapshot,
+ 			if (t->pt_inst != t->pt_orig_inst)
+ 				scf_instance_destroy(t->pt_inst);
+ 			t->pt_inst = _get_global_inst(h);
+-			scf_service_destroy(t->pt_svc);
++			if (t->pt_svc != t->pt_orig_svc)
++				scf_service_destroy(t->pt_svc);
+ 			t->pt_svc = NULL;
+ 			break;
+ 
+@@ -2181,7 +2186,6 @@ _get_next_iterator(scf_handle_t *h, scf_pg_tmpl_t *t, const char *snapshot,
+ 			goto fail;
+ 	}
+ 
+-
+ 	iter = _get_svc_or_inst_iter(h, t);
+ fail:
+ 	return (iter);
+

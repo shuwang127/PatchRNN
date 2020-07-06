@@ -1,0 +1,59 @@
+commit 383a3b64cb617f77df0d1f13e431c455ebcecafb
+Author: Martin Storsjö <martin@martin.st>
+Date:   Tue Feb 21 12:03:56 2012 +0200
+
+    movdec: Restart parsing root-level atoms at the right spot
+    
+    If parsing moov+mdat in a non-seekable file, we currently
+    abort parsing directly after parsing the header of the mdat
+    atom. If we want to continue parsing later (if looking to
+    parse later fragments), we need to skip past the content of the
+    mdat atom, otherwise we end up parsing the content of the mdat
+    atom as root level atoms.
+    
+    Signed-off-by: Martin Storsjö <martin@martin.st>
+
+diff --git a/libavformat/isom.h b/libavformat/isom.h
+index 32c4b3fd1d..214af589a5 100644
+--- a/libavformat/isom.h
++++ b/libavformat/isom.h
+@@ -143,6 +143,7 @@ typedef struct MOVContext {
+     unsigned trex_count;
+     int itunes_metadata;  ///< metadata are itunes style
+     int chapter_track;
++    int64_t next_root_atom; ///< offset of the next root atom
+ } MOVContext;
+ 
+ int ff_mp4_read_descr_len(AVIOContext *pb);
+diff --git a/libavformat/mov.c b/libavformat/mov.c
+index 2242ba7636..a2b2da0a22 100644
+--- a/libavformat/mov.c
++++ b/libavformat/mov.c
+@@ -350,8 +350,11 @@ static int mov_read_default(MOVContext *c, AVIOContext *pb, MOVAtom atom)
+             if (err < 0)
+                 return err;
+             if (c->found_moov && c->found_mdat &&
+-                (!pb->seekable || start_pos + a.size == avio_size(pb)))
++                (!pb->seekable || start_pos + a.size == avio_size(pb))) {
++                if (!pb->seekable)
++                    c->next_root_atom = start_pos + a.size;
+                 return 0;
++            }
+             left = a.size - avio_tell(pb) + start_pos;
+             if (left > 0) /* skip garbage at atom end */
+                 avio_skip(pb, left);
+@@ -2667,8 +2670,11 @@ static int mov_read_packet(AVFormatContext *s, AVPacket *pkt)
+     sample = mov_find_next_sample(s, &st);
+     if (!sample) {
+         mov->found_mdat = 0;
+-        if (s->pb->seekable||
+-            mov_read_default(mov, s->pb, (MOVAtom){ AV_RL32("root"), INT64_MAX }) < 0 ||
++        if (!mov->next_root_atom)
++            return AVERROR_EOF;
++        avio_seek(s->pb, mov->next_root_atom, SEEK_SET);
++        mov->next_root_atom = 0;
++        if (mov_read_default(mov, s->pb, (MOVAtom){ AV_RL32("root"), INT64_MAX }) < 0 ||
+             s->pb->eof_reached)
+             return AVERROR_EOF;
+         av_dlog(s, "read fragments, offset 0x%"PRIx64"\n", avio_tell(s->pb));
+

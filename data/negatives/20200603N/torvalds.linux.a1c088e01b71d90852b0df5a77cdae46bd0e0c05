@@ -1,0 +1,61 @@
+commit a1c088e01b71d90852b0df5a77cdae46bd0e0c05
+Author: Oliver Neukum <oliver@neukum.org>
+Date:   Tue Dec 18 04:45:29 2012 +0000
+
+    usbnet: handle PM failure gracefully
+    
+    If a device fails to do remote wakeup, this is no reason
+    to abort an open totally. This patch just continues without
+    runtime PM.
+    
+    Signed-off-by: Oliver Neukum <oneukum@suse.de>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/usb/usbnet.c b/drivers/net/usb/usbnet.c
+index c04110ba677f..50ed7ab09c9f 100644
+--- a/drivers/net/usb/usbnet.c
++++ b/drivers/net/usb/usbnet.c
+@@ -719,7 +719,8 @@ int usbnet_stop (struct net_device *net)
+ 	dev->flags = 0;
+ 	del_timer_sync (&dev->delay);
+ 	tasklet_kill (&dev->bh);
+-	if (info->manage_power)
++	if (info->manage_power &&
++	    !test_and_clear_bit(EVENT_NO_RUNTIME_PM, &dev->flags))
+ 		info->manage_power(dev, 0);
+ 	else
+ 		usb_autopm_put_interface(dev->intf);
+@@ -794,14 +795,14 @@ int usbnet_open (struct net_device *net)
+ 	tasklet_schedule (&dev->bh);
+ 	if (info->manage_power) {
+ 		retval = info->manage_power(dev, 1);
+-		if (retval < 0)
+-			goto done_manage_power_error;
+-		usb_autopm_put_interface(dev->intf);
++		if (retval < 0) {
++			retval = 0;
++			set_bit(EVENT_NO_RUNTIME_PM, &dev->flags);
++		} else {
++			usb_autopm_put_interface(dev->intf);
++		}
+ 	}
+ 	return retval;
+-
+-done_manage_power_error:
+-	clear_bit(EVENT_DEV_OPEN, &dev->flags);
+ done:
+ 	usb_autopm_put_interface(dev->intf);
+ done_nopm:
+diff --git a/include/linux/usb/usbnet.h b/include/linux/usb/usbnet.h
+index 9bbeabf66c54..288b32aadab2 100644
+--- a/include/linux/usb/usbnet.h
++++ b/include/linux/usb/usbnet.h
+@@ -69,6 +69,7 @@ struct usbnet {
+ #		define EVENT_DEV_ASLEEP 6
+ #		define EVENT_DEV_OPEN	7
+ #		define EVENT_DEVICE_REPORT_IDLE	8
++#		define EVENT_NO_RUNTIME_PM	9
+ };
+ 
+ static inline struct usb_driver *driver_of(struct usb_interface *intf)
+

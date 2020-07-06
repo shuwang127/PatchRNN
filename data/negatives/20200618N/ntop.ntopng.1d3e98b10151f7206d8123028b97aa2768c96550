@@ -1,0 +1,150 @@
+commit 1d3e98b10151f7206d8123028b97aa2768c96550
+Author: Luca Deri <deri@ntop.org>
+Date:   Tue May 26 22:57:57 2015 +0200
+
+    Change to avoid checking alerts state (enabled/disabled) too oftem
+
+diff --git a/include/GenericHost.h b/include/GenericHost.h
+index 1beb332c..0d3ce441 100644
+--- a/include/GenericHost.h
++++ b/include/GenericHost.h
+@@ -88,9 +88,8 @@ class GenericHost : public GenericHashEntry {
+   inline ValueTrend getThptTrend()    { return(bytes_thpt_trend);          };
+   inline char* getJsonActivityMap()   { return(activityStats.serialize()); };
+   inline u_int8_t getSourceId()       { return(source_id);                 };
+-  bool triggerAlerts();
+   virtual char* get_string_key(char *buf, u_int buf_len) { return(NULL);   };
+-  virtual bool match(patricia_tree_t *ptree)  { return(true);              };
++  virtual bool match(patricia_tree_t *ptree)             { return(true);   };
+ };
+ 
+ #endif /* _GENERIC_HOST_H_ */
+diff --git a/include/Host.h b/include/Host.h
+index 162e57a4..3546848e 100644
+--- a/include/Host.h
++++ b/include/Host.h
+@@ -48,7 +48,7 @@ class Host : public GenericHost {
+   DnsStats *dns;
+   HTTPStats *http;
+   EppStats *epp;
+-
++  bool trigger_host_alerts;
+   u_int32_t max_new_flows_sec_threshold, max_num_syn_sec_threshold, max_num_active_flows;
+ 
+ #ifdef NTOPNG_PRO
+@@ -142,8 +142,10 @@ class Host : public GenericHost {
+   inline void incNumEPPQueriesSent(u_int16_t query_type) { if(epp) epp->incNumEPPQueriesSent(query_type); };
+   inline void incNumEPPQueriesRcvd(u_int16_t query_type) { if(epp) epp->incNumEPPQueriesRcvd(query_type); };
+   inline void incNumEPPResponsesSent(u_int32_t ret_code) { if(epp) epp->incNumEPPResponsesSent(ret_code); };
+-  inline void incNumEPPResponsesRcvd(u_int32_t ret_code) { if(epp) epp->incNumEPPResponsesRcvd(ret_code); };
++  inline void incNumEPPResponsesRcvd(u_int32_t ret_code) { if(epp) epp->incNumEPPResponsesRcvd(ret_code); };  
++  inline bool triggerAlerts()                            { return(trigger_host_alerts);                   };
+ 
++  void readAlertPrefs();
+   void updateHTTPHostRequest(char *virtual_host_name, u_int32_t num_req, u_int32_t bytes_sent, u_int32_t bytes_rcvd);
+ 
+   bool match(patricia_tree_t *ptree) { return(get_ip() ? get_ip()->match(ptree) : false); };
+diff --git a/src/GenericHost.cpp b/src/GenericHost.cpp
+index d53fb8df..b069c739 100644
+--- a/src/GenericHost.cpp
++++ b/src/GenericHost.cpp
+@@ -176,19 +176,3 @@ void GenericHost::resetPeriodicStats() {
+   last_bytes_periodic = 0;
+ }
+ 
+-/* *************************************** */
+-
+-/**
+- * @brief Check if trigger alerts for this host
+- * @details It is posisble to disable alert triggering For specific hosts. This method checks if in the preferences for this host, alerts have been disabled. See scripts/lua/host_details.lua.
+- */
+-bool GenericHost::triggerAlerts() {
+-  char *key, ip_buf[48], rsp[32];
+-
+-  if(ntop->getPrefs()->are_alerts_disabled()) return(false);
+-
+-  key = get_string_key(ip_buf, sizeof(ip_buf));
+-  ntop->getRedis()->hashGet((char*)CONST_ALERT_PREFS, key, rsp, sizeof(rsp));
+-
+-  return((strcmp(rsp, "false") == 0) ? 0 : 1);
+-}
+diff --git a/src/Host.cpp b/src/Host.cpp
+index cfbae74e..6f6ef254 100644
+--- a/src/Host.cpp
++++ b/src/Host.cpp
+@@ -258,6 +258,8 @@ void Host::initialize(u_int8_t mac[6], u_int16_t _vlanId, bool init_all) {
+ 
+     if((localHost || systemHost) && ip)
+       readStats();
++
++    readAlertPrefs();
+   }
+ 
+   if(!host_serial) computeHostSerial();
+@@ -1216,3 +1218,21 @@ void Host::setDumpTrafficPolicy(bool new_policy) {
+ 			    (char*)(dump_host_traffic ? "true" : "false"));
+ };
+ 
++
++/* *************************************** */
++
++void Host::readAlertPrefs() {
++  if(ntop->getPrefs()->are_alerts_disabled()) 
++    trigger_host_alerts = false;
++  else {
++    char *key, ip_buf[48], rsp[32];
++      
++    key = get_string_key(ip_buf, sizeof(ip_buf));
++    if(key) {
++      ntop->getRedis()->hashGet((char*)CONST_ALERT_PREFS, key, rsp, sizeof(rsp));
++	
++      trigger_host_alerts = ((strcmp(rsp, "false") == 0) ? 0 : 1);
++    } else
++      trigger_host_alerts = false;
++  }  
++}
+diff --git a/src/Lua.cpp b/src/Lua.cpp
+index 170b2386..f6b64980 100644
+--- a/src/Lua.cpp
++++ b/src/Lua.cpp
+@@ -1550,6 +1550,31 @@ static int ntop_update_host_traffic_policy(lua_State* vm) {
+ 
+ /* ****************************************** */
+ 
++static int ntop_update_host_alert_policy(lua_State* vm) {
++  NetworkInterfaceView *ntop_interface = get_ntop_interface(vm);
++  char *host_ip;
++  u_int16_t vlan_id = 0;
++  char buf[64];
++  Host *h;
++
++  ntop->getTrace()->traceEvent(TRACE_INFO, "%s() called", __FUNCTION__);
++
++  if(ntop_lua_check(vm, __FUNCTION__, 1, LUA_TSTRING)) return(CONST_LUA_ERROR);
++  get_host_vlan_info((char*)lua_tostring(vm, 1), &host_ip, &vlan_id, buf, sizeof(buf));
++
++  /* Optional VLAN id */
++  if(lua_type(vm, 2) == LUA_TNUMBER) vlan_id = (u_int16_t)lua_tonumber(vm, 2);
++
++  if((!ntop_interface) 
++     || ((h = ntop_interface->findHostsByIP(get_allowed_nets(vm), host_ip, vlan_id)) == NULL))
++    return(CONST_LUA_ERROR);
++  
++  h->readAlertPrefs();
++  return(CONST_LUA_OK);
++}
++
++/* ****************************************** */
++
+ static int ntop_set_host_dump_policy(lua_State* vm) {
+   NetworkInterfaceView *ntop_interface = get_ntop_interface(vm);
+   char *host_ip;
+@@ -4140,6 +4165,7 @@ static const luaL_Reg ntop_interface_reg[] = {
+   { "listHTTPhosts",          ntop_list_http_hosts },
+   { "findHost",               ntop_get_interface_find_host },
+   { "updateHostTrafficPolicy", ntop_update_host_traffic_policy },
++  { "updateHostAlertPolicy",  ntop_update_host_alert_policy },
+   { "setHostDumpPolicy",      ntop_set_host_dump_policy },
+   { "setHostQuota",           ntop_set_host_quota },
+   { "getInterfaceDumpDiskPolicy",     ntop_get_interface_dump_disk_policy },
+

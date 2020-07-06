@@ -1,0 +1,72 @@
+commit 8d1db1d154c1134c9bf92b202ef198cc79979ea8
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Wed Jan 22 16:16:04 2014 +0100
+
+    bus: when allocating a memfd for usage in a bus connection, name the memfd after the bus connection
+
+diff --git a/src/libsystemd/sd-bus/bus-kernel.c b/src/libsystemd/sd-bus/bus-kernel.c
+index 78a6c1062..833ea5574 100644
+--- a/src/libsystemd/sd-bus/bus-kernel.c
++++ b/src/libsystemd/sd-bus/bus-kernel.c
+@@ -1085,21 +1085,40 @@ int bus_kernel_pop_memfd(sd_bus *bus, void **address, size_t *mapped, size_t *al
+         assert_se(pthread_mutex_lock(&bus->memfd_cache_mutex) >= 0);
+ 
+         if (bus->n_memfd_cache <= 0) {
+-                struct kdbus_cmd_memfd_make cmd = {
+-                        .size = sizeof(struct kdbus_cmd_memfd_make),
+-                };
++                _cleanup_free_ char *g = NULL;
++                struct kdbus_cmd_memfd_make *cmd;
++                struct kdbus_item *item;
++                size_t l, sz;
+                 int r;
+ 
+                 assert_se(pthread_mutex_unlock(&bus->memfd_cache_mutex) >= 0);
+ 
+-                r = ioctl(bus->input_fd, KDBUS_CMD_MEMFD_NEW, &cmd);
++                assert(bus->connection_name);
++
++                g = sd_bus_label_escape(bus->connection_name);
++                if (!g)
++                        return -ENOMEM;
++
++                l = strlen(g);
++                sz = ALIGN8(offsetof(struct kdbus_cmd_memfd_make, items)) +
++                        ALIGN8(offsetof(struct kdbus_item, str)) +
++                        l + 1;
++                cmd = alloca0(sz);
++                cmd->size = sz;
++
++                item = cmd->items;
++                item->size = ALIGN8(offsetof(struct kdbus_item, str)) + l + 1;
++                item->type = KDBUS_ITEM_MEMFD_NAME;
++                memcpy(item->str, g, l + 1);
++
++                r = ioctl(bus->input_fd, KDBUS_CMD_MEMFD_NEW, cmd);
+                 if (r < 0)
+                         return -errno;
+ 
+                 *address = NULL;
+                 *mapped = 0;
+                 *allocated = 0;
+-                return cmd.fd;
++                return cmd->fd;
+         }
+ 
+         c = &bus->memfd_cache[--bus->n_memfd_cache];
+diff --git a/src/libsystemd/sd-bus/sd-memfd.c b/src/libsystemd/sd-bus/sd-memfd.c
+index 913be2086..b78ea6a31 100644
+--- a/src/libsystemd/sd-bus/sd-memfd.c
++++ b/src/libsystemd/sd-bus/sd-memfd.c
+@@ -92,8 +92,10 @@ _public_ int sd_memfd_new(const char *name, sd_memfd **m) {
+         sz = ALIGN8(offsetof(struct kdbus_cmd_memfd_make, items)) +
+                 ALIGN8(offsetof(struct kdbus_item, str)) +
+                 l + 1;
++
+         cmd = alloca0(sz);
+         cmd->size = sz;
++
+         item = cmd->items;
+         item->size = ALIGN8(offsetof(struct kdbus_item, str)) + l + 1;
+         item->type = KDBUS_ITEM_MEMFD_NAME;
+

@@ -1,0 +1,55 @@
+commit 5f8d0211e3b92b4d342f00cd28d077791c9da3ef
+Author: Andrew Beekhof <andrew@beekhof.net>
+Date:   Mon Jun 1 12:20:45 2015 +1000
+
+    Fix: PE: Skip unrunnable actions when one-or-more is in effect
+    
+    The require-all=false/one-or-more logic will already mark the psuedo op
+    as unrunnable if the one-or-more criteria cannot be satisfied.
+    
+    Therefor we can simply exclude these unrunnable actions from the graph.
+    
+    They appear whenever clone-max is greater than the number of instances
+    that will ever be run (ie. due to location constraints)
+
+diff --git a/pengine/graph.c b/pengine/graph.c
+index 068859048..8fdcfc769 100644
+--- a/pengine/graph.c
++++ b/pengine/graph.c
+@@ -198,7 +198,7 @@ graph_update_action(action_t * first, action_t * then, node_t * node, enum pe_ac
+         if (changed) {
+             pe_rsc_trace(then->rsc, "implies right: %s then %s: changed", first->uuid, then->uuid);
+         } else {
+-            crm_trace("implies right: %s then %s", first->uuid, then->uuid);
++            crm_trace("implies right: %s then %s %p", first->uuid, then->uuid, then->rsc);
+         }
+     }
+ 
+@@ -457,6 +457,13 @@ update_action(action_t * then)
+ 
+     if (is_set(then->flags, pe_action_requires_any)) {
+         clear_bit(then->flags, pe_action_runnable);
++        /* We are relying on the pe_order_one_or_more clause of
++         * graph_update_action(), called as part of the:
++         *
++         *    'if (first == other->action)'
++         *
++         * block below, to set this back if appropriate
++         */
+     }
+ 
+     for (lpc = then->actions_before; lpc != NULL; lpc = lpc->next) {
+@@ -1107,6 +1114,12 @@ should_dump_input(int last_action, action_t * action, action_wrapper_t * wrapper
+                   wrapper->action->id, wrapper->action->uuid, action->uuid);
+         return FALSE;
+ 
++    } else if (is_set(wrapper->action->flags, pe_action_runnable) == FALSE
++               && is_set(type, pe_order_one_or_more)) {
++        crm_trace("Input (%d) %s optional (one-or-more) for %s",
++                  wrapper->action->id, wrapper->action->uuid, action->uuid);
++        return FALSE;
++
+     } else if (is_set(action->flags, pe_action_pseudo)
+                && (wrapper->type & pe_order_stonith_stop)) {
+         crm_trace("Input (%d) %s suppressed for %s",
+

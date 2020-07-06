@@ -1,0 +1,1222 @@
+commit 27682017e9b140a694a11f33f2c3092fb5ed2941
+Author: Akos Kiss <akiss@inf.u-szeged.hu>
+Date:   Thu Apr 21 12:11:44 2016 +0200
+
+    Remove unused internal functions
+    
+    The internals have surprisingly large number of unused functions at
+    surprising places. This patch cleans them out to make maintenance
+    easier and to prevent dead code having effect on future decisions.
+    
+    The patch intentionally does not try to clean up public API but
+    focuses on internal modules only that are/should not be reachable
+    from "outside".
+    
+    However, unit tests do access private API, thus tests of literal
+    storage had to be adjusted.
+    
+    JerryScript-DCO-1.0-Signed-off-by: Akos Kiss akiss@inf.u-szeged.hu
+
+diff --git a/jerry-core/ecma/base/ecma-helpers-string.c b/jerry-core/ecma/base/ecma-helpers-string.c
+index 744c7d44..4f377f16 100644
+--- a/jerry-core/ecma/base/ecma-helpers-string.c
++++ b/jerry-core/ecma/base/ecma-helpers-string.c
+@@ -1270,39 +1270,6 @@ ecma_string_get_char_at_pos (const ecma_string_t *string_p, /**< ecma-string */
+   return ch;
+ } /* ecma_string_get_char_at_pos */
+ 
+-/**
+- * Get byte from specified position in the ecma-string.
+- *
+- * @return byte value
+- */
+-lit_utf8_byte_t
+-ecma_string_get_byte_at_pos (const ecma_string_t *string_p, /**< ecma-string */
+-                             lit_utf8_size_t index) /**< byte index */
+-{
+-  lit_utf8_size_t buffer_size;
+-  bool is_ascii;
+-  const lit_utf8_byte_t *chars_p = ecma_string_raw_chars (string_p, &buffer_size, &is_ascii);
+-  JERRY_ASSERT (index < buffer_size);
+-
+-  if (chars_p != NULL)
+-  {
+-    return chars_p[index];
+-  }
+-
+-  lit_utf8_byte_t byte;
+-
+-  MEM_DEFINE_LOCAL_ARRAY (utf8_str_p, buffer_size, lit_utf8_byte_t);
+-
+-  lit_utf8_size_t sz = ecma_string_to_utf8_string (string_p, utf8_str_p, buffer_size);
+-  JERRY_ASSERT (sz == buffer_size);
+-
+-  byte = utf8_str_p[index];
+-
+-  MEM_FINALIZE_LOCAL_ARRAY (utf8_str_p);
+-
+-  return byte;
+-} /* ecma_string_get_byte_at_pos */
+-
+ /**
+  * Get specified magic string
+  *
+@@ -1350,31 +1317,6 @@ ecma_is_string_magic_longpath (const ecma_string_t *string_p, /**< ecma-string *
+   return lit_is_utf8_string_magic (utf8_str_p, utf8_str_size, out_id_p);
+ } /* ecma_is_string_magic_longpath */
+ 
+-/**
+- * Long path part of ecma_is_ex_string_magic
+- *
+- * Converts passed ecma-string to zt-string and
+- * checks if it is equal to one of magic string
+- *
+- * @return true - if magic string equal to passed string was found,
+- *         false - otherwise.
+- */
+-static bool
+-ecma_is_ex_string_magic_longpath (const ecma_string_t *string_p, /**< ecma-string */
+-                                  lit_magic_string_ex_id_t *out_id_p) /**< [out] external magic string's id */
+-{
+-  lit_utf8_size_t utf8_str_size;
+-  bool is_ascii;
+-  const lit_utf8_byte_t *utf8_str_p = ecma_string_raw_chars (string_p, &utf8_str_size, &is_ascii);
+-
+-  if (utf8_str_p == NULL || !is_ascii)
+-  {
+-    return false;
+-  }
+-
+-  return lit_is_ex_utf8_string_magic (utf8_str_p, utf8_str_size, out_id_p);
+-} /* ecma_is_ex_string_magic_longpath */
+-
+ /**
+  * Check if passed string equals to one of magic strings
+  * and if equal magic string was found, return it's id in 'out_id_p' argument.
+@@ -1408,39 +1350,6 @@ ecma_is_string_magic (const ecma_string_t *string_p, /**< ecma-string */
+   }
+ } /* ecma_is_string_magic */
+ 
+-/**
+- * Check if passed string equals to one of external magic strings
+- * and if equal external magic string was found, return it's id in 'out_id_p' argument.
+- *
+- * @return true - if external magic string equal to passed string was found,
+- *         false - otherwise.
+- */
+-bool
+-ecma_is_ex_string_magic (const ecma_string_t *string_p, /**< ecma-string */
+-                         lit_magic_string_ex_id_t *out_id_p) /**< [out] external magic string's id */
+-{
+-  if (ECMA_STRING_GET_CONTAINER (string_p) == ECMA_STRING_CONTAINER_MAGIC_STRING_EX)
+-  {
+-    JERRY_ASSERT (string_p->u.magic_string_ex_id < lit_get_magic_string_ex_count ());
+-
+-    *out_id_p = (lit_magic_string_ex_id_t) string_p->u.magic_string_ex_id;
+-
+-    return true;
+-  }
+-  else
+-  {
+-    /*
+-     * Any ecma-string constructor except ecma_concat_ecma_strings
+-     * should return ecma-string with ECMA_STRING_CONTAINER_MAGIC_STRING_EX
+-     * container type if new ecma-string's content is equal to one of external magic strings.
+-     */
+-    JERRY_ASSERT (ecma_string_get_length (string_p) > LIT_MAGIC_STRING_LENGTH_LIMIT
+-                  || !ecma_is_ex_string_magic_longpath (string_p, out_id_p));
+-
+-    return false;
+-  }
+-} /* ecma_is_ex_string_magic */
+-
+ /**
+  * Try to calculate hash of the ecma-string
+  *
+diff --git a/jerry-core/ecma/base/ecma-helpers.h b/jerry-core/ecma/base/ecma-helpers.h
+index 85e535f0..a1e032bd 100644
+--- a/jerry-core/ecma/base/ecma-helpers.h
++++ b/jerry-core/ecma/base/ecma-helpers.h
+@@ -168,12 +168,10 @@ extern bool ecma_compare_ecma_strings_relational (const ecma_string_t *, const e
+ extern ecma_length_t ecma_string_get_length (const ecma_string_t *);
+ extern lit_utf8_size_t ecma_string_get_size (const ecma_string_t *);
+ extern ecma_char_t ecma_string_get_char_at_pos (const ecma_string_t *, ecma_length_t);
+-extern lit_utf8_byte_t ecma_string_get_byte_at_pos (const ecma_string_t *, lit_utf8_size_t);
+ 
+ extern ecma_string_t *ecma_get_magic_string (lit_magic_string_id_t);
+ extern ecma_string_t *ecma_get_magic_string_ex (lit_magic_string_ex_id_t);
+ extern bool ecma_is_string_magic (const ecma_string_t *, lit_magic_string_id_t *);
+-extern bool ecma_is_ex_string_magic (const ecma_string_t *, lit_magic_string_ex_id_t *);
+ 
+ extern lit_string_hash_t ecma_string_hash (const ecma_string_t *);
+ extern ecma_string_t *ecma_string_substr (const ecma_string_t *, ecma_length_t, ecma_length_t);
+diff --git a/jerry-core/ecma/builtin-objects/ecma-builtin-helpers-date.c b/jerry-core/ecma/builtin-objects/ecma-builtin-helpers-date.c
+index 6eecb265..62c4cde2 100644
+--- a/jerry-core/ecma/builtin-objects/ecma-builtin-helpers-date.c
++++ b/jerry-core/ecma/builtin-objects/ecma-builtin-helpers-date.c
+@@ -909,29 +909,6 @@ ecma_date_set_internal_property (ecma_value_t this_arg, /**< this argument */
+   return ecma_make_number_value (value_p);
+ } /* ecma_date_set_internal_property */
+ 
+-/**
+- * Insert leading zeros to a string of a number if needed.
+- */
+-void
+-ecma_date_insert_leading_zeros (ecma_string_t **str_p, /**< [in,out] ecma string */
+-                                ecma_number_t num, /**< input number */
+-                                uint32_t length) /**< length of string of number */
+-{
+-  JERRY_ASSERT (length >= 1);
+-
+-  /* If the length is bigger than the number of digits in num, then insert leding zeros. */
+-  uint32_t first_index = length - 1u;
+-  ecma_number_t power_i = (ecma_number_t) pow (10, first_index);
+-  for (uint32_t i = first_index; i > 0 && num < power_i; i--, power_i /= 10)
+-  {
+-    ecma_string_t *zero_str_p = ecma_new_ecma_string_from_uint32 (0);
+-    ecma_string_t *concat_p = ecma_concat_ecma_strings (zero_str_p, *str_p);
+-    ecma_deref_ecma_string (zero_str_p);
+-    ecma_deref_ecma_string (*str_p);
+-    *str_p = concat_p;
+-  }
+-} /* ecma_date_insert_leading_zeros */
+-
+ /**
+  * Common function to copy utf8 characters.
+  *
+diff --git a/jerry-core/ecma/builtin-objects/ecma-builtin-helpers.h b/jerry-core/ecma/builtin-objects/ecma-builtin-helpers.h
+index 8dd575c3..feca31c0 100644
+--- a/jerry-core/ecma/builtin-objects/ecma-builtin-helpers.h
++++ b/jerry-core/ecma/builtin-objects/ecma-builtin-helpers.h
+@@ -119,7 +119,6 @@ extern ecma_number_t ecma_date_time_clip (ecma_number_t);
+ extern ecma_number_t ecma_date_timezone_offset (ecma_number_t);
+ extern ecma_value_t ecma_date_set_internal_property (ecma_value_t, ecma_number_t,
+                                                                 ecma_number_t, ecma_date_timezone_t);
+-extern void ecma_date_insert_leading_zeros (ecma_string_t **, ecma_number_t, uint32_t);
+ 
+ extern ecma_value_t ecma_date_value_to_string (ecma_number_t);
+ extern ecma_value_t ecma_date_value_to_utc_string (ecma_number_t);
+diff --git a/jerry-core/ecma/operations/ecma-function-object.c b/jerry-core/ecma/operations/ecma-function-object.c
+index ce53eb74..86516f3a 100644
+--- a/jerry-core/ecma/operations/ecma-function-object.c
++++ b/jerry-core/ecma/operations/ecma-function-object.c
+@@ -921,98 +921,6 @@ ecma_op_function_construct (ecma_object_t *func_obj_p, /**< Function object */
+   return ret_value;
+ } /* ecma_op_function_construct */
+ 
+-/**
+- * Function declaration.
+- *
+- * See also: ECMA-262 v5, 10.5 - Declaration binding instantiation (block 5).
+- *
+- * @return ecma value
+- *         returned value must be freed with ecma_free_value.
+- */
+-ecma_value_t
+-ecma_op_function_declaration (ecma_object_t *lex_env_p, /**< lexical environment */
+-                              ecma_string_t *function_name_p, /**< function name */
+-                              const ecma_compiled_code_t *bytecode_data_p, /**< bytecode data */
+-                              bool is_decl_in_strict_mode, /**< flag, indicating if function is
+-                                                            *   declared in strict mode code */
+-                              bool is_configurable_bindings) /**< flag indicating whether function
+-                                                              *   is declared in eval code */
+-{
+-  // b.
+-  ecma_object_t *func_obj_p = ecma_op_create_function_object (lex_env_p,
+-                                                              is_decl_in_strict_mode,
+-                                                              bytecode_data_p);
+-
+-  // c.
+-  bool func_already_declared = ecma_op_has_binding (lex_env_p, function_name_p);
+-
+-  ecma_value_t ret_value = ecma_make_simple_value (ECMA_SIMPLE_VALUE_EMPTY);
+-
+-  // d.
+-  if (!func_already_declared)
+-  {
+-    ecma_value_t completion = ecma_op_create_mutable_binding (lex_env_p,
+-                                                              function_name_p,
+-                                                              is_configurable_bindings);
+-
+-    JERRY_ASSERT (ecma_is_value_empty (completion));
+-  }
+-  else if (ecma_is_lexical_environment_global (lex_env_p))
+-  {
+-    // e.
+-    ecma_object_t *glob_obj_p = ecma_builtin_get (ECMA_BUILTIN_ID_GLOBAL);
+-
+-    ecma_property_t *existing_prop_p = ecma_op_object_get_property (glob_obj_p, function_name_p);
+-
+-    if (ecma_is_property_configurable (existing_prop_p))
+-    {
+-      ecma_value_t completion;
+-      completion = ecma_builtin_helper_def_prop (glob_obj_p,
+-                                                 function_name_p,
+-                                                 ecma_make_simple_value (ECMA_SIMPLE_VALUE_UNDEFINED),
+-                                                 true, /* Writable */
+-                                                 true, /* Enumerable */
+-                                                 is_configurable_bindings, /* Configurable */
+-                                                 true); /* Failure handling */
+-
+-      JERRY_ASSERT (ecma_is_value_true (completion));
+-    }
+-    else if (ECMA_PROPERTY_GET_TYPE (existing_prop_p) == ECMA_PROPERTY_TYPE_NAMEDACCESSOR)
+-    {
+-      ret_value = ecma_raise_type_error (ECMA_ERR_MSG (""));
+-    }
+-    else
+-    {
+-      JERRY_ASSERT (ECMA_PROPERTY_GET_TYPE (existing_prop_p) == ECMA_PROPERTY_TYPE_NAMEDDATA);
+-
+-      if (!ecma_is_property_writable (existing_prop_p)
+-          || !ecma_is_property_enumerable (existing_prop_p))
+-      {
+-        ret_value = ecma_raise_type_error (ECMA_ERR_MSG (""));
+-      }
+-    }
+-
+-    ecma_deref_object (glob_obj_p);
+-  }
+-
+-  if (ecma_is_value_empty (ret_value))
+-  {
+-    // f.
+-    ret_value = ecma_op_set_mutable_binding (lex_env_p,
+-                                             function_name_p,
+-                                             ecma_make_object_value (func_obj_p),
+-                                             is_decl_in_strict_mode);
+-  }
+-  else
+-  {
+-    JERRY_ASSERT (ecma_is_value_error (ret_value));
+-  }
+-
+-  ecma_deref_object (func_obj_p);
+-
+-  return ret_value;
+-} /* ecma_op_function_declaration */
+-
+ /**
+  * @}
+  * @}
+diff --git a/jerry-core/ecma/operations/ecma-function-object.h b/jerry-core/ecma/operations/ecma-function-object.h
+index 8238f0eb..016bf256 100644
+--- a/jerry-core/ecma/operations/ecma-function-object.h
++++ b/jerry-core/ecma/operations/ecma-function-object.h
+@@ -53,10 +53,6 @@ ecma_op_function_construct (ecma_object_t *, const ecma_value_t *, ecma_length_t
+ extern ecma_value_t
+ ecma_op_function_has_instance (ecma_object_t *, ecma_value_t);
+ 
+-extern ecma_value_t
+-ecma_op_function_declaration (ecma_object_t *, ecma_string_t *,
+-                              const ecma_compiled_code_t *, bool, bool);
+-
+ /**
+  * @}
+  * @}
+diff --git a/jerry-core/ecma/operations/ecma-get-put-value.c b/jerry-core/ecma/operations/ecma-get-put-value.c
+index ac19893a..6601b066 100644
+--- a/jerry-core/ecma/operations/ecma-get-put-value.c
++++ b/jerry-core/ecma/operations/ecma-get-put-value.c
+@@ -207,133 +207,6 @@ ecma_op_put_value_lex_env_base (ecma_object_t *ref_base_lex_env_p, /**< referenc
+                                       is_strict);
+ } /* ecma_op_put_value_lex_env_base */
+ 
+-/**
+- * Reject sequence for PutValue
+- *
+- * @return ecma value
+- *         Returned value must be freed with ecma_free_value
+- */
+-static ecma_value_t
+-ecma_reject_put (bool is_throw) /**< Throw flag */
+-{
+-  if (is_throw)
+-  {
+-    return ecma_raise_type_error (ECMA_ERR_MSG (""));
+-  }
+-  else
+-  {
+-    return ecma_make_simple_value (ECMA_SIMPLE_VALUE_EMPTY);
+-  }
+-} /* ecma_reject_put */
+-
+-/**
+- * PutValue operation part (object base).
+- *
+- * See also: ECMA-262 v5, 8.7.2, section 4
+- *
+- * @return ecma value
+- *         Returned value must be freed with ecma_free_value.
+- */
+-ecma_value_t
+-ecma_op_put_value_object_base (ecma_reference_t ref, /**< ECMA-reference */
+-                               ecma_value_t value) /**< ECMA-value */
+-{
+-  const ecma_value_t base = ref.base;
+-  const bool is_unresolvable_reference = ecma_is_value_undefined (base);
+-  const bool has_primitive_base = (ecma_is_value_boolean (base)
+-                                   || ecma_is_value_number (base)
+-                                   || ecma_is_value_string (base));
+-  const bool has_object_base = (ecma_is_value_object (base)
+-                                && !(ecma_is_lexical_environment (ecma_get_object_from_value (base))));
+-  const bool is_property_reference = has_primitive_base || has_object_base;
+-
+-  JERRY_ASSERT (!is_unresolvable_reference);
+-  JERRY_ASSERT (is_property_reference);
+-
+-  // 4.a
+-  if (!has_primitive_base)
+-  {
+-    // 4.b case 1
+-
+-    ecma_object_t *obj_p = ecma_get_object_from_value (base);
+-    JERRY_ASSERT (obj_p != NULL
+-                  && !ecma_is_lexical_environment (obj_p));
+-
+-    ecma_value_t ret_value = ecma_make_simple_value (ECMA_SIMPLE_VALUE_EMPTY);
+-
+-    ECMA_TRY_CATCH (put_ret_value,
+-                    ecma_op_object_put (obj_p,
+-                                        ECMA_GET_NON_NULL_POINTER (ecma_string_t,
+-                                                                   ref.referenced_name_cp),
+-                                        value,
+-                                        ref.is_strict),
+-                    ret_value);
+-
+-    ret_value = ecma_make_simple_value (ECMA_SIMPLE_VALUE_EMPTY);
+-
+-    ECMA_FINALIZE (put_ret_value);
+-
+-    return ret_value;
+-  }
+-  else
+-  {
+-    // 4.b case 2
+-    ecma_value_t ret_value = ecma_make_simple_value (ECMA_SIMPLE_VALUE_EMPTY);
+-
+-    // sub_1.
+-    ECMA_TRY_CATCH (obj_base, ecma_op_to_object (base), ret_value);
+-
+-    ecma_object_t *obj_p = ecma_get_object_from_value (obj_base);
+-    JERRY_ASSERT (obj_p != NULL
+-                  && !ecma_is_lexical_environment (obj_p));
+-
+-    ecma_string_t *referenced_name_p = ECMA_GET_NON_NULL_POINTER (ecma_string_t,
+-                                                                  ref.referenced_name_cp);
+-
+-    // sub_2.
+-    if (!ecma_op_object_can_put (obj_p, referenced_name_p))
+-    {
+-      ret_value = ecma_reject_put (ref.is_strict);
+-    }
+-    else
+-    {
+-      // sub_3.
+-      ecma_property_t *own_prop_p = ecma_op_object_get_own_property (obj_p, referenced_name_p);
+-
+-      // sub_5.
+-      ecma_property_t *prop_p = ecma_op_object_get_property (obj_p, referenced_name_p);
+-
+-      // sub_4., sub_7
+-      if ((own_prop_p != NULL && ECMA_PROPERTY_GET_TYPE (own_prop_p) == ECMA_PROPERTY_TYPE_NAMEDDATA)
+-          || (prop_p == NULL)
+-          || ECMA_PROPERTY_GET_TYPE (prop_p) != ECMA_PROPERTY_TYPE_NAMEDACCESSOR)
+-      {
+-        ret_value = ecma_reject_put (ref.is_strict);
+-      }
+-      else
+-      {
+-        // sub_6.
+-        JERRY_ASSERT (prop_p != NULL && ECMA_PROPERTY_GET_TYPE (prop_p) == ECMA_PROPERTY_TYPE_NAMEDACCESSOR);
+-
+-        ecma_object_t *setter_p = ecma_get_named_accessor_property_setter (prop_p);
+-        JERRY_ASSERT (setter_p != NULL);
+-
+-        ECMA_TRY_CATCH (call_ret,
+-                        ecma_op_function_call (setter_p, base, &value, 1),
+-                        ret_value);
+-
+-        ret_value = ecma_make_simple_value (ECMA_SIMPLE_VALUE_EMPTY);
+-
+-        ECMA_FINALIZE (call_ret);
+-      }
+-    }
+-
+-    ECMA_FINALIZE (obj_base);
+-
+-    return ret_value;
+-  }
+-} /* ecma_op_put_value_object_base */
+-
+ /**
+  * @}
+  * @}
+diff --git a/jerry-core/ecma/operations/ecma-lex-env.c b/jerry-core/ecma/operations/ecma-lex-env.c
+index 96b32cfd..059df421 100644
+--- a/jerry-core/ecma/operations/ecma-lex-env.c
++++ b/jerry-core/ecma/operations/ecma-lex-env.c
+@@ -81,21 +81,6 @@ ecma_get_global_environment (void)
+   return ecma_global_lex_env_p;
+ } /* ecma_get_global_environment */
+ 
+-/**
+- * Figure out whether the lexical environment is global.
+- *
+- * @return true - if lexical environment is object-bound and corresponding object is global object,
+- *         false - otherwise.
+- */
+-bool
+-ecma_is_lexical_environment_global (ecma_object_t *lex_env_p) /**< lexical environment */
+-{
+-  JERRY_ASSERT (lex_env_p != NULL
+-                && ecma_is_lexical_environment (lex_env_p));
+-
+-  return (lex_env_p == ecma_global_lex_env_p);
+-} /* ecma_is_lexical_environment_global */
+-
+ /**
+  * @}
+  */
+diff --git a/jerry-core/ecma/operations/ecma-lex-env.h b/jerry-core/ecma/operations/ecma-lex-env.h
+index 9ee27dfb..627daf91 100644
+--- a/jerry-core/ecma/operations/ecma-lex-env.h
++++ b/jerry-core/ecma/operations/ecma-lex-env.h
+@@ -33,7 +33,6 @@
+ extern void ecma_init_environment (void);
+ extern void ecma_finalize_environment (void);
+ extern ecma_object_t *ecma_get_global_environment (void);
+-extern bool ecma_is_lexical_environment_global (ecma_object_t *);
+ 
+ /**
+  * @}
+@@ -43,7 +42,6 @@ extern bool ecma_is_lexical_environment_global (ecma_object_t *);
+ extern ecma_value_t ecma_op_get_value_lex_env_base (ecma_object_t *, ecma_string_t *, bool);
+ extern ecma_value_t ecma_op_get_value_object_base (ecma_reference_t);
+ extern ecma_value_t ecma_op_put_value_lex_env_base (ecma_object_t *, ecma_string_t *, bool, ecma_value_t);
+-extern ecma_value_t ecma_op_put_value_object_base (ecma_reference_t, ecma_value_t);
+ 
+ /* ECMA-262 v5, Table 17. Abstract methods of Environment Records */
+ extern bool ecma_op_has_binding (ecma_object_t *, ecma_string_t *);
+diff --git a/jerry-core/lit/lit-literal.c b/jerry-core/lit/lit-literal.c
+index 5b077a18..ec63485e 100644
+--- a/jerry-core/lit/lit-literal.c
++++ b/jerry-core/lit/lit-literal.c
+@@ -266,264 +266,6 @@ lit_find_literal_by_num (const ecma_number_t num) /**< a number to search for */
+   return NULL;
+ } /* lit_find_literal_by_num */
+ 
+-/**
+- * Check if literal equals to charset record
+- *
+- * @return true if is_equal
+- *         false otherwise
+- */
+-static bool
+-lit_literal_equal_charset_rec (lit_literal_t lit, /**< literal to compare */
+-                               lit_literal_t record) /**< charset record to compare */
+-{
+-  switch (lit->type)
+-  {
+-    case LIT_RECORD_TYPE_CHARSET:
+-    {
+-      return lit_literal_equal_charset (lit,
+-                                        lit_charset_literal_get_charset (record),
+-                                        lit_charset_literal_get_size (record));
+-    }
+-    case LIT_RECORD_TYPE_MAGIC_STR:
+-    {
+-      lit_magic_string_id_t magic_string_id = lit_magic_literal_get_magic_str_id (lit);
+-      return lit_literal_equal_charset (record,
+-                                        lit_get_magic_string_utf8 (magic_string_id),
+-                                        lit_get_magic_string_size (magic_string_id));
+-    }
+-    case LIT_RECORD_TYPE_MAGIC_STR_EX:
+-    {
+-      lit_magic_string_ex_id_t magic_string_id = lit_magic_literal_get_magic_str_ex_id (lit);
+-
+-      return lit_literal_equal_charset (record,
+-                                        lit_get_magic_string_ex_utf8 (magic_string_id),
+-                                        lit_get_magic_string_ex_size (magic_string_id));
+-    }
+-    case LIT_RECORD_TYPE_NUMBER:
+-    {
+-      ecma_number_t num = lit_number_literal_get_number (lit);
+-
+-      lit_utf8_byte_t buff[ECMA_MAX_CHARS_IN_STRINGIFIED_NUMBER];
+-      lit_utf8_size_t copied = ecma_number_to_utf8_string (num, buff, sizeof (buff));
+-
+-      return lit_literal_equal_charset (record, buff, copied);
+-    }
+-    default:
+-    {
+-      JERRY_UNREACHABLE ();
+-      return false;
+-    }
+-  }
+-} /* lit_literal_equal_charset_rec */
+-
+-/**
+- * Check if literal equals to utf-8 string
+- *
+- * @return true if equal
+- *         false otherwise
+- */
+-bool
+-lit_literal_equal_utf8 (lit_literal_t lit, /**< literal to compare */
+-                        const lit_utf8_byte_t *str_p, /**< utf-8 string to compare */
+-                        lit_utf8_size_t str_size) /**< string size in bytes */
+-{
+-  switch (lit->type)
+-  {
+-    case LIT_RECORD_TYPE_CHARSET:
+-    {
+-      if (lit_charset_literal_get_size (lit) != str_size)
+-      {
+-        return 0;
+-      }
+-      return !strncmp ((const char *) lit_charset_literal_get_charset (lit), (const char *) str_p, str_size);
+-    }
+-    case LIT_RECORD_TYPE_MAGIC_STR:
+-    {
+-      lit_magic_string_id_t magic_id = lit_magic_literal_get_magic_str_id (lit);
+-      return lit_compare_utf8_string_and_magic_string (str_p, str_size, magic_id);
+-    }
+-    case LIT_RECORD_TYPE_MAGIC_STR_EX:
+-    {
+-      lit_magic_string_ex_id_t magic_id = lit_magic_literal_get_magic_str_ex_id (lit);
+-      return lit_compare_utf8_string_and_magic_string_ex (str_p, str_size, magic_id);
+-    }
+-    case LIT_RECORD_TYPE_NUMBER:
+-    {
+-      ecma_number_t num = lit_number_literal_get_number (lit);
+-
+-      lit_utf8_byte_t num_buf[ECMA_MAX_CHARS_IN_STRINGIFIED_NUMBER];
+-      lit_utf8_size_t num_size = ecma_number_to_utf8_string (num, num_buf, sizeof (num_buf));
+-
+-      return lit_compare_utf8_strings (str_p, str_size, num_buf, num_size);
+-    }
+-    default:
+-    {
+-      JERRY_UNREACHABLE ();
+-    }
+-  }
+-} /* lit_literal_equal_utf8 */
+-
+-/**
+- * Check if literal contains the string equal to the passed number
+- *
+- * @return true if equal
+- *         false otherwise
+- */
+-bool
+-lit_literal_equal_num (lit_literal_t lit, /**< literal to check */
+-                       ecma_number_t num) /**< number to compare with */
+-{
+-  lit_utf8_byte_t buff[ECMA_MAX_CHARS_IN_STRINGIFIED_NUMBER];
+-  lit_utf8_size_t copied = ecma_number_to_utf8_string (num, buff, sizeof (buff));
+-
+-  return lit_literal_equal_utf8 (lit, buff, copied);
+-} /* lit_literal_equal_num */
+-
+-
+-/**
+- * Check if literal contains the string equal to the buffer
+- *
+- * @return true if equal
+- *         false otherwise
+- */
+-bool
+-lit_literal_equal_charset (lit_literal_t lit, /**< literal to checks */
+-                           const lit_utf8_byte_t *buff, /**< string buffer */
+-                           lit_utf8_size_t size) /**< buffer size */
+-{
+-  JERRY_ASSERT (lit->type == LIT_RECORD_TYPE_CHARSET);
+-
+-  if (size != lit_charset_literal_get_size (lit))
+-  {
+-    return false;
+-  }
+-
+-  return !strncmp ((const char *) buff, (const char *) lit_charset_literal_get_charset (lit), size);
+-} /* lit_literal_equal_charset */
+-
+-
+-/**
+- * Check if two literals are equal
+- *
+- * @return true if equal
+- *         false otherwise
+- */
+-bool
+-lit_literal_equal (lit_literal_t lit1, /**< first literal */
+-                   lit_literal_t lit2) /**< second literal */
+-{
+-  switch (lit2->type)
+-  {
+-    case LIT_RECORD_TYPE_CHARSET:
+-    {
+-      return lit_literal_equal_charset_rec (lit1, lit2);
+-    }
+-    case LIT_RECORD_TYPE_MAGIC_STR:
+-    {
+-      lit_magic_string_id_t magic_str_id = lit_magic_literal_get_magic_str_id (lit2);
+-
+-      return lit_literal_equal_utf8 (lit1,
+-                                     lit_get_magic_string_utf8 (magic_str_id),
+-                                     lit_get_magic_string_size (magic_str_id));
+-    }
+-    case LIT_RECORD_TYPE_MAGIC_STR_EX:
+-    {
+-      lit_magic_string_ex_id_t magic_str_ex_id = lit_magic_literal_get_magic_str_ex_id (lit2);
+-
+-      return lit_literal_equal_utf8 (lit1,
+-                                     lit_get_magic_string_ex_utf8 (magic_str_ex_id),
+-                                     lit_get_magic_string_ex_size (magic_str_ex_id));
+-    }
+-    case LIT_RECORD_TYPE_NUMBER:
+-    {
+-      ecma_number_t num = lit_number_literal_get_number (lit2);
+-      return lit_literal_equal_num (lit1, num);
+-    }
+-    default:
+-    {
+-      JERRY_UNREACHABLE ();
+-      break;
+-    }
+-  }
+-
+-  JERRY_UNREACHABLE ();
+-  return 0;
+-} /* lit_literal_equal */
+-
+-/**
+- * Check if literal equals to utf-8 string.
+- * Check that literal is a string literal before performing detailed comparison.
+- *
+- * @return true if equal
+- *         false otherwise
+- */
+-bool
+-lit_literal_equal_type_utf8 (lit_literal_t lit, /**< literal to compare */
+-                             const lit_utf8_byte_t *str_p, /**< utf-8 string */
+-                             lit_utf8_size_t str_size) /**< string size */
+-{
+-  const lit_record_type_t type = (const lit_record_type_t) lit->type;
+-
+-  if (type == LIT_RECORD_TYPE_NUMBER || type == LIT_RECORD_TYPE_FREE)
+-  {
+-    return false;
+-  }
+-
+-  return lit_literal_equal_utf8 (lit, str_p, str_size);
+-} /* lit_literal_equal_type_utf8 */
+-
+-/**
+- * Check if literal equals to C string.
+- * Check that literal is a string literal before performing detailed comparison.
+- *
+- * @return true if equal
+- *         false otherwise
+- */
+-bool
+-lit_literal_equal_type_cstr (lit_literal_t lit, /**< literal to compare */
+-                             const char *c_str_p) /**< zero-terminated C-string */
+-{
+-  return lit_literal_equal_type_utf8 (lit, (const lit_utf8_byte_t *) c_str_p, (lit_utf8_size_t) strlen (c_str_p));
+-} /* lit_literal_equal_type_cstr */
+-
+-/**
+- * Check if literal contains the string equal to the passed number.
+- * Check that literal is a number literal before performing detailed comparison.
+- *
+- * @return true if equal
+- *         false otherwise
+- */
+-bool
+-lit_literal_equal_type_num (lit_literal_t lit,     /**< literal to check */
+-                            ecma_number_t num) /**< number to compare with */
+-{
+-  if (lit->type != LIT_RECORD_TYPE_NUMBER)
+-  {
+-    return false;
+-  }
+-
+-  return lit_literal_equal_num (lit, num);
+-} /* lit_literal_equal_type_num */
+-
+-/**
+- * Check if two literals are equal
+- * Compare types of literals before performing detailed comparison.
+- *
+- * @return true if equal
+- *         false otherwise
+- */
+-bool
+-lit_literal_equal_type (lit_literal_t lit1, /**< first literal */
+-                        lit_literal_t lit2) /**< second literal */
+-{
+-  if (lit1->type != lit2->type)
+-  {
+-    return false;
+-  }
+-
+-  return lit_literal_equal (lit1, lit2);
+-} /* lit_literal_equal_type */
+-
+ /**
+  * Check if literal really exists in the storage
+  *
+diff --git a/jerry-core/lit/lit-literal.h b/jerry-core/lit/lit-literal.h
+index 919ee263..536f24e8 100644
+--- a/jerry-core/lit/lit-literal.h
++++ b/jerry-core/lit/lit-literal.h
+@@ -38,16 +38,6 @@ extern lit_literal_t lit_create_literal_from_num (ecma_number_t);
+ extern lit_literal_t lit_find_literal_by_num (ecma_number_t);
+ extern lit_literal_t lit_find_or_create_literal_from_num (ecma_number_t);
+ 
+-extern bool lit_literal_equal_utf8 (lit_literal_t, const lit_utf8_byte_t *, lit_utf8_size_t);
+-extern bool lit_literal_equal_num (lit_literal_t, ecma_number_t);
+-extern bool lit_literal_equal (lit_literal_t, lit_literal_t);
+-
+-extern bool lit_literal_equal_type_utf8 (lit_literal_t, const lit_utf8_byte_t *, lit_utf8_size_t);
+-extern bool lit_literal_equal_type_cstr (lit_literal_t, const char *);
+-extern bool lit_literal_equal_type_num (lit_literal_t, ecma_number_t);
+-extern bool lit_literal_equal_type (lit_literal_t, lit_literal_t);
+-extern bool lit_literal_equal_charset (lit_literal_t, const lit_utf8_byte_t *, lit_utf8_size_t);
+-
+ extern lit_literal_t lit_get_literal_by_cp (lit_cpointer_t);
+ 
+ extern ecma_number_t lit_number_literal_get_number (lit_literal_t);
+@@ -55,7 +45,6 @@ extern lit_string_hash_t lit_charset_literal_get_hash (lit_literal_t);
+ extern lit_utf8_size_t lit_charset_literal_get_size (lit_literal_t);
+ extern ecma_length_t lit_charset_literal_get_length (lit_literal_t);
+ extern lit_utf8_byte_t *lit_charset_literal_get_charset (lit_literal_t);
+-extern lit_literal_t lit_literal_get_next (lit_literal_t);
+ 
+ extern lit_magic_string_id_t lit_magic_literal_get_magic_str_id (lit_literal_t);
+ extern lit_magic_string_ex_id_t lit_magic_literal_get_magic_str_ex_id (lit_literal_t);
+diff --git a/jerry-core/lit/lit-strings.c b/jerry-core/lit/lit-strings.c
+index 29ed3ccb..cb745c76 100644
+--- a/jerry-core/lit/lit-strings.c
++++ b/jerry-core/lit/lit-strings.c
+@@ -18,41 +18,6 @@
+ 
+ #include "jrt-libc-includes.h"
+ 
+-JERRY_STATIC_ASSERT (sizeof (lit_utf8_iterator_pos_t) == sizeof (lit_utf8_size_t),
+-                     size_of_lit_utf8_iterator_pos_t_must_be_equal_to_size_of_lit_utf8_size_t);
+-
+-/**
+- * Compare two iterator positions
+- *
+- * @return +1, if pos1 > pos2
+- *          0, if pos1 == pos2
+- *         -1, otherwise
+- */
+-int32_t
+-lit_utf8_iterator_pos_cmp (lit_utf8_iterator_pos_t pos1, /**< first position of the iterator */
+-                           lit_utf8_iterator_pos_t pos2) /**< second position of the iterator */
+-{
+-  if (pos1.offset < pos2.offset)
+-  {
+-    return -1;
+-  }
+-  else if (pos1.offset > pos2.offset)
+-  {
+-    return 1;
+-  }
+-
+-  if (pos1.is_non_bmp_middle == false && pos2.is_non_bmp_middle == true)
+-  {
+-    return -1;
+-  }
+-  else if (pos1.is_non_bmp_middle == true && pos2.is_non_bmp_middle == false)
+-  {
+-    return 1;
+-  }
+-
+-  return 0;
+-} /* lit_utf8_iterator_pos_cmp */
+-
+ /**
+  * Validate utf-8 string
+  *
+@@ -246,69 +211,6 @@ lit_is_code_point_utf16_high_surrogate (lit_code_point_t code_point) /**< code p
+   return LIT_UTF16_HIGH_SURROGATE_MIN <= code_point && code_point <= LIT_UTF16_HIGH_SURROGATE_MAX;
+ } /* lit_is_code_point_utf16_high_surrogate */
+ 
+-/**
+- * Initialize iterator for traversing utf-8 string as a string of code units
+- *
+- * @return iterator
+- */
+-lit_utf8_iterator_t
+-lit_utf8_iterator_create (const lit_utf8_byte_t *utf8_buf_p, /**< utf-8 string */
+-                          lit_utf8_size_t buf_size) /**< string size */
+-{
+-  JERRY_ASSERT (utf8_buf_p || !buf_size);
+-  JERRY_ASSERT (lit_is_utf8_string_valid (utf8_buf_p, buf_size));
+-
+-  lit_utf8_iterator_t buf_iter =
+-  {
+-    utf8_buf_p,
+-    buf_size,
+-    LIT_ITERATOR_POS_ZERO
+-  };
+-
+-  return buf_iter;
+-} /* lit_utf8_iterator_create */
+-
+-/**
+- * Reset iterator to point to the beginning of a string
+- */
+-void
+-lit_utf8_iterator_seek_bos (lit_utf8_iterator_t *iter_p) /**< iterator to reset */
+-{
+-  iter_p->buf_pos.offset = 0;
+-  iter_p->buf_pos.is_non_bmp_middle = false;
+-} /* lit_utf8_iterator_seek_bos */
+-
+-/**
+- * Get iterator's position
+- *
+- * @return current position of the iterator
+- */
+-lit_utf8_iterator_pos_t
+-lit_utf8_iterator_get_pos (const lit_utf8_iterator_t *iter_p) /**< iterator */
+-{
+-  return iter_p->buf_pos;
+-} /* lit_utf8_iterator_get_pos */
+-
+-/**
+- * Restore previously saved position of the iterator
+- */
+-void
+-lit_utf8_iterator_seek (lit_utf8_iterator_t *iter_p, /**< utf-8 string iterator */
+-                        lit_utf8_iterator_pos_t iter_pos) /**< position to restore */
+-{
+-  JERRY_ASSERT (iter_pos.offset <= iter_p->buf_size);
+-#ifndef JERRY_NDEBUG
+-  if (iter_pos.offset < iter_p->buf_size)
+-  {
+-    lit_utf8_byte_t byte = *(iter_p->buf_p + iter_pos.offset);
+-    JERRY_ASSERT ((byte & LIT_UTF8_EXTRA_BYTE_MASK) != LIT_UTF8_EXTRA_BYTE_MARKER);
+-    JERRY_ASSERT (!iter_pos.is_non_bmp_middle || ((byte & LIT_UTF8_4_BYTE_MASK) == LIT_UTF8_4_BYTE_MARKER));
+-  }
+-#endif /* !JERRY_NDEBUG */
+-
+-  iter_p->buf_pos = iter_pos;
+-} /* lit_utf8_iterator_seek */
+-
+ /**
+  * Represents code point (>0xFFFF) as surrogate pair and returns its lower part
+  *
+@@ -342,112 +244,6 @@ convert_code_point_to_high_surrogate (lit_code_point_t code_point) /**< code poi
+   return (LIT_UTF16_HIGH_SURROGATE_MARKER | code_unit_bits);
+ } /* convert_code_point_to_high_surrogate */
+ 
+-/**
+- * Get next code unit form the iterated string
+- *
+- * @return next code unit
+- */
+-ecma_char_t
+-lit_utf8_iterator_peek_next (const lit_utf8_iterator_t *iter_p) /**< [in] utf-8 string iterator */
+-{
+-  JERRY_ASSERT (!lit_utf8_iterator_is_eos (iter_p));
+-
+-  lit_code_point_t code_point;
+-  lit_read_code_point_from_utf8 (iter_p->buf_p + iter_p->buf_pos.offset,
+-                                 iter_p->buf_size - iter_p->buf_pos.offset,
+-                                 &code_point);
+-
+-  if (code_point <= LIT_UTF16_CODE_UNIT_MAX)
+-  {
+-    JERRY_ASSERT (!iter_p->buf_pos.is_non_bmp_middle);
+-    return (ecma_char_t) code_point;
+-  }
+-  else
+-  {
+-    if (iter_p->buf_pos.is_non_bmp_middle)
+-    {
+-      return convert_code_point_to_low_surrogate (code_point);
+-    }
+-    else
+-    {
+-      return convert_code_point_to_high_surrogate (code_point);
+-    }
+-  }
+-} /* lit_utf8_iterator_peek_next */
+-
+-/**
+- * Increment iterator to point to next code unit
+- */
+-void
+-lit_utf8_iterator_incr (lit_utf8_iterator_t *iter_p) /**< [in,out] utf-8 string iterator */
+-{
+-  lit_utf8_iterator_read_next (iter_p);
+-} /* lit_utf8_iterator_incr */
+-
+-/**
+- * Skip specified number of code units
+- */
+-void
+-lit_utf8_iterator_advance (lit_utf8_iterator_t *iter_p, /**< [in,out] iterator */
+-                           ecma_length_t chars_count) /**< number of code units to skip */
+-{
+-  while (chars_count--)
+-  {
+-    lit_utf8_iterator_incr (iter_p);
+-  }
+-} /* lit_utf8_iterator_advance */
+-
+-/**
+- * Get next code unit form the iterated string and increment iterator to point to next code unit
+- *
+- * @return next code unit
+- */
+-ecma_char_t
+-lit_utf8_iterator_read_next (lit_utf8_iterator_t *iter_p) /**< [in,out] utf-8 string iterator */
+-{
+-  JERRY_ASSERT (!lit_utf8_iterator_is_eos (iter_p));
+-
+-  lit_code_point_t code_point;
+-  lit_utf8_size_t utf8_char_size = lit_read_code_point_from_utf8 (iter_p->buf_p + iter_p->buf_pos.offset,
+-                                                                  iter_p->buf_size - iter_p->buf_pos.offset,
+-                                                                  &code_point);
+-
+-  if (code_point <= LIT_UTF16_CODE_UNIT_MAX)
+-  {
+-    JERRY_ASSERT (!iter_p->buf_pos.is_non_bmp_middle);
+-    iter_p->buf_pos.offset = (iter_p->buf_pos.offset + utf8_char_size) & LIT_ITERATOR_OFFSET_MASK;
+-    return (ecma_char_t) code_point;
+-  }
+-  else
+-  {
+-    if (iter_p->buf_pos.is_non_bmp_middle)
+-    {
+-      iter_p->buf_pos.offset = (iter_p->buf_pos.offset + utf8_char_size) & LIT_ITERATOR_OFFSET_MASK;
+-      iter_p->buf_pos.is_non_bmp_middle = false;
+-      return convert_code_point_to_low_surrogate (code_point);
+-    }
+-    else
+-    {
+-      iter_p->buf_pos.is_non_bmp_middle = true;
+-      return convert_code_point_to_high_surrogate (code_point);
+-    }
+-  }
+-} /* lit_utf8_iterator_read_next */
+-
+-/**
+- * Checks iterator reached end of the string
+- *
+- * @return true - iterator is at the end of string
+- *         false - otherwise
+- */
+-bool
+-lit_utf8_iterator_is_eos (const lit_utf8_iterator_t *iter_p) /**< utf-8 string iterator */
+-{
+-  JERRY_ASSERT (iter_p->buf_pos.offset <= iter_p->buf_size);
+-
+-  return (iter_p->buf_pos.offset == iter_p->buf_size);
+-} /* lit_utf8_iterator_is_eos */
+-
+ /**
+  * Calculate size of a zero-terminated utf-8 string
+  *
+@@ -1001,20 +797,3 @@ bool lit_compare_utf8_strings_relational (const lit_utf8_byte_t *string1_p, /**<
+ 
+   return (string1_pos >= string1_end_p && string2_pos < string2_end_p);
+ } /* lit_compare_utf8_strings_relational */
+-
+-/**
+- * Print code unit to standard output
+- */
+-void
+-lit_put_ecma_char (ecma_char_t ecma_char) /**< code unit */
+-{
+-  if (ecma_char <= LIT_UTF8_1_BYTE_CODE_POINT_MAX)
+-  {
+-    jerry_port_putchar (ecma_char);
+-  }
+-  else
+-  {
+-    /* TODO: Support unicode characters printing. */
+-    jerry_port_putchar ('_');
+-  }
+-} /* lit_put_ecma_char */
+diff --git a/jerry-core/lit/lit-strings.h b/jerry-core/lit/lit-strings.h
+index 3c9d2657..c49f96bb 100644
+--- a/jerry-core/lit/lit-strings.h
++++ b/jerry-core/lit/lit-strings.h
+@@ -80,48 +80,11 @@
+  */
+ #define LIT_UTF8_CESU8_SURROGATE_SIZE_DIF (2 * LIT_UTF8_MAX_BYTES_IN_CODE_UNIT - LIT_UTF8_MAX_BYTES_IN_CODE_POINT)
+ 
+-/**
+- * Width of the offset field in lit_utf8_iterator_pos_t structure
+- */
+-#define LIT_ITERATOR_OFFSET_WIDTH (31)
+-
+-/**
+- * Iterator's offset field mask
+- */
+-#define LIT_ITERATOR_OFFSET_MASK ((1ull << LIT_ITERATOR_OFFSET_WIDTH) - 1)
+-
+ /**
+  * Byte values >= LIT_UTF8_FIRST_BYTE_MAX are not allowed in internal strings
+  */
+ #define LIT_UTF8_FIRST_BYTE_MAX LIT_UTF8_5_BYTE_MARKER
+ 
+-/**
+- * Represents position of the iterator
+- */
+-typedef struct
+-{
+-  __extension__ lit_utf8_size_t offset : LIT_ITERATOR_OFFSET_WIDTH; /** offset to utf-8 char */
+-  bool is_non_bmp_middle: 1; /** flag indicating that current position of the iterator is the middle of
+-                              *  4-byte char */
+-} lit_utf8_iterator_pos_t;
+-
+-/**
+- * Value of an iterator, positioned to beginning of a string
+- */
+-#define LIT_ITERATOR_POS_ZERO {0, false}
+-
+-/**
+- * Represents an iterator over utf-8 buffer
+- */
+-typedef struct
+-{
+-  const lit_utf8_byte_t *buf_p; /* buffer */
+-  lit_utf8_size_t buf_size; /* buffer length */
+-  lit_utf8_iterator_pos_t buf_pos; /* position in the buffer */
+-} lit_utf8_iterator_t;
+-
+-int32_t lit_utf8_iterator_pos_cmp (lit_utf8_iterator_pos_t, lit_utf8_iterator_pos_t);
+-
+ /* validation */
+ bool lit_is_utf8_string_valid (const lit_utf8_byte_t *, lit_utf8_size_t);
+ bool lit_is_cesu8_string_valid (const lit_utf8_byte_t *, lit_utf8_size_t);
+@@ -130,23 +93,6 @@ bool lit_is_cesu8_string_valid (const lit_utf8_byte_t *, lit_utf8_size_t);
+ bool lit_is_code_point_utf16_low_surrogate (lit_code_point_t);
+ bool lit_is_code_point_utf16_high_surrogate (lit_code_point_t);
+ 
+-/* iteration */
+-lit_utf8_iterator_t lit_utf8_iterator_create (const lit_utf8_byte_t *, lit_utf8_size_t);
+-
+-void lit_utf8_iterator_seek_bos (lit_utf8_iterator_t *);
+-
+-lit_utf8_iterator_pos_t lit_utf8_iterator_get_pos (const lit_utf8_iterator_t *);
+-void lit_utf8_iterator_seek (lit_utf8_iterator_t *, lit_utf8_iterator_pos_t);
+-
+-ecma_char_t lit_utf8_iterator_peek_next (const lit_utf8_iterator_t *);
+-
+-void lit_utf8_iterator_incr (lit_utf8_iterator_t *);
+-void lit_utf8_iterator_advance (lit_utf8_iterator_t *, ecma_length_t);
+-
+-ecma_char_t lit_utf8_iterator_read_next (lit_utf8_iterator_t *);
+-
+-bool lit_utf8_iterator_is_eos (const lit_utf8_iterator_t *);
+-
+ /* size */
+ lit_utf8_size_t lit_zt_utf8_string_size (const lit_utf8_byte_t *);
+ 
+@@ -189,7 +135,4 @@ ecma_char_t lit_utf8_peek_prev (const lit_utf8_byte_t *);
+ void lit_utf8_incr (const lit_utf8_byte_t **);
+ void lit_utf8_decr (const lit_utf8_byte_t **);
+ 
+-/* print */
+-void lit_put_ecma_char (ecma_char_t);
+-
+ #endif /* !LIT_STRINGS_H */
+diff --git a/tests/unit/test-literal-storage.c b/tests/unit/test-literal-storage.c
+index 4eb4fec1..98be8167 100644
+--- a/tests/unit/test-literal-storage.c
++++ b/tests/unit/test-literal-storage.c
+@@ -1,4 +1,5 @@
+-/* Copyright 2015 Samsung Electronics Co., Ltd.
++/* Copyright 2015-2016 Samsung Electronics Co., Ltd.
++ * Copyright 2016 University of Szeged
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -54,6 +55,31 @@ generate_number ()
+   return num;
+ } /* generate_number */
+ 
++static bool
++compare_utf8_string_and_string_literal (const lit_utf8_byte_t *str_p, lit_utf8_size_t str_size, lit_literal_t lit)
++{
++  if (LIT_RECORD_IS_CHARSET (lit))
++  {
++    lit_utf8_byte_t *lit_str_p = lit_charset_literal_get_charset (lit);
++    lit_utf8_size_t lit_str_size = lit_charset_literal_get_size (lit);
++    return lit_compare_utf8_strings (str_p, str_size, lit_str_p, lit_str_size);
++  }
++  else if (LIT_RECORD_IS_MAGIC_STR (lit))
++  {
++    lit_magic_string_id_t magic_id = lit_magic_literal_get_magic_str_id (lit);
++    return lit_compare_utf8_string_and_magic_string (str_p, str_size, magic_id);
++
++  }
++  else if (LIT_RECORD_IS_MAGIC_STR_EX (lit))
++  {
++    lit_magic_string_ex_id_t magic_id = lit_magic_literal_get_magic_str_ex_id (lit);
++    return lit_compare_utf8_string_and_magic_string_ex (str_p, str_size, magic_id);
++
++  }
++
++  return false;
++} /* compare_utf8_string_and_string_literal */
++
+ int
+ main (int __attr_unused___ argc,
+       char __attr_unused___ **argv)
+@@ -113,20 +139,19 @@ main (int __attr_unused___ argc,
+       {
+         lit1 = lit_find_or_create_literal_from_utf8_string (ptrs[j], lengths[j]);
+         lit2 = lit_find_literal_by_utf8_string (ptrs[j], lengths[j]);
+-        JERRY_ASSERT (lit_literal_equal_utf8 (lit1, ptrs[j], lengths[j]));
+-        JERRY_ASSERT (lit_literal_equal_type_utf8 (lit2, ptrs[j], lengths[j]));
++        JERRY_ASSERT (compare_utf8_string_and_string_literal (ptrs[j], lengths[j], lit1));
++        JERRY_ASSERT (compare_utf8_string_and_string_literal (ptrs[j], lengths[j], lit2));
+       }
+       else
+       {
+         lit1 = lit_find_or_create_literal_from_num (numbers[j]);
+         lit2 = lit_find_literal_by_num (numbers[j]);
+-        JERRY_ASSERT (lit_literal_equal_num (lit1, numbers[j]));
+-        JERRY_ASSERT (lit_literal_equal_type_num (lit2, numbers[j]));
++        JERRY_ASSERT (numbers[j] == lit_number_literal_get_number (lit1));
++        JERRY_ASSERT (numbers[j] == lit_number_literal_get_number (lit2));
+       }
+       JERRY_ASSERT (lit1);
+       JERRY_ASSERT (lit2);
+       JERRY_ASSERT (lit1 == lit2);
+-      JERRY_ASSERT (lit_literal_equal (lit1, lit2));
+     }
+ 
+     // Check empty string exists
+diff --git a/tests/unit/test-strings.c b/tests/unit/test-strings.c
+index 958e0db0..c16c3fde 100644
+--- a/tests/unit/test-strings.c
++++ b/tests/unit/test-strings.c
+@@ -219,15 +219,6 @@ main (int __attr_unused___ argc,
+   JERRY_ASSERT (res_buf[1] == 0x9F);
+   JERRY_ASSERT (res_buf[2] == 0xBF);
+ 
+-  lit_utf8_byte_t bytes[] = {0xF0, 0x90, 0x8D, 0x88};
+-  lit_utf8_iterator_t iter = lit_utf8_iterator_create (bytes, sizeof (bytes));
+-  ecma_char_t code_unit = lit_utf8_iterator_read_next (&iter);
+-  JERRY_ASSERT (!lit_utf8_iterator_is_eos (&iter));
+-  JERRY_ASSERT (code_unit == 0xD800);
+-  code_unit = lit_utf8_iterator_read_next (&iter);
+-  JERRY_ASSERT (lit_utf8_iterator_is_eos (&iter));
+-  JERRY_ASSERT (code_unit == 0xDF48);
+-
+   ecma_finalize ();
+   lit_finalize ();
+   mem_finalize (true);
+

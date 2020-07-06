@@ -1,0 +1,208 @@
+commit 1ce5ca5f26d65359de632cc96a3d745fdeab2465
+Author: wm4 <wm4@nowhere>
+Date:   Mon Aug 6 00:10:13 2012 +0200
+
+    options: get rid of some compatibility stuff
+    
+    Doesn't make sense because we broke/are going to break compatibility
+    with everything anyway.
+    
+    Remove mechanism for warning the user against disabled options.
+    
+    Remove colorspace alternative option values.
+
+diff --git a/cfg-mplayer.h b/cfg-mplayer.h
+index dc261af027..0f1789dec5 100644
+--- a/cfg-mplayer.h
++++ b/cfg-mplayer.h
+@@ -436,9 +436,6 @@ const m_option_t common_opts[] = {
+     // stop at given position
+     {"endpos", &end_at, CONF_TYPE_TIME_SIZE, 0, 0, 0, NULL},
+ 
+-    OPT_ERRORMESSAGE("edl", "Old EDL functionality using the --edl option is "
+-                     "not supported.\n"),
+-
+     // AVI specific: force non-interleaved mode
+     {"ni", &force_ni, CONF_TYPE_FLAG, 0, 0, 1, NULL},
+ 
+@@ -594,7 +591,6 @@ const m_option_t common_opts[] = {
+     {"subfont-blur", &subtitle_font_radius, CONF_TYPE_FLOAT, CONF_RANGE, 0, 8, NULL},
+     {"subfont-outline", &subtitle_font_thickness, CONF_TYPE_FLOAT, CONF_RANGE, 0, 8, NULL},
+     {"subfont-autoscale", &subtitle_autoscale, CONF_TYPE_INT, CONF_RANGE, 0, 3, NULL},
+-    OPT_START_CONDITIONAL(CONFIG_ASS, "libass"),
+     OPT_MAKE_FLAGS("ass", ass_enabled, 0),
+     OPT_FLOATRANGE("ass-font-scale", ass_font_scale, 0, 0, 100),
+     OPT_FLOATRANGE("ass-line-spacing", ass_line_spacing, 0, -1000, 1000),
+@@ -608,7 +604,6 @@ const m_option_t common_opts[] = {
+     OPT_STRING("ass-border-color", ass_border_color, 0),
+     OPT_STRING("ass-styles", ass_styles_file, 0),
+     OPT_INTRANGE("ass-hinting", ass_hinting, 0, 0, 7),
+-    OPT_START_CONDITIONAL(1, ""),
+     {NULL, NULL, 0, 0, 0, 0, NULL}
+ };
+ 
+@@ -690,10 +685,10 @@ const m_option_t mplayer_opts[]={
+     {"panscan", &vo_panscan, CONF_TYPE_FLOAT, CONF_RANGE, -1.0, 1.0, NULL},
+     OPT_FLOATRANGE("panscanrange", vo_panscanrange, 0, -19.0, 99.0),
+     OPT_CHOICE("colormatrix", requested_colorspace, 0,
+-               ({"auto", MP_CSP_AUTO}, {"0", MP_CSP_AUTO},
+-                {"BT.601", MP_CSP_BT_601}, {"sd", MP_CSP_BT_601}, {"1", MP_CSP_BT_601},
+-                {"BT.709", MP_CSP_BT_709}, {"hd", MP_CSP_BT_709}, {"2", MP_CSP_BT_709},
+-                {"SMPTE-240M", MP_CSP_SMPTE_240M}, {"3", MP_CSP_SMPTE_240M})),
++               ({"auto", MP_CSP_AUTO},
++                {"BT.601", MP_CSP_BT_601},
++                {"BT.709", MP_CSP_BT_709},
++                {"SMPTE-240M", MP_CSP_SMPTE_240M})),
+     OPT_CHOICE("colormatrix-input-range", requested_input_range, 0,
+                ({"auto", MP_CSP_LEVELS_AUTO},
+                 {"limited", MP_CSP_LEVELS_TV},
+diff --git a/libvo/vo_vdpau.c b/libvo/vo_vdpau.c
+index 65c371f237..dd6ecd6448 100644
+--- a/libvo/vo_vdpau.c
++++ b/libvo/vo_vdpau.c
+@@ -1702,11 +1702,6 @@ const struct vo_driver video_out_vdpau = {
+         OPT_MAKE_FLAGS("pullup", pullup, 0),
+         OPT_FLOATRANGE("denoise", denoise, 0, 0, 1),
+         OPT_FLOATRANGE("sharpen", sharpen, 0, -1, 1),
+-        OPT_ERRORMESSAGE("colorspace", "vo_vdpau suboption \"colorspace\" has "
+-                         "been removed. Use --colormatrix instead.\n"),
+-        OPT_ERRORMESSAGE("studio", "vo_vdpau suboption \"studio\" has been "
+-                         "removed. Use --colormatrix-output-range=limited "
+-                         "instead.\n"),
+         OPT_INTRANGE("hqscaling", hqscaling, 0, 0, 9),
+         OPT_FLOAT("fps", user_fps, 0),
+         OPT_FLAG_ON("composite-detect", composite_detect, 0, OPTDEF_INT(1)),
+diff --git a/m_config.c b/m_config.c
+index 7ae95de40c..2f989eb6f8 100644
+--- a/m_config.c
++++ b/m_config.c
+@@ -163,7 +163,7 @@ static void optstruct_set(const struct m_config *config,
+ 
+ static void m_config_add_option(struct m_config *config,
+                                 const struct m_option *arg,
+-                                const char *prefix, char *disabled_feature);
++                                const char *prefix);
+ 
+ static int config_destroy(void *p)
+ {
+@@ -215,7 +215,7 @@ struct m_config *m_config_new(void *optstruct,
+         *p = (struct m_option){
+             "include", NULL, CONF_TYPE_STRING, 0,
+         };
+-        m_config_add_option(config, p, NULL, NULL);
++        m_config_add_option(config, p, NULL);
+         config->includefunc = includefunc;
+     }
+ 
+@@ -264,29 +264,14 @@ void m_config_leave_file_local(struct m_config *config)
+ }
+ 
+ static void add_options(struct m_config *config, const struct m_option *defs,
+-                        const char *prefix, char *disabled_feature)
++                        const char *prefix)
+ {
+-    char *dis = disabled_feature;
+-    const char marker[] = "conditional functionality: ";
+-    for (int i = 0; defs[i].name; i++) {
+-        if (!strncmp(defs[i].name, marker, strlen(marker))) {
+-            // If a subconfig entry itself is disabled, everything
+-            // under it is already disabled for the same reason.
+-            if (!disabled_feature) {
+-                if (!strcmp(defs[i].name + strlen(marker), "1"))
+-                    dis = NULL;
+-                else
+-                    dis = defs[i].p;
+-            }
+-            continue;
+-        }
+-        m_config_add_option(config, defs + i, prefix, dis);
+-    }
++    for (int i = 0; defs[i].name; i++)
++        m_config_add_option(config, defs + i, prefix);
+ }
+ 
+ static void m_config_add_option(struct m_config *config,
+-                                const struct m_option *arg, const char *prefix,
+-                                char *disabled_feature)
++                                const struct m_option *arg, const char *prefix)
+ {
+     struct m_config_option *co;
+ 
+@@ -296,7 +281,6 @@ static void m_config_add_option(struct m_config *config,
+     // Allocate a new entry for this option
+     co = talloc_zero(config, struct m_config_option);
+     co->opt = arg;
+-    co->disabled_feature = disabled_feature;
+ 
+     // Fill in the full name
+     if (prefix && *prefix)
+@@ -306,7 +290,7 @@ static void m_config_add_option(struct m_config *config,
+ 
+     // Option with children -> add them
+     if (arg->type->flags & M_OPT_TYPE_HAS_CHILD) {
+-        add_options(config, arg->p, co->name, disabled_feature);
++        add_options(config, arg->p, co->name);
+     } else {
+         struct m_config_option *i;
+         // Check if there is already an option pointing to this address
+@@ -354,7 +338,7 @@ int m_config_register_options(struct m_config *config,
+     assert(config != NULL);
+     assert(args != NULL);
+ 
+-    add_options(config, args, NULL, NULL);
++    add_options(config, args, NULL);
+ 
+     return 1;
+ }
+@@ -389,13 +373,6 @@ static int m_config_parse_option(struct m_config *config, void *optstruct,
+     struct m_config_option *co = m_config_get_co(config, name);
+     if (!co)
+         return M_OPT_UNKNOWN;
+-    if (co->disabled_feature) {
+-        mp_tmsg(MSGT_CFGPARSER, MSGL_ERR,
+-                "Option \"%.*s\" is not available in this version of mplayer2, "
+-                "because it has been compiled with feature \"%s\" disabled.\n",
+-                BSTR_P(name), co->disabled_feature);
+-        return M_OPT_UNKNOWN;
+-    }
+ 
+     // This is the only mandatory function
+     assert(co->opt->type->parse);
+diff --git a/m_config.h b/m_config.h
+index 19d8005d3c..10f0cb67ed 100644
+--- a/m_config.h
++++ b/m_config.h
+@@ -36,8 +36,6 @@ struct m_config_option {
+     struct m_config_option *next;
+     // Full name (ie option:subopt).
+     char *name;
+-    // Compiled without support for this option? If so set to name of feature
+-    char *disabled_feature;
+     // Option description.
+     const struct m_option *opt;
+     // Raw value of the backup of the global value (or NULL).
+diff --git a/m_option.h b/m_option.h
+index 416471ea0e..4ab7e9c1d2 100644
+--- a/m_option.h
++++ b/m_option.h
+@@ -421,11 +421,6 @@ static inline void m_option_free(const m_option_t *opt, void *dst)
+ #define OPTION_PATH_SEPARATOR ':'
+ #endif
+ 
+-// The code will interpret arguments different from 1 as disabled, thus
+-// CONFIG_FOO etc mean disabled if no such macro is defined.
+-#define OPT_START_CONDITIONAL(enable, featurename) OPT_START_CONDITIONAL_AFTERMACROEVAL(enable, featurename)
+-#define OPT_START_CONDITIONAL_AFTERMACROEVAL(enable, featurename) {"conditional functionality: " #enable, .p = featurename}
+-
+ #define OPTDEF_STR(s) .defval = (void *)&(char * const){s}
+ #define OPTDEF_INT(i) .defval = (void *)&(const int){i}
+ 
+@@ -457,7 +452,6 @@ static inline void m_option_free(const m_option_t *opt, void *dst)
+ #define OPT_CHOICE(...) OPT_CHOICE_(__VA_ARGS__, .type = &m_option_type_choice)
+ #define OPT_CHOICE_(optname, varname, flags, choices, ...) OPT_GENERAL(optname, varname, flags, .priv = (void *)&(const struct m_opt_choice_alternatives[]){OPT_HELPER_REMOVEPAREN choices, {NULL}}, __VA_ARGS__)
+ #define OPT_TIME(...) OPT_GENERAL(__VA_ARGS__, .type = &m_option_type_time)
+-#define OPT_ERRORMESSAGE(optname, message) {.name = optname, .p = message, .type = &m_option_type_print}
+ 
+ #define OPT_BASE_STRUCT struct MPOpts
+ 
+

@@ -1,0 +1,75 @@
+commit 263b7fb557f797d9d4d1dcf93fb6bb2efc3f1d46
+Author: John Youn <John.Youn@synopsys.com>
+Date:   Thu Dec 17 11:16:58 2015 -0800
+
+    usb: dwc2: Move reset into dwc2_get_hwparams()
+    
+    The reset is required to get reset values of the hardware parameters but
+    the force mode is not. Move the base reset into dwc2_get_hwparams() and
+    do the reset and force mode afterwards.
+    
+    Signed-off-by: John Youn <johnyoun@synopsys.com>
+    Signed-off-by: Felipe Balbi <balbi@ti.com>
+
+diff --git a/drivers/usb/dwc2/core.c b/drivers/usb/dwc2/core.c
+index b700a47e026a..3b55635c878c 100644
+--- a/drivers/usb/dwc2/core.c
++++ b/drivers/usb/dwc2/core.c
+@@ -3120,6 +3120,9 @@ void dwc2_set_parameters(struct dwc2_hsotg *hsotg,
+ /**
+  * During device initialization, read various hardware configuration
+  * registers and interpret the contents.
++ *
++ * This should be called during driver probe. It will perform a core
++ * soft reset in order to get the reset values of the parameters.
+  */
+ int dwc2_get_hwparams(struct dwc2_hsotg *hsotg)
+ {
+@@ -3128,6 +3131,7 @@ int dwc2_get_hwparams(struct dwc2_hsotg *hsotg)
+ 	u32 hwcfg1, hwcfg2, hwcfg3, hwcfg4;
+ 	u32 hptxfsiz, grxfsiz, gnptxfsiz;
+ 	u32 gusbcfg = 0;
++	int retval;
+ 
+ 	/*
+ 	 * Attempt to ensure this device is really a DWC_otg Controller.
+@@ -3147,6 +3151,10 @@ int dwc2_get_hwparams(struct dwc2_hsotg *hsotg)
+ 		hw->snpsid >> 12 & 0xf, hw->snpsid >> 8 & 0xf,
+ 		hw->snpsid >> 4 & 0xf, hw->snpsid & 0xf, hw->snpsid);
+ 
++	retval = dwc2_core_reset(hsotg);
++	if (retval)
++		return retval;
++
+ 	hwcfg1 = dwc2_readl(hsotg->regs + GHWCFG1);
+ 	hwcfg2 = dwc2_readl(hsotg->regs + GHWCFG2);
+ 	hwcfg3 = dwc2_readl(hsotg->regs + GHWCFG3);
+diff --git a/drivers/usb/dwc2/platform.c b/drivers/usb/dwc2/platform.c
+index f4366513acb6..bfa4a6a8a1f3 100644
+--- a/drivers/usb/dwc2/platform.c
++++ b/drivers/usb/dwc2/platform.c
+@@ -512,13 +512,7 @@ static int dwc2_driver_probe(struct platform_device *dev)
+ 	if (retval)
+ 		return retval;
+ 
+-	/*
+-	 * Reset before dwc2_get_hwparams() then it could get power-on real
+-	 * reset value form registers.
+-	 */
+-	dwc2_core_reset_and_force_dr_mode(hsotg);
+-
+-	/* Detect config values from hardware */
++	/* Reset the controller and detect hardware config values */
+ 	retval = dwc2_get_hwparams(hsotg);
+ 	if (retval)
+ 		goto error;
+@@ -526,6 +520,8 @@ static int dwc2_driver_probe(struct platform_device *dev)
+ 	/* Validate parameter values */
+ 	dwc2_set_parameters(hsotg, params);
+ 
++	dwc2_core_reset_and_force_dr_mode(hsotg);
++
+ 	if (hsotg->dr_mode != USB_DR_MODE_HOST) {
+ 		retval = dwc2_gadget_init(hsotg, irq);
+ 		if (retval)
+

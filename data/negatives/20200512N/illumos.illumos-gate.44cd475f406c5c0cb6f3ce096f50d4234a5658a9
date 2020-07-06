@@ -1,0 +1,444 @@
+commit 44cd475f406c5c0cb6f3ce096f50d4234a5658a9
+Author: zl149053 <none@none>
+Date:   Mon Jun 2 14:59:37 2008 -0700
+
+    6626684 a ':' character is included in the target name crashes the iscsi daemon
+    6671131 iscsitgtd segfaults and takes enormous amounts of memory if ampersand given as option
+
+diff --git a/usr/src/cmd/iscsi/iscsitgtd/errcode.h b/usr/src/cmd/iscsi/iscsitgtd/errcode.h
+index bb5c1bcd5a..4c20c5c163 100644
+--- a/usr/src/cmd/iscsi/iscsitgtd/errcode.h
++++ b/usr/src/cmd/iscsi/iscsitgtd/errcode.h
+@@ -88,6 +88,7 @@ typedef enum {
+ 	ERR_CREATE_TARGET_DIR_FAILED,
+ 	ERR_ENCODE_GUID_FAILED,
+ 	ERR_INIT_XML_READER_FAILED,
++	ERR_INVALID_XML_REQUEST,
+ 	ERR_OPEN_PARAM_FILE_FAILED,
+ 	ERR_UPDATE_MAINCFG_FAILED,
+ 	ERR_UPDATE_TARGCFG_FAILED,
+diff --git a/usr/src/cmd/iscsi/iscsitgtd/main.c b/usr/src/cmd/iscsi/iscsitgtd/main.c
+index 31a70f1fdd..7f56748d70 100644
+--- a/usr/src/cmd/iscsi/iscsitgtd/main.c
++++ b/usr/src/cmd/iscsi/iscsitgtd/main.c
+@@ -437,6 +437,14 @@ server_for_door(void *cookie, char *argp, size_t arg_size, door_desc_t *dp,
+ 		return;
+ 	}
+ 
++	if (validate_xml(argp) != True) {
++		xml_rtn_msg(&err_rply, ERR_INVALID_XML_REQUEST);
++		strlcpy(argp, err_rply, arg_size);
++		free(err_rply);
++		(void) door_return(argp, strlen(argp) + 1, NULL, 0);
++		return;
++	}
++
+ 	bzero(&m, sizeof (m));
+ 
+ 	if ((r = (xmlTextReaderPtr)xmlReaderForMemory(argp, strlen(argp),
+diff --git a/usr/src/cmd/iscsi/iscsitgtd/mgmt_create.c b/usr/src/cmd/iscsi/iscsitgtd/mgmt_create.c
+index 933480b434..c1533e1bae 100644
+--- a/usr/src/cmd/iscsi/iscsitgtd/mgmt_create.c
++++ b/usr/src/cmd/iscsi/iscsitgtd/mgmt_create.c
+@@ -264,8 +264,10 @@ create_target(tgt_node_t *x)
+ 
+ 	if (create_lun(node_name, name, type, lun, size, backing, &code)
+ 	    == True) {
+-		if (mgmt_config_save2scf() == False)
++		if (mgmt_config_save2scf() == False) {
++			xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
+ 			goto error;
++		}
+ 
+ 		/* Only isns register on the 1st creation of the target */
+ 		if (lun == 0 && isns_enabled() == True) {
+@@ -347,6 +349,8 @@ create_initiator(tgt_node_t *x)
+ 
+ 	if (mgmt_config_save2scf() == True)
+ 		xml_rtn_msg(&msg, ERR_SUCCESS);
++	else
++		xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
+ 
+ error:
+ 	if (name)
+@@ -393,6 +397,8 @@ create_tpgt(tgt_node_t *x)
+ 
+ 	if (mgmt_config_save2scf() == True)
+ 		xml_rtn_msg(&msg, ERR_SUCCESS);
++	else
++		xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
+ 
+ error:
+ 	if (tpgt)
+diff --git a/usr/src/cmd/iscsi/iscsitgtd/mgmt_scf.c b/usr/src/cmd/iscsi/iscsitgtd/mgmt_scf.c
+index 9769bb9dd6..753953260e 100644
+--- a/usr/src/cmd/iscsi/iscsitgtd/mgmt_scf.c
++++ b/usr/src/cmd/iscsi/iscsitgtd/mgmt_scf.c
+@@ -67,6 +67,8 @@
+ #include "errcode.h"
+ #include "t10.h"
+ 
++#define	PGNAME_SIZE	64
++
+ static Boolean_t create_pg(targ_scf_t *h, char *pgname, char *prop);
+ static void new_property(targ_scf_t *h, tgt_node_t *n);
+ static void new_value_list(targ_scf_t *h, tgt_node_t *p);
+@@ -75,6 +77,9 @@ static void backup(char *file, char *ext);
+ static pthread_mutex_t scf_conf_mutex;
+ static pthread_mutex_t scf_param_mutex;
+ 
++static void pgname_encode(char *instr, char *outstr, int max_len);
++static void pgname_decode(char *instr);
++
+ Boolean_t
+ mgmt_scf_init()
+ {
+@@ -221,15 +226,32 @@ mgmt_transaction_abort(targ_scf_t *h)
+ 	}
+ }
+ 
++/*
++ * process property group name first
++ * a reasonable buf to receive encoded pgname is double size of pgname
++ */
++#define	PG_FACTOR	2
+ static Boolean_t
+ create_pg(targ_scf_t *h, char *pgname, char *prop)
+ {
+-	if (scf_service_get_pg(h->t_service, pgname, h->t_pg) != 0) {
+-		if (scf_service_add_pg(h->t_service, pgname,
++	int len;
++	char *buf = NULL;
++
++	len = strlen(pgname);
++	buf = (char *)calloc(1, len * PG_FACTOR);
++	if (buf == NULL)
++		return (False);
++
++	pgname_encode(pgname, buf, len * PG_FACTOR);
++
++	if (scf_service_get_pg(h->t_service, buf, h->t_pg) != 0) {
++		if (scf_service_add_pg(h->t_service, buf,
+ 		    prop, 0, h->t_pg) != 0) {
++			free(buf);
+ 			return (False);
+ 		}
+ 	}
++	free(buf);
+ 	return (True);
+ }
+ 
+@@ -323,6 +345,7 @@ mgmt_get_main_config(tgt_node_t **node)
+ 		char *iname;
+ 
+ 		scf_pg_get_name(h->t_pg, pname, sizeof (pname));
++		pgname_decode(pname);
+ 		iname = strchr(pname, '_');
+ 		if (iname == NULL) {
+ 			/* the pg found here is not a tgt/initiator/tpgt */
+@@ -544,7 +567,7 @@ mgmt_config_save2scf()
+ 	scf_property_t *prop = NULL;
+ 	scf_value_t *value = NULL;
+ 	scf_iter_t *iter = NULL;
+-	char pgname[64];
++	char pgname[PGNAME_SIZE];
+ 	char passcode[32];
+ 	unsigned int	outlen;
+ 	tgt_node_t	*n = NULL;
+@@ -670,7 +693,8 @@ mgmt_config_save2scf()
+ 				tgt_node_free(tn);
+ 			}
+ 			mgmt_transaction_end(h);
+-		}
++		} else
++			goto error;
+ 	}
+ 
+ 	if (mgmt_transaction_start(h, "passwords", "application") == True) {
+@@ -735,7 +759,7 @@ mgmt_param_save2scf(tgt_node_t *node, char *target_name, int lun)
+ 	scf_property_t *prop = NULL;
+ 	scf_value_t *value = NULL;
+ 	scf_iter_t *iter = NULL;
+-	char pgname[64];
++	char pgname[PGNAME_SIZE];
+ 	tgt_node_t	*n = NULL;
+ 
+ 	h = mgmt_handle_init();
+@@ -799,7 +823,8 @@ mgmt_get_param(tgt_node_t **node, char *target_name, int lun)
+ 	scf_value_t *value = NULL;
+ 	scf_iter_t *iter = NULL;
+ 	char pname[64];
+-	char pgname[64];
++	char expgname[PGNAME_SIZE * PG_FACTOR];
++	char pgname[PGNAME_SIZE];
+ 	char valuebuf[MAXPATHLEN];
+ 	tgt_node_t	*n;
+ 	Boolean_t status = False;
+@@ -814,10 +839,11 @@ mgmt_get_param(tgt_node_t **node, char *target_name, int lun)
+ 	iter = scf_iter_create(h->t_handle);
+ 
+ 	snprintf(pgname, sizeof (pgname), "param_%s_%d", target_name, lun);
++	pgname_encode(pgname, expgname, PGNAME_SIZE);
+ 
+ 	(void) pthread_mutex_lock(&scf_param_mutex);
+ 
+-	if (scf_service_get_pg(h->t_service, pgname, h->t_pg) == -1) {
++	if (scf_service_get_pg(h->t_service, expgname, h->t_pg) == -1) {
+ 		goto error;
+ 	}
+ 
+@@ -867,7 +893,7 @@ Boolean_t
+ mgmt_param_remove(char *target_name, int lun)
+ {
+ 	targ_scf_t *h = NULL;
+-	char pgname[64];
++	char pgname[PGNAME_SIZE];
+ 
+ 	h = mgmt_handle_init();
+ 	if (h == NULL)
+@@ -1347,3 +1373,77 @@ check_auth_modify(ucred_t *cred)
+ 
+ 	return (ret);
+ }
++
++/*
++ * Following two functions replace ':' and '.' in target/initiator
++ * names into '__2' and '__1' when write to SMF, and do a reverse
++ * replacement when read from SMF.
++ * pgname_encode's buffers are allocated by caller.
++ * see CR 6626684
++ */
++#define	SMF_COLON	"__2"
++#define	SMF_DOT		"__1"
++
++static void
++pgname_encode(char *instr, char *outstr, int max_len)
++{
++	int i = 0;
++
++	assert(instr != NULL && outstr != NULL);
++	for (; *instr != '\0'; instr++) {
++		switch (*instr) {
++		case ':':
++			strcpy(outstr + i, SMF_COLON);
++			i += 3;
++			break;
++		case '.':
++			strcpy(outstr + i, SMF_DOT);
++			i += 3;
++			break;
++		default:
++			*(outstr + i) = *instr;
++			i ++;
++			break;
++		}
++		/* in case of next possible ':' or '.', we cease on len-3 */
++		if (i >= max_len - 3)
++			break;
++	}
++	outstr[i] = '\0';
++}
++
++/*
++ * pgname_decode use original buffer, since it reduces string length
++ */
++static void
++pgname_decode(char *instr)
++{
++	char *buf;
++	char *rec;
++
++	assert(instr != NULL);
++	buf = strdup(instr);
++
++	if (buf == NULL)
++		return;
++
++	rec = buf;
++	for (; *buf != '\0'; buf++) {
++		if (*buf == '_') {
++			if (memcmp(buf, SMF_COLON, strlen(SMF_COLON)) == 0) {
++				*instr = ':';
++				buf += 2;
++			} else if (memcmp(buf, SMF_DOT, strlen(SMF_DOT)) == 0) {
++				*instr = '.';
++				buf += 2;
++			} else {
++				*instr = *buf;
++			}
++		} else {
++			*instr = *buf;
++		}
++		instr ++;
++	}
++	*instr = '\0';
++	free(rec);
++}
+diff --git a/usr/src/cmd/iscsi/iscsitgtd/util.c b/usr/src/cmd/iscsi/iscsitgtd/util.c
+index 1230a5f9d3..1bc5ceac7d 100644
+--- a/usr/src/cmd/iscsi/iscsitgtd/util.c
++++ b/usr/src/cmd/iscsi/iscsitgtd/util.c
+@@ -1649,6 +1649,54 @@ error:
+ 		free(iname);
+ }
+ 
++/*
++ * []----
++ * | validate_xml
++ * |
++ * | This function checks if there is predefined entities &<>'" in xml request
++ * []----
++ */
++Boolean_t
++validate_xml(char *req)
++{
++	in_mark_t in_mark = in_none;
++
++	if (req == NULL)
++		return (False);
++	for (; *req != '\0'; req++) {
++		if (in_mark == in_none) {
++			if (*req == '<') {
++				in_mark = in_lt;
++				continue;
++			} else if (*req == '&') {
++				in_mark = in_amp;
++				continue;
++			} else if (strchr("\"\'>", *req) != NULL) {
++				return (False);
++			}
++		} else if (in_mark == in_lt) {
++			if (*req == '>') {
++				in_mark = in_none;
++				continue;
++			} else if (*req == '<') {
++				return (False);
++			}
++		} else {
++			if (*req == ';') {
++				in_mark = in_none;
++				continue;
++			} else if (*req == '&' || *req == '<') {
++				return (False);
++			}
++		}
++	}
++
++	if (in_mark == in_none)
++		return (True);
++	else
++		return (False);
++}
++
+ /*
+  * []----
+  * | get_local_name
+diff --git a/usr/src/cmd/iscsi/iscsitgtd/util_err.c b/usr/src/cmd/iscsi/iscsitgtd/util_err.c
+index 6e9c88cce5..dd3d5660ad 100644
+--- a/usr/src/cmd/iscsi/iscsitgtd/util_err.c
++++ b/usr/src/cmd/iscsi/iscsitgtd/util_err.c
+@@ -146,6 +146,8 @@ errcode_to_str(err_code_t err_code)
+ 		return ((char *)gettext("Failed to encode GUID value"));
+ 	case ERR_INIT_XML_READER_FAILED:
+ 		return ((char *)gettext("Failed to initialize XML reader"));
++	case ERR_INVALID_XML_REQUEST:
++		return ((char *)gettext("Invalid characters in XML request"));
+ 	case ERR_OPEN_PARAM_FILE_FAILED:
+ 		return ((char *)gettext("Failed to open parameter file"));
+ 	case ERR_UPDATE_MAINCFG_FAILED:
+diff --git a/usr/src/cmd/iscsi/iscsitgtd/utility.h b/usr/src/cmd/iscsi/iscsitgtd/utility.h
+index c0e361bb06..e4208f162b 100644
+--- a/usr/src/cmd/iscsi/iscsitgtd/utility.h
++++ b/usr/src/cmd/iscsi/iscsitgtd/utility.h
+@@ -20,7 +20,7 @@
+  */
+ 
+ /*
+- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
++ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
+  */
+ 
+@@ -60,6 +60,17 @@ typedef struct thick_provo {
+ 	target_queue_t		*q;
+ } thick_provo_t;
+ 
++/*
++ * in_mark presents the state in validate_xml()
++ * in_lt means it enters a '<' and wants a '>' to return normal
++ * in_amp means it meets a '&' and wants a ';' to return normal
++ */
++typedef enum {
++	in_none,
++	in_lt,
++	in_amp
++} in_mark_t;
++
+ void util_init();
+ int read_retry(int fd, char *buf, int count);
+ Boolean_t parse_text(iscsi_conn_t *c, int dlen, char **text,
+@@ -85,6 +96,7 @@ void *thick_provo_start(void *v);
+ Boolean_t thick_provo_chk_thr(char *targ, int lun);
+ void remove_target_common(char *name, int lun, char **msg);
+ char *get_local_name(char *iname);
++Boolean_t validate_xml(char *req);
+ 
+ 
+ #ifdef __cplusplus
+diff --git a/usr/src/lib/libiscsitgt/common/xml.c b/usr/src/lib/libiscsitgt/common/xml.c
+index 1d149d672d..de90d9c197 100644
+--- a/usr/src/lib/libiscsitgt/common/xml.c
++++ b/usr/src/lib/libiscsitgt/common/xml.c
+@@ -611,12 +611,49 @@ tgt_node_dup(tgt_node_t *n)
+ 	return (d);
+ }
+ 
++#define	MAX_REPLACEMENT_ENTITY	8
++#define	MAX_REPLACEMENT_BUFFER	1024
+ void
+ tgt_buf_add(char **b, char *element, const char *cdata)
+ {
++	char	entity[MAX_REPLACEMENT_ENTITY];
++	char	buf[MAX_REPLACEMENT_BUFFER];
++	int	len, i;
++
++	bzero(buf, sizeof (buf));
++
+ 	tgt_buf_add_tag(b, element, Tag_Start);
+-	if (cdata != NULL)
+-		tgt_buf_add_tag(b, cdata, Tag_String);
++	/*
++	 * we have to transform the predefined xml entities;
++	 */
++	if (cdata != NULL) {
++		len = strlen(cdata);
++		for (i = 0; i < len; i++) {
++			switch (cdata[i]) {
++			case '&':
++				(void) strcpy(entity, "&amp;");
++				break;
++			case '<':
++				(void) strcpy(entity, "&lt;");
++				break;
++			case '>':
++				(void) strcpy(entity, "&gt;");
++				break;
++			case '\'':
++				(void) strcpy(entity, "&apos;");
++				break;
++			case '"':
++				(void) strcpy(entity, "&quot;");
++				break;
++			default:
++				entity[0] = cdata[i];
++				entity[1] = '\0';
++				break;
++			}
++			(void) strlcat(buf, entity, sizeof (buf));
++		}
++		tgt_buf_add_tag(b, buf, Tag_String);
++	}
+ 	tgt_buf_add_tag(b, element, Tag_End);
+ }
+ 
+

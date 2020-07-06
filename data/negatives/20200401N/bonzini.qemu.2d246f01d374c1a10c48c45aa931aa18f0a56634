@@ -1,0 +1,72 @@
+commit 2d246f01d374c1a10c48c45aa931aa18f0a56634
+Author: Kevin Wolf <kwolf@redhat.com>
+Date:   Wed Sep 18 15:14:47 2013 +0200
+
+    blockdev: Introduce DriveInfo.enable_auto_del
+    
+    BlockDriverStates shouldn't be affected by an unplugged guest device,
+    except if created with the legacy -drive command line option or the
+    drive_add HMP command.
+    
+    Make the automatic deletion as well as cancelling of jobs conditional on
+    an enable_auto_del boolean that is only set in drive_init().
+    
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+    Reviewed-by: Eric Blake <eblake@redhat.com>
+    Reviewed-by: Wenchao Xia <xiawenc@linux.vnet.ibm.com>
+
+diff --git a/blockdev.c b/blockdev.c
+index ab79df7bff..52996eada3 100644
+--- a/blockdev.c
++++ b/blockdev.c
+@@ -89,6 +89,10 @@ void blockdev_mark_auto_del(BlockDriverState *bs)
+ {
+     DriveInfo *dinfo = drive_get_by_blockdev(bs);
+ 
++    if (dinfo && !dinfo->enable_auto_del) {
++        return;
++    }
++
+     if (bs->job) {
+         block_job_cancel(bs->job);
+     }
+@@ -746,6 +750,7 @@ static void qemu_opt_rename(QemuOpts *opts, const char *from, const char *to)
+ DriveInfo *drive_init(QemuOpts *all_opts, BlockInterfaceType block_default_type)
+ {
+     const char *value;
++    DriveInfo *dinfo;
+ 
+     /* Change legacy command line options into QMP ones */
+     qemu_opt_rename(all_opts, "iops", "throttling.iops-total");
+@@ -794,7 +799,17 @@ DriveInfo *drive_init(QemuOpts *all_opts, BlockInterfaceType block_default_type)
+         qemu_opt_unset(all_opts, "cache");
+     }
+ 
+-    return blockdev_init(all_opts, block_default_type);
++    /* Actual block device init: Functionality shared with blockdev-add */
++    dinfo = blockdev_init(all_opts, block_default_type);
++    if (dinfo == NULL) {
++        goto fail;
++    }
++
++    /* Set legacy DriveInfo fields */
++    dinfo->enable_auto_del = true;
++
++fail:
++    return dinfo;
+ }
+ 
+ void do_commit(Monitor *mon, const QDict *qdict)
+diff --git a/include/sysemu/blockdev.h b/include/sysemu/blockdev.h
+index 804ec8839b..10820910d7 100644
+--- a/include/sysemu/blockdev.h
++++ b/include/sysemu/blockdev.h
+@@ -37,6 +37,7 @@ struct DriveInfo {
+     int bus;
+     int unit;
+     int auto_del;               /* see blockdev_mark_auto_del() */
++    bool enable_auto_del; /* Only for legacy drive_init() */
+     int media_cd;
+     int cyls, heads, secs, trans;
+     QemuOpts *opts;
+

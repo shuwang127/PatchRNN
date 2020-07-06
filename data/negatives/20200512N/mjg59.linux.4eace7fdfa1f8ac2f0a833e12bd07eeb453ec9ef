@@ -1,0 +1,213 @@
+commit 4eace7fdfa1f8ac2f0a833e12bd07eeb453ec9ef
+Author: Cédric Cano <ccano@interfaceconcept.com>
+Date:   Fri Feb 11 19:45:38 2011 -0500
+
+    drm/radeon/kms: 6xx/7xx big endian fixes
+    
+    agd5f: minor cleanups
+    
+    Signed-off-by: Cédric Cano <ccano@interfaceconcept.com>
+    Signed-off-by: Alex Deucher <alexdeucher@gmail.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/radeon/r600.c b/drivers/gpu/drm/radeon/r600.c
+index 650672a0f5ad..de88624d5f87 100644
+--- a/drivers/gpu/drm/radeon/r600.c
++++ b/drivers/gpu/drm/radeon/r600.c
+@@ -2105,7 +2105,11 @@ static int r600_cp_load_microcode(struct radeon_device *rdev)
+ 
+ 	r600_cp_stop(rdev);
+ 
+-	WREG32(CP_RB_CNTL, RB_NO_UPDATE | RB_BLKSZ(15) | RB_BUFSZ(3));
++	WREG32(CP_RB_CNTL,
++#ifdef __BIG_ENDIAN
++	       BUF_SWAP_32BIT |
++#endif
++	       RB_NO_UPDATE | RB_BLKSZ(15) | RB_BUFSZ(3));
+ 
+ 	/* Reset cp */
+ 	WREG32(GRBM_SOFT_RESET, SOFT_RESET_CP);
+@@ -2192,7 +2196,11 @@ int r600_cp_resume(struct radeon_device *rdev)
+ 	WREG32(CP_RB_WPTR, 0);
+ 
+ 	/* set the wb address whether it's enabled or not */
+-	WREG32(CP_RB_RPTR_ADDR, (rdev->wb.gpu_addr + RADEON_WB_CP_RPTR_OFFSET) & 0xFFFFFFFC);
++	WREG32(CP_RB_RPTR_ADDR,
++#ifdef __BIG_ENDIAN
++	       RB_RPTR_SWAP(2) |
++#endif
++	       ((rdev->wb.gpu_addr + RADEON_WB_CP_RPTR_OFFSET) & 0xFFFFFFFC));
+ 	WREG32(CP_RB_RPTR_ADDR_HI, upper_32_bits(rdev->wb.gpu_addr + RADEON_WB_CP_RPTR_OFFSET) & 0xFF);
+ 	WREG32(SCRATCH_ADDR, ((rdev->wb.gpu_addr + RADEON_WB_SCRATCH_OFFSET) >> 8) & 0xFFFFFFFF);
+ 
+@@ -2628,7 +2636,11 @@ void r600_ring_ib_execute(struct radeon_device *rdev, struct radeon_ib *ib)
+ {
+ 	/* FIXME: implement */
+ 	radeon_ring_write(rdev, PACKET3(PACKET3_INDIRECT_BUFFER, 2));
+-	radeon_ring_write(rdev, ib->gpu_addr & 0xFFFFFFFC);
++	radeon_ring_write(rdev,
++#ifdef __BIG_ENDIAN
++			  (2 << 0) |
++#endif
++			  (ib->gpu_addr & 0xFFFFFFFC));
+ 	radeon_ring_write(rdev, upper_32_bits(ib->gpu_addr) & 0xFF);
+ 	radeon_ring_write(rdev, ib->length_dw);
+ }
+@@ -3297,8 +3309,8 @@ restart_ih:
+ 	while (rptr != wptr) {
+ 		/* wptr/rptr are in bytes! */
+ 		ring_index = rptr / 4;
+-		src_id =  rdev->ih.ring[ring_index] & 0xff;
+-		src_data = rdev->ih.ring[ring_index + 1] & 0xfffffff;
++		src_id = le32_to_cpu(rdev->ih.ring[ring_index]) & 0xff;
++		src_data = le32_to_cpu(rdev->ih.ring[ring_index + 1]) & 0xfffffff;
+ 
+ 		switch (src_id) {
+ 		case 1: /* D1 vblank/vline */
+diff --git a/drivers/gpu/drm/radeon/r600_blit_kms.c b/drivers/gpu/drm/radeon/r600_blit_kms.c
+index 86e5aa07f0db..69d94dd4db21 100644
+--- a/drivers/gpu/drm/radeon/r600_blit_kms.c
++++ b/drivers/gpu/drm/radeon/r600_blit_kms.c
+@@ -165,6 +165,9 @@ set_vtx_resource(struct radeon_device *rdev, u64 gpu_addr)
+ 	u32 sq_vtx_constant_word2;
+ 
+ 	sq_vtx_constant_word2 = ((upper_32_bits(gpu_addr) & 0xff) | (16 << 8));
++#ifdef __BIG_ENDIAN
++	sq_vtx_constant_word2 |= (2 << 30);
++#endif
+ 
+ 	radeon_ring_write(rdev, PACKET3(PACKET3_SET_RESOURCE, 7));
+ 	radeon_ring_write(rdev, 0x460);
+@@ -253,7 +256,11 @@ draw_auto(struct radeon_device *rdev)
+ 	radeon_ring_write(rdev, DI_PT_RECTLIST);
+ 
+ 	radeon_ring_write(rdev, PACKET3(PACKET3_INDEX_TYPE, 0));
+-	radeon_ring_write(rdev, DI_INDEX_SIZE_16_BIT);
++	radeon_ring_write(rdev,
++#ifdef __BIG_ENDIAN
++			  (2 << 2) |
++#endif
++			  DI_INDEX_SIZE_16_BIT);
+ 
+ 	radeon_ring_write(rdev, PACKET3(PACKET3_NUM_INSTANCES, 0));
+ 	radeon_ring_write(rdev, 1);
+@@ -424,7 +431,11 @@ set_default_state(struct radeon_device *rdev)
+ 	dwords = ALIGN(rdev->r600_blit.state_len, 0x10);
+ 	gpu_addr = rdev->r600_blit.shader_gpu_addr + rdev->r600_blit.state_offset;
+ 	radeon_ring_write(rdev, PACKET3(PACKET3_INDIRECT_BUFFER, 2));
+-	radeon_ring_write(rdev, gpu_addr & 0xFFFFFFFC);
++	radeon_ring_write(rdev,
++#ifdef __BIG_ENDIAN
++			  (2 << 0) |
++#endif
++			  (gpu_addr & 0xFFFFFFFC));
+ 	radeon_ring_write(rdev, upper_32_bits(gpu_addr) & 0xFF);
+ 	radeon_ring_write(rdev, dwords);
+ 
+@@ -467,7 +478,7 @@ static inline uint32_t i2f(uint32_t input)
+ int r600_blit_init(struct radeon_device *rdev)
+ {
+ 	u32 obj_size;
+-	int r, dwords;
++	int i, r, dwords;
+ 	void *ptr;
+ 	u32 packet2s[16];
+ 	int num_packet2s = 0;
+@@ -486,7 +497,7 @@ int r600_blit_init(struct radeon_device *rdev)
+ 
+ 	dwords = rdev->r600_blit.state_len;
+ 	while (dwords & 0xf) {
+-		packet2s[num_packet2s++] = PACKET2(0);
++		packet2s[num_packet2s++] = cpu_to_le32(PACKET2(0));
+ 		dwords++;
+ 	}
+ 
+@@ -529,8 +540,10 @@ int r600_blit_init(struct radeon_device *rdev)
+ 	if (num_packet2s)
+ 		memcpy_toio(ptr + rdev->r600_blit.state_offset + (rdev->r600_blit.state_len * 4),
+ 			    packet2s, num_packet2s * 4);
+-	memcpy(ptr + rdev->r600_blit.vs_offset, r6xx_vs, r6xx_vs_size * 4);
+-	memcpy(ptr + rdev->r600_blit.ps_offset, r6xx_ps, r6xx_ps_size * 4);
++	for (i = 0; i < r6xx_vs_size; i++)
++		*(u32 *)((unsigned long)ptr + rdev->r600_blit.vs_offset + i * 4) = cpu_to_le32(r6xx_vs[i]);
++	for (i = 0; i < r6xx_ps_size; i++)
++		*(u32 *)((unsigned long)ptr + rdev->r600_blit.ps_offset + i * 4) = cpu_to_le32(r6xx_ps[i]);
+ 	radeon_bo_kunmap(rdev->r600_blit.shader_obj);
+ 	radeon_bo_unreserve(rdev->r600_blit.shader_obj);
+ 
+diff --git a/drivers/gpu/drm/radeon/r600_blit_shaders.c b/drivers/gpu/drm/radeon/r600_blit_shaders.c
+index e8151c1d55b2..2d1f6c5ee2a7 100644
+--- a/drivers/gpu/drm/radeon/r600_blit_shaders.c
++++ b/drivers/gpu/drm/radeon/r600_blit_shaders.c
+@@ -684,7 +684,11 @@ const u32 r6xx_vs[] =
+ 	0x00000000,
+ 	0x3c000000,
+ 	0x68cd1000,
++#ifdef __BIG_ENDIAN
++	0x000a0000,
++#else
+ 	0x00080000,
++#endif
+ 	0x00000000,
+ };
+ 
+diff --git a/drivers/gpu/drm/radeon/r600d.h b/drivers/gpu/drm/radeon/r600d.h
+index a5d898b4bad2..04bac0bbd3ec 100644
+--- a/drivers/gpu/drm/radeon/r600d.h
++++ b/drivers/gpu/drm/radeon/r600d.h
+@@ -154,13 +154,14 @@
+ #define		ROQ_IB2_START(x)				((x) << 8)
+ #define	CP_RB_BASE					0xC100
+ #define	CP_RB_CNTL					0xC104
+-#define		RB_BUFSZ(x)					((x)<<0)
+-#define		RB_BLKSZ(x)					((x)<<8)
+-#define		RB_NO_UPDATE					(1<<27)
+-#define		RB_RPTR_WR_ENA					(1<<31)
++#define		RB_BUFSZ(x)					((x) << 0)
++#define		RB_BLKSZ(x)					((x) << 8)
++#define		RB_NO_UPDATE					(1 << 27)
++#define		RB_RPTR_WR_ENA					(1 << 31)
+ #define		BUF_SWAP_32BIT					(2 << 16)
+ #define	CP_RB_RPTR					0x8700
+ #define	CP_RB_RPTR_ADDR					0xC10C
++#define		RB_RPTR_SWAP(x)					((x) << 0)
+ #define	CP_RB_RPTR_ADDR_HI				0xC110
+ #define	CP_RB_RPTR_WR					0xC108
+ #define	CP_RB_WPTR					0xC114
+diff --git a/drivers/gpu/drm/radeon/rv770.c b/drivers/gpu/drm/radeon/rv770.c
+index 2211a323db41..d8ba67690656 100644
+--- a/drivers/gpu/drm/radeon/rv770.c
++++ b/drivers/gpu/drm/radeon/rv770.c
+@@ -321,7 +321,11 @@ static int rv770_cp_load_microcode(struct radeon_device *rdev)
+ 		return -EINVAL;
+ 
+ 	r700_cp_stop(rdev);
+-	WREG32(CP_RB_CNTL, RB_NO_UPDATE | (15 << 8) | (3 << 0));
++	WREG32(CP_RB_CNTL,
++#ifdef __BIG_ENDIAN
++	       BUF_SWAP_32BIT |
++#endif
++	       RB_NO_UPDATE | RB_BLKSZ(15) | RB_BUFSZ(3));
+ 
+ 	/* Reset cp */
+ 	WREG32(GRBM_SOFT_RESET, SOFT_RESET_CP);
+diff --git a/drivers/gpu/drm/radeon/rv770d.h b/drivers/gpu/drm/radeon/rv770d.h
+index abc8cf5a3672..79fa588e9ed5 100644
+--- a/drivers/gpu/drm/radeon/rv770d.h
++++ b/drivers/gpu/drm/radeon/rv770d.h
+@@ -76,10 +76,10 @@
+ #define		ROQ_IB1_START(x)				((x) << 0)
+ #define		ROQ_IB2_START(x)				((x) << 8)
+ #define	CP_RB_CNTL					0xC104
+-#define		RB_BUFSZ(x)					((x)<<0)
+-#define		RB_BLKSZ(x)					((x)<<8)
+-#define		RB_NO_UPDATE					(1<<27)
+-#define		RB_RPTR_WR_ENA					(1<<31)
++#define		RB_BUFSZ(x)					((x) << 0)
++#define		RB_BLKSZ(x)					((x) << 8)
++#define		RB_NO_UPDATE					(1 << 27)
++#define		RB_RPTR_WR_ENA					(1 << 31)
+ #define		BUF_SWAP_32BIT					(2 << 16)
+ #define	CP_RB_RPTR					0x8700
+ #define	CP_RB_RPTR_ADDR					0xC10C
+

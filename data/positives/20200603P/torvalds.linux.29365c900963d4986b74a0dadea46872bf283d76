@@ -1,0 +1,48 @@
+commit 29365c900963d4986b74a0dadea46872bf283d76
+Author: Stephen Hemminger <shemminger@osdl.org>
+Date:   Fri Sep 1 15:53:48 2006 -0700
+
+    [PATCH] skge: irq lock race
+    
+    The driver needs to access the IRQ status inside of lock to avoid
+    races with other places changing IRQ mask etc. This may be related
+    to some of the SMP bugs reported against skge in kernel bugzilla.
+    
+    Signed-off-by: Stephen Hemminger <shemminger@osdl.org>
+    Signed-off-by: Jeff Garzik <jeff@garzik.org>
+
+diff --git a/drivers/net/skge.c b/drivers/net/skge.c
+index e86a88aa9d06..8a321be24835 100644
+--- a/drivers/net/skge.c
++++ b/drivers/net/skge.c
+@@ -2891,13 +2891,15 @@ static irqreturn_t skge_intr(int irq, void *dev_id, struct pt_regs *regs)
+ {
+ 	struct skge_hw *hw = dev_id;
+ 	u32 status;
++	int handled = 0;
+ 
++	spin_lock(&hw->hw_lock);
+ 	/* Reading this register masks IRQ */
+ 	status = skge_read32(hw, B0_SP_ISRC);
+ 	if (status == 0)
+-		return IRQ_NONE;
++		goto out;
+ 
+-	spin_lock(&hw->hw_lock);
++	handled = 1;
+ 	status &= hw->intr_mask;
+ 	if (status & IS_EXT_REG) {
+ 		hw->intr_mask &= ~IS_EXT_REG;
+@@ -2959,9 +2961,10 @@ static irqreturn_t skge_intr(int irq, void *dev_id, struct pt_regs *regs)
+ 
+ 	skge_write32(hw, B0_IMSK, hw->intr_mask);
+ 	skge_read32(hw, B0_IMSK);
++out:
+ 	spin_unlock(&hw->hw_lock);
+ 
+-	return IRQ_HANDLED;
++	return IRQ_RETVAL(handled);
+ }
+ 
+ #ifdef CONFIG_NET_POLL_CONTROLLER
+

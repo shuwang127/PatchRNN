@@ -1,0 +1,82 @@
+commit ddc9397431f5ece23bfe670752894aa0aae10885
+Author: Mathias Stearn <mathias@10gen.com>
+Date:   Mon Mar 8 16:35:10 2010 -0500
+
+    Don't escape '/' in JSON strings SERVER-713
+
+diff --git a/db/jsobj.cpp b/db/jsobj.cpp
+index 87845c2ccc..2bb813b753 100644
+--- a/db/jsobj.cpp
++++ b/db/jsobj.cpp
+@@ -151,7 +151,7 @@ namespace mongo {
+         return s.str();
+     }
+ 
+-    string escape( string s ) {
++    string escape( string s , bool escape_slash=false) {
+         stringstream ret;
+         for ( string::iterator i = s.begin(); i != s.end(); ++i ) {
+             switch ( *i ) {
+@@ -162,7 +162,7 @@ namespace mongo {
+                 ret << "\\\\";
+                 break;
+             case '/':
+-                ret << "\\/";
++                ret << (escape_slash ? "\\/" : "/");
+                 break;
+             case '\b':
+                 ret << "\\b";
+@@ -301,17 +301,13 @@ namespace mongo {
+                 s << " )";
+             break;
+         case RegEx:
+-            if ( format == Strict )
+-                s << "{ \"$regex\" : \"";
+-            else
+-                s << "/";
+-            s << escape( regex() );
+-            if ( format == Strict )
++            if ( format == Strict ){
++                s << "{ \"$regex\" : \"" << escape( regex() );
+                 s << "\", \"$options\" : \"" << regexFlags() << "\" }";
+-            else {
+-                s << "/";
++            } else {
++                s << "/" << escape( regex() , true ) << "/";
+                 // FIXME Worry about alpha order?
+-                for ( const char *f = regexFlags(); *f; ++f )
++                for ( const char *f = regexFlags(); *f; ++f ){
+                     switch ( *f ) {
+                     case 'g':
+                     case 'i':
+@@ -320,6 +316,7 @@ namespace mongo {
+                     default:
+                         break;
+                     }
++                }
+             }
+             break;
+ 
+diff --git a/dbtests/jsontests.cpp b/dbtests/jsontests.cpp
+index 68c6b5c492..aa6b1a2c62 100644
+--- a/dbtests/jsontests.cpp
++++ b/dbtests/jsontests.cpp
+@@ -47,7 +47,7 @@ namespace JsonTests {
+             void run() {
+                 BSONObjBuilder b;
+                 b.append( "a", "\" \\ / \b \f \n \r \t" );
+-                ASSERT_EQUALS( "{ \"a\" : \"\\\" \\\\ \\/ \\b \\f \\n \\r \\t\" }", b.done().jsonString( Strict ) );
++                ASSERT_EQUALS( "{ \"a\" : \"\\\" \\\\ / \\b \\f \\n \\r \\t\" }", b.done().jsonString( Strict ) );
+             }
+         };
+ 
+@@ -304,7 +304,7 @@ namespace JsonTests {
+                 BSONObjBuilder b;
+                 b.appendRegex( "a", "/\"", "i" );
+                 BSONObj built = b.done();
+-                ASSERT_EQUALS( "{ \"a\" : { \"$regex\" : \"\\/\\\"\", \"$options\" : \"i\" } }",
++                ASSERT_EQUALS( "{ \"a\" : { \"$regex\" : \"/\\\"\", \"$options\" : \"i\" } }",
+                               built.jsonString( Strict ) );
+                 ASSERT_EQUALS( "{ \"a\" : /\\/\\\"/i }", built.jsonString( TenGen ) );
+                 ASSERT_EQUALS( "{ \"a\" : /\\/\\\"/i }", built.jsonString( JS ) );
+

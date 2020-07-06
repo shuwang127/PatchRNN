@@ -1,0 +1,45 @@
+commit a5c7f4710fba334bf613d705f97b4471b36446f8
+Author: Stefan Richter <stefanr@s5r6.in-berlin.de>
+Date:   Wed Mar 19 22:02:40 2008 +0100
+
+    firewire: insist on successive self ID complete events
+    
+    The whole topology code only works if the old and new topologies which
+    are compared come from immediately successive self ID complete events.
+    
+    If there happened bus resets without self ID complete events in the
+    meantime, or self ID complete events with invalid selfIDs, the topology
+    comparison could identify nodes wrongly, or more likely just corrupt
+    kernel memory or panic right away.
+    
+    We now discard all nodes of the old topology and treat all current nodes
+    as new ones if the current self ID generation is not the previous one
+    plus 1.
+    
+    Signed-off-by: Stefan Richter <stefanr@s5r6.in-berlin.de>
+    Signed-off-by: Jarod Wilson <jwilson@redhat.com>
+
+diff --git a/drivers/firewire/fw-topology.c b/drivers/firewire/fw-topology.c
+index c9be6e6948c4..e7520e4bd6bc 100644
+--- a/drivers/firewire/fw-topology.c
++++ b/drivers/firewire/fw-topology.c
+@@ -518,6 +518,18 @@ fw_core_handle_bus_reset(struct fw_card *card,
+ 	struct fw_node *local_node;
+ 	unsigned long flags;
+ 
++	/*
++	 * If the selfID buffer is not the immediate successor of the
++	 * previously processed one, we cannot reliably compare the
++	 * old and new topologies.
++	 */
++	if ((generation & 0xff) != ((card->generation + 1) & 0xff) &&
++	    card->local_node != NULL) {
++		fw_notify("skipped bus generations, destroying all nodes\n");
++		fw_destroy_nodes(card);
++		card->bm_retries = 0;
++	}
++
+ 	spin_lock_irqsave(&card->lock, flags);
+ 
+ 	card->node_id = node_id;
+

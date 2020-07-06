@@ -1,0 +1,109 @@
+commit d0de13622d5ac658efe7c51521dbdbe0752aa3dd
+Author: Eli Cohen <eli@mellanox.co.il>
+Date:   Mon Jul 14 23:48:50 2008 -0700
+
+    IPoIB: Only set Q_Key once: after joining broadcast group
+    
+    The current code will set the Q_Key for any join of a non-sendonly
+    multicast group.  The operation involves a modify QP operation, which
+    is fairly heavyweight, and is only really required after the join of
+    the broadcast group.  Fix this by adding a parameter to ipoib_mcast_attach()
+    to control when the Q_Key is set.
+    
+    Signed-off-by: Eli Cohen <eli@mellanox.co.il>
+    Signed-off-by: Roland Dreier <rolandd@cisco.com>
+
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib.h b/drivers/infiniband/ulp/ipoib/ipoib.h
+index b8753222c870..7b46e2d7b3c2 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib.h
++++ b/drivers/infiniband/ulp/ipoib/ipoib.h
+@@ -485,7 +485,7 @@ void ipoib_path_iter_read(struct ipoib_path_iter *iter,
+ #endif
+ 
+ int ipoib_mcast_attach(struct net_device *dev, u16 mlid,
+-		       union ib_gid *mgid);
++		       union ib_gid *mgid, int set_qkey);
+ int ipoib_mcast_detach(struct net_device *dev, u16 mlid,
+ 		       union ib_gid *mgid);
+ 
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_multicast.c b/drivers/infiniband/ulp/ipoib/ipoib_multicast.c
+index 0b7d129161e1..55ebd950bf23 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_multicast.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_multicast.c
+@@ -186,6 +186,7 @@ static int ipoib_mcast_join_finish(struct ipoib_mcast *mcast,
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 	struct ipoib_ah *ah;
+ 	int ret;
++	int set_qkey = 0;
+ 
+ 	mcast->mcmember = *mcmember;
+ 
+@@ -200,6 +201,7 @@ static int ipoib_mcast_join_finish(struct ipoib_mcast *mcast,
+ 		priv->qkey = be32_to_cpu(priv->broadcast->mcmember.qkey);
+ 		spin_unlock_irq(&priv->lock);
+ 		priv->tx_wr.wr.ud.remote_qkey = priv->qkey;
++		set_qkey = 1;
+ 	}
+ 
+ 	if (!test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags)) {
+@@ -212,7 +214,7 @@ static int ipoib_mcast_join_finish(struct ipoib_mcast *mcast,
+ 		}
+ 
+ 		ret = ipoib_mcast_attach(dev, be16_to_cpu(mcast->mcmember.mlid),
+-					 &mcast->mcmember.mgid);
++					 &mcast->mcmember.mgid, set_qkey);
+ 		if (ret < 0) {
+ 			ipoib_warn(priv, "couldn't attach QP to multicast group "
+ 				   IPOIB_GID_FMT "\n",
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_verbs.c b/drivers/infiniband/ulp/ipoib/ipoib_verbs.c
+index f50ebe0643ef..ba7c8868e6f7 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_verbs.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_verbs.c
+@@ -33,18 +33,13 @@
+ 
+ #include "ipoib.h"
+ 
+-int ipoib_mcast_attach(struct net_device *dev, u16 mlid, union ib_gid *mgid)
++int ipoib_mcast_attach(struct net_device *dev, u16 mlid, union ib_gid *mgid, int set_qkey)
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+-	struct ib_qp_attr *qp_attr;
++	struct ib_qp_attr *qp_attr = NULL;
+ 	int ret;
+ 	u16 pkey_index;
+ 
+-	ret = -ENOMEM;
+-	qp_attr = kmalloc(sizeof *qp_attr, GFP_KERNEL);
+-	if (!qp_attr)
+-		goto out;
+-
+ 	if (ib_find_pkey(priv->ca, priv->port, priv->pkey, &pkey_index)) {
+ 		clear_bit(IPOIB_PKEY_ASSIGNED, &priv->flags);
+ 		ret = -ENXIO;
+@@ -52,12 +47,19 @@ int ipoib_mcast_attach(struct net_device *dev, u16 mlid, union ib_gid *mgid)
+ 	}
+ 	set_bit(IPOIB_PKEY_ASSIGNED, &priv->flags);
+ 
+-	/* set correct QKey for QP */
+-	qp_attr->qkey = priv->qkey;
+-	ret = ib_modify_qp(priv->qp, qp_attr, IB_QP_QKEY);
+-	if (ret) {
+-		ipoib_warn(priv, "failed to modify QP, ret = %d\n", ret);
+-		goto out;
++	if (set_qkey) {
++		ret = -ENOMEM;
++		qp_attr = kmalloc(sizeof *qp_attr, GFP_KERNEL);
++		if (!qp_attr)
++			goto out;
++
++		/* set correct QKey for QP */
++		qp_attr->qkey = priv->qkey;
++		ret = ib_modify_qp(priv->qp, qp_attr, IB_QP_QKEY);
++		if (ret) {
++			ipoib_warn(priv, "failed to modify QP, ret = %d\n", ret);
++			goto out;
++		}
+ 	}
+ 
+ 	/* attach QP to multicast group */
+

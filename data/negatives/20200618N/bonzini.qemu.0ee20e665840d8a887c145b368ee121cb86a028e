@@ -1,0 +1,156 @@
+commit 0ee20e665840d8a887c145b368ee121cb86a028e
+Author: Kevin Wolf <kwolf@redhat.com>
+Date:   Mon May 6 15:58:04 2013 +0200
+
+    ahci: Don't allow creating slave drives
+    
+    An IDE bus provided by AHCI can only take a single IDE drive. If you add
+    a drive as slave, qemu used to accept the command line but the device
+    wouldn't be actually usable. Catch the situation instead and error out.
+    
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+
+diff --git a/hw/ide/ahci.c b/hw/ide/ahci.c
+index 3405583f59..eab60961bd 100644
+--- a/hw/ide/ahci.c
++++ b/hw/ide/ahci.c
+@@ -1163,7 +1163,7 @@ void ahci_init(AHCIState *s, DeviceState *qdev, DMAContext *dma, int ports)
+     for (i = 0; i < s->ports; i++) {
+         AHCIDevice *ad = &s->dev[i];
+ 
+-        ide_bus_new(&ad->port, qdev, i);
++        ide_bus_new(&ad->port, qdev, i, 1);
+         ide_init2(&ad->port, irqs[i]);
+ 
+         ad->hba = s;
+diff --git a/hw/ide/cmd646.c b/hw/ide/cmd646.c
+index 541d4ef335..a73eb9a5f7 100644
+--- a/hw/ide/cmd646.c
++++ b/hw/ide/cmd646.c
+@@ -281,7 +281,7 @@ static int pci_cmd646_ide_initfn(PCIDevice *dev)
+ 
+     irq = qemu_allocate_irqs(cmd646_set_irq, d, 2);
+     for (i = 0; i < 2; i++) {
+-        ide_bus_new(&d->bus[i], &d->dev.qdev, i);
++        ide_bus_new(&d->bus[i], &d->dev.qdev, i, 2);
+         ide_init2(&d->bus[i], irq[i]);
+ 
+         bmdma_init(&d->bus[i], &d->bmdma[i], d);
+diff --git a/hw/ide/internal.h b/hw/ide/internal.h
+index 0efb2da19b..03f14896d6 100644
+--- a/hw/ide/internal.h
++++ b/hw/ide/internal.h
+@@ -450,6 +450,7 @@ struct IDEBus {
+     IDEDevice *slave;
+     IDEState ifs[2];
+     int bus_id;
++    int max_units;
+     IDEDMA *dma;
+     uint8_t unit;
+     uint8_t cmd;
+@@ -574,7 +575,7 @@ void ide_atapi_cmd(IDEState *s);
+ void ide_atapi_cmd_reply_end(IDEState *s);
+ 
+ /* hw/ide/qdev.c */
+-void ide_bus_new(IDEBus *idebus, DeviceState *dev, int bus_id);
++void ide_bus_new(IDEBus *idebus, DeviceState *dev, int bus_id, int max_units);
+ IDEDevice *ide_create_drive(IDEBus *bus, int unit, DriveInfo *drive);
+ 
+ #endif /* HW_IDE_INTERNAL_H */
+diff --git a/hw/ide/isa.c b/hw/ide/isa.c
+index 5e7422fc2b..369a7fa58a 100644
+--- a/hw/ide/isa.c
++++ b/hw/ide/isa.c
+@@ -69,7 +69,7 @@ static int isa_ide_initfn(ISADevice *dev)
+ {
+     ISAIDEState *s = ISA_IDE(dev);
+ 
+-    ide_bus_new(&s->bus, DEVICE(dev), 0);
++    ide_bus_new(&s->bus, DEVICE(dev), 0, 2);
+     ide_init_ioport(&s->bus, dev, s->iobase, s->iobase2);
+     isa_init_irq(dev, &s->irq, s->isairq);
+     ide_init2(&s->bus, s->irq);
+diff --git a/hw/ide/macio.c b/hw/ide/macio.c
+index 64b2406ab0..bf12a100d4 100644
+--- a/hw/ide/macio.c
++++ b/hw/ide/macio.c
+@@ -334,7 +334,7 @@ static void macio_ide_initfn(Object *obj)
+     SysBusDevice *d = SYS_BUS_DEVICE(obj);
+     MACIOIDEState *s = MACIO_IDE(obj);
+ 
+-    ide_bus_new(&s->bus, DEVICE(obj), 0);
++    ide_bus_new(&s->bus, DEVICE(obj), 0, 2);
+     memory_region_init_io(&s->mem, &pmac_ide_ops, s, "pmac-ide", 0x1000);
+     sysbus_init_mmio(d, &s->mem);
+     sysbus_init_irq(d, &s->irq);
+diff --git a/hw/ide/mmio.c b/hw/ide/mmio.c
+index ce88c3a651..e80e7e5af8 100644
+--- a/hw/ide/mmio.c
++++ b/hw/ide/mmio.c
+@@ -137,7 +137,7 @@ static void mmio_ide_initfn(Object *obj)
+     SysBusDevice *d = SYS_BUS_DEVICE(obj);
+     MMIOState *s = MMIO_IDE(obj);
+ 
+-    ide_bus_new(&s->bus, DEVICE(obj), 0);
++    ide_bus_new(&s->bus, DEVICE(obj), 0, 2);
+     sysbus_init_irq(d, &s->irq);
+ }
+ 
+diff --git a/hw/ide/piix.c b/hw/ide/piix.c
+index 1de284d0e3..bf2856fb69 100644
+--- a/hw/ide/piix.c
++++ b/hw/ide/piix.c
+@@ -135,7 +135,7 @@ static void pci_piix_init_ports(PCIIDEState *d) {
+     int i;
+ 
+     for (i = 0; i < 2; i++) {
+-        ide_bus_new(&d->bus[i], &d->dev.qdev, i);
++        ide_bus_new(&d->bus[i], &d->dev.qdev, i, 2);
+         ide_init_ioport(&d->bus[i], NULL, port_info[i].iobase,
+                         port_info[i].iobase2);
+         ide_init2(&d->bus[i], isa_get_irq(NULL, port_info[i].isairq));
+diff --git a/hw/ide/qdev.c b/hw/ide/qdev.c
+index 8a9a891769..6a272b046d 100644
+--- a/hw/ide/qdev.c
++++ b/hw/ide/qdev.c
+@@ -47,10 +47,11 @@ static const TypeInfo ide_bus_info = {
+     .class_init = ide_bus_class_init,
+ };
+ 
+-void ide_bus_new(IDEBus *idebus, DeviceState *dev, int bus_id)
++void ide_bus_new(IDEBus *idebus, DeviceState *dev, int bus_id, int max_units)
+ {
+     qbus_create_inplace(&idebus->qbus, TYPE_IDE_BUS, dev, NULL);
+     idebus->bus_id = bus_id;
++    idebus->max_units = max_units;
+ }
+ 
+ static char *idebus_get_fw_dev_path(DeviceState *dev)
+@@ -76,6 +77,13 @@ static int ide_qdev_init(DeviceState *qdev)
+     if (dev->unit == -1) {
+         dev->unit = bus->master ? 1 : 0;
+     }
++
++    if (dev->unit >= bus->max_units) {
++        error_report("Can't create IDE unit %d, bus supports only %d units",
++                     dev->unit, bus->max_units);
++        goto err;
++    }
++
+     switch (dev->unit) {
+     case 0:
+         if (bus->master) {
+diff --git a/hw/ide/via.c b/hw/ide/via.c
+index 9d6a644391..5fe053cf97 100644
+--- a/hw/ide/via.c
++++ b/hw/ide/via.c
+@@ -158,7 +158,7 @@ static void vt82c686b_init_ports(PCIIDEState *d) {
+     int i;
+ 
+     for (i = 0; i < 2; i++) {
+-        ide_bus_new(&d->bus[i], &d->dev.qdev, i);
++        ide_bus_new(&d->bus[i], &d->dev.qdev, i, 2);
+         ide_init_ioport(&d->bus[i], NULL, port_info[i].iobase,
+                         port_info[i].iobase2);
+         ide_init2(&d->bus[i], isa_get_irq(NULL, port_info[i].isairq));
+

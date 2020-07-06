@@ -1,0 +1,114 @@
+commit fb0a64cdb1730ea58a5340ee1507c4c2979fda7e
+Author: Mayank Jha <mjnovice@gmail.com>
+Date:   Wed Apr 10 12:51:56 2013 +0530
+
+    added support for saving .eml files
+
+diff --git a/src/Gui/Window.cpp b/src/Gui/Window.cpp
+index 6e43e775..950e40db 100644
+--- a/src/Gui/Window.cpp
++++ b/src/Gui/Window.cpp
+@@ -1455,8 +1455,7 @@ void MainWindow::slotSaveCurrentMessageBody()
+         Imap::Network::MsgPartNetAccessManager *netAccess = new Imap::Network::MsgPartNetAccessManager(this);
+         netAccess->setModelMessage(message->toIndex(model));
+         Imap::Network::FileDownloadManager *fileDownloadManager =
+-            new Imap::Network::FileDownloadManager(this, netAccess, messageIndex.child(0, Imap::Mailbox::TreeItem::OFFSET_HEADER));
+-        // FIXME: change from "header" into "whole message"
++            new Imap::Network::FileDownloadManager(this, netAccess, messageIndex);
+         connect(fileDownloadManager, SIGNAL(succeeded()), fileDownloadManager, SLOT(deleteLater()));
+         connect(fileDownloadManager, SIGNAL(transferError(QString)), fileDownloadManager, SLOT(deleteLater()));
+         connect(fileDownloadManager, SIGNAL(fileNameRequested(QString *)),
+@@ -1464,7 +1463,7 @@ void MainWindow::slotSaveCurrentMessageBody()
+         connect(fileDownloadManager, SIGNAL(transferError(QString)),
+                 this, SLOT(slotDownloadMessageTransferError(QString)));
+         connect(fileDownloadManager, SIGNAL(destroyed()), netAccess, SLOT(deleteLater()));
+-        fileDownloadManager->slotDownloadNow();
++        fileDownloadManager->slotDownloadCompleteMessageNow();
+     }
+ }
+ 
+diff --git a/src/Imap/Network/FileDownloadManager.cpp b/src/Imap/Network/FileDownloadManager.cpp
+index e8530d5b..fea64ed0 100644
+--- a/src/Imap/Network/FileDownloadManager.cpp
++++ b/src/Imap/Network/FileDownloadManager.cpp
+@@ -20,6 +20,7 @@
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+ #include "FileDownloadManager.h"
++#include "Imap/Model/FullMessageCombiner.h"
+ #include "Imap/Model/ItemRoles.h"
+ #include "Imap/Model/MailboxTree.h"
+ 
+@@ -94,12 +95,42 @@ void FileDownloadManager::slotDataTransfered()
+     }
+ }
+ 
++void FileDownloadManager::slotDataSave()
++{
++    Q_ASSERT(m_combiner);
++    saving.open(QIODevice::WriteOnly);
++    saving.write((m_combiner->data()).data());
++    saving.close();
++    saved = true;
++    emit succeeded();
++}
++
+ void FileDownloadManager::slotTransferError()
+ {
+     Q_ASSERT(reply);
+     emit transferError(reply->errorString());
+ }
+ 
++void FileDownloadManager::slotDownloadCompleteMessageNow()
++{
++    if (!partIndex.isValid()) {
++        emit transferError(tr("FileDownloadManager::slotDownloadCompleteMessageNow(): part has disappeared"));
++        return;
++    }
++    QString saveFileName = toRealFileName(partIndex);
++    m_combiner = new Imap::Mailbox::FullMessageCombiner(partIndex, this);
++
++    emit fileNameRequested(&saveFileName);
++    if (saveFileName.isEmpty())
++        return;
++
++    saving.setFileName(saveFileName);
++    saved = false;
++    connect(m_combiner, SIGNAL(completed()), this, SLOT(slotDataSave()));
++    m_combiner->load();//emits completed() upon completion
++
++}
++
+ void FileDownloadManager::slotDeleteReply(QNetworkReply *reply)
+ {
+     if (reply == this->reply) {
+diff --git a/src/Imap/Network/FileDownloadManager.h b/src/Imap/Network/FileDownloadManager.h
+index 82fcf633..ce587e1e 100644
+--- a/src/Imap/Network/FileDownloadManager.h
++++ b/src/Imap/Network/FileDownloadManager.h
+@@ -25,6 +25,7 @@
+ #include <QFile>
+ #include <QPersistentModelIndex>
+ #include <QNetworkReply>
++#include "Imap/Model/FullMessageCombiner.h"
+ #include "Imap/Network/MsgPartNetAccessManager.h"
+ 
+ namespace Imap
+@@ -51,6 +52,8 @@ private slots:
+     void slotDeleteReply(QNetworkReply *reply);
+ public slots:
+     void slotDownloadNow();
++    void slotDownloadCompleteMessageNow();
++    void slotDataSave();
+ signals:
+     void transferError(const QString &errorMessage);
+     void fileNameRequested(QString *fileName);
+@@ -61,6 +64,7 @@ private:
+     QNetworkReply *reply;
+     QFile saving;
+     bool saved;
++    Imap::Mailbox::FullMessageCombiner *m_combiner;
+ 
+     FileDownloadManager(const FileDownloadManager &); // don't implement
+     FileDownloadManager &operator=(const FileDownloadManager &); // don't implement
+

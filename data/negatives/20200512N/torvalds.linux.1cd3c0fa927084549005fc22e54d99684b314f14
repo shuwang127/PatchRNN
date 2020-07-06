@@ -1,0 +1,293 @@
+commit 1cd3c0fa927084549005fc22e54d99684b314f14
+Author: Hans Verkuil <hverkuil@xs4all.nl>
+Date:   Sun Mar 8 17:04:38 2009 -0300
+
+    V4L/DVB (11022): zoran/bt819: use new notify functionality.
+    
+    Bt819 needs the parent driver to drive a GPIO pin low and high in order to
+    reset its fifo. Use the new notify callback for this.
+    
+    Signed-off-by: Hans Verkuil <hverkuil@xs4all.nl>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+
+diff --git a/drivers/media/video/bt819.c b/drivers/media/video/bt819.c
+index e0d8e2b186d1..217294d56414 100644
+--- a/drivers/media/video/bt819.c
++++ b/drivers/media/video/bt819.c
+@@ -32,13 +32,14 @@
+ #include <linux/types.h>
+ #include <linux/ioctl.h>
+ #include <linux/delay.h>
+-#include <asm/uaccess.h>
++#include <linux/uaccess.h>
+ #include <linux/i2c.h>
+ #include <linux/i2c-id.h>
+ #include <linux/videodev2.h>
+ #include <media/v4l2-device.h>
+ #include <media/v4l2-chip-ident.h>
+ #include <media/v4l2-i2c-drv.h>
++#include <media/bt819.h>
+ 
+ MODULE_DESCRIPTION("Brooktree-819 video decoder driver");
+ MODULE_AUTHOR("Mike Bernson & Dave Perks");
+@@ -250,7 +251,11 @@ static int bt819_s_std(struct v4l2_subdev *sd, v4l2_std_id std)
+ 
+ 	v4l2_dbg(1, debug, sd, "set norm %llx\n", (unsigned long long)std);
+ 
++	if (sd->v4l2_dev == NULL || sd->v4l2_dev->notify == NULL)
++		v4l2_err(sd, "no notify found!\n");
++
+ 	if (std & V4L2_STD_NTSC) {
++		v4l2_subdev_notify(sd, BT819_FIFO_RESET_LOW, 0);
+ 		bt819_setbit(decoder, 0x01, 0, 1);
+ 		bt819_setbit(decoder, 0x01, 1, 0);
+ 		bt819_setbit(decoder, 0x01, 5, 0);
+@@ -259,6 +264,7 @@ static int bt819_s_std(struct v4l2_subdev *sd, v4l2_std_id std)
+ 		/* bt819_setbit(decoder, 0x1a,  5, 1); */
+ 		timing = &timing_data[1];
+ 	} else if (std & V4L2_STD_PAL) {
++		v4l2_subdev_notify(sd, BT819_FIFO_RESET_LOW, 0);
+ 		bt819_setbit(decoder, 0x01, 0, 1);
+ 		bt819_setbit(decoder, 0x01, 1, 1);
+ 		bt819_setbit(decoder, 0x01, 5, 1);
+@@ -283,6 +289,7 @@ static int bt819_s_std(struct v4l2_subdev *sd, v4l2_std_id std)
+ 	bt819_write(decoder, 0x08, (timing->hscale >> 8) & 0xff);
+ 	bt819_write(decoder, 0x09, timing->hscale & 0xff);
+ 	decoder->norm = std;
++	v4l2_subdev_notify(sd, BT819_FIFO_RESET_HIGH, 0);
+ 	return 0;
+ }
+ 
+@@ -295,7 +302,11 @@ static int bt819_s_routing(struct v4l2_subdev *sd, const struct v4l2_routing *ro
+ 	if (route->input < 0 || route->input > 7)
+ 		return -EINVAL;
+ 
++	if (sd->v4l2_dev == NULL || sd->v4l2_dev->notify == NULL)
++		v4l2_err(sd, "no notify found!\n");
++
+ 	if (decoder->input != route->input) {
++		v4l2_subdev_notify(sd, BT819_FIFO_RESET_LOW, 0);
+ 		decoder->input = route->input;
+ 		/* select mode */
+ 		if (decoder->input == 0) {
+@@ -305,6 +316,7 @@ static int bt819_s_routing(struct v4l2_subdev *sd, const struct v4l2_routing *ro
+ 			bt819_setbit(decoder, 0x0b, 6, 1);
+ 			bt819_setbit(decoder, 0x1a, 1, 0);
+ 		}
++		v4l2_subdev_notify(sd, BT819_FIFO_RESET_HIGH, 0);
+ 	}
+ 	return 0;
+ }
+diff --git a/drivers/media/video/zoran/zoran_card.c b/drivers/media/video/zoran/zoran_card.c
+index b5d228d91b06..ec9b6ef56090 100644
+--- a/drivers/media/video/zoran/zoran_card.c
++++ b/drivers/media/video/zoran/zoran_card.c
+@@ -39,7 +39,6 @@
+ #include <linux/i2c.h>
+ #include <linux/i2c-algo-bit.h>
+ #include <linux/videodev2.h>
+-#include <media/v4l2-common.h>
+ #include <linux/spinlock.h>
+ #include <linux/sem.h>
+ #include <linux/kmod.h>
+@@ -48,8 +47,9 @@
+ #include <linux/pci.h>
+ #include <linux/interrupt.h>
+ #include <linux/mutex.h>
+-
+-#include <asm/io.h>
++#include <linux/io.h>
++#include <media/v4l2-common.h>
++#include <media/bt819.h>
+ 
+ #include "videocodec.h"
+ #include "zoran.h"
+@@ -1196,6 +1196,19 @@ zoran_setup_videocodec (struct zoran *zr,
+ 	return m;
+ }
+ 
++static int zoran_subdev_notify(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
++{
++	struct zoran *zr = to_zoran(sd->v4l2_dev);
++
++	/* Bt819 needs to reset its FIFO buffer using #FRST pin and
++	   LML33 card uses GPIO(7) for that. */
++	if (cmd == BT819_FIFO_RESET_LOW)
++		GPIO(zr, 7, 0);
++	else if (cmd == BT819_FIFO_RESET_HIGH)
++		GPIO(zr, 7, 1);
++	return 0;
++}
++
+ /*
+  *   Scan for a Buz card (actually for the PCI controller ZR36057),
+  *   request the irq and map the io memory
+@@ -1226,6 +1239,7 @@ static int __devinit zoran_probe(struct pci_dev *pdev,
+ 			ZORAN_NAME, __func__);
+ 		return -ENOMEM;
+ 	}
++	zr->v4l2_dev.notify = zoran_subdev_notify;
+ 	if (v4l2_device_register(&pdev->dev, &zr->v4l2_dev))
+ 		goto zr_free_mem;
+ 	zr->pci_dev = pdev;
+diff --git a/drivers/media/video/zoran/zoran_device.c b/drivers/media/video/zoran/zoran_device.c
+index f8bcd1a248c2..e0223deed35e 100644
+--- a/drivers/media/video/zoran/zoran_device.c
++++ b/drivers/media/video/zoran/zoran_device.c
+@@ -1584,8 +1584,8 @@ zoran_init_hardware (struct zoran *zr)
+ 	route.input = zr->card.input[zr->input].muxsel;
+ 
+ 	decoder_call(zr, core, init, 0);
+-	decoder_s_std(zr, zr->norm);
+-	decoder_s_routing(zr, &route);
++	decoder_call(zr, tuner, s_std, zr->norm);
++	decoder_call(zr, video, s_routing, &route);
+ 
+ 	encoder_call(zr, core, init, 0);
+ 	encoder_call(zr, video, s_std_output, zr->norm);
+@@ -1650,35 +1650,3 @@ zr36057_init_vfe (struct zoran *zr)
+ 		reg |= ZR36057_VDCR_Triton;
+ 	btwrite(reg, ZR36057_VDCR);
+ }
+-
+-/*
+- * Interface to decoder and encoder chips using i2c bus
+- */
+-
+-int decoder_s_std(struct zoran *zr, v4l2_std_id std)
+-{
+-	int res;
+-
+-	/* Bt819 needs to reset its FIFO buffer using #FRST pin and
+-	   LML33 card uses GPIO(7) for that. */
+-	if (zr->card.type == LML33)
+-		GPIO(zr, 7, 0);
+-	res = decoder_call(zr, tuner, s_std, std);
+-	if (zr->card.type == LML33)
+-		GPIO(zr, 7, 1); /* Pull #FRST high. */
+-	return res;
+-}
+-
+-int decoder_s_routing(struct zoran *zr, struct v4l2_routing *route)
+-{
+-	int res;
+-
+-	/* Bt819 needs to reset its FIFO buffer using #FRST pin and
+-	   LML33 card uses GPIO(7) for that. */
+-	if (zr->card.type == LML33)
+-		GPIO(zr, 7, 0);
+-	res = decoder_call(zr, video, s_routing, route);
+-	if (zr->card.type == LML33)
+-		GPIO(zr, 7, 1); /* Pull #FRST high. */
+-	return res;
+-}
+diff --git a/drivers/media/video/zoran/zoran_device.h b/drivers/media/video/zoran/zoran_device.h
+index 85414e17524e..07f2c23ff740 100644
+--- a/drivers/media/video/zoran/zoran_device.h
++++ b/drivers/media/video/zoran/zoran_device.h
+@@ -92,7 +92,4 @@ extern int pass_through;
+ #define encoder_call(zr, o, f, args...) \
+ 	v4l2_subdev_call(zr->encoder, o, f, ##args)
+ 
+-int decoder_s_std(struct zoran *zr, v4l2_std_id std);
+-int decoder_s_routing(struct zoran *zr, struct v4l2_routing *route);
+-
+ #endif				/* __ZORAN_DEVICE_H__ */
+diff --git a/drivers/media/video/zoran/zoran_driver.c b/drivers/media/video/zoran/zoran_driver.c
+index 60501f256b28..1e87fb9f7146 100644
+--- a/drivers/media/video/zoran/zoran_driver.c
++++ b/drivers/media/video/zoran/zoran_driver.c
+@@ -1449,7 +1449,7 @@ zoran_set_norm (struct zoran *zr,
+ 		v4l2_std_id std = 0;
+ 
+ 		decoder_call(zr, video, querystd, &std);
+-		decoder_s_std(zr, std);
++		decoder_call(zr, tuner, s_std, std);
+ 
+ 		/* let changes come into effect */
+ 		ssleep(2);
+@@ -1461,7 +1461,7 @@ zoran_set_norm (struct zoran *zr,
+ 				"%s: %s - no norm detected\n",
+ 				ZR_DEVNAME(zr), __func__);
+ 			/* reset norm */
+-			decoder_s_std(zr, zr->norm);
++			decoder_call(zr, tuner, s_std, zr->norm);
+ 			return -EIO;
+ 		}
+ 
+@@ -1480,7 +1480,7 @@ zoran_set_norm (struct zoran *zr,
+ 	if (on)
+ 		zr36057_overlay(zr, 0);
+ 
+-	decoder_s_std(zr, norm);
++	decoder_call(zr, tuner, s_std, norm);
+ 	encoder_call(zr, video, s_std_output, norm);
+ 
+ 	if (on)
+@@ -1522,7 +1522,7 @@ zoran_set_input (struct zoran *zr,
+ 	route.input = zr->card.input[input].muxsel;
+ 	zr->input = input;
+ 
+-	decoder_s_routing(zr, &route);
++	decoder_call(zr, video, s_routing, &route);
+ 
+ 	return 0;
+ }
+@@ -1775,7 +1775,7 @@ static long zoran_default(struct file *file, void *__fh, int cmd, void *arg)
+ 			goto gstat_unlock_and_return;
+ 		}
+ 
+-		decoder_s_routing(zr, &route);
++		decoder_call(zr, video, s_routing, &route);
+ 
+ 		/* sleep 1 second */
+ 		ssleep(1);
+@@ -1786,7 +1786,7 @@ static long zoran_default(struct file *file, void *__fh, int cmd, void *arg)
+ 
+ 		/* restore previous input and norm */
+ 		route.input = zr->card.input[zr->input].muxsel;
+-		decoder_s_routing(zr, &route);
++		decoder_call(zr, video, s_routing, &route);
+ gstat_unlock_and_return:
+ 		mutex_unlock(&zr->resource_lock);
+ 
+diff --git a/include/media/bt819.h b/include/media/bt819.h
+new file mode 100644
+index 000000000000..38f666bde77a
+--- /dev/null
++++ b/include/media/bt819.h
+@@ -0,0 +1,33 @@
++/*
++    bt819.h - bt819 notifications
++
++    Copyright (C) 2009 Hans Verkuil (hverkuil@xs4all.nl)
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program; if not, write to the Free Software
++    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++*/
++
++#ifndef _BT819_H_
++#define _BT819_H_
++
++#include <linux/ioctl.h>
++
++/* v4l2_device notifications. */
++
++/* Needed to reset the FIFO buffer when changing the input
++   or the video standard. */
++#define BT819_FIFO_RESET_LOW 	_IO('b', 0)
++#define BT819_FIFO_RESET_HIGH 	_IO('b', 1)
++
++#endif
+

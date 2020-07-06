@@ -1,0 +1,53 @@
+commit 162573937679ff36c9acd54268c047199dab564e
+Author: Mahesh Salgaonkar <mahesh@linux.vnet.ibm.com>
+Date:   Thu Feb 16 01:15:00 2012 +0000
+
+    fadump: Introduce cleanup routine to invalidate /proc/vmcore.
+    
+    With the firmware-assisted dump support we don't require a reboot when we
+    are in second kernel after crash. The second kernel after crash is a normal
+    kernel boot and has knowledge about entire system RAM with the page tables
+    initialized for entire system RAM. Hence once the dump is saved to disk, we
+    can just release the reserved memory area for general use and continue
+    with second kernel as production kernel.
+    
+    Hence when we release the reserved memory that contains dump data, the
+    '/proc/vmcore' will not be valid anymore. Hence this patch introduces
+    a cleanup routine that invalidates and removes the /proc/vmcore file. This
+    routine will be invoked before we release the reserved dump memory area.
+    
+    Signed-off-by: Mahesh Salgaonkar <mahesh@linux.vnet.ibm.com>
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+
+diff --git a/fs/proc/vmcore.c b/fs/proc/vmcore.c
+index b0f450a2bb7c..0d5071d29985 100644
+--- a/fs/proc/vmcore.c
++++ b/fs/proc/vmcore.c
+@@ -700,3 +700,26 @@ static int __init vmcore_init(void)
+ 	return 0;
+ }
+ module_init(vmcore_init)
++
++/* Cleanup function for vmcore module. */
++void vmcore_cleanup(void)
++{
++	struct list_head *pos, *next;
++
++	if (proc_vmcore) {
++		remove_proc_entry(proc_vmcore->name, proc_vmcore->parent);
++		proc_vmcore = NULL;
++	}
++
++	/* clear the vmcore list. */
++	list_for_each_safe(pos, next, &vmcore_list) {
++		struct vmcore *m;
++
++		m = list_entry(pos, struct vmcore, list);
++		list_del(&m->list);
++		kfree(m);
++	}
++	kfree(elfcorebuf);
++	elfcorebuf = NULL;
++}
++EXPORT_SYMBOL_GPL(vmcore_cleanup);
+

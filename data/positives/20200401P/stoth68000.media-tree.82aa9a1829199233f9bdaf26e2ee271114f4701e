@@ -1,0 +1,52 @@
+commit 82aa9a1829199233f9bdaf26e2ee271114f4701e
+Author: Ingo Molnar <mingo@elte.hu>
+Date:   Thu Feb 5 15:23:08 2009 +0100
+
+    perfcounters: fix "perf counters kills oprofile" bug, v2
+    
+    Impact: fix kernel crash
+    
+    Both oprofile and perfcounters register an NMI die handler, but only one
+    can handle the NMI.  Conveniently, oprofile unregisters it's notifier
+    when not actively in use, so setting it's notifier priority higher than
+    perfcounter's allows oprofile to borrow the NMI for the duration of it's
+    run.  Tested/works both as module and built-in.
+    
+    While testing, I found that if kerneltop was generating NMIs at very
+    high frequency, the kernel may panic when oprofile registered it's
+    handler.  This turned out to be because oprofile registers it's handler
+    before reset_value has been allocated, so if an NMI comes in while it's
+    still setting up, kabOom.  Rather than try more invasive changes, I
+    followed the lead of other places in op_model_ppro.c, and simply
+    returned in that highly unlikely event.  (debug warnings attached)
+    
+    Signed-off-by: Mike Galbraith <efault@gmx.de>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/arch/x86/oprofile/op_model_ppro.c b/arch/x86/oprofile/op_model_ppro.c
+index 07c914555a5e..85eb6268374f 100644
+--- a/arch/x86/oprofile/op_model_ppro.c
++++ b/arch/x86/oprofile/op_model_ppro.c
+@@ -126,6 +126,13 @@ static int ppro_check_ctrs(struct pt_regs * const regs,
+ 	u64 val;
+ 	int i;
+ 
++	/*
++	 * This can happen if perf counters are in use when
++	 * we steal the die notifier NMI.
++	 */
++	if (unlikely(!reset_value))
++		goto out;
++
+ 	for (i = 0 ; i < num_counters; ++i) {
+ 		if (!reset_value[i])
+ 			continue;
+@@ -136,6 +143,7 @@ static int ppro_check_ctrs(struct pt_regs * const regs,
+ 		}
+ 	}
+ 
++out:
+ 	/* Only P6 based Pentium M need to re-unmask the apic vector but it
+ 	 * doesn't hurt other P6 variant */
+ 	apic_write(APIC_LVTPC, apic_read(APIC_LVTPC) & ~APIC_LVT_MASKED);
+

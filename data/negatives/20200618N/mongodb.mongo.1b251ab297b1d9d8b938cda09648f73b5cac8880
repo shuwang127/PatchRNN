@@ -1,0 +1,100 @@
+commit 1b251ab297b1d9d8b938cda09648f73b5cac8880
+Author: Aaron <aaron@10gen.com>
+Date:   Tue Feb 2 12:38:48 2010 -0800
+
+    SERVER-595 add test
+
+diff --git a/db/query.cpp b/db/query.cpp
+index 6439fc08db..24e58f68d9 100644
+--- a/db/query.cpp
++++ b/db/query.cpp
+@@ -472,6 +472,8 @@ namespace mongo {
+         return res->count();
+     }
+ 
++    int _findingStartInitialTimeout = 5; // configurable for testing
++    
+     // Implements database 'query' requests using the query optimizer's QueryOp interface
+     class UserQueryOp : public QueryOp {
+     public:
+@@ -583,7 +585,7 @@ namespace mongo {
+                         }
+                         findingStartCursor_->c->advance();
+                         RARELY {
+-                            if ( findingStartTimer_.seconds() > 5 ) {
++                            if ( findingStartTimer_.seconds() >= _findingStartInitialTimeout ) {
+                                 createClientCursor( startLoc( findingStartCursor_->c->currLoc() ) );
+                                 findingStartMode_ = FindExtent;
+                                 return;
+diff --git a/dbtests/querytests.cpp b/dbtests/querytests.cpp
+index 2a25b206e9..670b13120c 100644
+--- a/dbtests/querytests.cpp
++++ b/dbtests/querytests.cpp
+@@ -27,6 +27,10 @@
+ 
+ #include "dbtests.h"
+ 
++namespace mongo {
++    extern int _findingStartInitialTimeout;
++}
++
+ namespace QueryTests {
+ 
+     class Base {
+@@ -677,6 +681,7 @@ namespace QueryTests {
+         CollectionBase( string leaf ){
+             _ns = "unittests.querytests.";
+             _ns += leaf;
++            client().dropCollection( ns() );
+         }
+         
+         virtual ~CollectionBase(){
+@@ -869,6 +874,39 @@ namespace QueryTests {
+         }
+     };
+ 
++    class FindingStart : public CollectionBase {
++    public:
++        FindingStart() : CollectionBase( "findingstart" ), _old( _findingStartInitialTimeout ) {
++            _findingStartInitialTimeout = 0;
++        }
++        ~FindingStart() {
++            _findingStartInitialTimeout = _old;
++        }
++        
++        void run() {
++            BSONObj info;
++            ASSERT( client().runCommand( "unittests", BSON( "create" << "querytests.findingstart" << "capped" << true << "size" << 1000 << "$nExtents" << 5 << "autoIndexId" << false ), info ) );
++            
++            int i = 0;
++            for( int oldCount = -1;
++                count() != oldCount;
++                oldCount = count(), client().insert( ns(), BSON( "i" << i++ ) ) );
++
++            for( int k = 0; k < 5; ++k ) {
++                client().insert( ns(), BSON( "i" << i++ ) );
++                int min = client().query( ns(), Query().sort( BSON( "$natural" << 1 ) ) )->next()[ "i" ].numberInt();            
++                for( int j = -1; j < i; ++j ) {
++                    auto_ptr< DBClientCursor > c = client().query( ns(), QUERY( "i" << GTE << j ), 0, 0, 0, QueryOption_OplogReplay );
++                    ASSERT( c->more() );
++                    ASSERT_EQUALS( ( j > min ? j : min ), c->next()[ "i" ].numberInt() );
++                }
++            }
++        }
++        
++    private:
++        int _old;
++    };
++    
+     class All : public Suite {
+     public:
+         All() : Suite( "query" ) {
+@@ -911,6 +949,7 @@ namespace QueryTests {
+             add< TailableCappedRaceCondition >();
+             add< HelperTest >();
+             add< HelperByIdTest >();
++            add< FindingStart >();
+         }
+     } myall;
+     
+

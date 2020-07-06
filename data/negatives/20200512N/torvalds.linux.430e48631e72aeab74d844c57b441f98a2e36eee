@@ -1,0 +1,138 @@
+commit 430e48631e72aeab74d844c57b441f98a2e36eee
+Author: KAMEZAWA Hiroyuki <kamezawa.hiroyu@jp.fujitsu.com>
+Date:   Wed Mar 10 15:22:30 2010 -0800
+
+    memcg: update threshold and softlimit at commit
+    
+    Presently, move_task does "batched" precharge.  Because res_counter or
+    css's refcnt are not-scalable jobs for memcg, try_charge_()..  tend to be
+    done in batched manner if allowed.
+    
+    Now, softlimit and threshold check their event counter in try_charge, but
+    the charge is not a per-page event.  And event counter is not updated at
+    charge().  Moreover, precharge doesn't pass "page" to try_charge() and
+    softlimit tree will be never updated until uncharge() causes an event."
+    
+    So the best place to check the event counter is commit_charge().  This is
+    per-page event by its nature.  This patch move checks to there.
+    
+    Signed-off-by: KAMEZAWA Hiroyuki <kamezawa.hiroyu@jp.fujitsu.com>
+    Cc: Kirill A. Shutemov <kirill@shutemov.name>
+    Cc: Balbir Singh <balbir@linux.vnet.ibm.com>
+    Cc: Daisuke Nishimura <nishimura@mxp.nes.nec.co.jp>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/memcontrol.c b/mm/memcontrol.c
+index 9c9dfcf7a6d1..006fe142d4ba 100644
+--- a/mm/memcontrol.c
++++ b/mm/memcontrol.c
+@@ -1424,8 +1424,7 @@ static int __cpuinit memcg_stock_cpu_callback(struct notifier_block *nb,
+  * oom-killer can be invoked.
+  */
+ static int __mem_cgroup_try_charge(struct mm_struct *mm,
+-			gfp_t gfp_mask, struct mem_cgroup **memcg,
+-			bool oom, struct page *page)
++			gfp_t gfp_mask, struct mem_cgroup **memcg, bool oom)
+ {
+ 	struct mem_cgroup *mem, *mem_over_limit;
+ 	int nr_retries = MEM_CGROUP_RECLAIM_RETRIES;
+@@ -1463,7 +1462,7 @@ static int __mem_cgroup_try_charge(struct mm_struct *mm,
+ 		unsigned long flags = 0;
+ 
+ 		if (consume_stock(mem))
+-			goto charged;
++			goto done;
+ 
+ 		ret = res_counter_charge(&mem->res, csize, &fail_res);
+ 		if (likely(!ret)) {
+@@ -1558,16 +1557,7 @@ static int __mem_cgroup_try_charge(struct mm_struct *mm,
+ 	}
+ 	if (csize > PAGE_SIZE)
+ 		refill_stock(mem, csize - PAGE_SIZE);
+-charged:
+-	/*
+-	 * Insert ancestor (and ancestor's ancestors), to softlimit RB-tree.
+-	 * if they exceeds softlimit.
+-	 */
+-	if (page && mem_cgroup_soft_limit_check(mem))
+-		mem_cgroup_update_tree(mem, page);
+ done:
+-	if (mem_cgroup_threshold_check(mem))
+-		mem_cgroup_threshold(mem);
+ 	return 0;
+ nomem:
+ 	css_put(&mem->css);
+@@ -1691,6 +1681,16 @@ static void __mem_cgroup_commit_charge(struct mem_cgroup *mem,
+ 	mem_cgroup_charge_statistics(mem, pc, true);
+ 
+ 	unlock_page_cgroup(pc);
++	/*
++	 * "charge_statistics" updated event counter. Then, check it.
++	 * Insert ancestor (and ancestor's ancestors), to softlimit RB-tree.
++	 * if they exceeds softlimit.
++	 */
++	if (mem_cgroup_soft_limit_check(mem))
++		mem_cgroup_update_tree(mem, pc->page);
++	if (mem_cgroup_threshold_check(mem))
++		mem_cgroup_threshold(mem);
++
+ }
+ 
+ /**
+@@ -1788,7 +1788,7 @@ static int mem_cgroup_move_parent(struct page_cgroup *pc,
+ 		goto put;
+ 
+ 	parent = mem_cgroup_from_cont(pcg);
+-	ret = __mem_cgroup_try_charge(NULL, gfp_mask, &parent, false, page);
++	ret = __mem_cgroup_try_charge(NULL, gfp_mask, &parent, false);
+ 	if (ret || !parent)
+ 		goto put_back;
+ 
+@@ -1824,7 +1824,7 @@ static int mem_cgroup_charge_common(struct page *page, struct mm_struct *mm,
+ 	prefetchw(pc);
+ 
+ 	mem = memcg;
+-	ret = __mem_cgroup_try_charge(mm, gfp_mask, &mem, true, page);
++	ret = __mem_cgroup_try_charge(mm, gfp_mask, &mem, true);
+ 	if (ret || !mem)
+ 		return ret;
+ 
+@@ -1944,14 +1944,14 @@ int mem_cgroup_try_charge_swapin(struct mm_struct *mm,
+ 	if (!mem)
+ 		goto charge_cur_mm;
+ 	*ptr = mem;
+-	ret = __mem_cgroup_try_charge(NULL, mask, ptr, true, page);
++	ret = __mem_cgroup_try_charge(NULL, mask, ptr, true);
+ 	/* drop extra refcnt from tryget */
+ 	css_put(&mem->css);
+ 	return ret;
+ charge_cur_mm:
+ 	if (unlikely(!mm))
+ 		mm = &init_mm;
+-	return __mem_cgroup_try_charge(mm, mask, ptr, true, page);
++	return __mem_cgroup_try_charge(mm, mask, ptr, true);
+ }
+ 
+ static void
+@@ -2340,8 +2340,7 @@ int mem_cgroup_prepare_migration(struct page *page, struct mem_cgroup **ptr)
+ 	unlock_page_cgroup(pc);
+ 
+ 	if (mem) {
+-		ret = __mem_cgroup_try_charge(NULL, GFP_KERNEL, &mem, false,
+-						page);
++		ret = __mem_cgroup_try_charge(NULL, GFP_KERNEL, &mem, false);
+ 		css_put(&mem->css);
+ 	}
+ 	*ptr = mem;
+@@ -3872,8 +3871,7 @@ static int mem_cgroup_do_precharge(unsigned long count)
+ 			batch_count = PRECHARGE_COUNT_AT_ONCE;
+ 			cond_resched();
+ 		}
+-		ret = __mem_cgroup_try_charge(NULL, GFP_KERNEL, &mem,
+-								false, NULL);
++		ret = __mem_cgroup_try_charge(NULL, GFP_KERNEL, &mem, false);
+ 		if (ret || !mem)
+ 			/* mem_cgroup_clear_mc() will do uncharge later */
+ 			return -ENOMEM;
+

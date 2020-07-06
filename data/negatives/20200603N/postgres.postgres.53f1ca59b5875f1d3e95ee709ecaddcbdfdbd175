@@ -1,0 +1,99 @@
+commit 53f1ca59b5875f1d3e95ee709ecaddcbdfdbd175
+Author: Robert Haas <rhaas@postgresql.org>
+Date:   Fri Oct 28 17:08:09 2011 -0400
+
+    Allow hint bits to be set sooner for temporary and unlogged tables.
+    
+    We need not wait until the commit record is durably on disk, because
+    in the event of a crash the page we're updating with hint bits will
+    be gone anyway.  Per off-list report from Heikki Linnakangas, this
+    can significantly degrade the performance of unlogged tables; I was
+    able to show a 2x speedup from this patch on a pgbench run with scale
+    factor 15.  In practice, this will mostly help small, heavily updated
+    tables, because on larger tables you're unlikely to run into the same
+    row again before the commit record makes it out to disk.
+
+diff --git a/src/backend/storage/buffer/bufmgr.c b/src/backend/storage/buffer/bufmgr.c
+index 8647eddcb4..f47f1b66b1 100644
+--- a/src/backend/storage/buffer/bufmgr.c
++++ b/src/backend/storage/buffer/bufmgr.c
+@@ -1929,6 +1929,35 @@ RelationGetNumberOfBlocksInFork(Relation relation, ForkNumber forkNum)
+ 	return smgrnblocks(relation->rd_smgr, forkNum);
+ }
+ 
++/*
++ * BufferIsPermanent
++ *		Determines whether a buffer will potentially still be around after
++ *		a crash.  Caller must hold a buffer pin.
++ */
++bool
++BufferIsPermanent(Buffer buffer)
++{
++	volatile BufferDesc *bufHdr;
++
++	/* Local buffers are used only for temp relations. */
++	if (BufferIsLocal(buffer))
++		return false;
++
++	/* Make sure we've got a real buffer, and that we hold a pin on it. */
++	Assert(BufferIsValid(buffer));
++	Assert(BufferIsPinned(buffer));
++
++	/*
++	 * BM_PERMANENT can't be changed while we hold a pin on the buffer, so
++	 * we need not bother with the buffer header spinlock.  Even if someone
++	 * else changes the buffer header flags while we're doing this, we assume
++	 * that changing an aligned 2-byte BufFlags value is atomic, so we'll read
++	 * the old value or the new value, but not random garbage.
++	 */
++	bufHdr = &BufferDescriptors[buffer - 1];
++	return (bufHdr->flags & BM_PERMANENT) != 0;
++}
++
+ /* ---------------------------------------------------------------------
+  *		DropRelFileNodeBuffers
+  *
+diff --git a/src/backend/utils/time/tqual.c b/src/backend/utils/time/tqual.c
+index d81ee7de06..1c4b74d94b 100644
+--- a/src/backend/utils/time/tqual.c
++++ b/src/backend/utils/time/tqual.c
+@@ -82,10 +82,12 @@ static bool XidInMVCCSnapshot(TransactionId xid, Snapshot snapshot);
+  * Set commit/abort hint bits on a tuple, if appropriate at this time.
+  *
+  * It is only safe to set a transaction-committed hint bit if we know the
+- * transaction's commit record has been flushed to disk.  We cannot change
+- * the LSN of the page here because we may hold only a share lock on the
+- * buffer, so we can't use the LSN to interlock this; we have to just refrain
+- * from setting the hint bit until some future re-examination of the tuple.
++ * transaction's commit record has been flushed to disk, or if the table is
++ * temporary or unlogged and will be obliterated by a crash anyway.  We
++ * cannot change the LSN of the page here because we may hold only a share
++ * lock on the buffer, so we can't use the LSN to interlock this; we have to
++ * just refrain from setting the hint bit until some future re-examination
++ * of the tuple.
+  *
+  * We can always set hint bits when marking a transaction aborted.	(Some
+  * code in heapam.c relies on that!)
+@@ -113,7 +115,7 @@ SetHintBits(HeapTupleHeader tuple, Buffer buffer,
+ 		/* NB: xid must be known committed here! */
+ 		XLogRecPtr	commitLSN = TransactionIdGetCommitLSN(xid);
+ 
+-		if (XLogNeedsFlush(commitLSN))
++		if (XLogNeedsFlush(commitLSN) && BufferIsPermanent(buffer))
+ 			return;				/* not flushed yet, so don't set hint */
+ 	}
+ 
+diff --git a/src/include/storage/bufmgr.h b/src/include/storage/bufmgr.h
+index 82b43006f3..49b5d314ff 100644
+--- a/src/include/storage/bufmgr.h
++++ b/src/include/storage/bufmgr.h
+@@ -192,6 +192,8 @@ extern void DropDatabaseBuffers(Oid dbid);
+ #define RelationGetNumberOfBlocks(reln) \
+ 	RelationGetNumberOfBlocksInFork(reln, MAIN_FORKNUM)
+ 
++extern bool BufferIsPermanent(Buffer buffer);
++
+ #ifdef NOT_USED
+ extern void PrintPinnedBufs(void);
+ #endif
+

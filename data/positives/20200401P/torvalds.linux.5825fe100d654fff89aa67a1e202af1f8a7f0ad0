@@ -1,0 +1,119 @@
+commit 5825fe100d654fff89aa67a1e202af1f8a7f0ad0
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Tue Sep 9 12:56:01 2008 +0200
+
+    mac80211: initialise queue QoS parameters at hw start
+    
+    When hardware is started it might be in a confused state with
+    respect to queue QoS parameters. This patch changes mac80211
+    to set sane defaults right after the hardware is brought up.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Cc: Michael Buesch <mb@bu3sch.de>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
+index 792c09ca08e3..b10e70715db0 100644
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -987,6 +987,7 @@ int ieee80211_frame_duration(struct ieee80211_local *local, size_t len,
+ 			     int rate, int erp, int short_preamble);
+ void mac80211_ev_michael_mic_failure(struct ieee80211_sub_if_data *sdata, int keyidx,
+ 				     struct ieee80211_hdr *hdr);
++void ieee80211_set_wmm_default(struct ieee80211_sub_if_data *sdata);
+ 
+ #ifdef CONFIG_MAC80211_NOINLINE
+ #define debug_noinline noinline
+diff --git a/net/mac80211/main.c b/net/mac80211/main.c
+index f90254a5948e..6a7f4fae18c2 100644
+--- a/net/mac80211/main.c
++++ b/net/mac80211/main.c
+@@ -399,8 +399,15 @@ static int ieee80211_open(struct net_device *dev)
+ 		atomic_inc(&local->iff_promiscs);
+ 
+ 	local->open_count++;
+-	if (need_hw_reconfig)
++	if (need_hw_reconfig) {
+ 		ieee80211_hw_config(local);
++		/*
++		 * set default queue parameters so drivers don't
++		 * need to initialise the hardware if the hardware
++		 * doesn't start up with sane defaults
++		 */
++		ieee80211_set_wmm_default(sdata);
++	}
+ 
+ 	/*
+ 	 * ieee80211_sta_work is disabled while network interface
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index f754ad273f92..c22dcd605e48 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -539,32 +539,6 @@ static void ieee80211_send_refuse_measurement_request(struct ieee80211_sub_if_da
+ }
+ 
+ /* MLME */
+-static void ieee80211_set_wmm_default(struct ieee80211_sub_if_data *sdata)
+-{
+-	struct ieee80211_local *local = sdata->local;
+-	struct ieee80211_tx_queue_params qparam;
+-	int i;
+-
+-	if (!local->ops->conf_tx)
+-		return;
+-
+-	memset(&qparam, 0, sizeof(qparam));
+-
+-	qparam.aifs = 2;
+-
+-	if (local->hw.conf.channel->band == IEEE80211_BAND_2GHZ &&
+-	    !(sdata->flags & IEEE80211_SDATA_OPERATING_GMODE))
+-		qparam.cw_min = 31;
+-	else
+-		qparam.cw_min = 15;
+-
+-	qparam.cw_max = 1023;
+-	qparam.txop = 0;
+-
+-	for (i = 0; i < local_to_hw(local)->queues; i++)
+-		local->ops->conf_tx(local_to_hw(local), i, &qparam);
+-}
+-
+ static void ieee80211_sta_def_wmm_params(struct ieee80211_sub_if_data *sdata,
+ 					 struct ieee80211_sta_bss *bss)
+ {
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index e19c74cada39..55be3ef5c755 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -572,3 +572,29 @@ void ieee802_11_parse_elems(u8 *start, size_t len,
+ 		pos += elen;
+ 	}
+ }
++
++void ieee80211_set_wmm_default(struct ieee80211_sub_if_data *sdata)
++{
++	struct ieee80211_local *local = sdata->local;
++	struct ieee80211_tx_queue_params qparam;
++	int i;
++
++	if (!local->ops->conf_tx)
++		return;
++
++	memset(&qparam, 0, sizeof(qparam));
++
++	qparam.aifs = 2;
++
++	if (local->hw.conf.channel->band == IEEE80211_BAND_2GHZ &&
++	    !(sdata->flags & IEEE80211_SDATA_OPERATING_GMODE))
++		qparam.cw_min = 31;
++	else
++		qparam.cw_min = 15;
++
++	qparam.cw_max = 1023;
++	qparam.txop = 0;
++
++	for (i = 0; i < local_to_hw(local)->queues; i++)
++		local->ops->conf_tx(local_to_hw(local), i, &qparam);
++}
+

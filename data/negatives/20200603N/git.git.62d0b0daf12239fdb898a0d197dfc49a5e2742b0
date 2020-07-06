@@ -1,0 +1,92 @@
+commit 62d0b0daf12239fdb898a0d197dfc49a5e2742b0
+Author: Christian Couder <chriscool@tuxfamily.org>
+Date:   Sat Jun 6 06:41:34 2009 +0200
+
+    bisect: when skipping, choose a commit away from a skipped commit
+    
+    To do that a new function "apply_skip_ratio" is added and another
+    function "managed_skipped" is created to wrap both "filter_skipped"
+    and the previous one.
+    
+    In "managed_skipped" we detect when we should choose a commit away
+    from a skipped one and then we automatically choose a skip ratio
+    to pass to "apply_skip_ratio".
+    
+    The ratio is choosen so that it alternates between 1/5, 2/5 and
+    3/5.
+    
+    In "apply_skip_ratio", we ignore a given ratio of all the commits
+    that could be tested.
+    
+    Signed-off-by: Christian Couder <chriscool@tuxfamily.org>
+    Signed-off-by: Junio C Hamano <gitster@pobox.com>
+
+diff --git a/bisect.c b/bisect.c
+index 115cf5fa4..6fdff0572 100644
+--- a/bisect.c
++++ b/bisect.c
+@@ -585,6 +585,54 @@ struct commit_list *filter_skipped(struct commit_list *list,
+ 	return filtered;
+ }
+ 
++static struct commit_list *apply_skip_ratio(struct commit_list *list,
++					    int count,
++					    int skip_num, int skip_denom)
++{
++	int index, i;
++	struct commit_list *cur, *previous;
++
++	cur = list;
++	previous = NULL;
++	index = count * skip_num / skip_denom;
++
++	for (i = 0; cur; cur = cur->next, i++) {
++		if (i == index) {
++			if (hashcmp(cur->item->object.sha1, current_bad_sha1))
++				return cur;
++			if (previous)
++				return previous;
++			return list;
++		}
++		previous = cur;
++	}
++
++	return list;
++}
++
++static struct commit_list *managed_skipped(struct commit_list *list,
++					   struct commit_list **tried)
++{
++	int count, skipped_first;
++	int skip_num, skip_denom;
++
++	*tried = NULL;
++
++	if (!skipped_revs.sha1_nr)
++		return list;
++
++	list = filter_skipped(list, tried, 0, &count, &skipped_first);
++
++	if (!skipped_first)
++		return list;
++
++	/* Use alternatively 1/5, 2/5 and 3/5 as skip ratio. */
++	skip_num = count % 3 + 1;
++	skip_denom = 5;
++
++	return apply_skip_ratio(list, count, skip_num, skip_denom);
++}
++
+ static void bisect_rev_setup(struct rev_info *revs, const char *prefix,
+ 			     const char *bad_format, const char *good_format,
+ 			     int read_paths)
+@@ -897,7 +945,7 @@ int bisect_next_all(const char *prefix)
+ 
+ 	revs.commits = find_bisection(revs.commits, &reaches, &all,
+ 				       !!skipped_revs.sha1_nr);
+-	revs.commits = filter_skipped(revs.commits, &tried, 0, NULL, NULL);
++	revs.commits = managed_skipped(revs.commits, &tried);
+ 
+ 	if (!revs.commits) {
+ 		/*
+

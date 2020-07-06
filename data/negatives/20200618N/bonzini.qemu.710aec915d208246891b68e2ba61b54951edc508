@@ -1,0 +1,104 @@
+commit 710aec915d208246891b68e2ba61b54951edc508
+Author: Markus Armbruster <armbru@redhat.com>
+Date:   Fri Mar 6 11:28:00 2015 +0100
+
+    monitor: Limit QError use to command handlers
+    
+    The previous commits narrowed use of QError to handle_qmp_command()
+    and its helpers monitor_protocol_emitter(), build_qmp_error_dict().
+    Narrow it further to just the command handler call: instead of
+    converting Error to QError throughout handle_qmp_command(), convert
+    the QError gotten from the command handler to Error, and switch the
+    helpers from QError to Error.
+    
+    Signed-off-by: Markus Armbruster <armbru@redhat.com>
+    Reviewed-by: Eric Blake <eblake@redhat.com>
+    Reviewed-by: Luiz Capitulino <lcapitulino@redhat.com>
+
+diff --git a/monitor.c b/monitor.c
+index 91f8a4e5d7..888d77153c 100644
+--- a/monitor.c
++++ b/monitor.c
+@@ -391,19 +391,19 @@ static void monitor_json_emitter(Monitor *mon, const QObject *data)
+     QDECREF(json);
+ }
+ 
+-static QDict *build_qmp_error_dict(const QError *err)
++static QDict *build_qmp_error_dict(Error *err)
+ {
+     QObject *obj;
+ 
+-    obj = qobject_from_jsonf("{ 'error': { 'class': %s, 'desc': %p } }",
+-                             ErrorClass_lookup[err->err_class],
+-                             qerror_human(err));
++    obj = qobject_from_jsonf("{ 'error': { 'class': %s, 'desc': %s } }",
++                             ErrorClass_lookup[error_get_class(err)],
++                             error_get_pretty(err));
+ 
+     return qobject_to_qdict(obj);
+ }
+ 
+ static void monitor_protocol_emitter(Monitor *mon, QObject *data,
+-                                     QError *err)
++                                     Error *err)
+ {
+     QDict *qmp;
+ 
+@@ -4983,13 +4983,12 @@ static void handle_qmp_command(JSONMessageParser *parser, QList *tokens)
+     obj = json_parser_parse(tokens, NULL);
+     if (!obj) {
+         // FIXME: should be triggered in json_parser_parse()
+-        qerror_report(QERR_JSON_PARSING);
++        error_set(&local_err, QERR_JSON_PARSING);
+         goto err_out;
+     }
+ 
+     input = qmp_check_input_obj(obj, &local_err);
+     if (!input) {
+-        qerror_report_err(local_err);
+         qobject_decref(obj);
+         goto err_out;
+     }
+@@ -5001,12 +5000,11 @@ static void handle_qmp_command(JSONMessageParser *parser, QList *tokens)
+     trace_handle_qmp_command(mon, cmd_name);
+     cmd = qmp_find_cmd(cmd_name);
+     if (!cmd) {
+-        qerror_report(ERROR_CLASS_COMMAND_NOT_FOUND,
+-                      "The command %s has not been found", cmd_name);
++        error_set(&local_err, ERROR_CLASS_COMMAND_NOT_FOUND,
++                  "The command %s has not been found", cmd_name);
+         goto err_out;
+     }
+     if (invalid_qmp_mode(mon, cmd, &local_err)) {
+-        qerror_report_err(local_err);
+         goto err_out;
+     }
+ 
+@@ -5020,7 +5018,6 @@ static void handle_qmp_command(JSONMessageParser *parser, QList *tokens)
+ 
+     qmp_check_client_args(cmd, args, &local_err);
+     if (local_err) {
+-        qerror_report_err(local_err);
+         goto err_out;
+     }
+ 
+@@ -5028,12 +5025,16 @@ static void handle_qmp_command(JSONMessageParser *parser, QList *tokens)
+         /* Command failed... */
+         if (!mon->error) {
+             /* ... without setting an error, so make one up */
+-            qerror_report(QERR_UNDEFINED_ERROR);
++            error_set(&local_err, QERR_UNDEFINED_ERROR);
+         }
+     }
++    if (mon->error) {
++        error_set(&local_err, mon->error->err_class, "%s",
++                  mon->error->err_msg);
++    }
+ 
+ err_out:
+-    monitor_protocol_emitter(mon, data, mon->error);
++    monitor_protocol_emitter(mon, data, local_err);
+     qobject_decref(data);
+     QDECREF(mon->error);
+     mon->error = NULL;
+

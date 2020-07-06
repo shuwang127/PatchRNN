@@ -1,0 +1,99 @@
+commit a90e63ca3b801ea39bfbfe79041e919ac7128f95
+Author: Sage Weil <sage@newdream.net>
+Date:   Tue Oct 13 10:40:02 2009 -0700
+
+    msgr: put peer type, addr in Connection
+
+diff --git a/src/msg/Message.h b/src/msg/Message.h
+index 8e5e6676f6..bab3c5f294 100644
+--- a/src/msg/Message.h
++++ b/src/msg/Message.h
+@@ -158,9 +158,11 @@ struct Connection : public RefCountedObject {
+   atomic_t nref;
+   Mutex lock;
+   RefCountedObject *priv;
++  int peer_type;
++  entity_addr_t peer_addr;
+ 
+ public:
+-  Connection() : nref(1), lock("Connection::lock"), priv(NULL) {}
++  Connection() : nref(1), lock("Connection::lock"), priv(NULL), peer_type(-1) {}
+   ~Connection() {
+     //generic_dout(0) << "~Connection " << this << dendl;
+     if (priv) {
+@@ -190,6 +192,13 @@ public:
+       return priv->get();
+     return NULL;
+   }
++
++  int get_peer_type() { return peer_type; }
++  void set_peer_type(int t) { peer_type = t; }
++
++  const entity_addr_t& get_peer_addr() { return peer_addr; }
++  void set_peer_addr(const entity_addr_t& a) { peer_addr = a; }
++
+ };
+ 
+ 
+diff --git a/src/msg/SimpleMessenger.cc b/src/msg/SimpleMessenger.cc
+index 12bdd1f1e0..3ba8a3b9aa 100644
+--- a/src/msg/SimpleMessenger.cc
++++ b/src/msg/SimpleMessenger.cc
+@@ -575,6 +575,7 @@ int SimpleMessenger::Pipe::accept()
+     dout(0) << "accept peer addr is really " << peer_addr
+ 	    << " (socket is " << socket_addr << ")" << dendl;
+   }
++  set_peer_addr(peer_addr);  // so that connection_state gets set up
+   
+   ceph_msg_connect connect;
+   ceph_msg_connect_reply reply;
+@@ -596,7 +597,7 @@ int SimpleMessenger::Pipe::accept()
+     rank->lock.Lock();
+ 
+     // note peer's type, flags
+-    peer_type = connect.host_type;
++    set_peer_type(connect.host_type);
+     policy = rank->get_policy(connect.host_type);
+     dout(10) << "accept of host_type " << connect.host_type
+ 	     << ", policy.lossy=" << policy.lossy
+@@ -2044,9 +2045,9 @@ SimpleMessenger::Pipe *SimpleMessenger::connect_rank(const entity_addr_t& addr,
+   
+   // create pipe
+   Pipe *pipe = new Pipe(this, Pipe::STATE_CONNECTING);
+-  pipe->peer_type = type;
++  pipe->set_peer_type(type);
++  pipe->set_peer_addr(addr);
+   pipe->policy = get_policy(type);
+-  pipe->peer_addr = addr;
+   pipe->start_writer();
+   pipe->register_pipe();
+   pipes.insert(pipe);
+diff --git a/src/msg/SimpleMessenger.h b/src/msg/SimpleMessenger.h
+index c385110b64..ec8f30e0bc 100644
+--- a/src/msg/SimpleMessenger.h
++++ b/src/msg/SimpleMessenger.h
+@@ -193,12 +193,22 @@ private:
+     static const Pipe& Server(int s);
+     static const Pipe& Client(const entity_addr_t& pi);
+ 
+-    entity_addr_t& get_peer_addr() { return peer_addr; }
+ 
+     __u32 get_out_seq() { return out_seq; }
+ 
+     bool is_queued() { return !q.empty() || keepalive; }
+ 
++    entity_addr_t& get_peer_addr() { return peer_addr; }
++
++    void set_peer_addr(const entity_addr_t& a) {
++      peer_addr = a;
++      connection_state->set_peer_addr(a);
++    }
++    void set_peer_type(int t) {
++      peer_type = t;
++      connection_state->set_peer_type(t);
++    }
++
+     void register_pipe();
+     void unregister_pipe();
+     void join() {
+

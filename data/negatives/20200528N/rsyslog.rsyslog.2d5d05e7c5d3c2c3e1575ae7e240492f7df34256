@@ -1,0 +1,272 @@
+commit 2d5d05e7c5d3c2c3e1575ae7e240492f7df34256
+Author: Rainer Gerhards <rgerhards@adiscon.com>
+Date:   Thu Feb 21 14:59:18 2008 +0000
+
+    changed tokenizer to utilize var class instead of scalar types
+
+diff --git a/ctok.c b/ctok.c
+index 71b10098e..db5609ec4 100644
+--- a/ctok.c
++++ b/ctok.c
+@@ -41,6 +41,7 @@
+ /* static data */
+ DEFobjStaticHelpers
+ DEFobjCurrIf(ctok_token)
++DEFobjCurrIf(var)
+ 
+ 
+ /* Standard-Constructor
+@@ -223,9 +224,9 @@ ctokGetNumber(ctok_t *pThis, ctok_token_t *pToken)
+ 		CHKiRet(ctokGetCharFromStream(pThis, &c));
+ 		c = tolower(c);
+ 	}
+-	pToken->intVal = n;
++	CHKiRet(var.SetInt64(pToken->pVar, n));
+ 
+-dbgprintf("number, number is: '%lld'\n", pToken->intVal);
++dbgprintf("number, number is: '%lld'\n", n);
+ 
+ finalize_it:
+ 	RETiRet;
+@@ -241,6 +242,7 @@ ctokGetVar(ctok_t *pThis, ctok_token_t *pToken)
+ {
+ 	DEFiRet;
+ 	uchar c;
++	cstr_t *pstrVal;
+ 
+ 	ISOBJ_TYPE_assert(pThis, ctok);
+ 	ASSERT(pToken != NULL);
+@@ -254,20 +256,23 @@ ctokGetVar(ctok_t *pThis, ctok_token_t *pToken)
+ 		pToken->tok = ctok_MSGVAR;
+ 	}
+ 
+-	CHKiRet(rsCStrConstruct(&pToken->pstrVal));
++	CHKiRet(rsCStrConstruct(&pstrVal));
+ 	/* this loop is quite simple, a variable name is terminated by whitespace. */
+ 	while(!isspace(c)) {
+-		CHKiRet(rsCStrAppendChar(pToken->pstrVal, tolower(c)));
++		CHKiRet(rsCStrAppendChar(pstrVal, tolower(c)));
+ 		CHKiRet(ctokGetCharFromStream(pThis, &c));
+ 	}
+ 	CHKiRet(rsCStrFinish(pStrB));
+ 
+-dbgprintf("var, var is: '%s'\n", rsCStrGetSzStr(pToken->pstrVal));
++dbgprintf("var, var is: '%s'\n", rsCStrGetSzStr(pstrVal));
++
++	CHKiRet(var.SetString(pToken->pVar, pstrVal));
++	pstrVal = NULL;
+ 
+ finalize_it:
+ 	if(iRet != RS_RET_OK) {
+-		if(pToken->pstrVal != NULL) {
+-			rsCStrDestruct(&pToken->pstrVal);
++		if(pstrVal != NULL) {
++			rsCStrDestruct(&pstrVal);
+ 		}
+ 	}
+ 
+@@ -284,38 +289,42 @@ ctokGetSimpStr(ctok_t *pThis, ctok_token_t *pToken)
+ 	DEFiRet;
+ 	uchar c;
+ 	int bInEsc = 0;
++	cstr_t *pstrVal;
+ 
+ 	ISOBJ_TYPE_assert(pThis, ctok);
+ 	ASSERT(pToken != NULL);
+ 
+ 	pToken->tok = ctok_SIMPSTR;
+ 
+-	CHKiRet(rsCStrConstruct(&pToken->pstrVal));
++	CHKiRet(rsCStrConstruct(&pstrVal));
+ 	CHKiRet(ctokGetCharFromStream(pThis, &c));
+ 	/* while we are in escape mode (had a backslash), no sequence
+ 	 * terminates the loop. If outside, it is terminated by a single quote.
+ 	 */
+ 	while(bInEsc || c != '\'') {
+ 		if(bInEsc) {
+-			CHKiRet(rsCStrAppendChar(pToken->pstrVal, c));
++			CHKiRet(rsCStrAppendChar(pstrVal, c));
+ 			bInEsc = 0;
+ 		} else {
+ 			if(c == '\\') {
+ 				bInEsc = 1;
+ 			} else {
+-				CHKiRet(rsCStrAppendChar(pToken->pstrVal, c));
++				CHKiRet(rsCStrAppendChar(pstrVal, c));
+ 			}
+ 		}
+ 		CHKiRet(ctokGetCharFromStream(pThis, &c));
+ 	}
+ 	CHKiRet(rsCStrFinish(pStrB));
+ 
+-dbgprintf("simpstr, str is: '%s'\n", rsCStrGetSzStr(pToken->pstrVal));
++dbgprintf("simpstr, str is: '%s'\n", rsCStrGetSzStr(pstrVal));
++
++	CHKiRet(var.SetString(pToken->pVar, pstrVal));
++	pstrVal = NULL;
+ 
+ finalize_it:
+ 	if(iRet != RS_RET_OK) {
+-		if(pToken->pstrVal != NULL) {
+-			rsCStrDestruct(&pToken->pstrVal);
++		if(pstrVal != NULL) {
++			rsCStrDestruct(&pstrVal);
+ 		}
+ 	}
+ 
+@@ -570,6 +579,7 @@ ENDobjQueryInterface(ctok)
+ BEGINObjClassInit(ctok, 1) /* class, version */
+ 	/* request objects we use */
+ 	CHKiRet(objUse(ctok_token));
++	CHKiRet(objUse(var));
+ 
+ 	OBJSetMethodHandler(objMethod_CONSTRUCTION_FINALIZER, ctokConstructFinalize);
+ ENDObjClassInit(ctok)
+diff --git a/ctok_token.c b/ctok_token.c
+index a7acabd2f..13a39a54c 100644
+--- a/ctok_token.c
++++ b/ctok_token.c
+@@ -34,11 +34,18 @@
+ 
+ /* static data */
+ DEFobjStaticHelpers
++DEFobjCurrIf(var)
+ 
+ 
+ /* Standard-Constructor
+  */
+ BEGINobjConstruct(ctok_token) /* be sure to specify the object type also in END macro! */
++	/* TODO: we may optimize the code below and alloc var only if actually
++	 * needed (but we need it quite often)
++	 */
++	CHKiRet(var.Construct(&pThis->pVar));
++	CHKiRet(var.ConstructFinalize(pThis->pVar));
++finalize_it:
+ ENDobjConstruct(ctok_token)
+ 
+ 
+@@ -55,8 +62,8 @@ rsRetVal ctok_tokenConstructFinalize(ctok_token_t __attribute__((unused)) *pThis
+ /* destructor for the ctok object */
+ BEGINobjDestruct(ctok_token) /* be sure to specify the object type also in END and CODESTART macros! */
+ CODESTARTobjDestruct(ctok_token)
+-	if(pThis->pstrVal != NULL) {
+-		rsCStrDestruct(&pThis->pstrVal);
++	if(pThis->pVar != NULL) {
++		var.Destruct(&pThis->pVar);
+ 	}
+ ENDobjDestruct(ctok_token)
+ 
+@@ -67,15 +74,15 @@ ENDobjDestruct(ctok_token)
+  * rgerhards, 2008-02-20
+  */
+ static rsRetVal
+-ctok_tokenUnlinkCStr(ctok_token_t *pThis, cstr_t **ppCStr)
++ctok_tokenUnlinkVar(ctok_token_t *pThis, var_t **ppVar)
+ {
+ 	DEFiRet;
+ 
+ 	ISOBJ_TYPE_assert(pThis, ctok_token);
+-	ASSERT(ppCStr != NULL);
++	ASSERT(ppVar != NULL);
+ 
+-	*ppCStr = pThis->pstrVal;
+-	pThis->pstrVal = NULL;
++	*ppVar = pThis->pVar;
++	pThis->pVar = NULL;
+ 
+ 	RETiRet;
+ }
+@@ -106,13 +113,16 @@ CODESTARTobjQueryInterface(ctok_token)
+ 	pIf->Construct = ctok_tokenConstruct;
+ 	pIf->ConstructFinalize = ctok_tokenConstructFinalize;
+ 	pIf->Destruct = ctok_tokenDestruct;
+-	pIf->UnlinkCStr = ctok_tokenUnlinkCStr;
++	pIf->UnlinkVar = ctok_tokenUnlinkVar;
+ 	pIf->IsCmpOp = ctok_tokenIsCmpOp;
+ finalize_it:
+ ENDobjQueryInterface(ctok_token)
+ 
+ 
+ BEGINObjClassInit(ctok_token, 1) /* class, version */
++	/* request objects we use */
++	CHKiRet(objUse(var));
++
+ 	OBJSetMethodHandler(objMethod_CONSTRUCTION_FINALIZER, ctok_tokenConstructFinalize);
+ ENDObjClassInit(ctok_token)
+ 
+diff --git a/ctok_token.h b/ctok_token.h
+index 4ea88d1a5..696a769e1 100644
+--- a/ctok_token.h
++++ b/ctok_token.h
+@@ -23,7 +23,7 @@
+ #define INCLUDED_CTOK_TOKEN_H
+ 
+ #include "obj.h"
+-#include "stringbuf.h"
++#include "var.h"
+ 
+ /* the tokens... I use numbers below so that the tokens can be easier
+  * identified in debug output. These ID's are also partly resused as opcodes.
+@@ -61,8 +61,9 @@ typedef struct {
+ 		ctok_CMP_STARTSWITH = 106,
+ 		ctok_CMP_GTEQ = 107, /* end compare operations */
+ 	} tok;
+-	cstr_t *pstrVal;
+-	int64 intVal;
++	var_t *pVar;
++	//cstr_t *pstrVal;
++	//int64 intVal;
+ } ctok_token_t;
+ 
+ 
+@@ -72,7 +73,7 @@ BEGINinterface(ctok_token) /* name must also be changed in ENDinterface macro! *
+ 	rsRetVal (*Construct)(ctok_token_t **ppThis);
+ 	rsRetVal (*ConstructFinalize)(ctok_token_t __attribute__((unused)) *pThis);
+ 	rsRetVal (*Destruct)(ctok_token_t **ppThis);
+-	rsRetVal (*UnlinkCStr)(ctok_token_t *pThis, cstr_t **ppCStr);
++	rsRetVal (*UnlinkVar)(ctok_token_t *pThis, var_t **ppVar);
+ 	int (*IsCmpOp)(ctok_token_t *pThis);
+ ENDinterface(ctok_token)
+ #define ctok_tokenCURR_IF_VERSION 1 /* increment whenever you change the interface structure! */
+diff --git a/expr.c b/expr.c
+index 23284b105..e84eab17f 100644
+--- a/expr.c
++++ b/expr.c
+@@ -64,7 +64,6 @@ terminal(expr_t *pThis, ctok_t *tok)
+ 	DEFiRet;
+ 	ctok_token_t *pToken;
+ 	var_t *pVar;
+-	cstr_t *pCStr;
+ 
+ 	ISOBJ_TYPE_assert(pThis, expr);
+ 	ISOBJ_TYPE_assert(tok, ctok);
+@@ -73,11 +72,8 @@ terminal(expr_t *pThis, ctok_t *tok)
+ 
+ 	switch(pToken->tok) {
+ 		case ctok_SIMPSTR:
+-			CHKiRet(var.Construct(&pVar));
+-			CHKiRet(var.ConstructFinalize(pVar));
+-			CHKiRet(ctok_token.UnlinkCStr(pToken, &pCStr));
+-			CHKiRet(var.SetString(pVar, pCStr));
+ 			dbgoprint((obj_t*) pThis, "simpstr\n");
++			CHKiRet(ctok_token.UnlinkVar(pToken, &pVar));
+ 			CHKiRet(vmprg.AddVarOperation(pThis->pVmprg, opcode_PUSHCONSTANT, pVar)); /* add to program */
+ 			break;
+ 		case ctok_NUMBER:
+diff --git a/var.c b/var.c
+index c4cf0b9b1..e199a0ee6 100644
+--- a/var.c
++++ b/var.c
+@@ -102,7 +102,10 @@ varUnsetValues(var_t *pThis)
+ }
+ 
+ 
+-/* set a string value */
++/* set a string value 
++ * The caller hands over the string and must n longer use it after this method
++ * has been called.
++ */
+ static rsRetVal
+ varSetString(var_t *pThis, cstr_t *pCStr)
+ {
+

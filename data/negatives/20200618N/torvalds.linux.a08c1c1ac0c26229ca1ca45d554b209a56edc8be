@@ -1,0 +1,106 @@
+commit a08c1c1ac0c26229ca1ca45d554b209a56edc8be
+Author: Kalle Valo <kalle.valo@nokia.com>
+Date:   Sun Mar 22 21:57:28 2009 +0200
+
+    cfg80211: add feature to hold bss
+    
+    In beacon filtering there needs to be a way to not expire the BSS even
+    when no beacons are received. Add an interface to cfg80211 to hold
+    BSS and make sure that it's not expired.
+    
+    Signed-off-by: Kalle Valo <kalle.valo@nokia.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index dca4a6b0461b..5389afdc1297 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -539,6 +539,7 @@ enum cfg80211_signal_type {
+  *	is no guarantee that these are well-formed!)
+  * @len_information_elements: total length of the information elements
+  * @signal: signal strength value (type depends on the wiphy's signal_type)
++ * @hold: BSS should not expire
+  * @free_priv: function pointer to free private data
+  * @priv: private area for driver use, has at least wiphy->bss_priv_size bytes
+  */
+@@ -940,4 +941,21 @@ void cfg80211_send_rx_deauth(struct net_device *dev, const u8 *buf,
+ void cfg80211_send_rx_disassoc(struct net_device *dev, const u8 *buf,
+ 			       size_t len);
+ 
++/**
++ * cfg80211_hold_bss - exclude bss from expiration
++ * @bss: bss which should not expire
++ *
++ * In a case when the BSS is not updated but it shouldn't expire this
++ * function can be used to mark the BSS to be excluded from expiration.
++ */
++void cfg80211_hold_bss(struct cfg80211_bss *bss);
++
++/**
++ * cfg80211_unhold_bss - remove expiration exception from the BSS
++ * @bss: bss which can expire again
++ *
++ * This function marks the BSS to be expirable again.
++ */
++void cfg80211_unhold_bss(struct cfg80211_bss *bss);
++
+ #endif /* __NET_CFG80211_H */
+diff --git a/net/wireless/core.h b/net/wireless/core.h
+index 6acd483a61f8..97a6fd8b2b03 100644
+--- a/net/wireless/core.h
++++ b/net/wireless/core.h
+@@ -90,6 +90,8 @@ struct cfg80211_internal_bss {
+ 	struct rb_node rbn;
+ 	unsigned long ts;
+ 	struct kref ref;
++	bool hold;
++
+ 	/* must be last because of priv member */
+ 	struct cfg80211_bss pub;
+ };
+diff --git a/net/wireless/scan.c b/net/wireless/scan.c
+index 280dbcd02c15..2a00e362f5fe 100644
+--- a/net/wireless/scan.c
++++ b/net/wireless/scan.c
+@@ -80,7 +80,8 @@ void cfg80211_bss_expire(struct cfg80211_registered_device *dev)
+ 	bool expired = false;
+ 
+ 	list_for_each_entry_safe(bss, tmp, &dev->bss_list, list) {
+-		if (!time_after(jiffies, bss->ts + IEEE80211_SCAN_RESULT_EXPIRE))
++		if (bss->hold ||
++		    !time_after(jiffies, bss->ts + IEEE80211_SCAN_RESULT_EXPIRE))
+ 			continue;
+ 		list_del(&bss->list);
+ 		rb_erase(&bss->rbn, &dev->bss_tree);
+@@ -471,6 +472,30 @@ void cfg80211_unlink_bss(struct wiphy *wiphy, struct cfg80211_bss *pub)
+ }
+ EXPORT_SYMBOL(cfg80211_unlink_bss);
+ 
++void cfg80211_hold_bss(struct cfg80211_bss *pub)
++{
++	struct cfg80211_internal_bss *bss;
++
++	if (!pub)
++		return;
++
++	bss = container_of(pub, struct cfg80211_internal_bss, pub);
++	bss->hold = true;
++}
++EXPORT_SYMBOL(cfg80211_hold_bss);
++
++void cfg80211_unhold_bss(struct cfg80211_bss *pub)
++{
++	struct cfg80211_internal_bss *bss;
++
++	if (!pub)
++		return;
++
++	bss = container_of(pub, struct cfg80211_internal_bss, pub);
++	bss->hold = false;
++}
++EXPORT_SYMBOL(cfg80211_unhold_bss);
++
+ #ifdef CONFIG_WIRELESS_EXT
+ int cfg80211_wext_siwscan(struct net_device *dev,
+ 			  struct iw_request_info *info,
+

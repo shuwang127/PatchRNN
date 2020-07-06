@@ -1,0 +1,50 @@
+commit fb0e72c8b94903be3a7e742ab0a4b53b89e7ee35
+Author: Chao Yu <yuchao0@huawei.com>
+Date:   Sat Feb 3 17:44:39 2018 +0800
+
+    f2fs: fix to handle looped node chain during recovery
+    
+    There is no checksum in node block now, so bit-transition from hardware
+    can make node_footer.next_blkaddr being corrupted w/o any detection,
+    result in node chain becoming looped one.
+    
+    For this condition, during recovery, in order to avoid running into dead
+    loop, let's detect it and just skip out.
+    
+    Signed-off-by: Yunlei He <heyunlei@huawei.com>
+    Signed-off-by: Chao Yu <yuchao0@huawei.com>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/recovery.c b/fs/f2fs/recovery.c
+index c5e5c45130b5..1b23d3febe4c 100644
+--- a/fs/f2fs/recovery.c
++++ b/fs/f2fs/recovery.c
+@@ -242,6 +242,9 @@ static int find_fsync_dnodes(struct f2fs_sb_info *sbi, struct list_head *head,
+ 	struct curseg_info *curseg;
+ 	struct page *page = NULL;
+ 	block_t blkaddr;
++	unsigned int loop_cnt = 0;
++	unsigned int free_blocks = sbi->user_block_count -
++					valid_user_blocks(sbi);
+ 	int err = 0;
+ 
+ 	/* get node pages in the current segment */
+@@ -294,6 +297,17 @@ static int find_fsync_dnodes(struct f2fs_sb_info *sbi, struct list_head *head,
+ 		if (IS_INODE(page) && is_dent_dnode(page))
+ 			entry->last_dentry = blkaddr;
+ next:
++		/* sanity check in order to detect looped node chain */
++		if (++loop_cnt >= free_blocks ||
++			blkaddr == next_blkaddr_of_node(page)) {
++			f2fs_msg(sbi->sb, KERN_NOTICE,
++				"%s: detect looped node chain, "
++				"blkaddr:%u, next:%u",
++				__func__, blkaddr, next_blkaddr_of_node(page));
++			err = -EINVAL;
++			break;
++		}
++
+ 		/* check next segment */
+ 		blkaddr = next_blkaddr_of_node(page);
+ 		f2fs_put_page(page, 1);
+

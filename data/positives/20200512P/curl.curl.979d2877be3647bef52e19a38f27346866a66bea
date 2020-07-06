@@ -1,0 +1,52 @@
+commit 979d2877be3647bef52e19a38f27346866a66bea
+Author: Jay Satiro <raysatiro@yahoo.com>
+Date:   Tue Oct 24 16:08:26 2017 -0400
+
+    transfer: Fix chunked-encoding upload bug
+    
+    - When uploading via chunked-encoding don't compare file size to bytes
+      sent to determine whether the upload has finished.
+    
+    Chunked-encoding adds its own overhead which why the bytes sent is not
+    equal to the file size. Prior to this change if a file was uploaded in
+    chunked-encoding and its size was known it was possible that the upload
+    could end prematurely without sending the final few chunks. That would
+    result in a server hang waiting for the remaining data, likely followed
+    by a disconnect.
+    
+    The scope of this bug is limited to some arbitrary file sizes which have
+    not been determined. One size that triggers the bug is 475020.
+    
+    Bug: https://github.com/curl/curl/issues/2001
+    Reported-by: moohoorama@users.noreply.github.com
+    
+    Closes https://github.com/curl/curl/pull/2010
+
+diff --git a/lib/transfer.c b/lib/transfer.c
+index 75659cf44..937477670 100644
+--- a/lib/transfer.c
++++ b/lib/transfer.c
+@@ -238,9 +238,11 @@ CURLcode Curl_fillreadbuffer(struct connectdata *conn, int bytes, int *nreadp)
+     }
+ #endif /* CURL_DOES_CONVERSIONS */
+ 
+-    if((nread - hexlen) == 0)
++    if((nread - hexlen) == 0) {
+       /* mark this as done once this chunk is transferred */
+       data->req.upload_done = TRUE;
++      infof(data, "Signaling end of chunked upload via terminating chunk.\n");
++    }
+ 
+     nread += (int)strlen(endofline_native); /* for the added end of line */
+   }
+@@ -1046,7 +1048,8 @@ static CURLcode readwrite_upload(struct Curl_easy *data,
+ 
+     k->writebytecount += bytes_written;
+ 
+-    if(k->writebytecount == data->state.infilesize) {
++    if((!k->upload_chunky || k->forbidchunk) &&
++       (k->writebytecount == data->state.infilesize)) {
+       /* we have sent all data we were supposed to */
+       k->upload_done = TRUE;
+       infof(data, "We are completely uploaded and fine\n");
+

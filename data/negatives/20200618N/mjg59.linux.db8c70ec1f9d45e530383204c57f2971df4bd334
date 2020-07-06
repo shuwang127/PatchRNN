@@ -1,0 +1,58 @@
+commit db8c70ec1f9d45e530383204c57f2971df4bd334
+Author: Marc Zyngier <marc.zyngier@arm.com>
+Date:   Wed Oct 14 12:27:16 2015 +0100
+
+    irqchip/gic-v3: Fix translation of LPIs after conversion to irq_fwspec
+    
+    Commit f833f57ff254 ("irqchip: Convert all alloc/xlate users from
+    of_node to fwnode") converted the GICv3 driver to using irq_fwspec
+    as part of its 'translate' method.
+    
+    Too bad it ended up with a copy of the GICv2 'translate' method,
+    which screws up LPI translation (by not translating them at all).
+    
+    Restore the code in its original shape, and just change what is
+    really required...
+    
+    Signed-off-by: Marc Zyngier <marc.zyngier@arm.com>
+    Cc: <linux-arm-kernel@lists.infradead.org>
+    Cc: Suravee Suthikulpanit <Suravee.Suthikulpanit@amd.com>
+    Cc: Duc Dang <dhdang@apm.com>
+    Cc: Jason Cooper <jason@lakedaemon.net>
+    Link: http://lkml.kernel.org/r/1444822037-16983-2-git-send-email-marc.zyngier@arm.com
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/drivers/irqchip/irq-gic-v3.c b/drivers/irqchip/irq-gic-v3.c
+index 05d010b652f5..d7be6ddc34f6 100644
+--- a/drivers/irqchip/irq-gic-v3.c
++++ b/drivers/irqchip/irq-gic-v3.c
+@@ -746,15 +746,19 @@ static int gic_irq_domain_translate(struct irq_domain *d,
+ 		if (fwspec->param_count < 3)
+ 			return -EINVAL;
+ 
+-		/* Get the interrupt number and add 16 to skip over SGIs */
+-		*hwirq = fwspec->param[1] + 16;
+-
+-		/*
+-		 * For SPIs, we need to add 16 more to get the GIC irq
+-		 * ID number
+-		 */
+-		if (!fwspec->param[0])
+-			*hwirq += 16;
++		switch (fwspec->param[0]) {
++		case 0:			/* SPI */
++			*hwirq = fwspec->param[1] + 32;
++			break;
++		case 1:			/* PPI */
++			*hwirq = fwspec->param[1] + 16;
++			break;
++		case GIC_IRQ_TYPE_LPI:	/* LPI */
++			*hwirq = fwspec->param[1];
++			break;
++		default:
++			return -EINVAL;
++		}
+ 
+ 		*type = fwspec->param[2] & IRQ_TYPE_SENSE_MASK;
+ 		return 0;
+

@@ -1,0 +1,54 @@
+commit 87740caa01956db89afdd2f5934d550c939d3c57
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+Date:   Fri Aug 7 19:29:49 2009 +0000
+
+    rm_cleanup functions need to be allowed to write WAL entries.  This oversight
+    appears to explain the recent reports of "PANIC: cannot make new WAL entries
+    during recovery".
+
+diff --git a/src/backend/access/transam/xlog.c b/src/backend/access/transam/xlog.c
+index 5990bae8b8..f2fb9ed8f5 100644
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -7,7 +7,7 @@
+  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+- * $PostgreSQL: pgsql/src/backend/access/transam/xlog.c,v 1.345 2009/06/26 20:29:04 tgl Exp $
++ * $PostgreSQL: pgsql/src/backend/access/transam/xlog.c,v 1.346 2009/08/07 19:29:49 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -463,6 +463,7 @@ static void readRecoveryCommandFile(void);
+ static void exitArchiveRecovery(TimeLineID endTLI,
+ 					uint32 endLogId, uint32 endLogSeg);
+ static bool recoveryStopsHere(XLogRecord *record, bool *includeThis);
++static void LocalSetXLogInsertAllowed(void);
+ static void CheckPointGuts(XLogRecPtr checkPointRedo, int flags);
+ 
+ static bool XLogCheckBuffer(XLogRecData *rdata, bool doPageWrites,
+@@ -5758,6 +5759,13 @@ StartupXLOG(void)
+ 	{
+ 		int			rmid;
+ 
++		/*
++		 * Resource managers might need to write WAL records, eg, to record
++		 * index cleanup actions.  So temporarily enable XLogInsertAllowed in
++		 * this process only.
++		 */
++		LocalSetXLogInsertAllowed();
++
+ 		/*
+ 		 * Allow resource managers to do any required cleanup.
+ 		 */
+@@ -5767,6 +5775,9 @@ StartupXLOG(void)
+ 				RmgrTable[rmid].rm_cleanup();
+ 		}
+ 
++		/* Disallow XLogInsert again */
++		LocalXLogInsertAllowed = -1;
++
+ 		/*
+ 		 * Check to see if the XLOG sequence contained any unresolved
+ 		 * references to uninitialized pages.
+

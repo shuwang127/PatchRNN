@@ -1,0 +1,91 @@
+commit 0c5670a0e571a3ba0e5e2fc45d5054041e049830
+Author: Ramiro Polla <ramiro.polla@gmail.com>
+Date:   Mon Mar 30 02:54:19 2009 +0000
+
+    mlpdec: Max filter orders for FIR and IIR are 8 and 4 respectively.
+    
+    Originally committed as revision 18230 to svn://svn.ffmpeg.org/ffmpeg/trunk
+
+diff --git a/libavcodec/mlp.h b/libavcodec/mlp.h
+index c19b69915..433f95f6e 100644
+--- a/libavcodec/mlp.h
++++ b/libavcodec/mlp.h
+@@ -50,11 +50,9 @@
+ /** number of allowed filters */
+ #define NUM_FILTERS         2
+ 
+-/** The maximum number of taps in either the IIR or FIR filter;
+- *  I believe MLP actually specifies the maximum order for IIR filters as four,
+- *  and that the sum of the orders of both filters must be <= 8.
+-*/
+-#define MAX_FILTER_ORDER    8
++/** The maximum number of taps in IIR and FIR filters. */
++#define MAX_FIR_ORDER       8
++#define MAX_IIR_ORDER       4
+ 
+ /** Code that signals end of a stream. */
+ #define END_OF_STREAM       0xd234d234
+@@ -67,8 +65,8 @@ typedef struct {
+     uint8_t     order; ///< number of taps in filter
+     uint8_t     shift; ///< Right shift to apply to output of filter.
+ 
+-    int32_t     coeff[MAX_FILTER_ORDER];
+-    int32_t     state[MAX_FILTER_ORDER];
++    int32_t     coeff[MAX_FIR_ORDER];
++    int32_t     state[MAX_FIR_ORDER];
+ } FilterParams;
+ 
+ /** sample data coding information */
+diff --git a/libavcodec/mlpdec.c b/libavcodec/mlpdec.c
+index a42b5e36a..8bcbd2129 100644
+--- a/libavcodec/mlpdec.c
++++ b/libavcodec/mlpdec.c
+@@ -433,6 +433,7 @@ static int read_filter_params(MLPDecodeContext *m, GetBitContext *gbp,
+                               unsigned int channel, unsigned int filter)
+ {
+     FilterParams *fp = &m->channel_params[channel].filter_params[filter];
++    const int max_order = filter ? MAX_IIR_ORDER : MAX_FIR_ORDER;
+     const char fchar = filter ? 'I' : 'F';
+     int i, order;
+ 
+@@ -440,10 +441,10 @@ static int read_filter_params(MLPDecodeContext *m, GetBitContext *gbp,
+     assert(filter < 2);
+ 
+     order = get_bits(gbp, 4);
+-    if (order > MAX_FILTER_ORDER) {
++    if (order > max_order) {
+         av_log(m->avctx, AV_LOG_ERROR,
+                "%cIR filter order %d is greater than maximum %d.\n",
+-               fchar, order, MAX_FILTER_ORDER);
++               fchar, order, max_order);
+         return -1;
+     }
+     fp->order = order;
+@@ -651,7 +652,7 @@ static void filter_channel(MLPDecodeContext *m, unsigned int substr,
+                            unsigned int channel)
+ {
+     SubStream *s = &m->substream[substr];
+-    int32_t filter_state_buffer[NUM_FILTERS][MAX_BLOCKSIZE + MAX_FILTER_ORDER];
++    int32_t filter_state_buffer[NUM_FILTERS][MAX_BLOCKSIZE + MAX_FIR_ORDER];
+     FilterParams *fp[NUM_FILTERS] = { &m->channel_params[channel].filter_params[FIR],
+                                       &m->channel_params[channel].filter_params[IIR], };
+     unsigned int filter_shift = fp[FIR]->shift;
+@@ -661,7 +662,7 @@ static void filter_channel(MLPDecodeContext *m, unsigned int substr,
+ 
+     for (j = 0; j < NUM_FILTERS; j++) {
+         memcpy(&filter_state_buffer[j][MAX_BLOCKSIZE], &fp[j]->state[0],
+-               MAX_FILTER_ORDER * sizeof(int32_t));
++               MAX_FIR_ORDER * sizeof(int32_t));
+     }
+ 
+     for (i = 0; i < s->blocksize; i++) {
+@@ -690,7 +691,7 @@ static void filter_channel(MLPDecodeContext *m, unsigned int substr,
+ 
+     for (j = 0; j < NUM_FILTERS; j++) {
+         memcpy(&fp[j]->state[0], &filter_state_buffer[j][index],
+-               MAX_FILTER_ORDER * sizeof(int32_t));
++               MAX_FIR_ORDER * sizeof(int32_t));
+     }
+ }
+ 
+

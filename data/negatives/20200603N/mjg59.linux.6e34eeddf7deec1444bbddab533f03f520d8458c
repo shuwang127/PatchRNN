@@ -1,0 +1,49 @@
+commit 6e34eeddf7deec1444bbddab533f03f520d8458c
+Author: Theodore Ts'o <tytso@mit.edu>
+Date:   Tue Apr 7 18:12:43 2009 -0400
+
+    block_write_full_page: switch synchronous writes to use WRITE_SYNC_PLUG
+    
+    Now that we have a distinction between WRITE_SYNC and WRITE_SYNC_PLUG,
+    use WRITE_SYNC_PLUG in __block_write_full_page() to avoid unplugging
+    the block device I/O queue between each page that gets flushed out.
+    
+    Otherwise, when we run sync() or fsync() and we need to write out a
+    large number of pages, the block device queue will get unplugged
+    between for every page that is flushed out, which will be a pretty
+    serious performance regression caused by commit a64c8610.
+    
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+diff --git a/fs/buffer.c b/fs/buffer.c
+index 6e35762b6169..13edf7ad3ff1 100644
+--- a/fs/buffer.c
++++ b/fs/buffer.c
+@@ -1596,6 +1596,16 @@ EXPORT_SYMBOL(unmap_underlying_metadata);
+  * locked buffer.   This only can happen if someone has written the buffer
+  * directly, with submit_bh().  At the address_space level PageWriteback
+  * prevents this contention from occurring.
++ *
++ * If block_write_full_page() is called with wbc->sync_mode ==
++ * WB_SYNC_ALL, the writes are posted using WRITE_SYNC_PLUG; this
++ * causes the writes to be flagged as synchronous writes, but the
++ * block device queue will NOT be unplugged, since usually many pages
++ * will be pushed to the out before the higher-level caller actually
++ * waits for the writes to be completed.  The various wait functions,
++ * such as wait_on_writeback_range() will ultimately call sync_page()
++ * which will ultimately call blk_run_backing_dev(), which will end up
++ * unplugging the device queue.
+  */
+ static int __block_write_full_page(struct inode *inode, struct page *page,
+ 			get_block_t *get_block, struct writeback_control *wbc)
+@@ -1606,7 +1616,8 @@ static int __block_write_full_page(struct inode *inode, struct page *page,
+ 	struct buffer_head *bh, *head;
+ 	const unsigned blocksize = 1 << inode->i_blkbits;
+ 	int nr_underway = 0;
+-	int write_op = (wbc->sync_mode == WB_SYNC_ALL ? WRITE_SYNC : WRITE);
++	int write_op = (wbc->sync_mode == WB_SYNC_ALL ?
++			WRITE_SYNC_PLUG : WRITE);
+ 
+ 	BUG_ON(!PageLocked(page));
+ 
+

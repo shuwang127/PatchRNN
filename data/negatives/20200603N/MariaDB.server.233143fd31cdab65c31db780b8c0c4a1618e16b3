@@ -1,0 +1,73 @@
+commit 233143fd31cdab65c31db780b8c0c4a1618e16b3
+Author: unknown <andrey@whirlpool.hristov.com>
+Date:   Fri Feb 22 18:45:45 2008 +0100
+
+    Fix for Bug#29605
+    --local-infile=0 checks can be bypassed by sending a FETCH LOCAL FILE response
+    
+    Add a check for CLIENT_LOCAL_FILES before sending a local file.
+    Beware, that all binary distributions enable sending of local files and it's up
+    to the programs which use libmysql to disable it, if they don't use this functionality.
+    Otherwise they are not safe.
+    
+    
+    client/mysqltest.c:
+      Enable LOAD DATA LOCAL INFILE for the test suite, like some rpl and ndb test.
+    sql-common/client.c:
+      Check if the client has LOAD DATA LOCAL INFILE disabled and
+      don't serve such requests from the server. This is not 100% proof,
+      as if the client has this enabled, in all binary builds for BC,
+      the check won't work and the client can be tricked into sending a
+      local file.
+    tests/mysql_client_test.c:
+      Switch on LOCAL INFILE in client test. If one day there
+      is a test which uses it, then it will work out of the box.
+
+diff --git a/client/mysqltest.c b/client/mysqltest.c
+index fdbd31fab36..a21a7113557 100644
+--- a/client/mysqltest.c
++++ b/client/mysqltest.c
+@@ -6333,6 +6333,8 @@ int util_query(MYSQL* org_mysql, const char* query){
+     if (!(mysql= mysql_init(mysql)))
+       die("Failed in mysql_init()");
+ 
++    /* enable local infile, in non-binary builds often disabled by default */
++    mysql_options(mysql, MYSQL_OPT_LOCAL_INFILE, 0);
+     safe_connect(mysql, "util", org_mysql->host, org_mysql->user,
+                  org_mysql->passwd, org_mysql->db, org_mysql->port,
+                  org_mysql->unix_socket);
+diff --git a/sql-common/client.c b/sql-common/client.c
+index a26207038cf..f4d587d4df3 100644
+--- a/sql-common/client.c
++++ b/sql-common/client.c
+@@ -2736,7 +2736,15 @@ static my_bool cli_read_query_result(MYSQL *mysql)
+ #ifdef MYSQL_CLIENT
+   if (field_count == NULL_LENGTH)		/* LOAD DATA LOCAL INFILE */
+   {
+-    int error=handle_local_infile(mysql,(char*) pos);
++    int error;
++
++    if (!(mysql->options.client_flag & CLIENT_LOCAL_FILES))
++    {
++      set_mysql_error(mysql, CR_MALFORMED_PACKET, unknown_sqlstate);
++      DBUG_RETURN(1);
++    }   
++
++    error= handle_local_infile(mysql,(char*) pos);
+     if ((length= cli_safe_read(mysql)) == packet_error || error)
+       DBUG_RETURN(1);
+     goto get_info;				/* Get info packet */
+diff --git a/tests/mysql_client_test.c b/tests/mysql_client_test.c
+index 6f3abfaa0b0..d85a40f7393 100644
+--- a/tests/mysql_client_test.c
++++ b/tests/mysql_client_test.c
+@@ -289,6 +289,8 @@ static void client_connect(ulong flag)
+     myerror("mysql_init() failed");
+     exit(1);
+   }
++  /* enable local infile, in non-binary builds often disabled by default */
++  mysql_options(mysql, MYSQL_OPT_LOCAL_INFILE, 0);
+ 
+   if (!(mysql_real_connect(mysql, opt_host, opt_user,
+                            opt_password, opt_db ? opt_db:"test", opt_port,
+

@@ -1,0 +1,52 @@
+commit e4c6f8bed01f9f9a5c607bd689bf67e7b8a36bd8
+Author: Eric Sandeen <sandeen@sandeen.net>
+Date:   Wed Jul 29 15:02:16 2009 -0700
+
+    hugetlbfs: fix i_blocks accounting
+    
+    As reported in Red Hat bz #509671, i_blocks for files on hugetlbfs get
+    accounting wrong when doing something like:
+    
+       $ > foo
+       $ date  > foo
+       date: write error: Invalid argument
+       $ /usr/bin/stat foo
+         File: `foo'
+         Size: 0          Blocks: 18446744073709547520 IO Block: 2097152 regular
+    ...
+    
+    This is because hugetlb_unreserve_pages() is unconditionally removing
+    blocks_per_huge_page(h) on each call rather than using the freed amount.
+    If there were 0 blocks, it goes negative, resulting in the above.
+    
+    This is a regression from commit a5516438959d90b071ff0a484ce4f3f523dc3152
+    ("hugetlb: modular state for hugetlb page size")
+    
+    which did:
+    
+    -       inode->i_blocks -= BLOCKS_PER_HUGEPAGE * freed;
+    +       inode->i_blocks -= blocks_per_huge_page(h);
+    
+    so just put back the freed multiplier, and it's all happy again.
+    
+    Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+    Acked-by: Andi Kleen <andi@firstfloor.org>
+    Cc: William Lee Irwin III <wli@holomorphy.com>
+    Cc: <stable@kernel.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index d0351e31f474..cafdcee154e8 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -2370,7 +2370,7 @@ void hugetlb_unreserve_pages(struct inode *inode, long offset, long freed)
+ 	long chg = region_truncate(&inode->i_mapping->private_list, offset);
+ 
+ 	spin_lock(&inode->i_lock);
+-	inode->i_blocks -= blocks_per_huge_page(h);
++	inode->i_blocks -= (blocks_per_huge_page(h) * freed);
+ 	spin_unlock(&inode->i_lock);
+ 
+ 	hugetlb_put_quota(inode->i_mapping, (chg - freed));
+

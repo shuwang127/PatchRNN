@@ -1,0 +1,83 @@
+commit c3f21423b4570ab8fea73ecb249e28ccf2ed82d7
+Author: hzhao <hzhao@facebook.com>
+Date:   Sat Jun 19 16:03:21 2010 -0700
+
+    fixed a re-declaring exception problem
+    
+    Summary:
+    This is the bug that caused those platform unit tests to fail. This is related
+    to p_T not able to take DynamicObjectData. In this case, it has to use Object as
+    the type, so invokes are dynamically done.
+    
+    Test Plan:
+    the new unit test, i'm testing www-dev now
+    
+    DiffCamp Revision: 125189
+    Reviewed By: mwilliams
+    CC: hphp-diffs@lists, mwilliams
+    Revert Plan:
+    OK
+
+diff --git a/src/compiler/statement/catch_statement.cpp b/src/compiler/statement/catch_statement.cpp
+index 74c026577d..b81280668e 100644
+--- a/src/compiler/statement/catch_statement.cpp
++++ b/src/compiler/statement/catch_statement.cpp
+@@ -102,18 +102,16 @@ void CatchStatement::inferTypes(AnalysisResultPtr ar) {
+   ClassScopePtr cls = ar->findClass(m_className);
+   TypePtr type;
+   m_valid = cls;
+-  if (!m_valid) {
+-    if (ar->isFirstPass()) {
+-      ConstructPtr self = shared_from_this();
+-      ar->getCodeError()->record(self, CodeError::UnknownClass, self);
+-    }
+-    type = NEW_TYPE(Object);
+-  } else if (cls->isRedeclaring()) {
+-    type = NEW_TYPE(Object);
+-  } else {
+-    type = Type::CreateObjectType(m_className);
++  if (!m_valid && ar->isFirstPass()) {
++    ConstructPtr self = shared_from_this();
++    ar->getCodeError()->record(self, CodeError::UnknownClass, self);
+   }
+ 
++  // This can never be a specific exception type, because a future exception
++  // class may be re-declaring, then generated code like this won't work with
++  // DynamicObjectData: p_exception v_e = e;
++  type = NEW_TYPE(Object);
++
+   BlockScopePtr scope = ar->getScope();
+   VariableTablePtr variables = scope->getVariables();
+   variables->add(m_variable, type, false, ar, shared_from_this(),
+diff --git a/src/test/test_code_run.cpp b/src/test/test_code_run.cpp
+index 2a846166a7..88265d9b4f 100644
+--- a/src/test/test_code_run.cpp
++++ b/src/test/test_code_run.cpp
+@@ -7405,6 +7405,26 @@ bool TestCodeRun::TestRedeclaredFunctions() {
+ }
+ 
+ bool TestCodeRun::TestRedeclaredClasses() {
++  MVCR(
++    "<?php\n"
++    "$b = 123;\n"
++    "if ($b) {\n"
++    "  class Exception1 extends Exception {}\n"
++    "} else {\n"
++    "  class Exception1 extends Exception {}\n"
++    "}\n"
++    "class Exception2 extends Exception1 {}\n"
++    "\n"
++    "function foo() {\n"
++    "  try {\n"
++    "    throw new Exception2();\n"
++    "  } catch (Exception $e) {\n"
++    "    var_dump($e->getCode());\n"
++    "  }\n"
++    "}\n"
++    "foo();\n"
++  );
++
+   MVCR("<?php "
+       "class base1 {}"
+       "class base2 {}"
+

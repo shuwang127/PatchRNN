@@ -1,0 +1,75 @@
+commit 5d0153c408ff8c7282fc387c4041fdbffd35727d
+Author: Monty <monty@mariadb.org>
+Date:   Thu Nov 2 14:39:54 2017 +0200
+
+    MDEV-12633  Error from valgrind related to dd_frm_type
+    
+    "Conditional jump or move depends on uninitialised value in
+    my_scan_weight_utf8_general_ci, main.mysql_client_test fails in biuldbot
+    with valgrind"
+    
+    - Fixed by ensuring that engine_name is set to empty string even in case
+      errors in the .frm file
+    - Added some error checking to ha_table_exists()
+
+diff --git a/sql/datadict.cc b/sql/datadict.cc
+index ee0d8805f95..f01d61f531b 100644
+--- a/sql/datadict.cc
++++ b/sql/datadict.cc
+@@ -45,6 +45,8 @@ static int read_string(File file, uchar**to, size_t length)
+ 
+   engine_name is a LEX_STRING, where engine_name->str must point to
+   a buffer of at least NAME_CHAR_LEN+1 bytes.
++  If engine_name is 0, then the function will only test if the file is a
++  view or not
+ 
+   @retval  FRMTYPE_ERROR        error
+   @retval  FRMTYPE_TABLE        table
+@@ -72,12 +74,23 @@ frm_type_enum dd_frm_type(THD *thd, char *path, LEX_STRING *engine_name)
+     goto err;
+   }
+ 
++  /*
++    We return FRMTYPE_TABLE if we can read the .frm file. This allows us
++    to drop a bad .frm file with DROP TABLE
++  */
+   type= FRMTYPE_TABLE;
+ 
+-  if (!is_binary_frm_header(header) || !engine_name)
++  /* engine_name is 0 if we only want to know if table is view or not */
++  if (!engine_name)
+     goto err;
+ 
++  /* Initialize engine name in case we are not able to find it out */
+   engine_name->length= 0;
++  engine_name->str[0]= 0;
++
++  if (!is_binary_frm_header(header))
++    goto err;
++
+   dbt= header[3];
+ 
+   /* cannot use ha_resolve_by_legacy_type without a THD */
+diff --git a/sql/handler.cc b/sql/handler.cc
+index 4e35780b1e2..a5a28ceb777 100644
+--- a/sql/handler.cc
++++ b/sql/handler.cc
+@@ -5063,10 +5063,15 @@ bool ha_table_exists(THD *thd, const char *db, const char *table_name,
+     {
+       char engine_buf[NAME_CHAR_LEN + 1];
+       LEX_STRING engine= { engine_buf, 0 };
++      frm_type_enum type;
+ 
+-      if (dd_frm_type(thd, path, &engine) != FRMTYPE_VIEW)
++      if ((type= dd_frm_type(thd, path, &engine)) == FRMTYPE_ERROR)
++        DBUG_RETURN(0);
++
++      if (type != FRMTYPE_VIEW)
+       {
+-        plugin_ref p=  plugin_lock_by_name(thd, &engine,  MYSQL_STORAGE_ENGINE_PLUGIN);
++        plugin_ref p= plugin_lock_by_name(thd, &engine,
++                                          MYSQL_STORAGE_ENGINE_PLUGIN);
+         *hton= p ? plugin_hton(p) : NULL;
+         if (*hton)
+           // verify that the table really exists
+

@@ -1,0 +1,94 @@
+commit 9d59124cacf5d0a1e89aee83de6233bdf97afdb1
+Author: Takashi Sakamoto <o-takashi@sakamocchi.jp>
+Date:   Fri Apr 25 22:45:27 2014 +0900
+
+    ALSA: bebob/firewire-lib: Add a quirk of wrong dbc in empty packet for M-Audio special Firewire series
+    
+    M-Audio Firewire 1814 has a quirk, ProjectMix I/O also has. They transmit
+    empty packet with wrong value of dbc incremented by 8 at high sampling rate.
+    According to IEC 61883-1, this value should be the same as the one in
+    previous packet.
+    
+    This commit adds a flag named as CIP_EMPTY_HAS_WRONG_DBC. With flag, the value
+    of dbc in empty packet is overwittern by an expected value.
+    
+    This is an example of this quirk:
+    CIP Header 0    CIP Header 1    Payload size
+    010D0000        9004F759        210
+    010D0010        90040B59        210
+    010D0020        90042359        210
+    01020028        9004FFFF        2  <-
+    010D0030        90043759        210
+    010D0040        90044B59        210
+    010D0050        90046359        210
+    01020058        9004FFFF        2  <-
+    010D0060        90047759        210
+    010D0070        90048B59        210
+    010D0080        9004A359        210
+    01020088        9004FFFF        2  <-
+    010D0090        9004B759        210
+    010D00A0        9004CB59        210
+    010D00B0        9004E359        210
+    010200B8        9004FFFF        2  <-
+    010D00C0        9004F759        210
+    010D00D0        90040B59        210
+    010D00E0        90042359        210
+    
+    Signed-off-by: Takashi Sakamoto <o-takashi@sakamocchi.jp>
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+diff --git a/sound/firewire/amdtp.c b/sound/firewire/amdtp.c
+index 690c60828872..e573f253e39d 100644
+--- a/sound/firewire/amdtp.c
++++ b/sound/firewire/amdtp.c
+@@ -665,6 +665,10 @@ static void handle_in_packet(struct amdtp_stream *s,
+ 
+ 	/* Check data block counter continuity */
+ 	data_block_counter = cip_header[0] & AMDTP_DBC_MASK;
++	if (data_blocks == 0 && (s->flags & CIP_EMPTY_HAS_WRONG_DBC) &&
++	    s->data_block_counter != UINT_MAX)
++		data_block_counter = s->data_block_counter;
++
+ 	if (((s->flags & CIP_SKIP_DBC_ZERO_CHECK) && data_block_counter == 0) ||
+ 	    (s->data_block_counter == UINT_MAX)) {
+ 		lost = false;
+diff --git a/sound/firewire/amdtp.h b/sound/firewire/amdtp.h
+index c79f058f1621..d8ee7b0e9386 100644
+--- a/sound/firewire/amdtp.h
++++ b/sound/firewire/amdtp.h
+@@ -27,6 +27,8 @@
+  *	skipped for detecting discontinuity.
+  * @CIP_SKIP_INIT_DBC_CHECK: Only for in-stream. The value of dbc in first
+  *	packet is not continuous from an initial value.
++ * @CIP_EMPTY_HAS_WRONG_DBC: Only for in-stream. The value of dbc in empty
++ *	packet is wrong but the others are correct.
+  */
+ enum cip_flags {
+ 	CIP_NONBLOCKING		= 0x00,
+@@ -37,6 +39,7 @@ enum cip_flags {
+ 	CIP_WRONG_DBS		= 0x10,
+ 	CIP_SKIP_DBC_ZERO_CHECK	= 0x20,
+ 	CIP_SKIP_INIT_DBC_CHECK	= 0x40,
++	CIP_EMPTY_HAS_WRONG_DBC	= 0x80,
+ };
+ 
+ /**
+diff --git a/sound/firewire/bebob/bebob_stream.c b/sound/firewire/bebob/bebob_stream.c
+index 2695b7899410..3e74d9b1e357 100644
+--- a/sound/firewire/bebob/bebob_stream.c
++++ b/sound/firewire/bebob/bebob_stream.c
+@@ -457,6 +457,13 @@ int snd_bebob_stream_init_duplex(struct snd_bebob *bebob)
+ 	/* See comments in next function */
+ 	init_completion(&bebob->bus_reset);
+ 	bebob->tx_stream.flags |= CIP_SKIP_INIT_DBC_CHECK;
++	/*
++	 * At high sampling rate, M-Audio special firmware transmits empty
++	 * packet with the value of dbc incremented by 8 but the others are
++	 * valid to IEC 61883-1.
++	 */
++	if (bebob->maudio_special_quirk)
++		bebob->tx_stream.flags |= CIP_EMPTY_HAS_WRONG_DBC;
+ 
+ 	err = amdtp_stream_init(&bebob->rx_stream, bebob->unit,
+ 				AMDTP_OUT_STREAM, CIP_BLOCKING);
+

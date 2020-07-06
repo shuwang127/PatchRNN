@@ -1,0 +1,56 @@
+commit 2cc17fda94c5ee8c64c2fdc2ef981fc277e2e958
+Author: Josh Poimboeuf <jpoimboe@redhat.com>
+Date:   Mon Oct 10 15:24:01 2016 -0500
+
+    objtool: Support '-mtune=atom' stack frame setup instruction
+    
+    Arnd reported that enabling CONFIG_MATOM results in a bunch of objtool
+    false positive frame pointer warnings:
+    
+      arch/x86/events/intel/ds.o: warning: objtool: intel_pmu_pebs_del()+0x43: call without frame pointer save/setup
+      security/keys/keyring.o: warning: objtool: keyring_read()+0x59: call without frame pointer save/setup
+      kernel/signal.o: warning: objtool: __dequeue_signal()+0xd8: call without frame pointer save/setup
+      ...
+    
+    objtool gets confused by the fact that the '-mtune=atom' GCC option
+    sometimes uses 'lea (%rsp),%rbp' instead of 'mov %rsp,%rbp'.  The
+    instructions are effectively the same, but objtool doesn't know about
+    the 'lea' variant.
+    
+    Fix the false warnings by adding support for 'lea (%rsp),%rbp' in the
+    objtool decoder.
+    
+    Reported-by: Arnd Bergmann <arnd@arndb.de>
+    Signed-off-by: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Brian Gerst <brgerst@gmail.com>
+    Cc: Denys Vlasenko <dvlasenk@redhat.com>
+    Cc: H. Peter Anvin <hpa@zytor.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: linux-kernel@vger.kernel.org
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/tools/objtool/arch/x86/decode.c b/tools/objtool/arch/x86/decode.c
+index c0c0b265e88e..b63a31be1218 100644
+--- a/tools/objtool/arch/x86/decode.c
++++ b/tools/objtool/arch/x86/decode.c
+@@ -98,6 +98,15 @@ int arch_decode_instruction(struct elf *elf, struct section *sec,
+ 			*type = INSN_FP_SETUP;
+ 		break;
+ 
++	case 0x8d:
++		if (insn.rex_prefix.bytes &&
++		    insn.rex_prefix.bytes[0] == 0x48 &&
++		    insn.modrm.nbytes && insn.modrm.bytes[0] == 0x2c &&
++		    insn.sib.nbytes && insn.sib.bytes[0] == 0x24)
++			/* lea %(rsp), %rbp */
++			*type = INSN_FP_SETUP;
++		break;
++
+ 	case 0x90:
+ 		*type = INSN_NOP;
+ 		break;
+

@@ -1,0 +1,51 @@
+commit 1b17844b29ae042576bea588164f2f1e9590a8bc
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Tue Apr 22 13:49:40 2014 -0700
+
+    mm: make fixup_user_fault() check the vma access rights too
+    
+    fixup_user_fault() is used by the futex code when the direct user access
+    fails, and the futex code wants it to either map in the page in a usable
+    form or return an error.  It relied on handle_mm_fault() to map the
+    page, and correctly checked the error return from that, but while that
+    does map the page, it doesn't actually guarantee that the page will be
+    mapped with sufficient permissions to be then accessed.
+    
+    So do the appropriate tests of the vma access rights by hand.
+    
+    [ Side note: arguably handle_mm_fault() could just do that itself, but
+      we have traditionally done it in the caller, because some callers -
+      notably get_user_pages() - have been able to access pages even when
+      they are mapped with PROT_NONE.  Maybe we should re-visit that design
+      decision, but in the meantime this is the minimal patch. ]
+    
+    Found by Dave Jones running his trinity tool.
+    
+    Reported-by: Dave Jones <davej@redhat.com>
+    Acked-by: Hugh Dickins <hughd@google.com>
+    Cc: stable@vger.kernel.org
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/memory.c b/mm/memory.c
+index d0f0bef3be48..93e332d5ed77 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1955,12 +1955,17 @@ int fixup_user_fault(struct task_struct *tsk, struct mm_struct *mm,
+ 		     unsigned long address, unsigned int fault_flags)
+ {
+ 	struct vm_area_struct *vma;
++	vm_flags_t vm_flags;
+ 	int ret;
+ 
+ 	vma = find_extend_vma(mm, address);
+ 	if (!vma || address < vma->vm_start)
+ 		return -EFAULT;
+ 
++	vm_flags = (fault_flags & FAULT_FLAG_WRITE) ? VM_WRITE : VM_READ;
++	if (!(vm_flags & vma->vm_flags))
++		return -EFAULT;
++
+ 	ret = handle_mm_fault(mm, vma, address, fault_flags);
+ 	if (ret & VM_FAULT_ERROR) {
+ 		if (ret & VM_FAULT_OOM)
+

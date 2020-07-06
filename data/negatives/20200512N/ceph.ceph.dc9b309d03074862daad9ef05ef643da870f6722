@@ -1,0 +1,47 @@
+commit dc9b309d03074862daad9ef05ef643da870f6722
+Author: Jason Dillaman <dillaman@redhat.com>
+Date:   Thu Oct 19 22:24:31 2017 -0400
+
+    osdc/Objecter: skip sparse-read result decode if bufferlist is empty
+    
+    If the OSD does not execute sub-ops due to errors encountered prior to
+    the sub-op, the sub-op result remains zeroed with empty out data.
+    Attempting to decode the empty bufferlist results in large exception
+    handling CPU overhead.
+    
+    Fixes: http://tracker.ceph.com/issues/21844
+    Signed-off-by: Jason Dillaman <dillaman@redhat.com>
+
+diff --git a/src/osdc/Objecter.h b/src/osdc/Objecter.h
+index 3358d6bb24..569e328ee6 100644
+--- a/src/osdc/Objecter.h
++++ b/src/osdc/Objecter.h
+@@ -335,13 +335,20 @@ struct ObjectOperation {
+     void finish(int r) override {
+       bufferlist::iterator iter = bl.begin();
+       if (r >= 0) {
+-	try {
+-	  ::decode(*extents, iter);
+-	  ::decode(*data_bl, iter);
+-	} catch (buffer::error& e) {
+-	  if (prval)
+-	    *prval = -EIO;
+-	}
++        // NOTE: it's possible the sub-op has not been executed but the result
++        // code remains zeroed. Avoid the costly exception handling on a
++        // potential IO path.
++        if (bl.length() > 0) {
++	  try {
++	    ::decode(*extents, iter);
++	    ::decode(*data_bl, iter);
++	  } catch (buffer::error& e) {
++	    if (prval)
++              *prval = -EIO;
++	  }
++        } else if (prval) {
++          *prval = -EIO;
++        }
+       }
+     }
+   };
+

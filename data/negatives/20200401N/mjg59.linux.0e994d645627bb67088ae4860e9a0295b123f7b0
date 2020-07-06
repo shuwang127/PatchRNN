@@ -1,0 +1,128 @@
+commit 0e994d645627bb67088ae4860e9a0295b123f7b0
+Author: Martin Peres <martin.peres@labri.fr>
+Date:   Wed Feb 19 01:04:56 2014 +0100
+
+    drm/nouveau/therm: let the vbios decide on the automatic fan management mode
+    
+    This should fix automatic fan management on fermi cards who do not have
+    0x46 entries in the thermal table.
+    
+    On my nve6, the blob sets the default linear range from 40°C to 100°C
+    but my nvcf's default values are 40°C to 85°C. Let's keep 85 as a default
+    for everyone.
+    
+    Signed-off-by: Martin Peres <martin.peres@labri.fr>
+    Tested-by: Timothée Ravier <tim@siosm.fr>
+    Signed-off-by: Ben Skeggs <bskeggs@redhat.com>
+
+diff --git a/drivers/gpu/drm/nouveau/core/include/subdev/bios/therm.h b/drivers/gpu/drm/nouveau/core/include/subdev/bios/therm.h
+index 083541dbe9c8..8dc5051df55d 100644
+--- a/drivers/gpu/drm/nouveau/core/include/subdev/bios/therm.h
++++ b/drivers/gpu/drm/nouveau/core/include/subdev/bios/therm.h
+@@ -31,6 +31,12 @@ struct nouveau_therm_trip_point {
+ 	int hysteresis;
+ };
+ 
++enum nvbios_therm_fan_mode {
++	NVBIOS_THERM_FAN_TRIP = 0,
++	NVBIOS_THERM_FAN_LINEAR = 1,
++	NVBIOS_THERM_FAN_OTHER = 2,
++};
++
+ struct nvbios_therm_fan {
+ 	u16 pwm_freq;
+ 
+@@ -40,6 +46,7 @@ struct nvbios_therm_fan {
+ 	u16 bump_period;
+ 	u16 slow_down_period;
+ 
++	enum nvbios_therm_fan_mode fan_mode;
+ 	struct nouveau_therm_trip_point trip[NOUVEAU_TEMP_FAN_TRIP_MAX];
+ 	u8 nr_fan_trip;
+ 	u8 linear_min_temp;
+diff --git a/drivers/gpu/drm/nouveau/core/subdev/bios/therm.c b/drivers/gpu/drm/nouveau/core/subdev/bios/therm.c
+index 22ac6dbd6c8f..d15854094078 100644
+--- a/drivers/gpu/drm/nouveau/core/subdev/bios/therm.c
++++ b/drivers/gpu/drm/nouveau/core/subdev/bios/therm.c
+@@ -164,6 +164,7 @@ nvbios_therm_fan_parse(struct nouveau_bios *bios,
+ 
+ 	i = 0;
+ 	fan->nr_fan_trip = 0;
++	fan->fan_mode = NVBIOS_THERM_FAN_OTHER;
+ 	while ((entry = nvbios_therm_entry(bios, i++, &ver, &len))) {
+ 		s16 value = nv_ro16(bios, entry + 1);
+ 
+@@ -174,6 +175,8 @@ nvbios_therm_fan_parse(struct nouveau_bios *bios,
+ 			break;
+ 		case 0x24:
+ 			fan->nr_fan_trip++;
++			if (fan->fan_mode > NVBIOS_THERM_FAN_TRIP)
++				fan->fan_mode = NVBIOS_THERM_FAN_TRIP;
+ 			cur_trip = &fan->trip[fan->nr_fan_trip - 1];
+ 			cur_trip->hysteresis = value & 0xf;
+ 			cur_trip->temp = (value & 0xff0) >> 4;
+@@ -194,11 +197,19 @@ nvbios_therm_fan_parse(struct nouveau_bios *bios,
+ 			fan->slow_down_period = value;
+ 			break;
+ 		case 0x46:
++			if (fan->fan_mode > NVBIOS_THERM_FAN_LINEAR)
++				fan->fan_mode = NVBIOS_THERM_FAN_LINEAR;
+ 			fan->linear_min_temp = nv_ro08(bios, entry + 1);
+ 			fan->linear_max_temp = nv_ro08(bios, entry + 2);
+ 			break;
+ 		}
+ 	}
+ 
++	/* starting from fermi, fan management is always linear */
++	if (nv_device(bios)->card_type >= NV_C0 &&
++		fan->fan_mode == NVBIOS_THERM_FAN_OTHER) {
++		fan->fan_mode = NVBIOS_THERM_FAN_LINEAR;
++	}
++
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/nouveau/core/subdev/therm/base.c b/drivers/gpu/drm/nouveau/core/subdev/therm/base.c
+index fd1b4606e22b..9ad01da6eacb 100644
+--- a/drivers/gpu/drm/nouveau/core/subdev/therm/base.c
++++ b/drivers/gpu/drm/nouveau/core/subdev/therm/base.c
+@@ -110,16 +110,18 @@ nouveau_therm_update(struct nouveau_therm *therm, int mode)
+ 		poll = false;
+ 		break;
+ 	case NOUVEAU_THERM_CTRL_AUTO:
+-		if (priv->fan->bios.nr_fan_trip) {
++		switch(priv->fan->bios.fan_mode) {
++		case NVBIOS_THERM_FAN_TRIP:
+ 			duty = nouveau_therm_update_trip(therm);
+-		} else
+-		if (priv->fan->bios.linear_min_temp ||
+-		    priv->fan->bios.linear_max_temp) {
++			break;
++		case NVBIOS_THERM_FAN_LINEAR:
+ 			duty = nouveau_therm_update_linear(therm);
+-		} else {
++			break;
++		case NVBIOS_THERM_FAN_OTHER:
+ 			if (priv->cstate)
+ 				duty = priv->cstate;
+ 			poll = false;
++			break;
+ 		}
+ 		immd = false;
+ 		break;
+diff --git a/drivers/gpu/drm/nouveau/core/subdev/therm/fan.c b/drivers/gpu/drm/nouveau/core/subdev/therm/fan.c
+index ceb85281cbe9..016990a8252c 100644
+--- a/drivers/gpu/drm/nouveau/core/subdev/therm/fan.c
++++ b/drivers/gpu/drm/nouveau/core/subdev/therm/fan.c
+@@ -192,11 +192,8 @@ nouveau_therm_fan_set_defaults(struct nouveau_therm *therm)
+ 	priv->fan->bios.max_duty = 100;
+ 	priv->fan->bios.bump_period = 500;
+ 	priv->fan->bios.slow_down_period = 2000;
+-/*XXX: talk to mupuf */
+-#if 0
+ 	priv->fan->bios.linear_min_temp = 40;
+ 	priv->fan->bios.linear_max_temp = 85;
+-#endif
+ }
+ 
+ static void
+

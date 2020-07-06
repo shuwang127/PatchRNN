@@ -1,0 +1,70 @@
+commit f2cba9299be45f8e027f7b45c6e4a3cae55576c6
+Author: Shawn O. Pearce <spearce@spearce.org>
+Date:   Mon Mar 14 16:48:38 2011 -0700
+
+    fetch-pack: Finish negotation if remote replies "ACK %s ready"
+    
+    If multi_ack_detailed was selected in the protocol capabilities
+    (both client and server are >= Git 1.6.6) the upload-pack side will
+    send "ACK %s ready" when it knows how to safely cut the graph and
+    produce a reasonable pack for the want list that was already sent
+    on the connection.
+    
+    Upon receiving "ACK %s ready" there is no point in looking at
+    the remaining commits inside of rev_list.  Sending additional
+    "have %s" lines to the remote will not construct a smaller pack.
+    It is unlikely a commit older than the current cut point will have
+    a better delta base than the cut point itself has.
+    
+    The original design of this code had fetch-pack empty rev_list by
+    marking a commit and its transitive ancestors COMMON whenever the
+    remote side said "ACK %s {continue,common}" and skipping over any
+    already COMMON commits during get_rev().  This approach does not
+    work when most of rev_list is actually COMMON_REF, commits that
+    are pointed to by a reference on the remote, which exist locally,
+    and which have not yet been sent to the remote as a "have %s" line.
+    
+    Most of the common references are tags in the ref/tags namespace,
+    using points in the commit graph that are more than 1 commit apart.
+    In git.git itself, this is currently 340 tags, 339 of which point to
+    commits in the commit graph.  fetch-pack pushes all of these into
+    rev_list, but is unable to mark them COMMON and discard during a
+    remote's "ACK %s {continue,common}" because it does not parse through
+    the entire parent chain.  Not parsing the entire parent chain is
+    an optimization to avoid walking back to the roots of the repository.
+    
+    Assuming the client is only following the remote (and does not make
+    its own local commits), the client needs 11 rounds to spin through
+    the entire list of tags (32 commits per round, ceil(339/32) == 11).
+    Unfortunately the server knows on the first "have %s" line that
+    it can produce a good pack, and does not need to see the remaining
+    320 tags in the other 10 rounds.
+    
+    Over git:// and ssh:// this isn't as bad as it sounds, the client is
+    only transmitting an extra 16,000 bytes that it doesn't need to send.
+    
+    Over smart HTTP, the client must do an additional 10 HTTP POST
+    requests, each of which incurs round-trip latency, and must upload
+    the entire state vector of all known common objects.  On the final
+    POST request, this is 16 KiB worth of data.
+    
+    Fix all of this by clearing rev_list as soon as the remote side
+    says it can construct a pack.
+    
+    Signed-off-by: Shawn O. Pearce <spearce@spearce.org>
+    Signed-off-by: Junio C Hamano <gitster@pobox.com>
+
+diff --git a/builtin/fetch-pack.c b/builtin/fetch-pack.c
+index b99941393..5173dc9aa 100644
+--- a/builtin/fetch-pack.c
++++ b/builtin/fetch-pack.c
+@@ -379,6 +379,8 @@ static int find_common(int fd[2], unsigned char *result_sha1,
+ 					retval = 0;
+ 					in_vain = 0;
+ 					got_continue = 1;
++					if (ack == ACK_ready)
++						rev_list = NULL;
+ 					break;
+ 					}
+ 				}
+

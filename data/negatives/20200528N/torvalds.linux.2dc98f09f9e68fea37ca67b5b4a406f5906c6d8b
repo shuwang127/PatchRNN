@@ -1,0 +1,84 @@
+commit 2dc98f09f9e68fea37ca67b5b4a406f5906c6d8b
+Author: Bart Van Assche <bart.vanassche@wdc.com>
+Date:   Tue Jan 16 16:14:09 2018 -0800
+
+    IB/srpt: Use the source GID as session name
+    
+    Use the source GID as session name instead of the initiator port ID
+    from the SRP login request. The only functional change in this patch
+    is that it changes the session name shown in debug messages.
+    
+    Note: the fifth argument that is passed to target_alloc_session() is
+    what the SCSI target core uses as key for lookups in the ACL (access
+    control list) information.
+    
+    Signed-off-by: Bart Van Assche <bart.vanassche@wdc.com>
+    Signed-off-by: Doug Ledford <dledford@redhat.com>
+
+diff --git a/drivers/infiniband/ulp/srpt/ib_srpt.c b/drivers/infiniband/ulp/srpt/ib_srpt.c
+index 7893fc420794..597fc0bc0734 100644
+--- a/drivers/infiniband/ulp/srpt/ib_srpt.c
++++ b/drivers/infiniband/ulp/srpt/ib_srpt.c
+@@ -1989,6 +1989,7 @@ static int srpt_cm_req_recv(struct ib_cm_id *cm_id,
+ 	struct srp_login_rej *rej;
+ 	struct ib_cm_rep_param *rep_param;
+ 	struct srpt_rdma_ch *ch, *tmp_ch;
++	char i_port_id[36];
+ 	u32 it_iu_len;
+ 	int i, ret = 0;
+ 
+@@ -2143,9 +2144,9 @@ static int srpt_cm_req_recv(struct ib_cm_id *cm_id,
+ 		goto destroy_ib;
+ 	}
+ 
+-	srpt_format_guid(ch->ini_guid, sizeof(ch->ini_guid),
++	srpt_format_guid(ch->sess_name, sizeof(ch->sess_name),
+ 			 &param->primary_path->dgid.global.interface_id);
+-	snprintf(ch->sess_name, sizeof(ch->sess_name), "0x%016llx%016llx",
++	snprintf(i_port_id, sizeof(i_port_id), "0x%016llx%016llx",
+ 			be64_to_cpu(*(__be64 *)ch->i_port_id),
+ 			be64_to_cpu(*(__be64 *)(ch->i_port_id + 8)));
+ 
+@@ -2154,16 +2155,16 @@ static int srpt_cm_req_recv(struct ib_cm_id *cm_id,
+ 	if (sport->port_guid_tpg.se_tpg_wwn)
+ 		ch->sess = target_alloc_session(&sport->port_guid_tpg, 0, 0,
+ 						TARGET_PROT_NORMAL,
+-						ch->ini_guid, ch, NULL);
++						ch->sess_name, ch, NULL);
+ 	if (sport->port_gid_tpg.se_tpg_wwn && IS_ERR_OR_NULL(ch->sess))
+ 		ch->sess = target_alloc_session(&sport->port_gid_tpg, 0, 0,
+-					TARGET_PROT_NORMAL, ch->sess_name, ch,
++					TARGET_PROT_NORMAL, i_port_id, ch,
+ 					NULL);
+ 	/* Retry without leading "0x" */
+ 	if (sport->port_gid_tpg.se_tpg_wwn && IS_ERR_OR_NULL(ch->sess))
+ 		ch->sess = target_alloc_session(&sport->port_gid_tpg, 0, 0,
+ 						TARGET_PROT_NORMAL,
+-						ch->sess_name + 2, ch, NULL);
++						i_port_id + 2, ch, NULL);
+ 	if (IS_ERR_OR_NULL(ch->sess)) {
+ 		pr_info("Rejected login because no ACL has been configured yet for initiator %s.\n",
+ 			ch->sess_name);
+diff --git a/drivers/infiniband/ulp/srpt/ib_srpt.h b/drivers/infiniband/ulp/srpt/ib_srpt.h
+index 1434f0cd45f7..6c5a14ac7742 100644
+--- a/drivers/infiniband/ulp/srpt/ib_srpt.h
++++ b/drivers/infiniband/ulp/srpt/ib_srpt.h
+@@ -269,7 +269,6 @@ enum rdma_ch_state {
+  * @pkey:          P_Key of the IB partition for this SRP channel.
+  * @sess:          Session information associated with this SRP channel.
+  * @sess_name:     Session name.
+- * @ini_guid:      Initiator port GUID.
+  * @release_work:  Allows scheduling of srpt_release_channel().
+  */
+ struct srpt_rdma_ch {
+@@ -297,8 +296,7 @@ struct srpt_rdma_ch {
+ 	struct list_head	cmd_wait_list;
+ 	uint16_t		pkey;
+ 	struct se_session	*sess;
+-	u8			sess_name[36];
+-	u8			ini_guid[24];
++	u8			sess_name[24];
+ 	struct work_struct	release_work;
+ };
+ 
+

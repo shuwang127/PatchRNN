@@ -1,0 +1,64 @@
+commit 11ad19277e025f914518bc2943a240cdd37cf844
+Author: Ingo Molnar <mingo@kernel.org>
+Date:   Wed Apr 22 11:44:46 2015 +0200
+
+    x86/fpu: Remove the free_thread_xstate() complication
+    
+    Use fpstate_free() directly to manage FPU state.
+    
+    Only process.c was using this method, so this is a speedup as well,
+    as it removes the extra function call and related clobbers.
+    
+    Reviewed-by: Borislav Petkov <bp@alien8.de>
+    Cc: Andy Lutomirski <luto@amacapital.net>
+    Cc: Dave Hansen <dave.hansen@linux.intel.com>
+    Cc: Fenghua Yu <fenghua.yu@intel.com>
+    Cc: H. Peter Anvin <hpa@zytor.com>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Oleg Nesterov <oleg@redhat.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+index 6b75c4b927ec..fef8db024ece 100644
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -362,7 +362,6 @@ DECLARE_PER_CPU(struct irq_stack *, softirq_stack);
+ #endif	/* X86_64 */
+ 
+ extern unsigned int xstate_size;
+-extern void free_thread_xstate(struct task_struct *);
+ extern struct kmem_cache *task_xstate_cachep;
+ 
+ struct perf_event;
+diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
+index 35d0f1925524..6ab180f40a7e 100644
+--- a/arch/x86/kernel/process.c
++++ b/arch/x86/kernel/process.c
+@@ -99,14 +99,9 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
+ 	return 0;
+ }
+ 
+-void free_thread_xstate(struct task_struct *tsk)
+-{
+-	fpstate_free(&tsk->thread.fpu);
+-}
+-
+ void arch_release_task_struct(struct task_struct *tsk)
+ {
+-	free_thread_xstate(tsk);
++	fpstate_free(&tsk->thread.fpu);
+ }
+ 
+ void arch_task_cache_init(void)
+@@ -154,7 +149,7 @@ void flush_thread(void)
+ 	if (!use_eager_fpu()) {
+ 		/* FPU state will be reallocated lazily at the first use. */
+ 		drop_fpu(tsk);
+-		free_thread_xstate(tsk);
++		fpstate_free(&tsk->thread.fpu);
+ 	} else {
+ 		if (!tsk_used_math(tsk)) {
+ 			/* kthread execs. TODO: cleanup this horror. */
+

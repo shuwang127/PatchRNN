@@ -1,0 +1,77 @@
+commit 91a38540f504cdde7cb62668f7a6d52e3bd0178b
+Author: Lars-Peter Clausen <lars@metafoo.de>
+Date:   Wed Feb 22 10:49:05 2012 +0100
+
+    ASoC: imx-ssi: Set dma data early
+    
+    Move the call to snd_soc_dai_set_dma_data from the hw_params callback to the
+    startup callback. This allows us to use the dma data in the pcm driver's open
+    callback.
+    
+    Signed-off-by: Lars-Peter Clausen <lars@metafoo.de>
+    Tested-by: Shawn Guo <shawn.guo@linaro.org>
+    Signed-off-by: Mark Brown <broonie@opensource.wolfsonmicro.com>
+
+diff --git a/sound/soc/imx/imx-ssi.c b/sound/soc/imx/imx-ssi.c
+index 01d1f749cf02..dbf43f5f0aed 100644
+--- a/sound/soc/imx/imx-ssi.c
++++ b/sound/soc/imx/imx-ssi.c
+@@ -233,6 +233,23 @@ static int imx_ssi_set_dai_clkdiv(struct snd_soc_dai *cpu_dai,
+ 	return 0;
+ }
+ 
++static int imx_ssi_startup(struct snd_pcm_substream *substream,
++			   struct snd_soc_dai *cpu_dai)
++{
++	struct imx_ssi *ssi = snd_soc_dai_get_drvdata(cpu_dai);
++	struct imx_pcm_dma_params *dma_data;
++
++	/* Tx/Rx config */
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
++		dma_data = &ssi->dma_params_tx;
++	else
++		dma_data = &ssi->dma_params_rx;
++
++	snd_soc_dai_set_dma_data(cpu_dai, substream, dma_data);
++
++	return 0;
++}
++
+ /*
+  * Should only be called when port is inactive (i.e. SSIEN = 0),
+  * although can be called multiple times by upper layers.
+@@ -242,23 +259,17 @@ static int imx_ssi_hw_params(struct snd_pcm_substream *substream,
+ 			     struct snd_soc_dai *cpu_dai)
+ {
+ 	struct imx_ssi *ssi = snd_soc_dai_get_drvdata(cpu_dai);
+-	struct imx_pcm_dma_params *dma_data;
+ 	u32 reg, sccr;
+ 
+ 	/* Tx/Rx config */
+-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+ 		reg = SSI_STCCR;
+-		dma_data = &ssi->dma_params_tx;
+-	} else {
++	else
+ 		reg = SSI_SRCCR;
+-		dma_data = &ssi->dma_params_rx;
+-	}
+ 
+ 	if (ssi->flags & IMX_SSI_SYN)
+ 		reg = SSI_STCCR;
+ 
+-	snd_soc_dai_set_dma_data(cpu_dai, substream, dma_data);
+-
+ 	sccr = readl(ssi->base + reg) & ~SSI_STCCR_WL_MASK;
+ 
+ 	/* DAI data (word) size */
+@@ -343,6 +354,7 @@ static int imx_ssi_trigger(struct snd_pcm_substream *substream, int cmd,
+ }
+ 
+ static const struct snd_soc_dai_ops imx_ssi_pcm_dai_ops = {
++	.startup	= imx_ssi_startup,
+ 	.hw_params	= imx_ssi_hw_params,
+ 	.set_fmt	= imx_ssi_set_dai_fmt,
+ 	.set_clkdiv	= imx_ssi_set_dai_clkdiv,
+

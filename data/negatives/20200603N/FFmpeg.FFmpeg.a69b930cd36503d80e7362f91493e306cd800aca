@@ -1,0 +1,79 @@
+commit a69b930cd36503d80e7362f91493e306cd800aca
+Author: Alex Beregszaszi <alex@rtfs.hu>
+Date:   Tue May 7 17:55:02 2002 +0000
+
+    clamp intra matrix to 8bit for mjpeg (workaround for qscale>=25)
+    
+    Originally committed as revision 451 to svn://svn.ffmpeg.org/ffmpeg/trunk
+
+diff --git a/libavcodec/common.h b/libavcodec/common.h
+index 815ca29009..38379a4cfc 100644
+--- a/libavcodec/common.h
++++ b/libavcodec/common.h
+@@ -902,4 +902,6 @@ void *av_mallocz(int size);
+ /* math */
+ int ff_gcd(int a, int b);
+ 
++#define CLAMP_TO_8BIT(d) ((d > 0xff) ? 0xff : (d < 0) ? 0 : d)
++
+ #endif
+diff --git a/libavcodec/mjpeg.c b/libavcodec/mjpeg.c
+index d1d0127312..6db3d5ec7f 100644
+--- a/libavcodec/mjpeg.c
++++ b/libavcodec/mjpeg.c
+@@ -388,6 +388,8 @@ void mjpeg_picture_header(MpegEncContext *s)
+ {
+     put_marker(&s->pb, SOI);
+ 
++    if (!s->mjpeg_data_only_frames)
++    {
+     jpeg_put_comments(s);    
+ 
+     if (s->mjpeg_write_tables) jpeg_table_header(s);
+@@ -425,6 +427,7 @@ void mjpeg_picture_header(MpegEncContext *s)
+ #else
+     put_bits(&s->pb, 8, 0); /* select matrix */
+ #endif
++    }
+ 
+     /* scan header */
+     put_marker(&s->pb, SOS);
+diff --git a/libavcodec/mpegvideo.c b/libavcodec/mpegvideo.c
+index 73daa0d323..19deb2da99 100644
+--- a/libavcodec/mpegvideo.c
++++ b/libavcodec/mpegvideo.c
+@@ -427,10 +427,11 @@ int MPV_encode_init(AVCodecContext *avctx)
+         s->out_format = FMT_MJPEG;
+         s->intra_only = 1; /* force intra only for jpeg */
+         s->mjpeg_write_tables = 1; /* write all tables */
++	s->mjpeg_data_only_frames = 0; /* write all the needed headers */
+         s->mjpeg_vsample[0] = 2; /* set up default sampling factors */
+         s->mjpeg_vsample[1] = 1; /* the only currently supported values */
+         s->mjpeg_vsample[2] = 1; 
+-        s->mjpeg_hsample[0] = 2; 
++        s->mjpeg_hsample[0] = 2;
+         s->mjpeg_hsample[1] = 1; 
+         s->mjpeg_hsample[2] = 1; 
+         if (mjpeg_init(s) < 0)
+@@ -1658,7 +1659,7 @@ static void encode_picture(MpegEncContext *s, int picture_number)
+         /* for mjpeg, we do include qscale in the matrix */
+         s->intra_matrix[0] = default_intra_matrix[0];
+         for(i=1;i<64;i++)
+-            s->intra_matrix[i] = (default_intra_matrix[i] * s->qscale) >> 3;
++            s->intra_matrix[i] = CLAMP_TO_8BIT((default_intra_matrix[i] * s->qscale) >> 3);
+         convert_matrix(s->q_intra_matrix, s->q_intra_matrix16, 
+                        s->q_intra_matrix16_bias, s->intra_matrix, s->intra_quant_bias);
+     }
+diff --git a/libavcodec/mpegvideo.h b/libavcodec/mpegvideo.h
+index 4ad5009dab..1a3c853e26 100644
+--- a/libavcodec/mpegvideo.h
++++ b/libavcodec/mpegvideo.h
+@@ -332,6 +332,7 @@ typedef struct MpegEncContext {
+     int mjpeg_hsample[3]; /* horizontal sampling factors, default = {2, 1, 1} */
+     int mjpeg_write_tables; /* do we want to have quantisation- and
+ 			       huffmantables in the jpeg file ? */
++    int mjpeg_data_only_frames; /* frames only with SOI, SOS and EOI markers */
+ 
+     /* MSMPEG4 specific */
+     int mv_table_index;
+

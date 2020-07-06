@@ -1,0 +1,41 @@
+commit 442e31ca5a49e398351b2954b51f578353fdf210
+Author: Jeff Layton <jlayton@redhat.com>
+Date:   Thu Dec 20 16:15:38 2012 -0500
+
+    vfs: fix linkat to retry once on ESTALE errors
+    
+    Signed-off-by: Jeff Layton <jlayton@redhat.com>
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/namei.c b/fs/namei.c
+index b06a111591a8..6868699272bf 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -3626,12 +3626,13 @@ SYSCALL_DEFINE5(linkat, int, olddfd, const char __user *, oldname,
+ 
+ 	if (flags & AT_SYMLINK_FOLLOW)
+ 		how |= LOOKUP_FOLLOW;
+-
++retry:
+ 	error = user_path_at(olddfd, oldname, how, &old_path);
+ 	if (error)
+ 		return error;
+ 
+-	new_dentry = user_path_create(newdfd, newname, &new_path, 0);
++	new_dentry = user_path_create(newdfd, newname, &new_path,
++					(how & LOOKUP_REVAL));
+ 	error = PTR_ERR(new_dentry);
+ 	if (IS_ERR(new_dentry))
+ 		goto out;
+@@ -3648,6 +3649,10 @@ SYSCALL_DEFINE5(linkat, int, olddfd, const char __user *, oldname,
+ 	error = vfs_link(old_path.dentry, new_path.dentry->d_inode, new_dentry);
+ out_dput:
+ 	done_path_create(&new_path, new_dentry);
++	if (retry_estale(error, how)) {
++		how |= LOOKUP_REVAL;
++		goto retry;
++	}
+ out:
+ 	path_put(&old_path);
+ 
+

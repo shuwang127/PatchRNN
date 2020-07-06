@@ -1,0 +1,78 @@
+commit 3e329b8e8da608174828d7f4a21eea10868c9966
+Author: Manuel Pégourié-Gonnard <manuel.pegourie-gonnard@arm.com>
+Date:   Thu Jun 29 12:55:27 2017 +0200
+
+    Add badtime-skipping feature to new function
+    
+    This is from the morally 5th (and soon obsolete) invocation of this function
+    in verify_top().
+    
+    Doing this badtime-skipping when we search for a parent in the provided chain
+    is a change of behaviour, but it's backwards-compatible: it can only cause us
+    to accept valid chains that we used to reject before. Eg if the peer has a
+    chain with two version of an intermediate certificate with different validity
+    periods, the first non valid and the second valid - such cases are probably
+    rare or users would have complained already, but it doesn't hurt to handle it
+    properly as it allows for more uniform code.
+
+diff --git a/library/x509_crt.c b/library/x509_crt.c
+index ee79e893c..7f181a602 100644
+--- a/library/x509_crt.c
++++ b/library/x509_crt.c
+@@ -1894,7 +1894,23 @@ static int x509_crt_check_parent( const mbedtls_x509_crt *child,
+ }
+ 
+ /*
+- * Find a suitable parent for child in candidates
++ * Find a suitable parent for child in candidates, or return NULL.
++ *
++ * Here suitable is defined as:
++ *  - subject name matches child's issuer
++ *  - if necessary, the CA bit is set and key usage allows signing certs
++ *  - pathlen constraints are satisfied
++ *
++ * Stop at the first suitable candidate, except if it's not time-valid (not
++ * expired nor future) *and* there is a later suitable candidate that is
++ * time-valid.
++ *
++ * The rationale for this rule is that someone could have a list of trusted
++ * roots with two versions on the same root with different validity periods.
++ * (At least one user reported having such a list and wanted it to just work.)
++ * The reason we don't just require time-validity is that generally there is
++ * only one version, and if it's expired we want the flags to state that
++ * rather than NOT_TRUSTED, as would be the case if we required it here.
+  */
+ static mbedtls_x509_crt *x509_crt_find_parent( mbedtls_x509_crt *child,
+                                                mbedtls_x509_crt *candidates,
+@@ -1902,7 +1918,7 @@ static mbedtls_x509_crt *x509_crt_find_parent( mbedtls_x509_crt *child,
+                                                int path_cnt,
+                                                int self_cnt )
+ {
+-    mbedtls_x509_crt *parent;
++    mbedtls_x509_crt *parent, *badtime_parent = NULL;
+ 
+     for( parent = candidates; parent != NULL; parent = parent->next )
+     {
+@@ -1916,9 +1932,21 @@ static mbedtls_x509_crt *x509_crt_find_parent( mbedtls_x509_crt *child,
+             continue;
+         }
+ 
++        if( mbedtls_x509_time_is_past( &parent->valid_to ) ||
++            mbedtls_x509_time_is_future( &parent->valid_from ) )
++        {
++            if( badtime_parent == NULL )
++                badtime_parent = parent;
++
++            continue;
++        }
++
+         break;
+     }
+ 
++    if( parent == NULL )
++        parent = badtime_parent;
++
+     return parent;
+ }
+ 
+

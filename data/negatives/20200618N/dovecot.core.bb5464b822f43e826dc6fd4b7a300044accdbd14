@@ -1,0 +1,72 @@
+commit bb5464b822f43e826dc6fd4b7a300044accdbd14
+Author: Timo Sirainen <tss@iki.fi>
+Date:   Thu Dec 12 18:08:25 2013 +0200
+
+    auth: Previous userdb changes caused userdb prefetch to be used always.
+
+diff --git a/src/auth/auth-request.c b/src/auth/auth-request.c
+index a6ab2eb5b..0752f3d8b 100644
+--- a/src/auth/auth-request.c
++++ b/src/auth/auth-request.c
+@@ -631,10 +631,12 @@ auth_request_handle_passdb_callback(enum passdb_result *result,
+ 			auth_fields_rollback(request->extra_fields);
+ 			if (request->userdb_reply == NULL)
+ 				;
+-			else if (!request->snapshot_has_userdb_reply)
+-				request->userdb_reply = NULL;
+-			else
++			else if (request->snapshot_has_userdb_reply)
+ 				auth_fields_rollback(request->userdb_reply);
++			else {
++				request->userdb_reply = NULL;
++				request->userdb_prefetch_set = FALSE;
++			}
+ 		}
+ 
+ 		if (*result == PASSDB_RESULT_USER_UNKNOWN) {
+@@ -1426,6 +1428,7 @@ void auth_request_set_field(struct auth_request *request,
+ 		auth_request_validate_networks(request, value);
+ 	} else if (strncmp(name, "userdb_", 7) == 0) {
+ 		/* for prefetch userdb */
++		request->userdb_prefetch_set = TRUE;
+ 		if (request->userdb_reply == NULL)
+ 			auth_request_init_userdb_reply(request);
+ 		auth_request_set_userdb_field(request, name + 7, value);
+@@ -1478,8 +1481,7 @@ void auth_request_set_null_field(struct auth_request *request, const char *name)
+ 	if (strncmp(name, "userdb_", 7) == 0) {
+ 		/* make sure userdb prefetch is used even if all the fields
+ 		   were returned as NULL. */
+-		if (request->userdb_reply == NULL)
+-			auth_request_init_userdb_reply(request);
++		request->userdb_prefetch_set = TRUE;
+ 	}
+ }
+ 
+diff --git a/src/auth/auth-request.h b/src/auth/auth-request.h
+index 8526f3f70..369007c34 100644
+--- a/src/auth/auth-request.h
++++ b/src/auth/auth-request.h
+@@ -136,6 +136,9 @@ struct auth_request {
+ 	   or because one of the returned uid/gid fields couldn't be translated
+ 	   to a number */
+ 	unsigned int userdb_lookup_tempfailed:1;
++	/* userdb_* fields have been set by the passdb lookup, userdb prefetch
++	   will work. */
++	unsigned int userdb_prefetch_set:1;
+ 
+ 	/* ... mechanism specific data ... */
+ };
+diff --git a/src/auth/userdb-prefetch.c b/src/auth/userdb-prefetch.c
+index bb3ac77b4..29dbecf09 100644
+--- a/src/auth/userdb-prefetch.c
++++ b/src/auth/userdb-prefetch.c
+@@ -15,7 +15,7 @@ static void prefetch_lookup(struct auth_request *auth_request,
+ {
+ 	/* auth_request_set_field() should have already placed the userdb_*
+ 	   values to userdb_reply. */
+-	if (auth_request->userdb_reply == NULL) {
++	if (!auth_request->userdb_prefetch_set) {
+ 		if (auth_request_get_auth(auth_request)->userdbs->next == NULL) {
+ 			/* no other userdbs */
+ 			if (auth_request->userdb_lookup) {
+

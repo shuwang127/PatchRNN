@@ -1,0 +1,187 @@
+commit 8d1cc86a6278687efbab7b8c294ab01efe4d4231
+Author: Roland Dreier <rolandd@cisco.com>
+Date:   Sun May 6 21:05:32 2007 -0700
+
+    IPoIB: Convert to NAPI
+    
+    Convert the IP-over-InfiniBand network device driver over to using
+    NAPI to handle completions for the main CQ.  This covers all receives
+    as well as datagram mode sends; send completions for connected mode
+    connections are still handled from interrupt context.
+    
+    Signed-off-by: Roland Dreier <rolandd@cisco.com>
+
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib.h b/drivers/infiniband/ulp/ipoib/ipoib.h
+index fd558267d1cb..15867af33c44 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib.h
++++ b/drivers/infiniband/ulp/ipoib/ipoib.h
+@@ -311,6 +311,7 @@ extern struct workqueue_struct *ipoib_workqueue;
+ 
+ /* functions */
+ 
++int ipoib_poll(struct net_device *dev, int *budget);
+ void ipoib_ib_completion(struct ib_cq *cq, void *dev_ptr);
+ 
+ struct ipoib_ah *ipoib_create_ah(struct net_device *dev,
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_cm.c b/drivers/infiniband/ulp/ipoib/ipoib_cm.c
+index b8089a041581..785bc8505f2a 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_cm.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_cm.c
+@@ -416,7 +416,7 @@ void ipoib_cm_handle_rx_wc(struct net_device *dev, struct ib_wc *wc)
+ 	skb->dev = dev;
+ 	/* XXX get correct PACKET_ type here */
+ 	skb->pkt_type = PACKET_HOST;
+-	netif_rx_ni(skb);
++	netif_receive_skb(skb);
+ 
+ repost:
+ 	if (unlikely(ipoib_cm_post_receive(dev, wr_id)))
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_ib.c b/drivers/infiniband/ulp/ipoib/ipoib_ib.c
+index 1bdb9101911a..68d72c6f7ffb 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_ib.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_ib.c
+@@ -226,7 +226,7 @@ static void ipoib_ib_handle_rx_wc(struct net_device *dev, struct ib_wc *wc)
+ 		skb->dev = dev;
+ 		/* XXX get correct PACKET_ type here */
+ 		skb->pkt_type = PACKET_HOST;
+-		netif_rx_ni(skb);
++		netif_receive_skb(skb);
+ 	} else {
+ 		ipoib_dbg_data(priv, "dropping loopback packet\n");
+ 		dev_kfree_skb_any(skb);
+@@ -280,28 +280,63 @@ static void ipoib_ib_handle_tx_wc(struct net_device *dev, struct ib_wc *wc)
+ 			   wc->status, wr_id, wc->vendor_err);
+ }
+ 
+-static void ipoib_ib_handle_wc(struct net_device *dev, struct ib_wc *wc)
++int ipoib_poll(struct net_device *dev, int *budget)
+ {
+-	if (wc->wr_id & IPOIB_CM_OP_SRQ)
+-		ipoib_cm_handle_rx_wc(dev, wc);
+-	else if (wc->wr_id & IPOIB_OP_RECV)
+-		ipoib_ib_handle_rx_wc(dev, wc);
+-	else
+-		ipoib_ib_handle_tx_wc(dev, wc);
++	struct ipoib_dev_priv *priv = netdev_priv(dev);
++	int max = min(*budget, dev->quota);
++	int done;
++	int t;
++	int empty;
++	int n, i;
++
++	done  = 0;
++	empty = 0;
++
++	while (max) {
++		t = min(IPOIB_NUM_WC, max);
++		n = ib_poll_cq(priv->cq, t, priv->ibwc);
++
++		for (i = 0; i < n; ++i) {
++			struct ib_wc *wc = priv->ibwc + i;
++
++			if (wc->wr_id & IPOIB_CM_OP_SRQ) {
++				++done;
++				--max;
++				ipoib_cm_handle_rx_wc(dev, wc);
++			} else if (wc->wr_id & IPOIB_OP_RECV) {
++				++done;
++				--max;
++				ipoib_ib_handle_rx_wc(dev, wc);
++			} else
++				ipoib_ib_handle_tx_wc(dev, wc);
++		}
++
++		if (n != t) {
++			empty = 1;
++			break;
++		}
++	}
++
++	dev->quota -= done;
++	*budget    -= done;
++
++	if (empty) {
++		netif_rx_complete(dev);
++		if (unlikely(ib_req_notify_cq(priv->cq,
++					      IB_CQ_NEXT_COMP |
++					      IB_CQ_REPORT_MISSED_EVENTS)) &&
++		    netif_rx_reschedule(dev, 0))
++			return 1;
++
++		return 0;
++	}
++
++	return 1;
+ }
+ 
+ void ipoib_ib_completion(struct ib_cq *cq, void *dev_ptr)
+ {
+-	struct net_device *dev = (struct net_device *) dev_ptr;
+-	struct ipoib_dev_priv *priv = netdev_priv(dev);
+-	int n, i;
+-
+-	ib_req_notify_cq(cq, IB_CQ_NEXT_COMP);
+-	do {
+-		n = ib_poll_cq(cq, IPOIB_NUM_WC, priv->ibwc);
+-		for (i = 0; i < n; ++i)
+-			ipoib_ib_handle_wc(dev, priv->ibwc + i);
+-	} while (n == IPOIB_NUM_WC);
++	netif_rx_schedule(dev_ptr);
+ }
+ 
+ static inline int post_send(struct ipoib_dev_priv *priv,
+@@ -514,9 +549,10 @@ int ipoib_ib_dev_stop(struct net_device *dev)
+ 	struct ib_qp_attr qp_attr;
+ 	unsigned long begin;
+ 	struct ipoib_tx_buf *tx_req;
+-	int i;
++	int i, n;
+ 
+ 	clear_bit(IPOIB_FLAG_INITIALIZED, &priv->flags);
++	netif_poll_disable(dev);
+ 
+ 	ipoib_cm_dev_stop(dev);
+ 
+@@ -568,6 +604,18 @@ int ipoib_ib_dev_stop(struct net_device *dev)
+ 			goto timeout;
+ 		}
+ 
++		do {
++			n = ib_poll_cq(priv->cq, IPOIB_NUM_WC, priv->ibwc);
++			for (i = 0; i < n; ++i) {
++				if (priv->ibwc[i].wr_id & IPOIB_CM_OP_SRQ)
++					ipoib_cm_handle_rx_wc(dev, priv->ibwc + i);
++				else if (priv->ibwc[i].wr_id & IPOIB_OP_RECV)
++					ipoib_ib_handle_rx_wc(dev, priv->ibwc + i);
++				else
++					ipoib_ib_handle_tx_wc(dev, priv->ibwc + i);
++			}
++		} while (n == IPOIB_NUM_WC);
++
+ 		msleep(1);
+ 	}
+ 
+@@ -596,6 +644,9 @@ int ipoib_ib_dev_stop(struct net_device *dev)
+ 		msleep(1);
+ 	}
+ 
++	netif_poll_enable(dev);
++	ib_req_notify_cq(priv->cq, IB_CQ_NEXT_COMP);
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_main.c b/drivers/infiniband/ulp/ipoib/ipoib_main.c
+index b4c380c5a3ba..0a428f2b05c7 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_main.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_main.c
+@@ -948,6 +948,8 @@ static void ipoib_setup(struct net_device *dev)
+ 	dev->hard_header 	 = ipoib_hard_header;
+ 	dev->set_multicast_list  = ipoib_set_mcast_list;
+ 	dev->neigh_setup         = ipoib_neigh_setup_dev;
++	dev->poll                = ipoib_poll;
++	dev->weight              = 100;
+ 
+ 	dev->watchdog_timeo 	 = HZ;
+ 
+

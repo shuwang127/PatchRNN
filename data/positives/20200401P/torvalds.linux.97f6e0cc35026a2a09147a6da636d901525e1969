@@ -1,0 +1,73 @@
+commit 97f6e0cc35026a2a09147a6da636d901525e1969
+Author: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Date:   Wed Aug 10 17:27:34 2016 +1000
+
+    powerpc/32: Fix crash during static key init
+    
+    We cannot do those initializations from apply_feature_fixups() as
+    this function runs in a very restricted environment on 32-bit where
+    the kernel isn't running at its linked address and the PTRRELOC()
+    macro must be used for any global accesss.
+    
+    Instead, split them into a separtate steup_feature_keys() function
+    which is called in a more suitable spot on ppc32.
+    
+    Fixes: 309b315b6ec6 ("powerpc: Call jump_label_init() in apply_feature_fixups()")
+    Reported-and-tested-by: Christian Kujau <lists@nerdbynature.de>
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/include/asm/feature-fixups.h b/arch/powerpc/include/asm/feature-fixups.h
+index 57fec8ac7b92..ddf54f5bbdd1 100644
+--- a/arch/powerpc/include/asm/feature-fixups.h
++++ b/arch/powerpc/include/asm/feature-fixups.h
+@@ -186,6 +186,7 @@ label##3:					       	\
+ 
+ #ifndef __ASSEMBLY__
+ void apply_feature_fixups(void);
++void setup_feature_keys(void);
+ #endif
+ 
+ #endif /* __ASM_POWERPC_FEATURE_FIXUPS_H */
+diff --git a/arch/powerpc/kernel/setup_32.c b/arch/powerpc/kernel/setup_32.c
+index f10a975baa5e..24ec3ea4b3a2 100644
+--- a/arch/powerpc/kernel/setup_32.c
++++ b/arch/powerpc/kernel/setup_32.c
+@@ -100,6 +100,9 @@ extern unsigned int memset_nocache_branch; /* Insn to be replaced by NOP */
+ 
+ notrace void __init machine_init(u64 dt_ptr)
+ {
++	/* Configure static keys first, now that we're relocated. */
++	setup_feature_keys();
++
+ 	/* Enable early debugging if any specified (see udbg.h) */
+ 	udbg_early_init();
+ 
+diff --git a/arch/powerpc/kernel/setup_64.c b/arch/powerpc/kernel/setup_64.c
+index eafb9a79e011..7ac8e6eaab5b 100644
+--- a/arch/powerpc/kernel/setup_64.c
++++ b/arch/powerpc/kernel/setup_64.c
+@@ -300,6 +300,7 @@ void __init early_setup(unsigned long dt_ptr)
+ 
+ 	/* Apply all the dynamic patching */
+ 	apply_feature_fixups();
++	setup_feature_keys();
+ 
+ 	/* Initialize the hash table or TLB handling */
+ 	early_init_mmu();
+diff --git a/arch/powerpc/lib/feature-fixups.c b/arch/powerpc/lib/feature-fixups.c
+index 74145f02ad41..043415f0bdb1 100644
+--- a/arch/powerpc/lib/feature-fixups.c
++++ b/arch/powerpc/lib/feature-fixups.c
+@@ -188,7 +188,10 @@ void __init apply_feature_fixups(void)
+ 			  &__start___fw_ftr_fixup, &__stop___fw_ftr_fixup);
+ #endif
+ 	do_final_fixups();
++}
+ 
++void __init setup_feature_keys(void)
++{
+ 	/*
+ 	 * Initialise jump label. This causes all the cpu/mmu_has_feature()
+ 	 * checks to take on their correct polarity based on the current set of
+

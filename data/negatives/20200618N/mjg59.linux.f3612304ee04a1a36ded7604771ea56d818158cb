@@ -1,0 +1,45 @@
+commit f3612304ee04a1a36ded7604771ea56d818158cb
+Author: Heiko Carstens <heiko.carstens@de.ibm.com>
+Date:   Fri Feb 17 10:29:20 2012 +0100
+
+    [S390] idle: avoid RCU usage in extended quiescent state
+    
+    Avoid calling wake_up() from our NMI "bottom halve" from RCU extended
+    quiescent state in idle. wake_up() has RCU read-side critical sections
+    but this will be completely ignored by RCU if the cpu is in extended
+    quiescent state.
+    Which means that whatever object is being accessed from within the
+    read-side critical section can be freed concurrently from a different
+    cpu.
+    So make sure we leave extended quiescent state before calling wake_up().
+    
+    Signed-off-by: Heiko Carstens <heiko.carstens@de.ibm.com>
+    Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+
+diff --git a/arch/s390/kernel/process.c b/arch/s390/kernel/process.c
+index 3201ae447990..4261aa799774 100644
+--- a/arch/s390/kernel/process.c
++++ b/arch/s390/kernel/process.c
+@@ -76,7 +76,6 @@ static void default_idle(void)
+ 	if (test_thread_flag(TIF_MCCK_PENDING)) {
+ 		local_mcck_enable();
+ 		local_irq_enable();
+-		s390_handle_mcck();
+ 		return;
+ 	}
+ 	trace_hardirqs_on();
+@@ -93,10 +92,12 @@ void cpu_idle(void)
+ 	for (;;) {
+ 		tick_nohz_idle_enter();
+ 		rcu_idle_enter();
+-		while (!need_resched())
++		while (!need_resched() && !test_thread_flag(TIF_MCCK_PENDING))
+ 			default_idle();
+ 		rcu_idle_exit();
+ 		tick_nohz_idle_exit();
++		if (test_thread_flag(TIF_MCCK_PENDING))
++			s390_handle_mcck();
+ 		preempt_enable_no_resched();
+ 		schedule();
+ 		preempt_disable();
+

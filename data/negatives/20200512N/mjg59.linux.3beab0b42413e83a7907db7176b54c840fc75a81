@@ -1,0 +1,64 @@
+commit 3beab0b42413e83a7907db7176b54c840fc75a81
+Author: Zhang, Yanmin <yanmin_zhang@linux.intel.com>
+Date:   Sun Jul 5 12:08:08 2009 -0700
+
+    sys_sync(): fix 16% performance regression in ffsb create_4k test
+    
+    I run many ffsb test cases on JBODs (typically 13/12 disks).  Comparing
+    with kernel 2.6.30, 2.6.31-rc1 has about 16% regression with
+    ffsb_create_4k.  The sub test case creates files continuously for 10
+    minitues and every file is 1MB.
+    
+    Bisect located below patch.
+    
+    5cee5815d1564bbbd505fea86f4550f1efdb5cd0 is first bad commit
+    commit 5cee5815d1564bbbd505fea86f4550f1efdb5cd0
+    Author: Jan Kara <jack@suse.cz>
+    Date:   Mon Apr 27 16:43:51 2009 +0200
+    
+        vfs: Make sys_sync() use fsync_super() (version 4)
+    
+        It is unnecessarily fragile to have two places (fsync_super() and do_sync())
+        doing data integrity sync of the filesystem. Alter __fsync_super() to
+        accommodate needs of both callers and use it. So after this patch
+        __fsync_super() is the only place where we gather all the calls needed to
+        properly send all data on a filesystem to disk.
+    
+    As a matter of fact, ffsb calls sys_sync in the end to make sure all data
+    is flushed to disks and the flushing is counted into the result.  vmstat
+    shows ffsb is blocked when syncing for a long time.  With 2.6.30, ffsb is
+    blocked for a short time.
+    
+    I checked the patch and did experiments to recover the original methods.
+    Eventually, the root cause is the patch deletes the calling to
+    wakeup_pdflush when syncing, so only ffsb is blocked on disk I/O.
+    wakeup_pdflush could ask pdflush to write back pages with ffsb at the
+    same time.
+    
+    [akpm@linux-foundation.org: restore comment too]
+    Signed-off-by: Zhang Yanmin <yanmin_zhang@linux.intel.com>
+    Cc: Jan Kara <jack@suse.cz>
+    Cc: Al Viro <viro@zeniv.linux.org.uk>
+    Acked-by: Jens Axboe <jens.axboe@oracle.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/sync.c b/fs/sync.c
+index dd200025af85..3422ba61d86d 100644
+--- a/fs/sync.c
++++ b/fs/sync.c
+@@ -112,8 +112,13 @@ restart:
+ 	mutex_unlock(&mutex);
+ }
+ 
++/*
++ * sync everything.  Start out by waking pdflush, because that writes back
++ * all queues in parallel.
++ */
+ SYSCALL_DEFINE0(sync)
+ {
++	wakeup_pdflush(0);
+ 	sync_filesystems(0);
+ 	sync_filesystems(1);
+ 	if (unlikely(laptop_mode))
+

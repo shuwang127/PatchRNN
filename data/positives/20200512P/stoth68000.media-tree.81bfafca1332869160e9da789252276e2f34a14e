@@ -1,0 +1,98 @@
+commit 81bfafca1332869160e9da789252276e2f34a14e
+Author: Josh Poimboeuf <jpoimboe@redhat.com>
+Date:   Wed Mar 9 00:06:51 2016 -0600
+
+    objtool: Prevent infinite recursion in noreturn detection
+    
+    Ingo reported an infinite loop in objtool with a certain randconfig [1].
+    With the given config, two functions in crypto/ablkcipher.o contained
+    sibling calls to each other, which threw the recursive call in
+    dead_end_function() for a loop (literally!).
+    
+    Split the noreturn detection into two passes.  In the first pass, check
+    for return instructions.  In the second pass, do the potentially
+    recursive sibling call check.  In most cases, the first pass will be
+    good enough.  In the rare case where a second pass is needed, recursion
+    should hopefully no longer be possible.
+    
+    [1] https://lkml.kernel.org/r/20160308154909.GA20956@gmail.com
+    
+    Reported-by: Ingo Molnar <mingo@kernel.org>
+    Signed-off-by: Josh Poimboeuf <jpoimboe@redhat.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Andy Lutomirski <luto@kernel.org>
+    Cc: Arnaldo Carvalho de Melo <acme@infradead.org>
+    Cc: Arnaldo Carvalho de Melo <acme@kernel.org>
+    Cc: Bernd Petrovitsch <bernd@petrovitsch.priv.at>
+    Cc: Borislav Petkov <bp@alien8.de>
+    Cc: Chris J Arges <chris.j.arges@canonical.com>
+    Cc: Jiri Slaby <jslaby@suse.cz>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Michal Marek <mmarek@suse.cz>
+    Cc: Namhyung Kim <namhyung@gmail.com>
+    Cc: Pedro Alves <palves@redhat.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Cc: live-patching@vger.kernel.org
+    Link: http://lkml.kernel.org/r/16afb602640ef43b7782087d6cca17bf6fc13603.1457502970.git.jpoimboe@redhat.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/tools/objtool/builtin-check.c b/tools/objtool/builtin-check.c
+index f7e0ebac3fbe..80d9ed90d641 100644
+--- a/tools/objtool/builtin-check.c
++++ b/tools/objtool/builtin-check.c
+@@ -125,7 +125,7 @@ static bool ignore_func(struct objtool_file *file, struct symbol *func)
+ static bool dead_end_function(struct objtool_file *file, struct symbol *func)
+ {
+ 	int i;
+-	struct instruction *insn;
++	struct instruction *insn, *func_insn;
+ 	bool empty = true;
+ 
+ 	/*
+@@ -154,10 +154,11 @@ static bool dead_end_function(struct objtool_file *file, struct symbol *func)
+ 	if (!func->sec)
+ 		return false;
+ 
+-	insn = find_instruction(file, func->sec, func->offset);
+-	if (!insn)
++	func_insn = find_instruction(file, func->sec, func->offset);
++	if (!func_insn)
+ 		return false;
+ 
++	insn = func_insn;
+ 	list_for_each_entry_from(insn, &file->insns, list) {
+ 		if (insn->sec != func->sec ||
+ 		    insn->offset >= func->offset + func->len)
+@@ -167,6 +168,21 @@ static bool dead_end_function(struct objtool_file *file, struct symbol *func)
+ 
+ 		if (insn->type == INSN_RETURN)
+ 			return false;
++	}
++
++	if (empty)
++		return false;
++
++	/*
++	 * A function can have a sibling call instead of a return.  In that
++	 * case, the function's dead-end status depends on whether the target
++	 * of the sibling call returns.
++	 */
++	insn = func_insn;
++	list_for_each_entry_from(insn, &file->insns, list) {
++		if (insn->sec != func->sec ||
++		    insn->offset >= func->offset + func->len)
++			break;
+ 
+ 		if (insn->type == INSN_JUMP_UNCONDITIONAL) {
+ 			struct instruction *dest = insn->jump_dest;
+@@ -194,7 +210,7 @@ static bool dead_end_function(struct objtool_file *file, struct symbol *func)
+ 			return false;
+ 	}
+ 
+-	return !empty;
++	return true;
+ }
+ 
+ /*
+

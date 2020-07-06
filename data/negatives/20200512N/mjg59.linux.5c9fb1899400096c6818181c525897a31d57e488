@@ -1,0 +1,47 @@
+commit 5c9fb1899400096c6818181c525897a31d57e488
+Author: Greg Kurz <gkurz@linux.vnet.ibm.com>
+Date:   Wed Oct 15 12:42:58 2014 +0200
+
+    powerpc/vphn: NUMA node code expects big-endian
+    
+    The associativity domain numbers are obtained from the hypervisor through
+    registers and written into memory by the guest: the packed array passed to
+    vphn_unpack_associativity() is then native-endian, unlike what was assumed
+    in the following commit:
+    
+    commit b08a2a12e44eaec5024b2b969f4fcb98169d1ca3
+    Author: Alistair Popple <alistair@popple.id.au>
+    Date:   Wed Aug 7 02:01:44 2013 +1000
+    
+        powerpc: Make NUMA device node code endian safe
+    
+    This issue fills the topology with bogus data and makes it unusable. It may
+    lead to severe performance breakdowns.
+    
+    We should ideally patch the vphn_unpack_associativity() function to do the
+    64-bit loads, but this requires some more brain storming.
+    
+    In the meantime, let's go for a suboptimal and temporary bug fix: this patch
+    converts each 64-bit value of the packed array to big endian, as expected by
+    the current parsing code in vphn_unpack_associativity().
+    
+    Signed-off-by: Greg Kurz <gkurz@linux.vnet.ibm.com>
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/mm/numa.c b/arch/powerpc/mm/numa.c
+index 177659050fa0..e5236c24dc07 100644
+--- a/arch/powerpc/mm/numa.c
++++ b/arch/powerpc/mm/numa.c
+@@ -1460,8 +1460,11 @@ static long hcall_vphn(unsigned long cpu, __be32 *associativity)
+ 	long retbuf[PLPAR_HCALL9_BUFSIZE] = {0};
+ 	u64 flags = 1;
+ 	int hwcpu = get_hard_smp_processor_id(cpu);
++	int i;
+ 
+ 	rc = plpar_hcall9(H_HOME_NODE_ASSOCIATIVITY, retbuf, flags, hwcpu);
++	for (i = 0; i < 6; i++)
++		retbuf[i] = cpu_to_be64(retbuf[i]);
+ 	vphn_unpack_associativity(retbuf, associativity);
+ 
+ 	return rc;
+

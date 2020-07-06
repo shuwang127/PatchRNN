@@ -1,0 +1,71 @@
+commit af2c6a4aaa2253f1e29df8fb59a3d92174d30a33
+Author: Michael Chan <mchan@broadcom.com>
+Date:   Tue Nov 7 14:57:51 2006 -0800
+
+    [TG3]: Fix array overrun in tg3_read_partno().
+    
+    Use proper upper limits for the loops and check for all error
+    conditions.
+    
+    The problem was noticed by Adrian Bunk.
+    
+    Signed-off-by: Michael Chan <mchan@broadcom.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index 8f059b7968bd..06e4f77b0988 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -10212,7 +10212,7 @@ static int __devinit tg3_phy_probe(struct tg3 *tp)
+ static void __devinit tg3_read_partno(struct tg3 *tp)
+ {
+ 	unsigned char vpd_data[256];
+-	int i;
++	unsigned int i;
+ 	u32 magic;
+ 
+ 	if (tg3_nvram_read_swab(tp, 0x0, &magic))
+@@ -10258,9 +10258,9 @@ static void __devinit tg3_read_partno(struct tg3 *tp)
+ 	}
+ 
+ 	/* Now parse and find the part number. */
+-	for (i = 0; i < 256; ) {
++	for (i = 0; i < 254; ) {
+ 		unsigned char val = vpd_data[i];
+-		int block_end;
++		unsigned int block_end;
+ 
+ 		if (val == 0x82 || val == 0x91) {
+ 			i = (i + 3 +
+@@ -10276,21 +10276,26 @@ static void __devinit tg3_read_partno(struct tg3 *tp)
+ 			     (vpd_data[i + 1] +
+ 			      (vpd_data[i + 2] << 8)));
+ 		i += 3;
+-		while (i < block_end) {
++
++		if (block_end > 256)
++			goto out_not_found;
++
++		while (i < (block_end - 2)) {
+ 			if (vpd_data[i + 0] == 'P' &&
+ 			    vpd_data[i + 1] == 'N') {
+ 				int partno_len = vpd_data[i + 2];
+ 
+-				if (partno_len > 24)
++				i += 3;
++				if (partno_len > 24 || (partno_len + i) > 256)
+ 					goto out_not_found;
+ 
+ 				memcpy(tp->board_part_number,
+-				       &vpd_data[i + 3],
+-				       partno_len);
++				       &vpd_data[i], partno_len);
+ 
+ 				/* Success. */
+ 				return;
+ 			}
++			i += 3 + vpd_data[i + 2];
+ 		}
+ 
+ 		/* Part number not found. */
+

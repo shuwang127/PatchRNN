@@ -1,0 +1,41 @@
+commit d72348fb5ca634583bf3f79996cc4b3ef91d9c3a
+Author: Johan Hovold <johan@kernel.org>
+Date:   Thu Apr 23 16:06:50 2015 +0200
+
+    usb: musb: fix inefficient copy of unaligned buffers
+    
+    Make sure only to copy any actual data rather than the whole buffer,
+    when releasing the temporary buffer used for unaligned non-isochronous
+    transfers.
+    
+    Signed-off-by: Johan Hovold <johan@kernel.org>
+    Signed-off-by: Felipe Balbi <balbi@ti.com>
+
+diff --git a/drivers/usb/musb/musb_host.c b/drivers/usb/musb/musb_host.c
+index c3d5fc9dfb5b..e1fb5d885c18 100644
+--- a/drivers/usb/musb/musb_host.c
++++ b/drivers/usb/musb/musb_host.c
+@@ -2512,6 +2512,7 @@ static void musb_free_temp_buffer(struct urb *urb)
+ {
+ 	enum dma_data_direction dir;
+ 	struct musb_temp_buffer *temp;
++	size_t length;
+ 
+ 	if (!(urb->transfer_flags & URB_ALIGNED_TEMP_BUFFER))
+ 		return;
+@@ -2522,8 +2523,12 @@ static void musb_free_temp_buffer(struct urb *urb)
+ 			    data);
+ 
+ 	if (dir == DMA_FROM_DEVICE) {
+-		memcpy(temp->old_xfer_buffer, temp->data,
+-		       urb->transfer_buffer_length);
++		if (usb_pipeisoc(urb->pipe))
++			length = urb->transfer_buffer_length;
++		else
++			length = urb->actual_length;
++
++		memcpy(temp->old_xfer_buffer, temp->data, length);
+ 	}
+ 	urb->transfer_buffer = temp->old_xfer_buffer;
+ 	kfree(temp->kmalloc_ptr);
+

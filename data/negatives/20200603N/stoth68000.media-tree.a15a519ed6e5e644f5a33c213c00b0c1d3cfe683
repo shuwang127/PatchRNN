@@ -1,0 +1,66 @@
+commit a15a519ed6e5e644f5a33c213c00b0c1d3cfe683
+Author: David Woodhouse <dwmw2@infradead.org>
+Date:   Wed Jul 1 18:49:06 2009 +0100
+
+    Fix iommu address space allocation
+    
+    This fixes kernel.org bug #13584. The IOVA code attempted to optimise
+    the insertion of new ranges into the rbtree, with the unfortunate result
+    that some ranges just didn't get inserted into the tree at all. Then
+    those ranges would be handed out more than once, and things kind of go
+    downhill from there.
+    
+    Introduced after 2.6.25 by ddf02886cbe665d67ca750750196ea5bf524b10b
+    ("PCI: iova RB tree setup tweak").
+    
+    Signed-off-by: David Woodhouse <David.Woodhouse@intel.com>
+    Cc: mark gross <mgross@linux.intel.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: stable@kernel.org
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/pci/iova.c b/drivers/pci/iova.c
+index 2287116e9822..46dd440e2315 100644
+--- a/drivers/pci/iova.c
++++ b/drivers/pci/iova.c
+@@ -1,9 +1,19 @@
+ /*
+- * Copyright (c) 2006, Intel Corporation.
++ * Copyright © 2006-2009, Intel Corporation.
+  *
+- * This file is released under the GPLv2.
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
+  *
+- * Copyright (C) 2006-2008 Intel Corporation
+  * Author: Anil S Keshavamurthy <anil.s.keshavamurthy@intel.com>
+  */
+ 
+@@ -123,7 +133,15 @@ static int __alloc_and_insert_iova_range(struct iova_domain *iovad,
+ 	/* Insert the new_iova into domain rbtree by holding writer lock */
+ 	/* Add new node and rebalance tree. */
+ 	{
+-		struct rb_node **entry = &((prev)), *parent = NULL;
++		struct rb_node **entry, *parent = NULL;
++
++		/* If we have 'prev', it's a valid place to start the
++		   insertion. Otherwise, start from the root. */
++		if (prev)
++			entry = &prev;
++		else
++			entry = &iovad->rbroot.rb_node;
++
+ 		/* Figure out where to put new node */
+ 		while (*entry) {
+ 			struct iova *this = container_of(*entry,
+

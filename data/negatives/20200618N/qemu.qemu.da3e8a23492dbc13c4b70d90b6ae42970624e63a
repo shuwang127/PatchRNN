@@ -1,0 +1,148 @@
+commit da3e8a23492dbc13c4b70d90b6ae42970624e63a
+Author: Shannon Zhao <shannon.zhao@linaro.org>
+Date:   Tue Apr 28 19:51:12 2015 +0800
+
+    virtio-net: Move DEFINE_VIRTIO_NET_FEATURES to virtio-net
+    
+    So far virtio-net-device can't expose host features to guest while
+    using virtio-mmio because it doesn't set DEFINE_VIRTIO_NET_FEATURES on
+    backend or transport. So the performance is low.
+    
+    The host features belong to the backend while virtio-net-pci,
+    virtio-net-s390 and virtio-net-ccw set the DEFINE_VIRTIO_NET_FEATURES
+    on transports. But they already have the ability to forward property
+    accesses to the backend child. So if we move the host features to
+    backends, it doesn't break the backwards compatibility for them and
+    make host features work while using virtio-mmio.
+    
+    Here we move DEFINE_VIRTIO_NET_FEATURES to the backend virtio-net. The
+    transports just sync the host features from backend. Meanwhile move
+    virtio_net_set_config_size to virtio-net to make sure the config size
+    is correct and don't expose it.
+    
+    Signed-off-by: Shannon Zhao <zhaoshenglong@huawei.com>
+    Signed-off-by: Shannon Zhao <shannon.zhao@linaro.org>
+    Reviewed-by: Michael S. Tsirkin <mst@redhat.com>
+    Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+    Reviewed-by: Peter Maydell <peter.maydell@linaro.org>
+
+diff --git a/hw/net/virtio-net.c b/hw/net/virtio-net.c
+index b6fac9cc2b..c23284f8b0 100644
+--- a/hw/net/virtio-net.c
++++ b/hw/net/virtio-net.c
+@@ -446,6 +446,9 @@ static uint32_t virtio_net_get_features(VirtIODevice *vdev, uint32_t features)
+     VirtIONet *n = VIRTIO_NET(vdev);
+     NetClientState *nc = qemu_get_queue(n->nic);
+ 
++    /* Firstly sync all virtio-net possible supported features */
++    features |= n->host_features;
++
+     virtio_add_feature(&features, VIRTIO_NET_F_MAC);
+ 
+     if (!peer_has_vnet_hdr(n)) {
+@@ -1552,7 +1555,7 @@ static void virtio_net_guest_notifier_mask(VirtIODevice *vdev, int idx,
+                              vdev, idx, mask);
+ }
+ 
+-void virtio_net_set_config_size(VirtIONet *n, uint32_t host_features)
++static void virtio_net_set_config_size(VirtIONet *n, uint32_t host_features)
+ {
+     int i, config_size = 0;
+     virtio_add_feature(&host_features, VIRTIO_NET_F_MAC);
+@@ -1585,6 +1588,7 @@ static void virtio_net_device_realize(DeviceState *dev, Error **errp)
+     NetClientState *nc;
+     int i;
+ 
++    virtio_net_set_config_size(n, n->host_features);
+     virtio_init(vdev, "virtio-net", VIRTIO_ID_NET, n->config_size);
+ 
+     n->max_queues = MAX(n->nic_conf.peers.queues, 1);
+@@ -1721,6 +1725,7 @@ static void virtio_net_instance_init(Object *obj)
+ }
+ 
+ static Property virtio_net_properties[] = {
++    DEFINE_VIRTIO_NET_FEATURES(VirtIONet, host_features),
+     DEFINE_NIC_PROPERTIES(VirtIONet, nic_conf),
+     DEFINE_PROP_UINT32("x-txtimer", VirtIONet, net_conf.txtimer,
+                                                TX_TIMER_INTERVAL),
+diff --git a/hw/s390x/s390-virtio-bus.c b/hw/s390x/s390-virtio-bus.c
+index 047c963698..b893e023b8 100644
+--- a/hw/s390x/s390-virtio-bus.c
++++ b/hw/s390x/s390-virtio-bus.c
+@@ -145,7 +145,6 @@ static void s390_virtio_net_realize(VirtIOS390Device *s390_dev, Error **errp)
+     DeviceState *vdev = DEVICE(&dev->vdev);
+     Error *err = NULL;
+ 
+-    virtio_net_set_config_size(&dev->vdev, s390_dev->host_features);
+     virtio_net_set_netclient_name(&dev->vdev, qdev->id,
+                                   object_get_typename(OBJECT(qdev)));
+     qdev_set_parent_bus(vdev, BUS(&s390_dev->bus));
+@@ -508,7 +507,6 @@ static unsigned virtio_s390_get_features(DeviceState *d)
+ 
+ static Property s390_virtio_net_properties[] = {
+     DEFINE_VIRTIO_COMMON_FEATURES(VirtIOS390Device, host_features),
+-    DEFINE_VIRTIO_NET_FEATURES(VirtIOS390Device, host_features),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
+diff --git a/hw/s390x/virtio-ccw.c b/hw/s390x/virtio-ccw.c
+index 0434f56637..e6e9f9d68f 100644
+--- a/hw/s390x/virtio-ccw.c
++++ b/hw/s390x/virtio-ccw.c
+@@ -779,7 +779,6 @@ static void virtio_ccw_net_realize(VirtioCcwDevice *ccw_dev, Error **errp)
+     DeviceState *vdev = DEVICE(&dev->vdev);
+     Error *err = NULL;
+ 
+-    virtio_net_set_config_size(&dev->vdev, ccw_dev->host_features[0]);
+     virtio_net_set_netclient_name(&dev->vdev, qdev->id,
+                                   object_get_typename(OBJECT(qdev)));
+     qdev_set_parent_bus(vdev, BUS(&ccw_dev->bus));
+@@ -1403,7 +1402,6 @@ static int virtio_ccw_load_config(DeviceState *d, QEMUFile *f)
+ 
+ static Property virtio_ccw_net_properties[] = {
+     DEFINE_PROP_STRING("devno", VirtioCcwDevice, bus_id),
+-    DEFINE_VIRTIO_NET_FEATURES(VirtioCcwDevice, host_features[0]),
+     DEFINE_PROP_BIT("ioeventfd", VirtioCcwDevice, flags,
+                     VIRTIO_CCW_FLAG_USE_IOEVENTFD_BIT, true),
+     DEFINE_PROP_END_OF_LIST(),
+diff --git a/hw/virtio/virtio-pci.c b/hw/virtio/virtio-pci.c
+index 5ea4656a03..07b2a67c3f 100644
+--- a/hw/virtio/virtio-pci.c
++++ b/hw/virtio/virtio-pci.c
+@@ -1369,7 +1369,6 @@ static Property virtio_net_properties[] = {
+     DEFINE_PROP_BIT("ioeventfd", VirtIOPCIProxy, flags,
+                     VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT, false),
+     DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, 3),
+-    DEFINE_VIRTIO_NET_FEATURES(VirtIOPCIProxy, host_features),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
+@@ -1379,7 +1378,6 @@ static void virtio_net_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
+     VirtIONetPCI *dev = VIRTIO_NET_PCI(vpci_dev);
+     DeviceState *vdev = DEVICE(&dev->vdev);
+ 
+-    virtio_net_set_config_size(&dev->vdev, vpci_dev->host_features);
+     virtio_net_set_netclient_name(&dev->vdev, qdev->id,
+                                   object_get_typename(OBJECT(qdev)));
+     qdev_set_parent_bus(vdev, BUS(&vpci_dev->bus));
+diff --git a/include/hw/virtio/virtio-net.h b/include/hw/virtio/virtio-net.h
+index 4c2fe83b6b..e0dbb418ad 100644
+--- a/include/hw/virtio/virtio-net.h
++++ b/include/hw/virtio/virtio-net.h
+@@ -68,6 +68,7 @@ typedef struct VirtIONet {
+     uint32_t has_vnet_hdr;
+     size_t host_hdr_len;
+     size_t guest_hdr_len;
++    uint32_t host_features;
+     uint8_t has_ufo;
+     int mergeable_rx_bufs;
+     uint8_t promisc;
+@@ -137,7 +138,6 @@ typedef struct VirtIONet {
+     DEFINE_PROP_INT32("x-txburst", _state, _field.txburst, TX_BURST),          \
+     DEFINE_PROP_STRING("tx", _state, _field.tx)
+ 
+-void virtio_net_set_config_size(VirtIONet *n, uint32_t host_features);
+ void virtio_net_set_netclient_name(VirtIONet *n, const char *name,
+                                    const char *type);
+ 
+

@@ -1,0 +1,59 @@
+commit e05139f2569ecf699b229a6473a86cdffed62956
+Author: Jan Beulich <JBeulich@suse.com>
+Date:   Wed Sep 28 16:56:51 2011 +0100
+
+    x86-64: Don't apply destructive erratum workaround on unaffected CPUs
+    
+    Erratum 93 applies to AMD K8 CPUs only, and its workaround
+    (forcing the upper 32 bits of %rip to all get set under certain
+    conditions) is actually getting in the way of analyzing page
+    faults occurring during EFI physical mode runtime calls (in
+    particular the page table walk shown is completely unrelated to
+    the actual fault). This is because typically EFI runtime code
+    lives in the space between 2G and 4G, which - modulo the above
+    manipulation - is likely to overlap with the kernel or modules
+    area.
+    
+    While even for the other errata workarounds their taking effect
+    could be limited to just the affected CPUs, none of them appears
+    to be destructive, and they're generally getting called only
+    outside of performance critical paths, so they're being left
+    untouched.
+    
+    Signed-off-by: Jan Beulich <jbeulich@suse.com>
+    Link: http://lkml.kernel.org/r/4E835FE30200007800058464@nat28.tlf.novell.com
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 0d17c8c50acd..9c7378df740a 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -420,12 +420,14 @@ static noinline __kprobes int vmalloc_fault(unsigned long address)
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_CPU_SUP_AMD
+ static const char errata93_warning[] =
+ KERN_ERR 
+ "******* Your BIOS seems to not contain a fix for K8 errata #93\n"
+ "******* Working around it, but it may cause SEGVs or burn power.\n"
+ "******* Please consider a BIOS update.\n"
+ "******* Disabling USB legacy in the BIOS may also help.\n";
++#endif
+ 
+ /*
+  * No vm86 mode in 64-bit mode:
+@@ -505,7 +507,11 @@ static void dump_pagetable(unsigned long address)
+  */
+ static int is_errata93(struct pt_regs *regs, unsigned long address)
+ {
+-#ifdef CONFIG_X86_64
++#if defined(CONFIG_X86_64) && defined(CONFIG_CPU_SUP_AMD)
++	if (boot_cpu_data.x86_vendor != X86_VENDOR_AMD
++	    || boot_cpu_data.x86 != 0xf)
++		return 0;
++
+ 	if (address != regs->ip)
+ 		return 0;
+ 
+

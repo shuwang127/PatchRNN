@@ -1,0 +1,61 @@
+commit b5bae2612af92fd8e7bcdcf7ce3e0259e8d341c9
+Author: Josef Bacik <jbacik@fusionio.com>
+Date:   Fri Sep 14 13:43:01 2012 -0400
+
+    Btrfs: fix race when getting the eb out of page->private
+    
+    We can race when checking wether PagePrivate is set on a page and we
+    actually have an eb saved in the pages private pointer.  We could have
+    easily written out this page and released it in the time that we did the
+    pagevec lookup and actually got around to looking at this page.  So use
+    mapping->private_lock to ensure we get a consistent view of the
+    page->private pointer.  This is inline with the alloc and releasepage paths
+    which use private_lock when manipulating page->private.  Thanks,
+    
+    Reported-by: David Sterba <dave@jikos.cz>
+    Signed-off-by: Josef Bacik <jbacik@fusionio.com>
+
+diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
+index 90bd9f768c0a..a2c21570adf5 100644
+--- a/fs/btrfs/extent_io.c
++++ b/fs/btrfs/extent_io.c
+@@ -3256,19 +3256,34 @@ int btree_write_cache_pages(struct address_space *mapping,
+ 				break;
+ 			}
+ 
++			spin_lock(&mapping->private_lock);
++			if (!PagePrivate(page)) {
++				spin_unlock(&mapping->private_lock);
++				continue;
++			}
++
+ 			eb = (struct extent_buffer *)page->private;
++
++			/*
++			 * Shouldn't happen and normally this would be a BUG_ON
++			 * but no sense in crashing the users box for something
++			 * we can survive anyway.
++			 */
+ 			if (!eb) {
++				spin_unlock(&mapping->private_lock);
+ 				WARN_ON(1);
+ 				continue;
+ 			}
+ 
+-			if (eb == prev_eb)
++			if (eb == prev_eb) {
++				spin_unlock(&mapping->private_lock);
+ 				continue;
++			}
+ 
+-			if (!atomic_inc_not_zero(&eb->refs)) {
+-				WARN_ON(1);
++			ret = atomic_inc_not_zero(&eb->refs);
++			spin_unlock(&mapping->private_lock);
++			if (!ret)
+ 				continue;
+-			}
+ 
+ 			prev_eb = eb;
+ 			ret = lock_extent_buffer_for_io(eb, fs_info, &epd);
+

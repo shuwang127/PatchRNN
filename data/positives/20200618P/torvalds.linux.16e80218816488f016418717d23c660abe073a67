@@ -1,0 +1,83 @@
+commit 16e80218816488f016418717d23c660abe073a67
+Author: Douglas Anderson <dianders@chromium.org>
+Date:   Thu Jan 28 18:19:55 2016 -0800
+
+    usb: dwc2: host: Avoid use of chan->qh after qh freed
+    
+    When poking around with USB devices with slub_debug enabled, I found
+    another obvious use after free.  Turns out that in dwc2_hc_n_intr() I
+    was in a state when the contents of chan->qh was filled with 0x6b,
+    indicating that chan->qh was freed but chan still had a reference to
+    it.
+    
+    Let's make sure that whenever we free qh we also make sure we remove a
+    reference from its channel.
+    
+    The bug fixed here doesn't appear to be new--I believe I just got lucky
+    and happened to see it while stress testing.
+    
+    Acked-by: John Youn <johnyoun@synopsys.com>
+    Signed-off-by: Douglas Anderson <dianders@chromium.org>
+    Reviewed-by: Kever Yang <kever.yang@rock-chips.com>
+    Tested-by: Heiko Stuebner <heiko@sntech.de>
+    Tested-by: Stefan Wahren <stefan.wahren@i2se.com>
+    Signed-off-by: Felipe Balbi <balbi@kernel.org>
+
+diff --git a/drivers/usb/dwc2/hcd.c b/drivers/usb/dwc2/hcd.c
+index bc4bdbc1534e..e2d2e9be366e 100644
+--- a/drivers/usb/dwc2/hcd.c
++++ b/drivers/usb/dwc2/hcd.c
+@@ -164,6 +164,9 @@ static void dwc2_qh_list_free(struct dwc2_hsotg *hsotg,
+ 					 qtd_list_entry)
+ 			dwc2_hcd_qtd_unlink_and_free(hsotg, qtd, qh);
+ 
++		if (qh->channel && qh->channel->qh == qh)
++			qh->channel->qh = NULL;
++
+ 		spin_unlock_irqrestore(&hsotg->lock, flags);
+ 		dwc2_hcd_qh_free(hsotg, qh);
+ 		spin_lock_irqsave(&hsotg->lock, flags);
+@@ -554,7 +557,12 @@ static int dwc2_hcd_endpoint_disable(struct dwc2_hsotg *hsotg,
+ 		dwc2_hcd_qtd_unlink_and_free(hsotg, qtd, qh);
+ 
+ 	ep->hcpriv = NULL;
++
++	if (qh->channel && qh->channel->qh == qh)
++		qh->channel->qh = NULL;
++
+ 	spin_unlock_irqrestore(&hsotg->lock, flags);
++
+ 	dwc2_hcd_qh_free(hsotg, qh);
+ 
+ 	return 0;
+@@ -2782,6 +2790,8 @@ static int _dwc2_hcd_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
+ fail3:
+ 	dwc2_urb->priv = NULL;
+ 	usb_hcd_unlink_urb_from_ep(hcd, urb);
++	if (qh_allocated && qh->channel && qh->channel->qh == qh)
++		qh->channel->qh = NULL;
+ fail2:
+ 	spin_unlock_irqrestore(&hsotg->lock, flags);
+ 	urb->hcpriv = NULL;
+diff --git a/drivers/usb/dwc2/hcd_intr.c b/drivers/usb/dwc2/hcd_intr.c
+index 4270f6c719c6..0d0fd2a7f1f9 100644
+--- a/drivers/usb/dwc2/hcd_intr.c
++++ b/drivers/usb/dwc2/hcd_intr.c
+@@ -1943,6 +1943,16 @@ static void dwc2_hc_n_intr(struct dwc2_hsotg *hsotg, int chnum)
+ 	}
+ 
+ 	dwc2_writel(hcint, hsotg->regs + HCINT(chnum));
++
++	/*
++	 * If we got an interrupt after someone called
++	 * dwc2_hcd_endpoint_disable() we don't want to crash below
++	 */
++	if (!chan->qh) {
++		dev_warn(hsotg->dev, "Interrupt on disabled channel\n");
++		return;
++	}
++
+ 	chan->hcint = hcint;
+ 	hcint &= hcintmsk;
+ 
+

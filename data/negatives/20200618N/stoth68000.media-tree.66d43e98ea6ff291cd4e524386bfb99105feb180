@@ -1,0 +1,40 @@
+commit 66d43e98ea6ff291cd4e524386bfb99105feb180
+Author: Haren Myneni <haren@us.ibm.com>
+Date:   Mon Dec 12 00:37:39 2005 -0800
+
+    [PATCH] fix in __alloc_bootmem_core() when there is no free page in first node's memory
+    
+    Hitting BUG_ON() in __alloc_bootmem_core() when there is no free page
+    available in the first node's memory.  For the case of kdump on PPC64
+    (Power 4 machine), the captured kernel is used two memory regions - memory
+    for TCE tables (tce-base and tce-size at top of RAM and reserved) and
+    captured kernel memory region (crashk_base and crashk_size).  Since we
+    reserve the memory for the first node, we should be returning from
+    __alloc_bootmem_core() to search for the next node (pg_dat).
+    
+    Currently, find_next_zero_bit() is returning the n^th bit (eidx) when there
+    is no free page.  Then, test_bit() is failed since we set 0xff only for the
+    actual size initially (init_bootmem_core()) even though rounded up to one
+    page for bdata->node_bootmem_map.  We are hitting the BUG_ON after failing
+    to enter second "for" loop.
+    
+    Signed-off-by: Haren Myneni <haren@us.ibm.com>
+    Cc: Andy Whitcroft <apw@shadowen.org>
+    Cc: Dave Hansen <haveblue@us.ibm.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/mm/bootmem.c b/mm/bootmem.c
+index e8c567177dcf..16b9465eb4eb 100644
+--- a/mm/bootmem.c
++++ b/mm/bootmem.c
+@@ -204,6 +204,8 @@ __alloc_bootmem_core(struct bootmem_data *bdata, unsigned long size,
+ 		unsigned long j;
+ 		i = find_next_zero_bit(bdata->node_bootmem_map, eidx, i);
+ 		i = ALIGN(i, incr);
++		if (i >= eidx)
++			break;
+ 		if (test_bit(i, bdata->node_bootmem_map))
+ 			continue;
+ 		for (j = i + 1; j < i + areasize; ++j) {
+

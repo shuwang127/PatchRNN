@@ -1,0 +1,78 @@
+commit 9f9a964f195df68175cd3d5c9c90a476fa474073
+Author: Tom Gundersen <teg@jklm.no>
+Date:   Sun Jan 5 23:01:32 2014 +0100
+
+    libsystemd-dhcp: expose received DNS server
+
+diff --git a/src/libsystemd-dhcp/dhcp-client.c b/src/libsystemd-dhcp/dhcp-client.c
+index f6a621102..dbec86981 100644
+--- a/src/libsystemd-dhcp/dhcp-client.c
++++ b/src/libsystemd-dhcp/dhcp-client.c
+@@ -41,6 +41,7 @@ struct DHCPLease {
+         be32_t server_address;
+         be32_t subnet_mask;
+         be32_t router;
++        be32_t dns;
+ };
+ 
+ typedef struct DHCPLease DHCPLease;
+@@ -209,6 +210,33 @@ int sd_dhcp_client_get_netmask(sd_dhcp_client *client, struct in_addr *addr)
+         return 0;
+ }
+ 
++int sd_dhcp_client_get_dns(sd_dhcp_client *client, struct in_addr *addr)
++{
++        assert_return(client, -EINVAL);
++        assert_return(addr, -EINVAL);
++
++        switch (client->state) {
++        case DHCP_STATE_INIT:
++        case DHCP_STATE_SELECTING:
++        case DHCP_STATE_INIT_REBOOT:
++        case DHCP_STATE_REBOOTING:
++        case DHCP_STATE_REQUESTING:
++                return -EADDRNOTAVAIL;
++
++        case DHCP_STATE_BOUND:
++        case DHCP_STATE_RENEWING:
++        case DHCP_STATE_REBINDING:
++                if (client->lease->dns)
++                        addr->s_addr = client->lease->dns;
++                else
++                        return -ENOENT;
++
++                break;
++        }
++
++        return 0;
++}
++
+ int sd_dhcp_client_prefixlen(const struct in_addr *addr)
+ {
+         int len = 0;
+@@ -727,6 +755,12 @@ static int client_parse_offer(uint8_t code, uint8_t len, const uint8_t *option,
+ 
+                 break;
+ 
++        case DHCP_OPTION_DOMAIN_NAME_SERVER:
++                if (len >= 4)
++                        memcpy(&lease->dns, option, 4);
++
++                break;
++
+         case DHCP_OPTION_RENEWAL_T1_TIME:
+                 if (len == 4) {
+                         memcpy(&val, option, 4);
+diff --git a/src/systemd/sd-dhcp-client.h b/src/systemd/sd-dhcp-client.h
+index fdc5b2dcb..68fcba549 100644
+--- a/src/systemd/sd-dhcp-client.h
++++ b/src/systemd/sd-dhcp-client.h
+@@ -54,6 +54,7 @@ int sd_dhcp_client_get_address(sd_dhcp_client *client, struct in_addr *addr);
+ int sd_dhcp_client_get_netmask(sd_dhcp_client *client, struct in_addr *addr);
+ int sd_dhcp_client_prefixlen(const struct in_addr *addr);
+ int sd_dhcp_client_get_router(sd_dhcp_client *client, struct in_addr *addr);
++int sd_dhcp_client_get_dns(sd_dhcp_client *client, struct in_addr *addr);
+ 
+ int sd_dhcp_client_stop(sd_dhcp_client *client);
+ int sd_dhcp_client_start(sd_dhcp_client *client);
+

@@ -1,0 +1,179 @@
+commit e8d576e59888025659041e15bb47b29400d64c73
+Author: Morris Jette <jette@schedmd.com>
+Date:   Mon Jun 2 11:23:18 2014 -0700
+
+    Plug several memory leaks in new core-spec code
+
+diff --git a/src/common/read_config.c b/src/common/read_config.c
+index c3e9af92cd..f4382d2c54 100644
+--- a/src/common/read_config.c
++++ b/src/common/read_config.c
+@@ -890,6 +890,7 @@ static void _destroy_nodename(void *ptr)
+ 	slurm_conf_node_t *n = (slurm_conf_node_t *)ptr;
+ 
+ 	xfree(n->addresses);
++	xfree(n->cpu_spec_list);
+ 	xfree(n->feature);
+ 	xfree(n->hostnames);
+ 	xfree(n->gres);
+@@ -1383,9 +1384,10 @@ static void _free_name_hashtbl(void)
+ 	for (i=0; i<NAME_HASH_LEN; i++) {
+ 		p = node_to_host_hashtbl[i];
+ 		while (p) {
++			xfree(p->address);
+ 			xfree(p->alias);
++			xfree(p->cpu_spec_list);
+ 			xfree(p->hostname);
+-			xfree(p->address);
+ 			q = p->next_alias;
+ 			xfree(p);
+ 			p = q;
+diff --git a/src/common/slurm_protocol_defs.c b/src/common/slurm_protocol_defs.c
+index 4d8f6574ee..276300376a 100644
+--- a/src/common/slurm_protocol_defs.c
++++ b/src/common/slurm_protocol_defs.c
+@@ -2351,6 +2351,7 @@ extern void slurm_free_node_info_members(node_info_t * node)
+ {
+ 	if (node) {
+ 		xfree(node->arch);
++		xfree(node->cpu_spec_list);
+ 		acct_gather_energy_destroy(node->energy);
+ 		ext_sensors_destroy(node->ext_sensors);
+ 		xfree(node->features);
+diff --git a/src/plugins/select/cons_res/job_test.c b/src/plugins/select/cons_res/job_test.c
+index 5b7fe35d8a..1a5283cd85 100644
+--- a/src/plugins/select/cons_res/job_test.c
++++ b/src/plugins/select/cons_res/job_test.c
+@@ -806,6 +806,11 @@ bitstr_t *_make_core_bitmap(bitstr_t *node_map, uint16_t core_spec)
+ 
+ 		if (!node_ptr->cpu_spec_list)
+ 			continue;
++		if (!node_ptr->node_spec_bitmap) {
++			info("CPUSpecList not registered for node %s yet",
++			     node_ptr->name);
++			continue;
++		}
+ 		/* remove node's specialized cpus now */
+ 		for (i = 0; i < (coff - c) ; i++) {
+ 			if (!bit_test(node_ptr->node_spec_bitmap, i))
+diff --git a/src/slurmctld/node_mgr.c b/src/slurmctld/node_mgr.c
+index 34b930c973..4b14aaac18 100644
+--- a/src/slurmctld/node_mgr.c
++++ b/src/slurmctld/node_mgr.c
+@@ -1893,7 +1893,7 @@ static int _build_node_spec_bitmap(struct node_record *node_ptr)
+ 	c = cr_get_coremap_offset(node_inx);
+ 	coff = cr_get_coremap_offset(node_inx+1);
+ 	size = coff - c;
+-	node_ptr->node_spec_bitmap = NULL;
++	FREE_NULL_BITMAP(node_ptr->node_spec_bitmap);
+ 	node_ptr->node_spec_bitmap = bit_alloc(size);
+ 	bit_nset(node_ptr->node_spec_bitmap, 0, size-1);
+ 
+diff --git a/src/slurmd/common/slurmd_cgroup.c b/src/slurmd/common/slurmd_cgroup.c
+index a0e58cc868..740f7baf3e 100644
+--- a/src/slurmd/common/slurmd_cgroup.c
++++ b/src/slurmd/common/slurmd_cgroup.c
+@@ -61,14 +61,14 @@
+ #define PATH_MAX 256
+ #endif
+ 
+-static xcgroup_t system_cpuset_cg;
+-static xcgroup_t system_memory_cg;
++static xcgroup_t system_cpuset_cg = {NULL, NULL, NULL, 0, 0, 0, 0};
++static xcgroup_t system_memory_cg = {NULL, NULL, NULL, 0, 0, 0, 0};
+ 
+ static bool cpuset_prefix_set = false;
+ static char *cpuset_prefix = "";
+ 
+-static xcgroup_ns_t cpuset_ns;
+-static xcgroup_ns_t memory_ns;
++static xcgroup_ns_t cpuset_ns = {NULL, NULL, NULL, NULL};
++static xcgroup_ns_t memory_ns = {NULL, NULL, NULL, NULL};
+ 
+ char cpuset_meta[PATH_MAX];
+ 
+@@ -151,6 +151,7 @@ again:
+ 			return SLURM_ERROR;
+ 		}
+ 	}
++	xcgroup_destroy(&slurm_cg);
+ 	xfree(cpus);
+ 
+ 	/* build system cgroup relative path */
+@@ -177,7 +178,6 @@ again:
+ 
+ error:
+ 	xcgroup_unlock(&cpuset_cg);
+-	xcgroup_destroy(&cpuset_cg);
+ 	free_slurm_cgroup_conf(&slurm_cgroup_conf);
+ 	return fstatus;
+ }
+@@ -293,6 +293,14 @@ error:
+ 	return fstatus;
+ }
+ 
++extern void fini_system_cgroup(void)
++{
++	xcgroup_destroy(&system_cpuset_cg);
++	xcgroup_destroy(&system_memory_cg);
++	xcgroup_ns_destroy(&cpuset_ns);
++	xcgroup_ns_destroy(&memory_ns);
++}
++
+ static char* _system_cgroup_create_slurm_cg (xcgroup_ns_t* ns)
+ {
+ 	/* we do it here as we do not have access to the conf structure */
+@@ -363,14 +371,17 @@ static int _xcgroup_cpuset_init(xcgroup_t* cg)
+ 	if (p == NULL) {
+ 		debug2("system cgroup: unable to get ancestor path for "
+ 		       "cpuset cg '%s' : %m", cg->path);
++		xfree(acg_name);
+ 		return fstatus;
+ 	} else
+ 		*p = '\0';
+ 	if (xcgroup_load(cg->ns, &acg, acg_name) != XCGROUP_SUCCESS) {
+ 		debug2("system cgroup: unable to load ancestor for "
+ 		       "cpuset cg '%s' : %m", cg->path);
++		xfree(acg_name);
+ 		return fstatus;
+ 	}
++	xfree(acg_name);
+ 
+ 	/* inherits ancestor params */
+ 	for (i = 0 ; i < 2 ; i++) {
+diff --git a/src/slurmd/common/slurmd_cgroup.h b/src/slurmd/common/slurmd_cgroup.h
+index 186d210b59..e579229f6b 100644
+--- a/src/slurmd/common/slurmd_cgroup.h
++++ b/src/slurmd/common/slurmd_cgroup.h
+@@ -50,6 +50,10 @@ extern int init_system_cpuset_cgroup(void);
+ /* Initialize slurmd system memory cgroup */
+ extern int init_system_memory_cgroup(void);
+ 
++/* Free memory allocated by init_system_cpuset_cgroup() and
++ * init_system_memory_cgroup() functions */
++extern void fini_system_cgroup(void);
++
+ /* Set reserved machine CPU IDs in system cpuset cgroup */
+ extern int set_system_cgroup_cpus(char *phys_core_str);
+ 
+diff --git a/src/slurmd/slurmd/slurmd.c b/src/slurmd/slurmd/slurmd.c
+index b8e9f681ce..8c190f47db 100644
+--- a/src/slurmd/slurmd/slurmd.c
++++ b/src/slurmd/slurmd/slurmd.c
+@@ -1186,6 +1186,7 @@ _destroy_conf(void)
+ 		xfree(conf->chos_loc);
+ 		xfree(conf->cluster_name);
+ 		xfree(conf->conffile);
++		xfree(conf->cpu_spec_list);
+ 		xfree(conf->epilog);
+ 		xfree(conf->health_check_program);
+ 		xfree(conf->hostname);
+@@ -1653,6 +1654,7 @@ _slurmd_fini(void)
+ 	_resource_spec_fini();
+ 	job_container_fini();
+ 	acct_gather_conf_destroy();
++	fini_system_cgroup();
+ 
+ 	return SLURM_SUCCESS;
+ }
+

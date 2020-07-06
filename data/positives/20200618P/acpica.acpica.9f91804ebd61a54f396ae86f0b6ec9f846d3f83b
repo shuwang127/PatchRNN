@@ -1,0 +1,55 @@
+commit 9f91804ebd61a54f396ae86f0b6ec9f846d3f83b
+Author: Rakib Mullick <rakib.mullick@gmail.com>
+Date:   Sun Nov 6 21:18:17 2011 +0600
+
+    Hardware: Fix possible recursive locking in hwregs.c
+    
+    In Linux calling pm-suspend might trigger a recursive lock in it's code path.
+    In function AcpiHwClearAcpiStatus(), AcpiOsAcquireLock() holds the lock
+    AcpiGbl_HardwareLock before calling AcpiHwRegisterWrite(), then without
+    releasing AcpiGbl_HardwareLock, this function calls AcpiEvWalkGpeList(), which
+    tries to hold AcpiGbl_GpeLock. Both AcpiGbl_HardwareLock and AcpiGbl_GpeLock
+    are at same lock-class and which might cause lock recursion deadlock.
+    
+    Following patch fixes this scenario by just releasing
+    AcpiGbl_HardwareLock before calling AcpiEvWalkGpeList().
+    
+     Changes since v0(https://lkml.org/lkml/2011/9/21/355):
+            - Fix changelog, thanks to Lin Ming.
+    
+     Changes since v1 (https://lkml.org/lkml/2011/11/3/89):
+            - Update changelog and rename goto label, courtesy Srivatsa S. Bhat.
+    
+    Signed-off-by: Rakib Mullick <rakib.mullick@gmail.com>
+    Reviewed-by: Srivatsa S. Bhat <srivatsa.bhat@linux.vnet.ibm.com>
+    Acked-by: Rafael J. Wysocki <rjw@sisk.pl>
+    Signed-off-by: Len Brown <len.brown@intel.com>
+
+diff --git a/source/components/hardware/hwregs.c b/source/components/hardware/hwregs.c
+index 99505798d..24b4cf4cf 100644
+--- a/source/components/hardware/hwregs.c
++++ b/source/components/hardware/hwregs.c
+@@ -382,17 +382,19 @@ AcpiHwClearAcpiStatus (
+ 
+     Status = AcpiHwRegisterWrite (ACPI_REGISTER_PM1_STATUS,
+                 ACPI_BITMASK_ALL_FIXED_STATUS);
++
++    AcpiOsReleaseLock (AcpiGbl_HardwareLock, LockFlags);
++
+     if (ACPI_FAILURE (Status))
+     {
+-        goto UnlockAndExit;
++        goto Exit;
+     }
+ 
+     /* Clear the GPE Bits in all GPE registers in all GPE blocks */
+ 
+     Status = AcpiEvWalkGpeList (AcpiHwClearGpeBlock, NULL);
+ 
+-UnlockAndExit:
+-    AcpiOsReleaseLock (AcpiGbl_HardwareLock, LockFlags);
++Exit:
+     return_ACPI_STATUS (Status);
+ }
+ 
+

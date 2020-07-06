@@ -1,0 +1,52 @@
+commit 1fbe6c5005758eac0c53f3c44e361e27628ae40f
+Author: Yasufumi Kinoshita <yasufumi.kinoshita@oracle.com>
+Date:   Mon Oct 7 15:16:31 2013 +0900
+
+    Bug#17431533 : FAILING ASSERTION: INDEX->PAGE != 0XFFFFFFFF AFTER DISCARDING TABLESPACE
+    
+    ha_innobase::records_in_range() should return HA_POS_ERROR for the table during discarded without requesting pages.
+    The later other handler method should treat the error correctly.
+    
+    Approved by Sunny in rb#3433
+
+diff --git a/storage/innobase/handler/ha_innodb.cc b/storage/innobase/handler/ha_innodb.cc
+index 9f5ba543a47..8c9fc33fa35 100644
+--- a/storage/innobase/handler/ha_innodb.cc
++++ b/storage/innobase/handler/ha_innodb.cc
+@@ -6454,6 +6454,11 @@ ha_innobase::records_in_range(
+ 
+ 	index = dict_table_get_index_noninline(prebuilt->table, key->name);
+ 
++	if (prebuilt->table->ibd_file_missing) {
++		n_rows = HA_POS_ERROR;
++		goto func_exit;
++	}
++
+ 	range_start = dtuple_create_for_mysql(&heap1, key->key_parts);
+ 	dict_index_copy_types(range_start, index, key->key_parts);
+ 
+@@ -6503,6 +6508,8 @@ ha_innobase::records_in_range(
+ 
+ 	my_free(key_val_buff2, MYF(0));
+ 
++func_exit:
++
+ 	prebuilt->trx->op_info = (char*)"";
+ 
+ 	/* The MySQL optimizer seems to believe an estimate of 0 rows is
+diff --git a/storage/innodb_plugin/handler/ha_innodb.cc b/storage/innodb_plugin/handler/ha_innodb.cc
+index 971c55a623c..cde3c679766 100644
+--- a/storage/innodb_plugin/handler/ha_innodb.cc
++++ b/storage/innodb_plugin/handler/ha_innodb.cc
+@@ -7523,6 +7523,10 @@ ha_innobase::records_in_range(
+ 	/* There exists possibility of not being able to find requested
+ 	index due to inconsistency between MySQL and InoDB dictionary info.
+ 	Necessary message should have been printed in innobase_get_index() */
++	if (prebuilt->table->ibd_file_missing) {
++		n_rows = HA_POS_ERROR;
++		goto func_exit;
++	}
+ 	if (UNIV_UNLIKELY(!index)) {
+ 		n_rows = HA_POS_ERROR;
+ 		goto func_exit;
+

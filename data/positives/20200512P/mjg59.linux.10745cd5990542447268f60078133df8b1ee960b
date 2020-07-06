@@ -1,0 +1,38 @@
+commit 10745cd5990542447268f60078133df8b1ee960b
+Author: Allan Stephens <allan.stephens@windriver.com>
+Date:   Mon Oct 24 14:59:20 2011 -0400
+
+    tipc: Flush unsent broadcast messages when contact with last node is lost
+    
+    Adds code to release any unsent broadcast messages in the broadcast link
+    transmit queue if TIPC loses contact with its only neighboring node.
+    Previously, a broadcast link that was in the congested state would hold
+    on to the unsent messages, even though the messages were now undeliverable.
+    
+    Signed-off-by: Allan Stephens <allan.stephens@windriver.com>
+    Signed-off-by: Paul Gortmaker <paul.gortmaker@windriver.com>
+
+diff --git a/net/tipc/bcast.c b/net/tipc/bcast.c
+index dd990b081435..4609819ea807 100644
+--- a/net/tipc/bcast.c
++++ b/net/tipc/bcast.c
+@@ -252,7 +252,17 @@ void tipc_bclink_acknowledge(struct tipc_node *n_ptr, u32 acked)
+ 
+ 	while (crs && less_eq(buf_seqno(crs), acked)) {
+ 		next = crs->next;
+-		bcbuf_decr_acks(crs);
++
++		if (crs != bcl->next_out)
++			bcbuf_decr_acks(crs);
++		else if (bclink->bcast_nodes.count)
++			break;
++		else {
++			bcbuf_set_acks(crs, 0);
++			bcl->next_out = next;
++			bclink_set_last_sent();
++		}
++
+ 		if (bcbuf_acks(crs) == 0) {
+ 			bcl->first_out = next;
+ 			bcl->out_queue_size--;
+

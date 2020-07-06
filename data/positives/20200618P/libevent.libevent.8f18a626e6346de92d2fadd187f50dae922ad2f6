@@ -1,0 +1,40 @@
+commit 8f18a626e6346de92d2fadd187f50dae922ad2f6
+Author: Azat Khuzhin <a3at.mail@gmail.com>
+Date:   Fri Mar 11 20:40:52 2016 +0300
+
+    http: fix leaking of response_code_line
+    
+    Since now evhttp_parse_response_line() can be called twice because after
+    "HTTP/1.1 100 Continue" we can have "HTTP/1.1 200"
+    
+    ==29162== 9 bytes in 1 blocks are definitely lost in loss record 1 of 1
+    ==29162==    at 0x4C29C0F: malloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+    ==29162==    by 0x5CBF0A9: strdup (in /lib/x86_64-linux-gnu/libc-2.21.so)
+    ==29162==    by 0x4AA3AC: event_mm_strdup_ (event.c:3493)
+    ==29162==    by 0x4BD843: evhttp_parse_response_line (http.c:1680)
+    ==29162==    by 0x4BE333: evhttp_parse_firstline_ (http.c:2013)
+    ==29162==    by 0x4BEA4F: evhttp_read_firstline (http.c:2243)
+    ==29162==    by 0x4BC5F8: evhttp_read_cb (http.c:1136)
+    ==29162==    by 0x4993F1: bufferevent_run_readcb_ (bufferevent.c:233)
+    ==29162==    by 0x49FBC0: bufferevent_trigger_nolock_ (bufferevent-internal.h:392)
+    ==29162==    by 0x49FF10: bufferevent_readcb (bufferevent_sock.c:208)
+    ==29162==    by 0x4A474A: event_persist_closure (event.c:1580)
+    ==29162==    by 0x4A49F5: event_process_active_single_queue (event.c:1639)
+    
+    Fixes: 0b46b39e95ad77951176f09782138305ba34edf3 ("http: fix "Expect:
+    100-continue" client side")
+
+diff --git a/http.c b/http.c
+index 21d080b8..2c69dbc4 100644
+--- a/http.c
++++ b/http.c
+@@ -1667,6 +1667,8 @@ evhttp_parse_response_line(struct evhttp_request *req, char *line)
+ 		return (-1);
+ 	}
+ 
++	if (req->response_code_line != NULL)
++		mm_free(req->response_code_line);
+ 	if ((req->response_code_line = mm_strdup(readable)) == NULL) {
+ 		event_warn("%s: strdup", __func__);
+ 		return (-1);
+

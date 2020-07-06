@@ -1,0 +1,74 @@
+commit a8a4ae3a899a6c0b4771cc57884800d8b76a6996
+Author: Andy Adamson <andros@netapp.com>
+Date:   Tue May 3 13:43:03 2011 -0400
+
+    NFSv41: Resend on NFS4ERR_RETRY_UNCACHED_REP
+    
+    Free the slot and resend the RPC with new session <slot#,seq#>.
+    
+    For nfs4_async_handle_error, return -EAGAIN and set the task->tk_status to 0
+    to restart the async rpc in the rpc_restart_call_prepare state which resets
+    the slot.
+    
+    For nfs4_handle_exception, retrying a call that uses nfs4_call_sync will
+    reset the slot via nfs41_call_sync_prepare.
+    
+    For open/close/lock/locku/delegreturn/layoutcommit/unlink/rename/write
+    cachethis is true, so these operations will not trigger an
+    NFS4ERR_RETRY_UNCACHED_REP.
+    
+    Signed-off-by: Andy Adamson <andros@netapp.com>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/fs/nfs/nfs4filelayout.c b/fs/nfs/nfs4filelayout.c
+index 6f8192f4cfc7..7841ea603c91 100644
+--- a/fs/nfs/nfs4filelayout.c
++++ b/fs/nfs/nfs4filelayout.c
+@@ -117,6 +117,8 @@ static int filelayout_async_handle_error(struct rpc_task *task,
+ 	case -EKEYEXPIRED:
+ 		rpc_delay(task, FILELAYOUT_POLL_RETRY_MAX);
+ 		break;
++	case -NFS4ERR_RETRY_UNCACHED_REP:
++		break;
+ 	default:
+ 		dprintk("%s DS error. Retry through MDS %d\n", __func__,
+ 			task->tk_status);
+diff --git a/fs/nfs/nfs4proc.c b/fs/nfs/nfs4proc.c
+index 69c0f3c5ee7a..cf1b339c3937 100644
+--- a/fs/nfs/nfs4proc.c
++++ b/fs/nfs/nfs4proc.c
+@@ -300,6 +300,7 @@ static int nfs4_handle_exception(struct nfs_server *server, int errorcode, struc
+ 			ret = nfs4_delay(server->client, &exception->timeout);
+ 			if (ret != 0)
+ 				break;
++		case -NFS4ERR_RETRY_UNCACHED_REP:
+ 		case -NFS4ERR_OLD_STATEID:
+ 			exception->retry = 1;
+ 			break;
+@@ -3695,6 +3696,7 @@ nfs4_async_handle_error(struct rpc_task *task, const struct nfs_server *server,
+ 			rpc_delay(task, NFS4_POLL_RETRY_MAX);
+ 			task->tk_status = 0;
+ 			return -EAGAIN;
++		case -NFS4ERR_RETRY_UNCACHED_REP:
+ 		case -NFS4ERR_OLD_STATEID:
+ 			task->tk_status = 0;
+ 			return -EAGAIN;
+@@ -4844,6 +4846,8 @@ static void nfs4_get_lease_time_done(struct rpc_task *task, void *calldata)
+ 		dprintk("%s Retry: tk_status %d\n", __func__, task->tk_status);
+ 		rpc_delay(task, NFS4_POLL_RETRY_MIN);
+ 		task->tk_status = 0;
++		/* fall through */
++	case -NFS4ERR_RETRY_UNCACHED_REP:
+ 		nfs_restart_rpc(task, data->clp);
+ 		return;
+ 	}
+@@ -5479,6 +5483,8 @@ static int nfs41_reclaim_complete_handle_errors(struct rpc_task *task, struct nf
+ 		break;
+ 	case -NFS4ERR_DELAY:
+ 		rpc_delay(task, NFS4_POLL_RETRY_MAX);
++		/* fall through */
++	case -NFS4ERR_RETRY_UNCACHED_REP:
+ 		return -EAGAIN;
+ 	default:
+ 		nfs4_schedule_lease_recovery(clp);
+

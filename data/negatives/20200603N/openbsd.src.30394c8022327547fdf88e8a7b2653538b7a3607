@@ -1,0 +1,62 @@
+commit 30394c8022327547fdf88e8a7b2653538b7a3607
+Author: kettenis <kettenis@openbsd.org>
+Date:   Mon Nov 24 13:48:49 2014 +0000
+
+    Fix some issues with 64-bit BARs behind PCI-PCI bridges.
+    Actual BARs that have the upper 32-bits set seen in the wild now on a
+    SPARC T5-2 system.
+    
+    Tested by many.
+
+diff --git a/sys/dev/pci/pci.c b/sys/dev/pci/pci.c
+index d56ed8249d1..e298e833cbf 100644
+--- a/sys/dev/pci/pci.c
++++ b/sys/dev/pci/pci.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: pci.c,v 1.106 2014/10/26 16:18:42 kettenis Exp $	*/
++/*	$OpenBSD: pci.c,v 1.107 2014/11/24 13:48:49 kettenis Exp $	*/
+ /*	$NetBSD: pci.c,v 1.31 1997/06/06 23:48:04 thorpej Exp $	*/
+ 
+ /*
+@@ -936,6 +936,12 @@ pci_reserve_resources(struct pci_attach_args *pa)
+ 	blr = pci_conf_read(pc, tag, PPB_REG_PREFMEM);
+ 	base = (blr & 0x0000fff0) << 16;
+ 	limit = (blr & 0xfff00000) | 0x000fffff;
++#ifdef __LP64__
++	blr = pci_conf_read(pc, pa->pa_tag, PPB_REG_PREFBASE_HI32);
++	base |= ((uint64_t)blr) << 32;
++	blr = pci_conf_read(pc, pa->pa_tag, PPB_REG_PREFLIM_HI32);
++	limit |= ((uint64_t)blr) << 32;
++#endif
+ 	if (limit > base)
+ 		size = (limit - base + 1);
+ 	else
+diff --git a/sys/dev/pci/ppb.c b/sys/dev/pci/ppb.c
+index d243f67f69c..04b20815c47 100644
+--- a/sys/dev/pci/ppb.c
++++ b/sys/dev/pci/ppb.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ppb.c,v 1.59 2014/09/15 14:22:07 kettenis Exp $	*/
++/*	$OpenBSD: ppb.c,v 1.60 2014/11/24 13:48:49 kettenis Exp $	*/
+ /*	$NetBSD: ppb.c,v 1.16 1997/06/06 23:48:05 thorpej Exp $	*/
+ 
+ /*
+@@ -261,7 +261,7 @@ ppbattach(struct device *parent, struct device *self, void *aux)
+ 		name = malloc(32, M_DEVBUF, M_NOWAIT);
+ 		if (name) {
+ 			snprintf(name, 32, "%s pcimem", sc->sc_dev.dv_xname);
+-			sc->sc_memex = extent_create(name, 0, 0xffffffff,
++			sc->sc_memex = extent_create(name, 0, (u_long)-1L,
+ 			    M_DEVBUF, NULL, 0, EX_NOWAIT | EX_FILLED);
+ 			extent_free(sc->sc_memex, sc->sc_membase,
+ 			    sc->sc_memlimit - sc->sc_membase + 1,
+@@ -273,7 +273,7 @@ ppbattach(struct device *parent, struct device *self, void *aux)
+ 	blr = pci_conf_read(pc, pa->pa_tag, PPB_REG_PREFMEM);
+ 	sc->sc_pmembase = (blr & 0x0000fff0) << 16;
+ 	sc->sc_pmemlimit = (blr & 0xfff00000) | 0x000fffff;
+-#ifdef __LP64__	/* XXX because extents use long... */
++#ifdef __LP64__
+ 	blr = pci_conf_read(pc, pa->pa_tag, PPB_REG_PREFBASE_HI32);
+ 	sc->sc_pmembase |= ((uint64_t)blr) << 32;
+ 	blr = pci_conf_read(pc, pa->pa_tag, PPB_REG_PREFLIM_HI32);
+

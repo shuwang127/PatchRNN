@@ -1,0 +1,55 @@
+commit 57b4295d2b7693dc15e047b6a5d0f6b86b612fa2
+Author: Vladislav Vaintroub <vvaintroub@mysql.com>
+Date:   Wed Apr 29 13:51:10 2009 +0200
+
+    Bug#43932 myisam index corruption with large index and large
+    key_buffer_size.
+    
+    The cause of corruption was number overflow when multiplying
+    two ulong values, number of used keycache blocks with size
+    of a single block. The result of multiplication exceeded ulong
+    range (4G) and this lead to incorrectly calculated  buffer offset
+    in the key cache.
+    
+    The fix is to use size_t for multiplication result.
+    
+    This patch also fixes pointless cast in safemalloc
+    (size of allocated block to uint), that creates lot of false
+    alarm warnings when using big keycache (> 4GB) in debug mode.
+
+diff --git a/mysys/mf_keycache.c b/mysys/mf_keycache.c
+index 397a3332740..16bcb11eb91 100644
+--- a/mysys/mf_keycache.c
++++ b/mysys/mf_keycache.c
+@@ -2044,13 +2044,15 @@ static BLOCK_LINK *find_key_block(KEY_CACHE *keycache,
+         }
+         else
+         {
++          size_t block_mem_offset;
+           /* There are some never used blocks, take first of them */
+           DBUG_ASSERT(keycache->blocks_used <
+                       (ulong) keycache->disk_blocks);
+           block= &keycache->block_root[keycache->blocks_used];
++          block_mem_offset= 
++           ((size_t) keycache->blocks_used) * keycache->key_cache_block_size;
+           block->buffer= ADD_TO_PTR(keycache->block_mem,
+-                                    ((ulong) keycache->blocks_used*
+-                                     keycache->key_cache_block_size),
++                                    block_mem_offset,
+                                     uchar*);
+           keycache->blocks_used++;
+           DBUG_ASSERT(!block->next_used);
+diff --git a/mysys/safemalloc.c b/mysys/safemalloc.c
+index 36d07b475e9..c484f1d4c54 100644
+--- a/mysys/safemalloc.c
++++ b/mysys/safemalloc.c
+@@ -174,7 +174,7 @@ void *_mymalloc(size_t size, const char *filename, uint lineno, myf MyFlags)
+   data[size + 3]= MAGICEND3;
+   irem->filename= (char *) filename;
+   irem->linenum= lineno;
+-  irem->datasize= (uint32) size;
++  irem->datasize= size;
+   irem->prev=	  NULL;
+ 
+   /* Add this remember structure to the linked list */
+

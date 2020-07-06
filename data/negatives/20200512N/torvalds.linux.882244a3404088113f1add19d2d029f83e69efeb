@@ -1,0 +1,60 @@
+commit 882244a3404088113f1add19d2d029f83e69efeb
+Author: Paulo Zanoni <paulo.r.zanoni@intel.com>
+Date:   Tue Apr 1 14:55:12 2014 -0300
+
+    drm/i915: fix WARNs when reading DDI state while suspended
+    
+    If runtime PM is enabled and we unset all modes, we will runtime
+    suspend after __intel_set_mode() , then function
+    intel_modeset_check_state() will try to read the HW state while it is
+    suspended and trigger lots of WARNs because it shouldn't be reading
+    registers.
+    
+    So on this patch we make intel_ddi_connector_get_hw_state() return
+    false in case the power domain is disabled, and we also make
+    intel_display_power_enabled() return false in case the device is
+    suspended. Notice that we can't just use
+    intel_display_power_enabled_sw() because while the driver is being
+    initialized the power domain refcounts are not reflecting the real
+    state of the hardware.
+    
+    Just for reference, I have previously published an alternate patch for
+    this problem, called "drm/i915: get runtime PM at intel_set_mode".
+    
+    Testcase: igt/pm_pc8
+    Signed-off-by: Paulo Zanoni <paulo.r.zanoni@intel.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/i915/intel_ddi.c b/drivers/gpu/drm/i915/intel_ddi.c
+index 070bf2e78d61..0ad4e9600063 100644
+--- a/drivers/gpu/drm/i915/intel_ddi.c
++++ b/drivers/gpu/drm/i915/intel_ddi.c
+@@ -1108,8 +1108,13 @@ bool intel_ddi_connector_get_hw_state(struct intel_connector *intel_connector)
+ 	enum port port = intel_ddi_get_encoder_port(intel_encoder);
+ 	enum pipe pipe = 0;
+ 	enum transcoder cpu_transcoder;
++	enum intel_display_power_domain power_domain;
+ 	uint32_t tmp;
+ 
++	power_domain = intel_display_port_power_domain(intel_encoder);
++	if (!intel_display_power_enabled(dev_priv, power_domain))
++		return false;
++
+ 	if (!intel_encoder->get_hw_state(intel_encoder, &pipe))
+ 		return false;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 453bf0cc21c0..9277265dc9a6 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -5280,6 +5280,9 @@ bool intel_display_power_enabled(struct drm_i915_private *dev_priv,
+ 	bool is_enabled;
+ 	int i;
+ 
++	if (dev_priv->pm.suspended)
++		return false;
++
+ 	power_domains = &dev_priv->power_domains;
+ 
+ 	is_enabled = true;
+

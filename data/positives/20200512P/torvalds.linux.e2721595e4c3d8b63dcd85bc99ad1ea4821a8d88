@@ -1,0 +1,121 @@
+commit e2721595e4c3d8b63dcd85bc99ad1ea4821a8d88
+Author: Roger He <Hongbo.He@amd.com>
+Date:   Thu Jan 11 12:57:58 2018 +0800
+
+    drm/ttm: check the return value of register_shrinker
+    
+    This fixes the build warning:
+    "ignoring return value of 'register_shrinker', declared with
+    attribute warn_unused_result [-Wunused-result]"
+    
+    Signed-off-by: Roger He <Hongbo.He@amd.com>
+    Reviewed-by: Christian König <christian.koenig@amd.com>
+    Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+
+diff --git a/drivers/gpu/drm/ttm/ttm_page_alloc.c b/drivers/gpu/drm/ttm/ttm_page_alloc.c
+index f1a3d55ead83..e48e387d4d17 100644
+--- a/drivers/gpu/drm/ttm/ttm_page_alloc.c
++++ b/drivers/gpu/drm/ttm/ttm_page_alloc.c
+@@ -477,12 +477,12 @@ ttm_pool_shrink_count(struct shrinker *shrink, struct shrink_control *sc)
+ 	return count;
+ }
+ 
+-static void ttm_pool_mm_shrink_init(struct ttm_pool_manager *manager)
++static int ttm_pool_mm_shrink_init(struct ttm_pool_manager *manager)
+ {
+ 	manager->mm_shrink.count_objects = ttm_pool_shrink_count;
+ 	manager->mm_shrink.scan_objects = ttm_pool_shrink_scan;
+ 	manager->mm_shrink.seeks = 1;
+-	register_shrinker(&manager->mm_shrink);
++	return register_shrinker(&manager->mm_shrink);
+ }
+ 
+ static void ttm_pool_mm_shrink_fini(struct ttm_pool_manager *manager)
+@@ -1032,15 +1032,18 @@ int ttm_page_alloc_init(struct ttm_mem_global *glob, unsigned max_pages)
+ 
+ 	ret = kobject_init_and_add(&_manager->kobj, &ttm_pool_kobj_type,
+ 				   &glob->kobj, "pool");
+-	if (unlikely(ret != 0)) {
+-		kobject_put(&_manager->kobj);
+-		_manager = NULL;
+-		return ret;
+-	}
+-
+-	ttm_pool_mm_shrink_init(_manager);
++	if (unlikely(ret != 0))
++		goto error;
+ 
++	ret = ttm_pool_mm_shrink_init(_manager);
++	if (unlikely(ret != 0))
++		goto error;
+ 	return 0;
++
++error:
++	kobject_put(&_manager->kobj);
++	_manager = NULL;
++	return ret;
+ }
+ 
+ void ttm_page_alloc_fini(void)
+diff --git a/drivers/gpu/drm/ttm/ttm_page_alloc_dma.c b/drivers/gpu/drm/ttm/ttm_page_alloc_dma.c
+index 4c659405a008..c7f01a4d924c 100644
+--- a/drivers/gpu/drm/ttm/ttm_page_alloc_dma.c
++++ b/drivers/gpu/drm/ttm/ttm_page_alloc_dma.c
+@@ -1182,12 +1182,12 @@ ttm_dma_pool_shrink_count(struct shrinker *shrink, struct shrink_control *sc)
+ 	return count;
+ }
+ 
+-static void ttm_dma_pool_mm_shrink_init(struct ttm_pool_manager *manager)
++static int ttm_dma_pool_mm_shrink_init(struct ttm_pool_manager *manager)
+ {
+ 	manager->mm_shrink.count_objects = ttm_dma_pool_shrink_count;
+ 	manager->mm_shrink.scan_objects = &ttm_dma_pool_shrink_scan;
+ 	manager->mm_shrink.seeks = 1;
+-	register_shrinker(&manager->mm_shrink);
++	return register_shrinker(&manager->mm_shrink);
+ }
+ 
+ static void ttm_dma_pool_mm_shrink_fini(struct ttm_pool_manager *manager)
+@@ -1197,7 +1197,7 @@ static void ttm_dma_pool_mm_shrink_fini(struct ttm_pool_manager *manager)
+ 
+ int ttm_dma_page_alloc_init(struct ttm_mem_global *glob, unsigned max_pages)
+ {
+-	int ret = -ENOMEM;
++	int ret;
+ 
+ 	WARN_ON(_manager);
+ 
+@@ -1205,7 +1205,7 @@ int ttm_dma_page_alloc_init(struct ttm_mem_global *glob, unsigned max_pages)
+ 
+ 	_manager = kzalloc(sizeof(*_manager), GFP_KERNEL);
+ 	if (!_manager)
+-		goto err;
++		return -ENOMEM;
+ 
+ 	mutex_init(&_manager->lock);
+ 	INIT_LIST_HEAD(&_manager->pools);
+@@ -1217,13 +1217,17 @@ int ttm_dma_page_alloc_init(struct ttm_mem_global *glob, unsigned max_pages)
+ 	/* This takes care of auto-freeing the _manager */
+ 	ret = kobject_init_and_add(&_manager->kobj, &ttm_pool_kobj_type,
+ 				   &glob->kobj, "dma_pool");
+-	if (unlikely(ret != 0)) {
+-		kobject_put(&_manager->kobj);
+-		goto err;
+-	}
+-	ttm_dma_pool_mm_shrink_init(_manager);
++	if (unlikely(ret != 0))
++		goto error;
++
++	ret = ttm_dma_pool_mm_shrink_init(_manager);
++	if (unlikely(ret != 0))
++		goto error;
+ 	return 0;
+-err:
++
++error:
++	kobject_put(&_manager->kobj);
++	_manager = NULL;
+ 	return ret;
+ }
+ 
+

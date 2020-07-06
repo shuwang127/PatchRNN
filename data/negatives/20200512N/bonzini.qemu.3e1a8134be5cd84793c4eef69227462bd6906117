@@ -1,0 +1,70 @@
+commit 3e1a8134be5cd84793c4eef69227462bd6906117
+Author: Kirill A. Shutemov <kirill@shutemov.name>
+Date:   Wed Jan 20 00:56:12 2010 +0100
+
+    block/qcow.c: fix warnings with _FORTIFY_SOURCE
+    
+    CC    block/qcow.o
+    cc1: warnings being treated as errors
+    block/qcow.c: In function 'qcow_create':
+    block/qcow.c:804: error: ignoring return value of 'write', declared with attribute warn_unused_result
+    block/qcow.c:806: error: ignoring return value of 'write', declared with attribute warn_unused_result
+    block/qcow.c:811: error: ignoring return value of 'write', declared with attribute warn_unused_result
+    make: *** [block/qcow.o] Error 1
+    
+    Signed-off-by: Kirill A. Shutemov <kirill@shutemov.name>
+    Signed-off-by: Juan Quintela <quintela@redhat.com>
+    Signed-off-by: Anthony Liguori <aliguori@us.ibm.com>
+
+diff --git a/block/qcow.c b/block/qcow.c
+index 1e3e59b008..003db1e793 100644
+--- a/block/qcow.c
++++ b/block/qcow.c
+@@ -750,6 +750,7 @@ static int qcow_create(const char *filename, QEMUOptionParameter *options)
+     int64_t total_size = 0;
+     const char *backing_file = NULL;
+     int flags = 0;
++    int ret;
+ 
+     /* Read out options */
+     while (options && options->name) {
+@@ -801,17 +802,34 @@ static int qcow_create(const char *filename, QEMUOptionParameter *options)
+     }
+ 
+     /* write all the data */
+-    write(fd, &header, sizeof(header));
++    ret = qemu_write_full(fd, &header, sizeof(header));
++    if (ret != sizeof(header)) {
++        ret = -1;
++        goto exit;
++    }
++
+     if (backing_file) {
+-        write(fd, backing_file, backing_filename_len);
++        ret = qemu_write_full(fd, backing_file, backing_filename_len);
++        if (ret != backing_filename_len) {
++            ret = -1;
++            goto exit;
++        }
++
+     }
+     lseek(fd, header_size, SEEK_SET);
+     tmp = 0;
+     for(i = 0;i < l1_size; i++) {
+-        write(fd, &tmp, sizeof(tmp));
++        ret = qemu_write_full(fd, &tmp, sizeof(tmp));
++        if (ret != sizeof(tmp)) {
++            ret = -1;
++            goto exit;
++        }
+     }
++
++    ret = 0;
++exit:
+     close(fd);
+-    return 0;
++    return ret;
+ }
+ 
+ static int qcow_make_empty(BlockDriverState *bs)
+

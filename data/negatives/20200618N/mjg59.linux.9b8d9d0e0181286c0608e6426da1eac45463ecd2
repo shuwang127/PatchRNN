@@ -1,0 +1,97 @@
+commit 9b8d9d0e0181286c0608e6426da1eac45463ecd2
+Author: Thomas Hellstrom <thomas-at-tungstengraphics-dot-com>
+Date:   Mon Jan 8 21:21:41 2007 +1100
+
+    via: allow for npot texture pitch alignment
+    
+    Signed-off-by: Dave Airlie <airlied@linux.ie>
+
+diff --git a/drivers/char/drm/via_drv.h b/drivers/char/drm/via_drv.h
+index cfc20a06707e..8b8778d4a423 100644
+--- a/drivers/char/drm/via_drv.h
++++ b/drivers/char/drm/via_drv.h
+@@ -29,10 +29,10 @@
+ 
+ #define DRIVER_NAME		"via"
+ #define DRIVER_DESC		"VIA Unichrome / Pro"
+-#define DRIVER_DATE		"20060529"
++#define DRIVER_DATE		"20061227"
+ 
+ #define DRIVER_MAJOR		2
+-#define DRIVER_MINOR		10
++#define DRIVER_MINOR		11
+ #define DRIVER_PATCHLEVEL	0
+ 
+ #include "via_verifier.h"
+diff --git a/drivers/char/drm/via_verifier.c b/drivers/char/drm/via_verifier.c
+index 24fc7cb6e7da..2e7e08078287 100644
+--- a/drivers/char/drm/via_verifier.c
++++ b/drivers/char/drm/via_verifier.c
+@@ -306,6 +306,7 @@ static __inline__ int finish_current_sequence(drm_via_state_t * cur_seq)
+ 			unsigned long lo = ~0, hi = 0, tmp;
+ 			uint32_t *addr, *pitch, *height, tex;
+ 			unsigned i;
++			int npot;
+ 
+ 			if (end > 9)
+ 				end = 9;
+@@ -316,12 +317,15 @@ static __inline__ int finish_current_sequence(drm_via_state_t * cur_seq)
+ 			    &(cur_seq->t_addr[tex = cur_seq->texture][start]);
+ 			pitch = &(cur_seq->pitch[tex][start]);
+ 			height = &(cur_seq->height[tex][start]);
+-
++			npot = cur_seq->tex_npot[tex];
+ 			for (i = start; i <= end; ++i) {
+ 				tmp = *addr++;
+ 				if (tmp < lo)
+ 					lo = tmp;
+-				tmp += (*height++ << *pitch++);
++				if (i == 0 && npot)
++					tmp += (*height++ * *pitch++);
++				else
++					tmp += (*height++ << *pitch++);
+ 				if (tmp > hi)
+ 					hi = tmp;
+ 			}
+@@ -443,13 +447,21 @@ investigate_hazard(uint32_t cmd, hazard_t hz, drm_via_state_t * cur_seq)
+ 		return 0;
+ 	case check_texture_addr3:
+ 		cur_seq->unfinished = tex_address;
+-		tmp = ((cmd >> 24) - 0x2B);
+-		cur_seq->pitch[cur_seq->texture][tmp] =
+-		    (cmd & 0x00F00000) >> 20;
+-		if (!tmp && (cmd & 0x000FFFFF)) {
+-			DRM_ERROR
+-			    ("Unimplemented texture level 0 pitch mode.\n");
+-			return 2;
++		tmp = ((cmd >> 24) - HC_SubA_HTXnL0Pit);
++		if (tmp == 0 &&
++		    (cmd & HC_HTXnEnPit_MASK)) {
++			cur_seq->pitch[cur_seq->texture][tmp] =
++				(cmd & HC_HTXnLnPit_MASK);
++			cur_seq->tex_npot[cur_seq->texture] = 1;
++		} else {
++			cur_seq->pitch[cur_seq->texture][tmp] =
++				(cmd & HC_HTXnLnPitE_MASK) >> HC_HTXnLnPitE_SHIFT;
++			cur_seq->tex_npot[cur_seq->texture] = 0;
++			if (cmd & 0x000FFFFF) {
++				DRM_ERROR
++					("Unimplemented texture level 0 pitch mode.\n");
++				return 2;
++			}
+ 		}
+ 		return 0;
+ 	case check_texture_addr4:
+diff --git a/drivers/char/drm/via_verifier.h b/drivers/char/drm/via_verifier.h
+index 256590fcc22a..b77f59df0278 100644
+--- a/drivers/char/drm/via_verifier.h
++++ b/drivers/char/drm/via_verifier.h
+@@ -43,6 +43,7 @@ typedef struct {
+ 	uint32_t tex_level_lo[2];
+ 	uint32_t tex_level_hi[2];
+ 	uint32_t tex_palette_size[2];
++	uint32_t tex_npot[2];
+ 	drm_via_sequence_t unfinished;
+ 	int agp_texture;
+ 	int multitex;
+

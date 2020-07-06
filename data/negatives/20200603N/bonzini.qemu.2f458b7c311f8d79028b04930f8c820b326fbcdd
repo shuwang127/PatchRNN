@@ -1,0 +1,111 @@
+commit 2f458b7c311f8d79028b04930f8c820b326fbcdd
+Author: Richard Henderson <rth@twiddle.net>
+Date:   Tue Sep 16 12:35:59 2014 -0700
+
+    target-alpha: Inline call_pal
+    
+    Reviewed-by: Aurelien Jarno <aurelien@aurel32.net>
+    Signed-off-by: Richard Henderson <rth@twiddle.net>
+
+diff --git a/target-alpha/helper.h b/target-alpha/helper.h
+index d221f0d7d6..e7f04504ac 100644
+--- a/target-alpha/helper.h
++++ b/target-alpha/helper.h
+@@ -92,7 +92,6 @@ DEF_HELPER_FLAGS_2(ieee_input_s, TCG_CALL_NO_WG, void, env, i64)
+ 
+ #if !defined (CONFIG_USER_ONLY)
+ DEF_HELPER_2(hw_ret, void, env, i64)
+-DEF_HELPER_3(call_pal, void, env, i64, i64)
+ 
+ DEF_HELPER_2(ldl_phys, i64, env, i64)
+ DEF_HELPER_2(ldq_phys, i64, env, i64)
+diff --git a/target-alpha/sys_helper.c b/target-alpha/sys_helper.c
+index f01eb96e1c..380d6e4d57 100644
+--- a/target-alpha/sys_helper.c
++++ b/target-alpha/sys_helper.c
+@@ -48,14 +48,6 @@ void helper_hw_ret(CPUAlphaState *env, uint64_t a)
+     env->pal_mode = a & 1;
+ }
+ 
+-void helper_call_pal(CPUAlphaState *env, uint64_t pc, uint64_t entry_ofs)
+-{
+-    int pal_mode = env->pal_mode;
+-    env->exc_addr = pc | pal_mode;
+-    env->pc = env->palbr + entry_ofs;
+-    env->pal_mode = 1;
+-}
+-
+ void helper_tbia(CPUAlphaState *env)
+ {
+     tlb_flush(CPU(alpha_env_get_cpu(env)), 1);
+diff --git a/target-alpha/translate.c b/target-alpha/translate.c
+index 62002dcfc9..01e7f3577b 100644
+--- a/target-alpha/translate.c
++++ b/target-alpha/translate.c
+@@ -42,6 +42,9 @@ typedef struct DisasContext DisasContext;
+ struct DisasContext {
+     struct TranslationBlock *tb;
+     uint64_t pc;
++#ifndef CONFIG_USER_ONLY
++    uint64_t palbr;
++#endif
+     int mem_idx;
+ 
+     /* Current rounding mode for this TB.  */
+@@ -1206,15 +1209,24 @@ static ExitStatus gen_call_pal(DisasContext *ctx, int palcode)
+     return gen_excp(ctx, EXCP_CALL_PAL, palcode);
+ #else
+     {
+-        TCGv pc = tcg_const_i64(ctx->pc);
+-        TCGv entry = tcg_const_i64(palcode & 0x80
+-                                   ? 0x2000 + (palcode - 0x80) * 64
+-                                   : 0x1000 + palcode * 64);
++        TCGv tmp = tcg_temp_new();
++        uint64_t exc_addr = ctx->pc;
++        uint64_t entry = ctx->palbr;
++
++        if (ctx->tb->flags & TB_FLAGS_PAL_MODE) {
++            exc_addr |= 1;
++        } else {
++            tcg_gen_movi_i64(tmp, 1);
++            tcg_gen_st8_i64(tmp, cpu_env, offsetof(CPUAlphaState, pal_mode));
++        }
+ 
+-        gen_helper_call_pal(cpu_env, pc, entry);
++        tcg_gen_movi_i64(tmp, exc_addr);
++        tcg_gen_st_i64(tmp, cpu_env, offsetof(CPUAlphaState, exc_addr));
++        tcg_temp_free(tmp);
+ 
+-        tcg_temp_free(entry);
+-        tcg_temp_free(pc);
++        entry += (palcode & 0x80
++                  ? 0x2000 + (palcode - 0x80) * 64
++                  : 0x1000 + palcode * 64);
+ 
+         /* Since the destination is running in PALmode, we don't really
+            need the page permissions check.  We'll see the existence of
+@@ -1222,11 +1234,13 @@ static ExitStatus gen_call_pal(DisasContext *ctx, int palcode)
+            we change the PAL base register.  */
+         if (!ctx->singlestep_enabled && !(ctx->tb->cflags & CF_LAST_IO)) {
+             tcg_gen_goto_tb(0);
++            tcg_gen_movi_i64(cpu_pc, entry);
+             tcg_gen_exit_tb((uintptr_t)ctx->tb);
+             return EXIT_GOTO_TB;
++        } else {
++            tcg_gen_movi_i64(cpu_pc, entry);
++            return EXIT_PC_UPDATED;
+         }
+-
+-        return EXIT_PC_UPDATED;
+     }
+ #endif
+ }
+@@ -2861,6 +2875,7 @@ static inline void gen_intermediate_code_internal(AlphaCPU *cpu,
+ #ifdef CONFIG_USER_ONLY
+     ctx.ir = cpu_std_ir;
+ #else
++    ctx.palbr = env->palbr;
+     ctx.ir = (tb->flags & TB_FLAGS_PAL_MODE ? cpu_pal_ir : cpu_std_ir);
+ #endif
+ 
+

@@ -1,0 +1,137 @@
+commit 1be374a0518a288147c6a7398792583200a67261
+Author: Andy Lutomirski <luto@amacapital.net>
+Date:   Wed May 22 14:07:44 2013 -0700
+
+    net: Block MSG_CMSG_COMPAT in send(m)msg and recv(m)msg
+    
+    To: linux-kernel@vger.kernel.org
+    Cc: x86@kernel.org, trinity@vger.kernel.org, Andy Lutomirski <luto@amacapital.net>, netdev@vger.kernel.org, "David S.
+            Miller" <davem@davemloft.net>
+    Subject: [PATCH 5/5] net: Block MSG_CMSG_COMPAT in send(m)msg and recv(m)msg
+    
+    MSG_CMSG_COMPAT is (AFAIK) not intended to be part of the API --
+    it's a hack that steals a bit to indicate to other networking code
+    that a compat entry was used.  So don't allow it from a non-compat
+    syscall.
+    
+    This prevents an oops when running this code:
+    
+    int main()
+    {
+            int s;
+            struct sockaddr_in addr;
+            struct msghdr *hdr;
+    
+            char *highpage = mmap((void*)(TASK_SIZE_MAX - 4096), 4096,
+                                  PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+            if (highpage == MAP_FAILED)
+                    err(1, "mmap");
+    
+            s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            if (s == -1)
+                    err(1, "socket");
+    
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(1);
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) != 0)
+                    err(1, "connect");
+    
+            void *evil = highpage + 4096 - COMPAT_MSGHDR_SIZE;
+            printf("Evil address is %p\n", evil);
+    
+            if (syscall(__NR_sendmmsg, s, evil, 1, MSG_CMSG_COMPAT) < 0)
+                    err(1, "sendmmsg");
+    
+            return 0;
+    }
+    
+    Cc: David S. Miller <davem@davemloft.net>
+    Signed-off-by: Andy Lutomirski <luto@amacapital.net>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/socket.c b/net/socket.c
+index 6b94633ca61d..9ff6366fee13 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -2075,8 +2075,12 @@ SYSCALL_DEFINE3(sendmsg, int, fd, struct msghdr __user *, msg, unsigned int, fla
+ {
+ 	int fput_needed, err;
+ 	struct msghdr msg_sys;
+-	struct socket *sock = sockfd_lookup_light(fd, &err, &fput_needed);
++	struct socket *sock;
++
++	if (flags & MSG_CMSG_COMPAT)
++		return -EINVAL;
+ 
++	sock = sockfd_lookup_light(fd, &err, &fput_needed);
+ 	if (!sock)
+ 		goto out;
+ 
+@@ -2149,6 +2153,8 @@ int __sys_sendmmsg(int fd, struct mmsghdr __user *mmsg, unsigned int vlen,
+ SYSCALL_DEFINE4(sendmmsg, int, fd, struct mmsghdr __user *, mmsg,
+ 		unsigned int, vlen, unsigned int, flags)
+ {
++	if (flags & MSG_CMSG_COMPAT)
++		return -EINVAL;
+ 	return __sys_sendmmsg(fd, mmsg, vlen, flags);
+ }
+ 
+@@ -2249,8 +2255,12 @@ SYSCALL_DEFINE3(recvmsg, int, fd, struct msghdr __user *, msg,
+ {
+ 	int fput_needed, err;
+ 	struct msghdr msg_sys;
+-	struct socket *sock = sockfd_lookup_light(fd, &err, &fput_needed);
++	struct socket *sock;
++
++	if (flags & MSG_CMSG_COMPAT)
++		return -EINVAL;
+ 
++	sock = sockfd_lookup_light(fd, &err, &fput_needed);
+ 	if (!sock)
+ 		goto out;
+ 
+@@ -2375,6 +2385,9 @@ SYSCALL_DEFINE5(recvmmsg, int, fd, struct mmsghdr __user *, mmsg,
+ 	int datagrams;
+ 	struct timespec timeout_sys;
+ 
++	if (flags & MSG_CMSG_COMPAT)
++		return -EINVAL;
++
+ 	if (!timeout)
+ 		return __sys_recvmmsg(fd, mmsg, vlen, flags, NULL);
+ 
+@@ -2492,15 +2505,31 @@ SYSCALL_DEFINE2(socketcall, int, call, unsigned long __user *, args)
+ 				   (int __user *)a[4]);
+ 		break;
+ 	case SYS_SENDMSG:
++		if (a[2] & MSG_CMSG_COMPAT) {
++			err = -EINVAL;
++			break;
++		}
+ 		err = sys_sendmsg(a0, (struct msghdr __user *)a1, a[2]);
+ 		break;
+ 	case SYS_SENDMMSG:
++		if (a[3] & MSG_CMSG_COMPAT) {
++			err = -EINVAL;
++			break;
++		}
+ 		err = sys_sendmmsg(a0, (struct mmsghdr __user *)a1, a[2], a[3]);
+ 		break;
+ 	case SYS_RECVMSG:
++		if (a[2] & MSG_CMSG_COMPAT) {
++			err = -EINVAL;
++			break;
++		}
+ 		err = sys_recvmsg(a0, (struct msghdr __user *)a1, a[2]);
+ 		break;
+ 	case SYS_RECVMMSG:
++		if (a[3] & MSG_CMSG_COMPAT) {
++			err = -EINVAL;
++			break;
++		}
+ 		err = sys_recvmmsg(a0, (struct mmsghdr __user *)a1, a[2], a[3],
+ 				   (struct timespec __user *)a[4]);
+ 		break;
+

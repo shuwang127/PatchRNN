@@ -1,0 +1,76 @@
+commit f34f8c5fea079065671163c37d98328cff31980b
+Author: Glauber de Oliveira Costa <gcosta@redhat.com>
+Date:   Thu Jan 17 19:13:26 2008 -0200
+
+    lguest: move last_pages to lg_cpu
+    
+    in our new model, pages are assigned to a virtual cpu, not to a guest.
+    We move it to the lg_cpu structure.
+    
+    Signed-off-by: Glauber de Oliveira Costa <gcosta@redhat.com>
+    Signed-off-by: Rusty Russell <rusty@rustcorp.com.au>
+
+diff --git a/drivers/lguest/lg.h b/drivers/lguest/lg.h
+index 94e518da9aa8..f1c4c33e4153 100644
+--- a/drivers/lguest/lg.h
++++ b/drivers/lguest/lg.h
+@@ -57,6 +57,8 @@ struct lg_cpu {
+ 	unsigned long regs_page;
+ 	struct lguest_regs *regs;
+ 
++	struct lguest_pages *last_pages;
++
+ 	int cpu_pgd; /* which pgd this cpu is currently using */
+ 
+ 	/* If a hypercall was asked for, this points to the arguments. */
+@@ -92,7 +94,6 @@ struct lguest
+ 
+ 	/* Bitmap of what has changed: see CHANGED_* above. */
+ 	int changed;
+-	struct lguest_pages *last_pages;
+ 
+ 	struct pgdir pgdirs[4];
+ 
+diff --git a/drivers/lguest/lguest_user.c b/drivers/lguest/lguest_user.c
+index f4f6df85bece..a87fca678c6b 100644
+--- a/drivers/lguest/lguest_user.c
++++ b/drivers/lguest/lguest_user.c
+@@ -131,6 +131,10 @@ static int lg_cpu_start(struct lg_cpu *cpu, unsigned id, unsigned long start_ip)
+ 	 * reference, it is destroyed before close() is called. */
+ 	cpu->mm = get_task_mm(cpu->tsk);
+ 
++	/* We remember which CPU's pages this Guest used last, for optimization
++	 * when the same Guest runs on the same CPU twice. */
++	cpu->last_pages = NULL;
++
+ 	return 0;
+ }
+ 
+@@ -192,10 +196,6 @@ static int initialize(struct file *file, const unsigned long __user *input)
+ 	if (err)
+ 		goto free_regs;
+ 
+-	/* We remember which CPU's pages this Guest used last, for optimization
+-	 * when the same Guest runs on the same CPU twice. */
+-	lg->last_pages = NULL;
+-
+ 	/* We keep our "struct lguest" in the file's private_data. */
+ 	file->private_data = lg;
+ 
+diff --git a/drivers/lguest/x86/core.c b/drivers/lguest/x86/core.c
+index 10eab6748d84..f8dfdc9a3e5b 100644
+--- a/drivers/lguest/x86/core.c
++++ b/drivers/lguest/x86/core.c
+@@ -80,9 +80,9 @@ static void copy_in_guest_info(struct lg_cpu *cpu, struct lguest_pages *pages)
+ 	 * same Guest we ran last time (and that Guest hasn't run anywhere else
+ 	 * meanwhile).  If that's not the case, we pretend everything in the
+ 	 * Guest has changed. */
+-	if (__get_cpu_var(last_cpu) != cpu || lg->last_pages != pages) {
++	if (__get_cpu_var(last_cpu) != cpu || cpu->last_pages != pages) {
+ 		__get_cpu_var(last_cpu) = cpu;
+-		lg->last_pages = pages;
++		cpu->last_pages = pages;
+ 		lg->changed = CHANGED_ALL;
+ 	}
+ 
+

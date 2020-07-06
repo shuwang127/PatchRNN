@@ -1,0 +1,69 @@
+commit ab2d992e63549a5b943605b1227d18190e6d9651
+Author: Thorvald Natvig <slicer@users.sourceforge.net>
+Date:   Sun Mar 1 16:14:29 2009 +0100
+
+    Support clearing texture over Ice/DBus, and remove qcompress() header from getTexture on Ice
+
+diff --git a/src/murmur/MurmurIce.cpp b/src/murmur/MurmurIce.cpp
+index 39000dce..a6a82942 100644
+--- a/src/murmur/MurmurIce.cpp
++++ b/src/murmur/MurmurIce.cpp
+@@ -1236,8 +1236,8 @@ static void impl_Server_getTexture(const ::Murmur::AMD_Server_getTexturePtr cb,
+ 	::Murmur::Texture tex;
+ 	tex.resize(qba.size());
+ 	const char *ptr = qba.constData();
+-	for (int i=0;i<qba.size();++i)
+-		tex[i] = ptr[i];
++	for (int i=0;i<qba.size()-4;++i)
++		tex[i] = ptr[i+4];
+ 
+ 	cb->ice_response(tex);
+ }
+diff --git a/src/murmur/ServerDB.cpp b/src/murmur/ServerDB.cpp
+index 62b98bfe..c1468a56 100644
+--- a/src/murmur/ServerDB.cpp
++++ b/src/murmur/ServerDB.cpp
+@@ -720,15 +720,35 @@ bool Server::setTexture(int id, const QByteArray &texture) {
+ 		return false;
+ 
+ 	QByteArray tex;
+-	if (texture.size() != 600 * 60 * 4)
+-		tex = qUncompress(texture);
+-	else
+-		tex = texture;
++	if (! texture.isEmpty()) {
++		quint32 l = 600*60*4;
++		if (texture.size() < 4)
++			return false;
+ 
+-	if (tex.size() != 600 * 60 * 4)
+-		return false;
++		if (texture.size() != l) {
++			const unsigned char *data = reinterpret_cast<const unsigned char *>(texture.constData());
++
++			if (((data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]) == l) {
++				tex = qUncompress(texture);
++			} else {
++				QByteArray qba(4,0);
++				qba[0] = (l >> 24) & 0xFF;
++				qba[1] = (l >> 16) & 0xFF;
++				qba[2] = (l >> 8) & 0xFF;
++				qba[3] = (l >> 0) & 0xFF;
++				qba.append(texture);
++				tex = qUncompress(qba);
++			}
++		} else {
++			tex = texture;
++		}
++
++		if (tex.size() != 600 * 60 * 4)
++			return false;
++	}
+ 
+-	tex = qCompress(tex);
++	if (! tex.isEmpty())
++		tex = qCompress(tex);
+ 
+ 	int res = -2;
+ 	emit setTextureSig(res, id, tex);
+

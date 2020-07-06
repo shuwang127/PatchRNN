@@ -1,0 +1,44 @@
+commit 8120c7452a51a773ad7a249b55557439f39d41ef
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+Date:   Fri Apr 4 11:43:34 2014 -0400
+
+    Fix bogus time printout in walreceiver's debug log messages.
+    
+    The displayed sendtime and receipttime were always exactly equal, because
+    somebody forgot that timestamptz_to_str returns a static buffer (thereby
+    simplifying life for most callers, at the cost of complicating it for those
+    who need two results concurrently).  Apply the same pstrdup solution used
+    by the other call sites with this issue.  Back-patch to 9.2 where the
+    faulty code was introduced.  Per bug #9849 from Haruka Takatsuka, though
+    this is not exactly his patch.
+    
+    Possibly we should change timestamptz_to_str's API, but I wouldn't want
+    to do so in the back branches.
+
+diff --git a/src/backend/replication/walreceiver.c b/src/backend/replication/walreceiver.c
+index 43db10851c..b0de0ea253 100644
+--- a/src/backend/replication/walreceiver.c
++++ b/src/backend/replication/walreceiver.c
+@@ -1199,9 +1199,19 @@ ProcessWalSndrMessage(XLogRecPtr walEnd, TimestampTz sendTime)
+ 	SpinLockRelease(&walrcv->mutex);
+ 
+ 	if (log_min_messages <= DEBUG2)
++	{
++		char	   *sendtime;
++		char	   *receipttime;
++
++		/* Copy because timestamptz_to_str returns a static buffer */
++		sendtime = pstrdup(timestamptz_to_str(sendTime));
++		receipttime = pstrdup(timestamptz_to_str(lastMsgReceiptTime));
+ 		elog(DEBUG2, "sendtime %s receipttime %s replication apply delay %d ms transfer latency %d ms",
+-			 timestamptz_to_str(sendTime),
+-			 timestamptz_to_str(lastMsgReceiptTime),
++			 sendtime,
++			 receipttime,
+ 			 GetReplicationApplyDelay(),
+ 			 GetReplicationTransferLatency());
++		pfree(sendtime);
++		pfree(receipttime);
++	}
+ }
+

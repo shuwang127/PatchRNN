@@ -1,0 +1,37 @@
+commit 452f299da3253f65020143f743c2e207b752547b
+Author: Thomas Graf <tgraf@suug.ch>
+Date:   Mon Jul 18 13:30:53 2005 -0700
+
+    [PKT_SCHED]: Reduce branch mispredictions in pfifo_fast_dequeue
+    
+    The current call to __qdisc_dequeue_head leads to a branch
+    misprediction for every loop iteration, the fact that the
+    most common priority is 2 makes this even worse.  This issue
+    has been brought up by Eric Dumazet <dada1@cosmosbay.com>
+    but unlike his solution which was to manually unroll the loop,
+    this approach preserves the possibility to increase the number
+    of bands at compile time.
+    
+    Signed-off-by: Thomas Graf <tgraf@suug.ch>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/sched/sch_generic.c b/net/sched/sch_generic.c
+index 73e218e646ac..8edefd5d095d 100644
+--- a/net/sched/sch_generic.c
++++ b/net/sched/sch_generic.c
+@@ -331,11 +331,10 @@ static struct sk_buff *pfifo_fast_dequeue(struct Qdisc* qdisc)
+ 	int prio;
+ 	struct sk_buff_head *list = qdisc_priv(qdisc);
+ 
+-	for (prio = 0; prio < PFIFO_FAST_BANDS; prio++, list++) {
+-		struct sk_buff *skb = __qdisc_dequeue_head(qdisc, list);
+-		if (skb) {
++	for (prio = 0; prio < PFIFO_FAST_BANDS; prio++) {
++		if (!skb_queue_empty(list + prio)) {
+ 			qdisc->q.qlen--;
+-			return skb;
++			return __qdisc_dequeue_head(qdisc, list + prio);
+ 		}
+ 	}
+ 
+

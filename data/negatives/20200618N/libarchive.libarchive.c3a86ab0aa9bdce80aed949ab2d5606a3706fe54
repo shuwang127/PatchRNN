@@ -1,0 +1,81 @@
+commit c3a86ab0aa9bdce80aed949ab2d5606a3706fe54
+Author: Tim Kientzle <kientzle@gmail.com>
+Date:   Sat Mar 26 01:53:58 2011 -0400
+
+    Issue 151: clients and filters are now guaranteed to have their
+    close() function invoked exactly once in all cases.
+    In particular, this avoids a leak when read_open_filename()
+    fails because of format errors.
+    
+    SVN-Revision: 3079
+
+diff --git a/libarchive/archive_read.c b/libarchive/archive_read.c
+index d7b390e1..793fc174 100644
+--- a/libarchive/archive_read.c
++++ b/libarchive/archive_read.c
+@@ -1,5 +1,5 @@
+ /*-
+- * Copyright (c) 2003-2007 Tim Kientzle
++ * Copyright (c) 2003-2011 Tim Kientzle
+  * All rights reserved.
+  *
+  * Redistribution and use in source and binary forms, with or without
+@@ -55,7 +55,7 @@ __FBSDID("$FreeBSD: head/lib/libarchive/archive_read.c 201157 2009-12-29 05:30:2
+ 
+ #define minimum(a, b) (a < b ? a : b)
+ 
+-static int	build_stream(struct archive_read *);
++static int	choose_filters(struct archive_read *);
+ static int	choose_format(struct archive_read *);
+ static void	free_filters(struct archive_read *);
+ static int	close_filters(struct archive_read *);
+@@ -247,7 +247,7 @@ archive_read_open2(struct archive *_a, void *client_data,
+ 	a->filter = filter;
+ 
+ 	/* Build out the input pipeline. */
+-	e = build_stream(a);
++	e = choose_filters(a);
+ 	if (e < ARCHIVE_WARN) {
+ 		a->archive.state = ARCHIVE_STATE_FATAL;
+ 		return (ARCHIVE_FATAL);
+@@ -255,6 +255,7 @@ archive_read_open2(struct archive *_a, void *client_data,
+ 
+ 	slot = choose_format(a);
+ 	if (slot < 0) {
++		close_filters(a);
+ 		a->archive.state = ARCHIVE_STATE_FATAL;
+ 		return (ARCHIVE_FATAL);
+ 	}
+@@ -270,7 +271,7 @@ archive_read_open2(struct archive *_a, void *client_data,
+  * building the pipeline.
+  */
+ static int
+-build_stream(struct archive_read *a)
++choose_filters(struct archive_read *a)
+ {
+ 	int number_bidders, i, bid, best_bid;
+ 	struct archive_read_filter_bidder *bidder, *best_bidder;
+@@ -631,8 +632,9 @@ close_filters(struct archive_read *a)
+ 	/* Close each filter in the pipeline. */
+ 	while (f != NULL) {
+ 		struct archive_read_filter *t = f->upstream;
+-		if (f->close != NULL) {
++		if (!f->closed && f->close != NULL) {
+ 			int r1 = (f->close)(f);
++			f->closed = 1;
+ 			if (r1 < r)
+ 				r = r1;
+ 		}
+diff --git a/libarchive/archive_read_private.h b/libarchive/archive_read_private.h
+index d694f41f..4318387d 100644
+--- a/libarchive/archive_read_private.h
++++ b/libarchive/archive_read_private.h
+@@ -104,6 +104,7 @@ struct archive_read_filter {
+ 	const char	*client_next;
+ 	size_t		 client_avail;
+ 	char		 end_of_file;
++	char		 closed;
+ 	char		 fatal;
+ };
+ 
+

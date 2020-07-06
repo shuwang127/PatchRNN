@@ -1,0 +1,75 @@
+commit b932ccb5674eb649133b5c33950405c37d17aab3
+Author: Dave Airlie <airlied@redhat.com>
+Date:   Wed Feb 20 10:02:20 2008 +1000
+
+    drm: add support for passing state into the suspend hooks.
+    
+    fix i915 driver to use state for hibernate save avoidance.
+    
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/char/drm/drmP.h b/drivers/char/drm/drmP.h
+index 19d3be5c4b2d..a6789f25009b 100644
+--- a/drivers/char/drm/drmP.h
++++ b/drivers/char/drm/drmP.h
+@@ -568,7 +568,7 @@ struct drm_driver {
+ 	void (*postclose) (struct drm_device *, struct drm_file *);
+ 	void (*lastclose) (struct drm_device *);
+ 	int (*unload) (struct drm_device *);
+-	int (*suspend) (struct drm_device *);
++	int (*suspend) (struct drm_device *, pm_message_t state);
+ 	int (*resume) (struct drm_device *);
+ 	int (*dma_ioctl) (struct drm_device *dev, void *data, struct drm_file *file_priv);
+ 	void (*dma_ready) (struct drm_device *);
+diff --git a/drivers/char/drm/drm_sysfs.c b/drivers/char/drm/drm_sysfs.c
+index fa36153619e8..05ed5043254f 100644
+--- a/drivers/char/drm/drm_sysfs.c
++++ b/drivers/char/drm/drm_sysfs.c
+@@ -36,7 +36,7 @@ static int drm_sysfs_suspend(struct device *dev, pm_message_t state)
+ 	printk(KERN_ERR "%s\n", __FUNCTION__);
+ 
+ 	if (drm_dev->driver->suspend)
+-		return drm_dev->driver->suspend(drm_dev);
++		return drm_dev->driver->suspend(drm_dev, state);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/char/drm/i915_drv.c b/drivers/char/drm/i915_drv.c
+index 35758a6c8b0d..4048f39b7eed 100644
+--- a/drivers/char/drm/i915_drv.c
++++ b/drivers/char/drm/i915_drv.c
+@@ -238,7 +238,7 @@ static void i915_restore_vga(struct drm_device *dev)
+ 
+ }
+ 
+-static int i915_suspend(struct drm_device *dev)
++static int i915_suspend(struct drm_device *dev, pm_message_t state)
+ {
+ 	struct drm_i915_private *dev_priv = dev->dev_private;
+ 	int i;
+@@ -249,6 +249,9 @@ static int i915_suspend(struct drm_device *dev)
+ 		return -ENODEV;
+ 	}
+ 
++	if (state.event == PM_EVENT_PRETHAW)
++		return 0;
++
+ 	pci_save_state(dev->pdev);
+ 	pci_read_config_byte(dev->pdev, LBB, &dev_priv->saveLBB);
+ 
+@@ -363,9 +366,11 @@ static int i915_suspend(struct drm_device *dev)
+ 
+ 	i915_save_vga(dev);
+ 
+-	/* Shut down the device */
+-	pci_disable_device(dev->pdev);
+-	pci_set_power_state(dev->pdev, PCI_D3hot);
++	if (state.event == PM_EVENT_SUSPEND) {
++		/* Shut down the device */
++		pci_disable_device(dev->pdev);
++		pci_set_power_state(dev->pdev, PCI_D3hot);
++	}
+ 
+ 	return 0;
+ }
+

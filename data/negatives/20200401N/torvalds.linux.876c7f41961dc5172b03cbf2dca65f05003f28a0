@@ -1,0 +1,85 @@
+commit 876c7f41961dc5172b03cbf2dca65f05003f28a0
+Author: Brian Haley <Brian.Haley@hp.com>
+Date:   Fri Apr 11 00:38:24 2008 -0400
+
+    [IPv6]: Change IPv6 unspecified destination address to ::1 for raw and un-connected sockets
+    
+    This patch fixes a difference between IPv4 and IPv6 when sending packets
+    to the unspecified address (either 0.0.0.0 or ::) when using raw or
+    un-connected UDP sockets.  There are two cases where IPv6 either fails
+    to send anything, or sends with the destination address set to ::.  For
+    example:
+    
+    --> ping -c1 0.0.0.0
+    PING 0.0.0.0 (127.0.0.1) 56(84) bytes of data.
+    64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.032 ms
+    
+    --> ping6 -c1 ::
+    PING ::(::) 56 data bytes
+    ping: sendmsg: Invalid argument
+    
+    Doing a sendto("0.0.0.0") reveals:
+    
+    10:55:01.495090 IP localhost.32780 > localhost.7639: UDP, length 100
+    
+    Doing a sendto("::") reveals:
+    
+    10:56:13.262478 IP6 fe80::217:8ff:fe7d:4718.32779 > ::.7639: UDP, length 100
+    
+    If you issue a connect() first in the UDP case, it will be sent to ::1,
+    similar to what happens with TCP.
+    
+    This restores the BSD-ism.
+    
+    Signed-off-by: Brian Haley <brian.haley@hp.com>
+    Signed-off-by: YOSHIFUJI Hideaki <yoshfuji@linux-ipv6.org>
+
+diff --git a/net/ipv6/raw.c b/net/ipv6/raw.c
+index 088b80b4ce74..059298baa1dd 100644
+--- a/net/ipv6/raw.c
++++ b/net/ipv6/raw.c
+@@ -805,15 +805,6 @@ static int rawv6_sendmsg(struct kiocb *iocb, struct sock *sk,
+ 		fl.fl6_flowlabel = np->flow_label;
+ 	}
+ 
+-	if (ipv6_addr_any(daddr)) {
+-		/*
+-		 * unspecified destination address
+-		 * treated as error... is this correct ?
+-		 */
+-		fl6_sock_release(flowlabel);
+-		return(-EINVAL);
+-	}
+-
+ 	if (fl.oif == 0)
+ 		fl.oif = sk->sk_bound_dev_if;
+ 
+@@ -846,7 +837,10 @@ static int rawv6_sendmsg(struct kiocb *iocb, struct sock *sk,
+ 	if (err)
+ 		goto out;
+ 
+-	ipv6_addr_copy(&fl.fl6_dst, daddr);
++	if (!ipv6_addr_any(daddr))
++		ipv6_addr_copy(&fl.fl6_dst, daddr);
++	else
++		fl.fl6_dst.s6_addr[15] = 0x1; /* :: means loopback (BSD'ism) */
+ 	if (ipv6_addr_any(&fl.fl6_src) && !ipv6_addr_any(&np->saddr))
+ 		ipv6_addr_copy(&fl.fl6_src, &np->saddr);
+ 
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index 30ef7dc5d403..1fd784f3e2ec 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -752,7 +752,10 @@ int udpv6_sendmsg(struct kiocb *iocb, struct sock *sk,
+ 	opt = ipv6_fixup_options(&opt_space, opt);
+ 
+ 	fl.proto = sk->sk_protocol;
+-	ipv6_addr_copy(&fl.fl6_dst, daddr);
++	if (!ipv6_addr_any(daddr))
++		ipv6_addr_copy(&fl.fl6_dst, daddr);
++	else
++		fl.fl6_dst.s6_addr[15] = 0x1; /* :: means loopback (BSD'ism) */
+ 	if (ipv6_addr_any(&fl.fl6_src) && !ipv6_addr_any(&np->saddr))
+ 		ipv6_addr_copy(&fl.fl6_src, &np->saddr);
+ 	fl.fl_ip_sport = inet->sport;
+

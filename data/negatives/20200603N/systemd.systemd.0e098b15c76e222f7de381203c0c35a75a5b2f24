@@ -1,0 +1,234 @@
+commit 0e098b15c76e222f7de381203c0c35a75a5b2f24
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Thu Oct 7 02:34:17 2010 +0200
+
+    util: never use sizeof(sa_family_t) when calculating sockaddr sizes
+
+diff --git a/src/ask-password.c b/src/ask-password.c
+index bcee6863c..9e4d9e7e6 100644
+--- a/src/ask-password.c
++++ b/src/ask-password.c
+@@ -33,6 +33,7 @@
+ #include <getopt.h>
+ #include <termios.h>
+ #include <limits.h>
++#include <stddef.h>
+ 
+ #include "log.h"
+ #include "macro.h"
+@@ -63,7 +64,7 @@ static int create_socket(char **name) {
+         sa.un.sun_family = AF_UNIX;
+         snprintf(sa.un.sun_path+1, sizeof(sa.un.sun_path)-1, "/org/freedesktop/systemd1/ask-password/%llu", random_ull());
+ 
+-        if (bind(fd, &sa.sa, sizeof(sa_family_t) + 1 + strlen(sa.un.sun_path+1)) < 0) {
++        if (bind(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + 1 + strlen(sa.un.sun_path+1)) < 0) {
+                 r = -errno;
+                 log_error("bind() failed: %m");
+                 goto fail;
+diff --git a/src/execute.c b/src/execute.c
+index 755b4700f..6db048c5f 100644
+--- a/src/execute.c
++++ b/src/execute.c
+@@ -174,7 +174,7 @@ static int connect_logger_as(const ExecContext *context, ExecOutput output, cons
+         sa.sa.sa_family = AF_UNIX;
+         strncpy(sa.un.sun_path+1, LOGGER_SOCKET, sizeof(sa.un.sun_path)-1);
+ 
+-        if (connect(fd, &sa.sa, sizeof(sa_family_t) + 1 + sizeof(LOGGER_SOCKET) - 1) < 0) {
++        if (connect(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + 1 + sizeof(LOGGER_SOCKET) - 1) < 0) {
+                 close_nointr_nofail(fd);
+                 return -errno;
+         }
+diff --git a/src/manager.c b/src/manager.c
+index c062cfb5e..4ee04e181 100644
+--- a/src/manager.c
++++ b/src/manager.c
+@@ -92,7 +92,7 @@ static int manager_setup_notify(Manager *m) {
+         else
+                 strncpy(sa.un.sun_path+1, NOTIFY_SOCKET, sizeof(sa.un.sun_path)-1);
+ 
+-        if (bind(m->notify_watch.fd, &sa.sa, sizeof(sa_family_t) + 1 + strlen(sa.un.sun_path+1)) < 0) {
++        if (bind(m->notify_watch.fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + 1 + strlen(sa.un.sun_path+1)) < 0) {
+                 log_error("bind() failed: %m");
+                 return -errno;
+         }
+diff --git a/src/reply-password.c b/src/reply-password.c
+index 236fdcc94..24d73a798 100644
+--- a/src/reply-password.c
++++ b/src/reply-password.c
+@@ -31,6 +31,7 @@
+ #include <sys/stat.h>
+ #include <sys/signalfd.h>
+ #include <getopt.h>
++#include <stddef.h>
+ 
+ #include "log.h"
+ #include "macro.h"
+@@ -50,7 +51,7 @@ static int send_on_socket(int fd, const char *socket_name, const void *packet, s
+         sa.un.sun_family = AF_UNIX;
+         strncpy(sa.un.sun_path+1, socket_name, sizeof(sa.un.sun_path)-1);
+ 
+-        if (sendto(fd, packet, size, MSG_NOSIGNAL, &sa.sa, sizeof(sa_family_t) + 1 + strlen(socket_name)) < 0) {
++        if (sendto(fd, packet, size, MSG_NOSIGNAL, &sa.sa, offsetof(struct sockaddr_un, sun_path) + 1 + strlen(socket_name)) < 0) {
+                 log_error("Failed to send: %m");
+                 return -1;
+         }
+diff --git a/src/sd-daemon.c b/src/sd-daemon.c
+index 9c23b917f..e12fb0483 100644
+--- a/src/sd-daemon.c
++++ b/src/sd-daemon.c
+@@ -40,6 +40,7 @@
+ #include <string.h>
+ #include <stdarg.h>
+ #include <stdio.h>
++#include <stddef.h>
+ 
+ #include "sd-daemon.h"
+ 
+@@ -227,7 +228,7 @@ int sd_is_socket(int fd, int family, int type, int listening) {
+                 if (getsockname(fd, &sockaddr.sa, &l) < 0)
+                         return -errno;
+ 
+-                if (l < sizeof(sa_family_t))
++                if (l < offsetof(struct sockaddr_un, sun_path))
+                         return -EINVAL;
+ 
+                 return sockaddr.sa.sa_family == family;
+@@ -253,7 +254,7 @@ int sd_is_socket_inet(int fd, int family, int type, int listening, uint16_t port
+         if (getsockname(fd, &sockaddr.sa, &l) < 0)
+                 return -errno;
+ 
+-        if (l < sizeof(sa_family_t))
++        if (l < offsetof(struct sockaddr_un, sun_path))
+                 return -EINVAL;
+ 
+         if (sockaddr.sa.sa_family != AF_INET &&
+@@ -295,7 +296,7 @@ int sd_is_socket_unix(int fd, int type, int listening, const char *path, size_t
+         if (getsockname(fd, &sockaddr.sa, &l) < 0)
+                 return -errno;
+ 
+-        if (l < sizeof(sa_family_t))
++        if (l < offsetof(struct sockaddr_un, sun_path))
+                 return -EINVAL;
+ 
+         if (sockaddr.sa.sa_family != AF_UNIX)
+@@ -307,17 +308,17 @@ int sd_is_socket_unix(int fd, int type, int listening, const char *path, size_t
+ 
+                 if (length <= 0)
+                         /* Unnamed socket */
+-                        return l == sizeof(sa_family_t);
++                        return l == offsetof(struct sockaddr_un, sun_path);
+ 
+                 if (path[0])
+                         /* Normal path socket */
+                         return
+-                                (l >= sizeof(sa_family_t) + length + 1) &&
++                                (l >= offsetof(struct sockaddr_un, sun_path) + length + 1) &&
+                                 memcmp(path, sockaddr.un.sun_path, length+1) == 0;
+                 else
+                         /* Abstract namespace socket */
+                         return
+-                                (l == sizeof(sa_family_t) + length) &&
++                                (l == offsetof(struct sockaddr_un, sun_path) + length) &&
+                                 memcmp(path, sockaddr.un.sun_path, length) == 0;
+         }
+ 
+@@ -366,7 +367,7 @@ int sd_notify(int unset_environment, const char *state) {
+ 
+         memset(&msghdr, 0, sizeof(msghdr));
+         msghdr.msg_name = &sockaddr;
+-        msghdr.msg_namelen = sizeof(sa_family_t) + strlen(e);
++        msghdr.msg_namelen = offsetof(struct sockaddr_un, sun_path) + strlen(e);
+ 
+         if (msghdr.msg_namelen > sizeof(struct sockaddr_un))
+                 msghdr.msg_namelen = sizeof(struct sockaddr_un);
+diff --git a/src/socket-util.c b/src/socket-util.c
+index 3f4d65a4c..a2fa13e59 100644
+--- a/src/socket-util.c
++++ b/src/socket-util.c
+@@ -29,13 +29,14 @@
+ #include <net/if.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#include <stddef.h>
++#include <sys/ioctl.h>
+ 
+ #include "macro.h"
+ #include "util.h"
+ #include "socket-util.h"
+ #include "missing.h"
+ #include "label.h"
+-#include <sys/ioctl.h>
+ 
+ int socket_address_parse(SocketAddress *a, const char *s) {
+         int r;
+@@ -96,7 +97,7 @@ int socket_address_parse(SocketAddress *a, const char *s) {
+ 
+                 a->sockaddr.un.sun_family = AF_UNIX;
+                 memcpy(a->sockaddr.un.sun_path, s, l);
+-                a->size = sizeof(sa_family_t) + l + 1;
++                a->size = offsetof(struct sockaddr_un, sun_path) + l + 1;
+ 
+         } else if (*s == '@') {
+                 /* Abstract AF_UNIX socket */
+@@ -108,7 +109,7 @@ int socket_address_parse(SocketAddress *a, const char *s) {
+ 
+                 a->sockaddr.un.sun_family = AF_UNIX;
+                 memcpy(a->sockaddr.un.sun_path+1, s+1, l);
+-                a->size = sizeof(sa_family_t) + 1 + l;
++                a->size = offsetof(struct sockaddr_un, sun_path) + 1 + l;
+ 
+         } else {
+ 
+@@ -211,10 +212,10 @@ int socket_address_verify(const SocketAddress *a) {
+                         return 0;
+ 
+                 case AF_UNIX:
+-                        if (a->size < sizeof(sa_family_t))
++                        if (a->size < offsetof(struct sockaddr_un, sun_path))
+                                 return -EINVAL;
+ 
+-                        if (a->size > sizeof(sa_family_t)) {
++                        if (a->size > offsetof(struct sockaddr_un, sun_path)) {
+ 
+                                 if (a->sockaddr.un.sun_path[0] != 0) {
+                                         char *e;
+@@ -223,7 +224,7 @@ int socket_address_verify(const SocketAddress *a) {
+                                         if (!(e = memchr(a->sockaddr.un.sun_path, 0, sizeof(a->sockaddr.un.sun_path))))
+                                                 return -EINVAL;
+ 
+-                                        if (a->size != sizeof(sa_family_t) + (e - a->sockaddr.un.sun_path) + 1)
++                                        if (a->size != offsetof(struct sockaddr_un, sun_path) + (e - a->sockaddr.un.sun_path) + 1)
+                                                 return -EINVAL;
+                                 }
+                         }
+@@ -280,7 +281,7 @@ int socket_address_print(const SocketAddress *a, char **p) {
+                 case AF_UNIX: {
+                         char *ret;
+ 
+-                        if (a->size <= sizeof(sa_family_t)) {
++                        if (a->size <= offsetof(struct sockaddr_un, sun_path)) {
+ 
+                                 if (!(ret = strdup("<unamed>")))
+                                         return -ENOMEM;
+diff --git a/src/systemctl.c b/src/systemctl.c
+index 45249aaa3..918dcbe8b 100644
+--- a/src/systemctl.c
++++ b/src/systemctl.c
+@@ -31,6 +31,7 @@
+ #include <fcntl.h>
+ #include <sys/socket.h>
+ #include <sys/stat.h>
++#include <stddef.h>
+ 
+ #include <dbus/dbus.h>
+ 
+@@ -4875,7 +4876,7 @@ static int send_shutdownd(usec_t t, char mode, bool warn, const char *message) {
+ 
+         zero(msghdr);
+         msghdr.msg_name = &sockaddr;
+-        msghdr.msg_namelen = sizeof(sa_family_t) + 1 + sizeof("/org/freedesktop/systemd1/shutdownd") - 1;
++        msghdr.msg_namelen = offsetof(struct sockaddr_un, sun_path) + 1 + sizeof("/org/freedesktop/systemd1/shutdownd") - 1;
+ 
+         msghdr.msg_iov = &iovec;
+         msghdr.msg_iovlen = 1;
+

@@ -1,0 +1,127 @@
+commit d7cc92e05fce97adf2e042cd64538f23b29aa9d5
+Author: John David Duncan <john.duncan@oracle.com>
+Date:   Fri Jun 13 20:58:27 2014 -0700
+
+    Another attempt to fix crashing bug in BlobHandler
+
+diff --git a/Adapter/impl/ndb/include/BlobHandler.h b/Adapter/impl/ndb/include/BlobHandler.h
+index d629945fcbb..841a5aa6aaf 100644
+--- a/Adapter/impl/ndb/include/BlobHandler.h
++++ b/Adapter/impl/ndb/include/BlobHandler.h
+@@ -36,6 +36,7 @@ public:
+ protected:
+   NdbBlob * ndbBlob;
+   BlobHandler * next;
++  char * content;
+   uint64_t length;
+   int columnId;
+   int fieldNumber;
+@@ -50,22 +51,15 @@ public:
+   void prepare(const NdbOperation *);
+   int runActiveHook(NdbBlob *);
+   v8::Handle<v8::Value> getResultBuffer();
+-
+-private:
+-  char * data;
+ };  
+ 
+ 
+ // BlobWriteHandler
+ class BlobWriteHandler : public BlobHandler {
+ public:
+-  BlobWriteHandler(int colId, int fieldNo, v8::Handle<v8::Object> jsBlobs);
++  BlobWriteHandler(int colId, int fieldNo, v8::Handle<v8::Object> jsBlob);
+   ~BlobWriteHandler();
+   void prepare(const NdbOperation *);
+-
+-private:
+-  v8::Persistent<v8::Object> jsBlobValue;
+-  char * content;
+ };
+ 
+ 
+@@ -85,11 +79,15 @@ inline int BlobHandler::getFieldNumber() {
+ 
+ // BlobReadHandler inline methods
+ inline BlobReadHandler::BlobReadHandler(int colId, int fieldNo) : 
+-  BlobHandler(colId, fieldNo), data(0)
++  BlobHandler(colId, fieldNo)
+ { }
+ 
+ inline BlobReadHandler::~BlobReadHandler() 
+ { }
+ 
++// BlobWriteHandler inline methods
++inline BlobWriteHandler::~BlobWriteHandler() 
++{ }
++
+ 
+ #endif
+diff --git a/Adapter/impl/ndb/src/BlobHandler.cpp b/Adapter/impl/ndb/src/BlobHandler.cpp
+index fd0c6136d0a..14bea912d58 100644
+--- a/Adapter/impl/ndb/src/BlobHandler.cpp
++++ b/Adapter/impl/ndb/src/BlobHandler.cpp
+@@ -31,6 +31,7 @@
+ BlobHandler::BlobHandler(int colId, int fieldNo) :
+   ndbBlob(0),
+   next(0),
++  content(0),
+   length(0),
+   columnId(colId), 
+   fieldNumber(fieldNo)
+@@ -44,7 +45,7 @@ int blobHandlerActiveHook(NdbBlob * ndbBlob, void * handler) {
+   return blobHandler->runActiveHook(ndbBlob);
+ }
+ 
+-void freeBufferContentsFromJs(char *data, void *hint) {
++void freeBufferContentsFromJs(char *data, void *) {
+   free(data);
+ }
+ 
+@@ -65,9 +66,9 @@ int BlobReadHandler::runActiveHook(NdbBlob *b) {
+   if(! isNull) {
+     ndbBlob->getLength(length);
+     uint32_t nBytes = length;
+-    data = (char *) malloc(length);
+-    if(data) {
+-      int rv = ndbBlob->readData(data, nBytes);
++    content = (char *) malloc(length);
++    if(content) {
++      int rv = ndbBlob->readData(content, nBytes);
+       DEBUG_PRINT("BLOB read: column %d, length %d, read %d/%d", 
+                   columnId, length, rv, nBytes);
+     } else {
+@@ -79,9 +80,9 @@ int BlobReadHandler::runActiveHook(NdbBlob *b) {
+ 
+ v8::Handle<v8::Value> BlobReadHandler::getResultBuffer() {
+   v8::HandleScope scope;
+-  if(data) {
++  if(content) {
+     node::Buffer * buffer;
+-    buffer = node::Buffer::New((char *) data, length, freeBufferContentsFromJs, 0);
++    buffer = node::Buffer::New(content, length, freeBufferContentsFromJs, 0);
+     return scope.Close(buffer->handle_);
+   }
+   return v8::Null();
+@@ -94,9 +95,8 @@ BlobWriteHandler::BlobWriteHandler(int colId, int fieldNo,
+                                    v8::Handle<v8::Object> blobValue) :
+   BlobHandler(colId, fieldNo)
+ {
+-  jsBlobValue = v8::Persistent<v8::Object>::New(blobValue);
+-  length = jsBlobValue->GetIndexedPropertiesExternalArrayDataLength();
+-  content = (char *) jsBlobValue->GetIndexedPropertiesExternalArrayData();
++  length = node::Buffer::Length(blobValue);
++  content = node::Buffer::Data(blobValue);
+ }
+ 
+ void BlobWriteHandler::prepare(const NdbOperation * ndbop) {
+@@ -111,8 +111,3 @@ void BlobWriteHandler::prepare(const NdbOperation * ndbop) {
+   if(next) next->prepare(ndbop);
+ }
+ 
+-BlobWriteHandler::~BlobWriteHandler() 
+-{
+-  jsBlobValue.Dispose();
+-}
+-
+

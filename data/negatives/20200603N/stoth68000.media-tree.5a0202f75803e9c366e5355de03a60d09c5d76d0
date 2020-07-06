@@ -1,0 +1,106 @@
+commit 5a0202f75803e9c366e5355de03a60d09c5d76d0
+Author: Joonyoung Shim <jy0922.shim@samsung.com>
+Date:   Fri Apr 22 16:30:47 2016 +0900
+
+    drm/exynos: support gem_prime_mmap
+    
+    This allows exported dma-bufs to be mapped using gem_prime_mmap.
+    
+    Signed-off-by: Joonyoung Shim <jy0922.shim@samsung.com>
+    Signed-off-by: Inki Dae <inki.dae@samsung.com>
+
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_drv.c b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+index 8ff355ddcf51..6c4dd49de993 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_drv.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_drv.c
+@@ -431,6 +431,7 @@ static struct drm_driver exynos_drm_driver = {
+ 	.gem_prime_import_sg_table	= exynos_drm_gem_prime_import_sg_table,
+ 	.gem_prime_vmap		= exynos_drm_gem_prime_vmap,
+ 	.gem_prime_vunmap	= exynos_drm_gem_prime_vunmap,
++	.gem_prime_mmap		= exynos_drm_gem_prime_mmap,
+ 	.ioctls			= exynos_ioctls,
+ 	.num_ioctls		= ARRAY_SIZE(exynos_ioctls),
+ 	.fops			= &exynos_drm_driver_fops,
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_gem.c b/drivers/gpu/drm/exynos/exynos_drm_gem.c
+index 6fb98f4c3544..9f688c28fa8e 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_gem.c
++++ b/drivers/gpu/drm/exynos/exynos_drm_gem.c
+@@ -503,22 +503,12 @@ int exynos_drm_gem_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ 	}
+ }
+ 
+-int exynos_drm_gem_mmap(struct file *filp, struct vm_area_struct *vma)
++static int exynos_drm_gem_mmap_obj(struct drm_gem_object *obj,
++				   struct vm_area_struct *vma)
+ {
+-	struct exynos_drm_gem *exynos_gem;
+-	struct drm_gem_object *obj;
++	struct exynos_drm_gem *exynos_gem = to_exynos_gem(obj);
+ 	int ret;
+ 
+-	/* set vm_area_struct. */
+-	ret = drm_gem_mmap(filp, vma);
+-	if (ret < 0) {
+-		DRM_ERROR("failed to mmap.\n");
+-		return ret;
+-	}
+-
+-	obj = vma->vm_private_data;
+-	exynos_gem = to_exynos_gem(obj);
+-
+ 	DRM_DEBUG_KMS("flags = 0x%x\n", exynos_gem->flags);
+ 
+ 	/* non-cachable as default. */
+@@ -543,6 +533,23 @@ int exynos_drm_gem_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	return ret;
+ }
+ 
++int exynos_drm_gem_mmap(struct file *filp, struct vm_area_struct *vma)
++{
++	struct drm_gem_object *obj;
++	int ret;
++
++	/* set vm_area_struct. */
++	ret = drm_gem_mmap(filp, vma);
++	if (ret < 0) {
++		DRM_ERROR("failed to mmap.\n");
++		return ret;
++	}
++
++	obj = vma->vm_private_data;
++
++	return exynos_drm_gem_mmap_obj(obj, vma);
++}
++
+ /* low-level interface prime helpers */
+ struct sg_table *exynos_drm_gem_prime_get_sg_table(struct drm_gem_object *obj)
+ {
+@@ -617,3 +624,15 @@ void exynos_drm_gem_prime_vunmap(struct drm_gem_object *obj, void *vaddr)
+ {
+ 	/* Nothing to do */
+ }
++
++int exynos_drm_gem_prime_mmap(struct drm_gem_object *obj,
++			      struct vm_area_struct *vma)
++{
++	int ret;
++
++	ret = drm_gem_mmap_obj(obj, obj->size, vma);
++	if (ret < 0)
++		return ret;
++
++	return exynos_drm_gem_mmap_obj(obj, vma);
++}
+diff --git a/drivers/gpu/drm/exynos/exynos_drm_gem.h b/drivers/gpu/drm/exynos/exynos_drm_gem.h
+index 00223052b87b..895125431227 100644
+--- a/drivers/gpu/drm/exynos/exynos_drm_gem.h
++++ b/drivers/gpu/drm/exynos/exynos_drm_gem.h
+@@ -139,5 +139,7 @@ exynos_drm_gem_prime_import_sg_table(struct drm_device *dev,
+ 				     struct sg_table *sgt);
+ void *exynos_drm_gem_prime_vmap(struct drm_gem_object *obj);
+ void exynos_drm_gem_prime_vunmap(struct drm_gem_object *obj, void *vaddr);
++int exynos_drm_gem_prime_mmap(struct drm_gem_object *obj,
++			      struct vm_area_struct *vma);
+ 
+ #endif
+

@@ -1,0 +1,71 @@
+commit cdac5504b2981520f993790f5d30c0cdc15c3214
+Author: Christian König <deathsimple@vodafone.de>
+Date:   Thu Feb 23 15:18:42 2012 +0100
+
+    drm/radeon: move ring syncing after bo validation
+    
+    The function radeon_bo_list_validate can cause a
+    bo to move, resulting in a different sync_obj
+    and a dependency to wait for this move to finish.
+    
+    Signed-off-by: Christian König <deathsimple@vodafone.de>
+    Reviewed-by: Alex Deucher <alexander.deucher@amd.com>
+    Reviewed-by: Jerome Glisse <jglisse@redhat.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/radeon/radeon.h b/drivers/gpu/drm/radeon/radeon.h
+index 049fc472c049..40bfcafab749 100644
+--- a/drivers/gpu/drm/radeon/radeon.h
++++ b/drivers/gpu/drm/radeon/radeon.h
+@@ -836,7 +836,6 @@ struct radeon_cs_parser {
+ 	struct radeon_cs_reloc	*relocs;
+ 	struct radeon_cs_reloc	**relocs_ptr;
+ 	struct list_head	validated;
+-	bool			sync_to_ring[RADEON_NUM_RINGS];
+ 	/* indices of various chunks */
+ 	int			chunk_ib_idx;
+ 	int			chunk_relocs_idx;
+diff --git a/drivers/gpu/drm/radeon/radeon_cs.c b/drivers/gpu/drm/radeon/radeon_cs.c
+index 435a3d970ab8..7fd098767023 100644
+--- a/drivers/gpu/drm/radeon/radeon_cs.c
++++ b/drivers/gpu/drm/radeon/radeon_cs.c
+@@ -85,12 +85,6 @@ int radeon_cs_parser_relocs(struct radeon_cs_parser *p)
+ 			radeon_bo_list_add_object(&p->relocs[i].lobj,
+ 						  &p->validated);
+ 
+-			if (p->relocs[i].robj->tbo.sync_obj && !(r->flags & RADEON_RELOC_DONT_SYNC)) {
+-				struct radeon_fence *fence = p->relocs[i].robj->tbo.sync_obj;
+-				if (!radeon_fence_signaled(fence)) {
+-					p->sync_to_ring[fence->ring] = true;
+-				}
+-			}
+ 		} else
+ 			p->relocs[i].handle = 0;
+ 	}
+@@ -118,11 +112,24 @@ static int radeon_cs_get_ring(struct radeon_cs_parser *p, u32 ring, s32 priority
+ 
+ static int radeon_cs_sync_rings(struct radeon_cs_parser *p)
+ {
++	bool sync_to_ring[RADEON_NUM_RINGS] = { };
+ 	int i, r;
+ 
++	for (i = 0; i < p->nrelocs; i++) {
++		if (!p->relocs[i].robj || !p->relocs[i].robj->tbo.sync_obj)
++			continue;
++
++		if (!(p->relocs[i].flags & RADEON_RELOC_DONT_SYNC)) {
++			struct radeon_fence *fence = p->relocs[i].robj->tbo.sync_obj;
++			if (!radeon_fence_signaled(fence)) {
++				sync_to_ring[fence->ring] = true;
++			}
++		}
++	}
++
+ 	for (i = 0; i < RADEON_NUM_RINGS; ++i) {
+ 		/* no need to sync to our own or unused rings */
+-		if (i == p->ring || !p->sync_to_ring[i] || !p->rdev->ring[i].ready)
++		if (i == p->ring || !sync_to_ring[i] || !p->rdev->ring[i].ready)
+ 			continue;
+ 
+ 		if (!p->ib->fence->semaphore) {
+

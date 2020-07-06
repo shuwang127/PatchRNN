@@ -1,0 +1,134 @@
+commit 726c14bf499e91e7ede4f1728830aba05c675061
+Author: Paul Mackerras <paulus@samba.org>
+Date:   Fri Feb 17 10:30:23 2006 +1100
+
+    [PATCH] Provide an interface for getting the current tick length
+    
+    This provides an interface for arch code to find out how many
+    nanoseconds are going to be added on to xtime by the next call to
+    do_timer.  The value returned is a fixed-point number in 52.12 format
+    in nanoseconds.  The reason for this format is that it gives the
+    full precision that the timekeeping code is using internally.
+    
+    The motivation for this is to fix a problem that has arisen on 32-bit
+    powerpc in that the value returned by do_gettimeofday drifts apart
+    from xtime if NTP is being used.  PowerPC is now using a lockless
+    do_gettimeofday based on reading the timebase register and performing
+    some simple arithmetic.  (This method of getting the time is also
+    exported to userspace via the VDSO.)  However, the factor and offset
+    it uses were calculated based on the nominal tick length and weren't
+    being adjusted when NTP varied the tick length.
+    
+    Note that 64-bit powerpc has had the lockless do_gettimeofday for a
+    long time now.  It also had an extremely hairy routine that got called
+    from the 32-bit compat routine for adjtimex, which adjusted the
+    factor and offset according to what it thought the timekeeping code
+    was going to do.  Not only was this only called if a 32-bit task did
+    adjtimex (i.e. not if a 64-bit task did adjtimex), it was also
+    duplicating computations from kernel/timer.c and it wasn't clear that
+    it was (still) correct.
+    
+    The simple solution is to ask the timekeeping code how long the
+    current jiffy will be on each timer interrupt, after calling
+    do_timer.  If this jiffy will be a different length from the last one,
+    we then need to compute new values for the factor and offset used in
+    the lockless do_gettimeofday.  In this way we can keep xtime and
+    do_gettimeofday in sync, even when NTP is varying the tick length.
+    
+    Note that when adjtimex varies the tick length, it almost always
+    introduces the variation from the next tick on.  The only case I could
+    see where adjtimex would vary the length of the current tick is when
+    an old-style adjtime adjustment is being cancelled.  (It's not clear
+    to me why the adjustment has to be cancelled immediately rather than
+    from the next tick on.)  Thus I don't see any real need for a hook in
+    adjtimex; the rare case of an old-style adjustment being cancelled can
+    be fixed up at the next tick.
+    
+    Signed-off-by: Paul Mackerras <paulus@samba.org>
+    Acked-by: john stultz <johnstul@us.ibm.com>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/include/linux/timex.h b/include/linux/timex.h
+index 04a4a8cb4ed3..b7ca1204e42a 100644
+--- a/include/linux/timex.h
++++ b/include/linux/timex.h
+@@ -345,6 +345,9 @@ time_interpolator_reset(void)
+ 
+ #endif /* !CONFIG_TIME_INTERPOLATION */
+ 
++/* Returns how long ticks are at present, in ns / 2^(SHIFT_SCALE-10). */
++extern u64 current_tick_length(void);
++
+ #endif /* KERNEL */
+ 
+ #endif /* LINUX_TIMEX_H */
+diff --git a/kernel/timer.c b/kernel/timer.c
+index b9dad3994676..fe3a9a9f8328 100644
+--- a/kernel/timer.c
++++ b/kernel/timer.c
+@@ -717,12 +717,16 @@ static void second_overflow(void)
+ #endif
+ }
+ 
+-/* in the NTP reference this is called "hardclock()" */
+-static void update_wall_time_one_tick(void)
++/*
++ * Returns how many microseconds we need to add to xtime this tick
++ * in doing an adjustment requested with adjtime.
++ */
++static long adjtime_adjustment(void)
+ {
+-	long time_adjust_step, delta_nsec;
++	long time_adjust_step;
+ 
+-	if ((time_adjust_step = time_adjust) != 0 ) {
++	time_adjust_step = time_adjust;
++	if (time_adjust_step) {
+ 		/*
+ 		 * We are doing an adjtime thing.  Prepare time_adjust_step to
+ 		 * be within bounds.  Note that a positive time_adjust means we
+@@ -733,10 +737,19 @@ static void update_wall_time_one_tick(void)
+ 		 */
+ 		time_adjust_step = min(time_adjust_step, (long)tickadj);
+ 		time_adjust_step = max(time_adjust_step, (long)-tickadj);
++	}
++	return time_adjust_step;
++}
+ 
++/* in the NTP reference this is called "hardclock()" */
++static void update_wall_time_one_tick(void)
++{
++	long time_adjust_step, delta_nsec;
++
++	time_adjust_step = adjtime_adjustment();
++	if (time_adjust_step)
+ 		/* Reduce by this step the amount of time left  */
+ 		time_adjust -= time_adjust_step;
+-	}
+ 	delta_nsec = tick_nsec + time_adjust_step * 1000;
+ 	/*
+ 	 * Advance the phase, once it gets to one microsecond, then
+@@ -758,6 +771,22 @@ static void update_wall_time_one_tick(void)
+ 	}
+ }
+ 
++/*
++ * Return how long ticks are at the moment, that is, how much time
++ * update_wall_time_one_tick will add to xtime next time we call it
++ * (assuming no calls to do_adjtimex in the meantime).
++ * The return value is in fixed-point nanoseconds with SHIFT_SCALE-10
++ * bits to the right of the binary point.
++ * This function has no side-effects.
++ */
++u64 current_tick_length(void)
++{
++	long delta_nsec;
++
++	delta_nsec = tick_nsec + adjtime_adjustment() * 1000;
++	return ((u64) delta_nsec << (SHIFT_SCALE - 10)) + time_adj;
++}
++
+ /*
+  * Using a loop looks inefficient, but "ticks" is
+  * usually just one (we shouldn't be losing ticks,
+

@@ -1,0 +1,99 @@
+commit 272af0f8cc306cd863a54a816953d2f0a7b06c20
+Author: Matthew Leeds <matthew.leeds@endlessm.com>
+Date:   Wed Mar 7 21:33:57 2018 -0800
+
+    dir: Regenerate summary in child repo after pulls
+    
+    After pulling multiple refs into the child repo using P2P code, the
+    summary file in the child repo will be the one from the last remote
+    used.  Since that remote might be a peer on the network or a USB drive,
+    it may not have the same set of refs as were pulled into the child repo.
+    This means that when the system helper tries to pull from the child repo
+    into the main repo it fails because the summary file is inaccurate.
+    
+    This commit addresses the issue by regenerating the summary file in the
+    child repo after the pulls finish. This has to only occur on the P2P
+    code paths because non-P2P code uses the summary file and its signature
+    as the security check.
+    
+    To check that this fixes the bug, I set up another computer on the local
+    network as an update server and made sure it had an updated
+    ostree-metadata ref for the remote I'm going to use. Then from this
+    computer with the patched flatpak I installed an app that's **not**
+    installed on the update server (all using collection IDs). Flatpak
+    fetched the app from the Internet, fetched the ostree-metadata ref from
+    the network peer, and then successfully pulled and deployed the app into
+    the system repo.
+    
+    Fixes https://github.com/flatpak/flatpak/issues/1425
+    
+    Closes: #1476
+    Approved by: pwithnall
+
+diff --git a/common/flatpak-dir.c b/common/flatpak-dir.c
+index 3acccf7a..6fc695d2 100644
+--- a/common/flatpak-dir.c
++++ b/common/flatpak-dir.c
+@@ -6277,11 +6277,10 @@ flatpak_dir_install (FlatpakDir          *self,
+ 
+           flatpak_flags |= FLATPAK_PULL_FLAGS_SIDELOAD_EXTRA_DATA;
+ 
+-          /* Avoid fetching the system remote summary on P2P code paths. The
+-           * flatpak_dir_pull() call below will cause the true remote's summary
+-           * to be pulled into the child repo (which might be the one from a
+-           * temporary remote rather than the system remote). Ostree does this
+-           * because of the MIRROR flag.*/
++          /* Avoid fetching the system remote summary on P2P code paths.
++           * Instead we have to regenerate the summary in the child repo,
++           * because the refs in it can be pulled from various different
++           * remotes. */
+           if (collection_id == NULL &&
+               !flatpak_dir_remote_fetch_summary (self, remote_name,
+                                                  &summary_copy, &summary_sig_copy,
+@@ -6311,6 +6310,14 @@ flatpak_dir_install (FlatpakDir          *self,
+             return FALSE;
+ #endif  /* FLATPAK_ENABLE_P2P */
+ 
++          /* Regenerate the summary in the child repo because the summary copied
++           * into the repo by the flatpak_dir_pull() call above is reflective of the refs on the
++           * remote that was pulled from, which might be a peer remote and might not
++           * have the full set of refs that was pulled. */
++          if (collection_id != NULL &&
++              !ostree_repo_regenerate_summary (child_repo, NULL, cancellable, error))
++            return FALSE;
++
+           if (summary_copy != NULL)
+             {
+               summary_file = g_file_get_child (ostree_repo_get_path (child_repo), "summary");
+@@ -6867,11 +6874,10 @@ flatpak_dir_update (FlatpakDir          *self,
+           if (child_repo == NULL)
+             return FALSE;
+ 
+-          /* Avoid fetching the system remote summary on P2P code paths. The
+-           * flatpak_dir_pull() call below will cause the true remote's summary
+-           * to be pulled into the child repo (which might be the one from a
+-           * temporary remote rather than the system remote). Ostree does this
+-           * because of the MIRROR flag.*/
++          /* Avoid fetching the system remote summary on P2P code paths.
++           * Instead we have to regenerate the summary in the child repo,
++           * because the refs in it can be pulled from various different
++           * remotes. */
+           if (collection_id == NULL &&
+               !flatpak_dir_remote_fetch_summary (self, remote_name,
+                                                  &summary_copy, &summary_sig_copy,
+@@ -6897,6 +6903,14 @@ flatpak_dir_update (FlatpakDir          *self,
+             return FALSE;
+ #endif  /* FLATPAK_ENABLE_P2P */
+ 
++          /* Regenerate the summary in the child repo because the summary copied
++           * into the repo by the flatpak_dir_pull() call above is reflective of the refs on the
++           * remote that was pulled from, which might be a peer remote and might not
++           * have the full set of refs that was pulled. */
++          if (collection_id != NULL &&
++              !ostree_repo_regenerate_summary (child_repo, NULL, cancellable, error))
++            return FALSE;
++
+           if (summary_copy != NULL)
+             {
+               summary_file = g_file_get_child (ostree_repo_get_path (child_repo), "summary");
+

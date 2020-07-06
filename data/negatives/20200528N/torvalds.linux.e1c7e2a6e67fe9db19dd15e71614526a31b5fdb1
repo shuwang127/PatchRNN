@@ -1,0 +1,80 @@
+commit e1c7e2a6e67fe9db19dd15e71614526a31b5fdb1
+Author: Li Zefan <lizf@cn.fujitsu.com>
+Date:   Wed Jun 24 09:52:29 2009 +0800
+
+    tracing/events: Don't increment @pos in s_start()
+    
+    While testing syscall tracepoints posted by Jason, I found 3 entries
+    were missing when reading available_events. The output size of
+    available_events is < 4 pages, which means we lost 1 entry per page.
+    
+    The cause is, it's wrong to increment @pos in s_start().
+    
+    Actually there's another bug here -- reading avaiable_events/set_events
+    can race with module unload:
+    
+      # cat available_events               |
+          s_start()                        |
+          s_stop()                         |
+                                           | # rmmod foo.ko
+          s_start()                        |
+            call = list_entry(m->private)  |
+    
+    @call might be freed and accessing it will lead to crash.
+    
+    Reviewed-by: Liming Wang <liming.wang@windriver.com>
+    Signed-off-by: Li Zefan <lizf@cn.fujitsu.com>
+    Cc: Steven Rostedt <rostedt@goodmis.org>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    LKML-Reference: <4A4186DD.6090405@cn.fujitsu.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/kernel/trace/trace_events.c b/kernel/trace/trace_events.c
+index aa08be69a1b6..53c8fd376a88 100644
+--- a/kernel/trace/trace_events.c
++++ b/kernel/trace/trace_events.c
+@@ -300,10 +300,18 @@ t_next(struct seq_file *m, void *v, loff_t *pos)
+ 
+ static void *t_start(struct seq_file *m, loff_t *pos)
+ {
++	struct ftrace_event_call *call = NULL;
++	loff_t l;
++
+ 	mutex_lock(&event_mutex);
+-	if (*pos == 0)
+-		m->private = ftrace_events.next;
+-	return t_next(m, NULL, pos);
++
++	m->private = ftrace_events.next;
++	for (l = 0; l <= *pos; ) {
++		call = t_next(m, NULL, &l);
++		if (!call)
++			break;
++	}
++	return call;
+ }
+ 
+ static void *
+@@ -332,10 +340,18 @@ s_next(struct seq_file *m, void *v, loff_t *pos)
+ 
+ static void *s_start(struct seq_file *m, loff_t *pos)
+ {
++	struct ftrace_event_call *call = NULL;
++	loff_t l;
++
+ 	mutex_lock(&event_mutex);
+-	if (*pos == 0)
+-		m->private = ftrace_events.next;
+-	return s_next(m, NULL, pos);
++
++	m->private = ftrace_events.next;
++	for (l = 0; l <= *pos; ) {
++		call = s_next(m, NULL, &l);
++		if (!call)
++			break;
++	}
++	return call;
+ }
+ 
+ static int t_show(struct seq_file *m, void *v)
+

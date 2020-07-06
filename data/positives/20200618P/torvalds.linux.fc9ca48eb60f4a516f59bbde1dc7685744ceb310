@@ -1,0 +1,68 @@
+commit fc9ca48eb60f4a516f59bbde1dc7685744ceb310
+Author: Peter Huewe <peterhuewe@gmx.de>
+Date:   Wed Feb 13 15:28:14 2013 +0100
+
+    staging/comedi: Fix undefined array subscript
+    
+    In vmk80xx_do_insn_bits the local variable reg, which is used as an
+    index to the tx_buf array, can be used uninitialized if
+    - data[0] == 0
+    and
+    - devpriv->model != VMK8061_MODEL
+    -> we get into the else branch without having reg initialized.
+    
+    Since the driver usually differentiates between VMK8061_MODEL and
+    VMK8055_MODEL it's safe to assume that VMK8055_DO_REG was meant as an
+    initial value.
+    
+    And to avoid duplication we can move the assignments to the top.
+    
+    Acked-by: Ian Abbott <abbotti@mev.co.uk>
+    Acked-by: Dan Carpenter <dan.carpenter@oracle.com>
+    Signed-off-by: Peter Huewe <peterhuewe@gmx.de>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/comedi/drivers/vmk80xx.c b/drivers/staging/comedi/drivers/vmk80xx.c
+index ebf2d4824860..eed46ee4f710 100644
+--- a/drivers/staging/comedi/drivers/vmk80xx.c
++++ b/drivers/staging/comedi/drivers/vmk80xx.c
+@@ -675,8 +675,14 @@ static int vmk80xx_do_insn_bits(struct comedi_device *dev,
+ 	if (data[0])
+ 		dir |= DIR_OUT;
+ 
+-	if (devpriv->model == VMK8061_MODEL)
++	if (devpriv->model == VMK8061_MODEL) {
+ 		dir |= DIR_IN;
++		reg = VMK8061_DO_REG;
++		cmd = VMK8061_CMD_DO;
++	} else { /* VMK8055_MODEL */
++		reg = VMK8055_DO_REG;
++		cmd = VMK8055_CMD_WRT_AD;
++	}
+ 
+ 	retval = rudimentary_check(devpriv, dir);
+ 	if (retval)
+@@ -688,14 +694,6 @@ static int vmk80xx_do_insn_bits(struct comedi_device *dev,
+ 	tx_buf = devpriv->usb_tx_buf;
+ 
+ 	if (data[0]) {
+-		if (devpriv->model == VMK8055_MODEL) {
+-			reg = VMK8055_DO_REG;
+-			cmd = VMK8055_CMD_WRT_AD;
+-		} else { /* VMK8061_MODEL */
+-			reg = VMK8061_DO_REG;
+-			cmd = VMK8061_CMD_DO;
+-		}
+-
+ 		tx_buf[reg] &= ~data[0];
+ 		tx_buf[reg] |= (data[0] & data[1]);
+ 
+@@ -706,7 +704,6 @@ static int vmk80xx_do_insn_bits(struct comedi_device *dev,
+ 	}
+ 
+ 	if (devpriv->model == VMK8061_MODEL) {
+-		reg = VMK8061_DO_REG;
+ 		tx_buf[0] = VMK8061_CMD_RD_DO;
+ 
+ 		retval = vmk80xx_read_packet(devpriv);
+

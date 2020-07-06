@@ -1,0 +1,262 @@
+commit 3a7d213b40618e898b875781a5d583049b9cb9ec
+Author: Alexander Koeppe <format_c@online.de>
+Date:   Mon Dec 30 21:17:06 2013 +0100
+
+    take over changes from LocutusOfBorg/fix-warnings
+
+diff --git a/include/ec_interfaces.h b/include/ec_interfaces.h
+index 599b3b24..6ae34f44 100644
+--- a/include/ec_interfaces.h
++++ b/include/ec_interfaces.h
+@@ -37,6 +37,10 @@ struct curses_color {
+ #define EC_COLOR_JOIN2        11
+ 
+ /* exported functions */
++EC_API_EXTERN void select_daemon_interface(void);
++EC_API_EXTERN void select_text_interface(void);
++EC_API_EXTERN void select_curses_interface(void);
++EC_API_EXTERN void select_gtk_interface(void);
+ 
+ #endif
+ 
+diff --git a/src/dissectors/ec_dns.c b/src/dissectors/ec_dns.c
+index 0b425ce0..817465ae 100644
+--- a/src/dissectors/ec_dns.c
++++ b/src/dissectors/ec_dns.c
+@@ -109,6 +109,7 @@ FUNC_DECODER(dissector_dns)
+    (void) DECODE_DATA; 
+    (void) DECODE_DATALEN;
+    (void) DECODED_LEN;
++   (void) ttl;
+    
+    DEBUG_MSG("DNS --> UDP 53  dissector_dns");
+    
+diff --git a/src/dissectors/ec_o5logon.c b/src/dissectors/ec_o5logon.c
+index 03a255df..c8fd00cd 100644
+--- a/src/dissectors/ec_o5logon.c
++++ b/src/dissectors/ec_o5logon.c
+@@ -99,7 +99,7 @@ FUNC_DECODER(dissector_o5logon)
+               }
+               last--;
+             }
+-            int length = *(last+1);
++            unsigned int length = *(last+1);
+             if (length < sizeof(conn_status->user))
+             {
+                strncpy((char*)conn_status->user, (char*)last + 2, length);
+diff --git a/src/dissectors/ec_ospf.c b/src/dissectors/ec_ospf.c
+index de25f80a..ea8b2792 100644
+--- a/src/dissectors/ec_ospf.c
++++ b/src/dissectors/ec_ospf.c
+@@ -126,9 +126,9 @@ FUNC_DECODER(dissector_ospf)
+ 
+    /* authentication */
+    if ( ntohs(ohdr->auth_type) == OSPF_AUTH_CRYPTOGRAPHIC ) {
+-        int i = 0;
++        unsigned int i = 0;
+ 
+-        int length = ntohs(ohdr->length);
++        unsigned int length = ntohs(ohdr->length);
+ 
+         if (ohdr->u.crypt.auth_data_len != OSPF_AUTH_MD5_SIZE) {
+                 return NULL;
+diff --git a/src/dissectors/ec_rip.c b/src/dissectors/ec_rip.c
+index 5f5a9ed0..5b23a822 100644
+--- a/src/dissectors/ec_rip.c
++++ b/src/dissectors/ec_rip.c
+@@ -150,7 +150,7 @@ FUNC_DECODER(dissector_rip)
+                     return NULL;
+             }
+ 
+-            int rip_packet_len = ntohs(ripm->packet_len);
++            uint16_t rip_packet_len = ntohs(ripm->packet_len);
+ 
+             /* validate the packet */
+             if (rip_packet_len > (PACKET->DATA.len - RIP_HEADER_SIZE - \
+diff --git a/src/ec_filter.c b/src/ec_filter.c
+index c268c166..84d89ba4 100644
+--- a/src/ec_filter.c
++++ b/src/ec_filter.c
+@@ -791,7 +791,7 @@ static int func_inject(struct filter_op *fop, struct packet_object *po)
+       FATAL_MSG("Cannot read the file into memory");
+  
+    /* check if we are overflowing pcap buffer */
+-   if(GBL_PCAP->snaplen - (po->L4.header - (po->packet + po->L2.len) + po->L4.len) <= po->DATA.len + size)
++   if(GBL_PCAP->snaplen - (po->L4.header - (po->packet + po->L2.len) + po->L4.len) <= po->DATA.len + (unsigned)size)
+       JIT_FAULT("injected file too long");
+          
+    /* copy the file into the buffer */
+diff --git a/src/ec_parser.c b/src/ec_parser.c
+index 5218b69a..7aaca1e7 100644
+--- a/src/ec_parser.c
++++ b/src/ec_parser.c
+@@ -21,6 +21,7 @@
+ 
+ 
+ #include <ec.h>
++#include <ec_parser.h>
+ #include <ec_interfaces.h>
+ #include <ec_sniff.h>
+ #include <ec_send.h>
+@@ -47,7 +48,6 @@
+ /* protos... */
+ 
+ static void ec_usage(void);
+-void parse_options(int argc, char **argv);
+ 
+ /*****************************************/
+ 
+@@ -283,13 +283,13 @@ void parse_options(int argc, char **argv)
+                   break;
+                   
+          case 'i':
+-		  set_iface(optarg);
++  set_iface(optarg);
+                   break;
+                   
+          case 'I':
+                   /* this option is only useful in the text interface */
+-	          set_lifaces();
+-		  select_text_interface();
++          set_lifaces();
++  select_text_interface();
+                   break;
+ 
+          case 'Y':
+diff --git a/src/ec_sniff.c b/src/ec_sniff.c
+index ab03d027..1c93d703 100644
+--- a/src/ec_sniff.c
++++ b/src/ec_sniff.c
+@@ -20,7 +20,7 @@
+ */
+ 
+ #include <ec.h>
+-#include <ec_parser.h>
++#include <ec_utils.h>
+ #include <ec_sniff.h>
+ #include <ec_sniff_unified.h>
+ #include <ec_sniff_bridge.h>
+diff --git a/src/interfaces/curses/ec_curses_view.c b/src/interfaces/curses/ec_curses_view.c
+index 343ada4a..7024befe 100644
+--- a/src/interfaces/curses/ec_curses_view.c
++++ b/src/interfaces/curses/ec_curses_view.c
+@@ -23,7 +23,7 @@
+ #include <wdg.h>
+ #include <ec_curses.h>
+ #include <ec_format.h>
+-#include <ec_parser.h>
++#include <ec_utils.h>
+ #include <ec_encryption.h>
+ 
+ /* proto */
+diff --git a/src/interfaces/curses/widgets/wdg_file.c b/src/interfaces/curses/widgets/wdg_file.c
+index 8407f1ab..d6038ab9 100644
+--- a/src/interfaces/curses/widgets/wdg_file.c
++++ b/src/interfaces/curses/widgets/wdg_file.c
+@@ -46,7 +46,7 @@ struct wdg_file_handle {
+    struct dirent **namelist;
+    char curpath[PATH_MAX];
+    char initpath[PATH_MAX];
+-   void (*callback)(char *path, char *file);
++   void (*callback)(const char *path, char *file);
+ };
+ 
+ /* PROTOS */
+@@ -66,7 +66,7 @@ static void wdg_file_menu_create(struct wdg_object *wo);
+ 
+ static int wdg_file_virtualize(int key);
+ static int wdg_file_driver(struct wdg_object *wo, int key, struct wdg_mouse_event *mouse);
+-static void wdg_file_callback(struct wdg_object *wo, char *path, char *file);
++static void wdg_file_callback(struct wdg_object *wo, const char *path, char *file);
+ 
+ /*******************************************/
+ 
+@@ -565,10 +565,10 @@ static void wdg_file_menu_create(struct wdg_object *wo)
+  * destroy the dialog and
+  * call the function associated to the file open dialog
+  */
+-static void wdg_file_callback(struct wdg_object *wo, char *path, char *file)
++static void wdg_file_callback(struct wdg_object *wo, const char *path, char *file)
+ {
+    WDG_WO_EXT(struct wdg_file_handle, ww);
+-   void (*callback)(char *, char *);
++   void (*callback)(const char *, char *);
+    char *p, *f;
+    
+    WDG_DEBUG_MSG("wdg_file_callback");
+diff --git a/src/interfaces/gtk/ec_gtk_plugins.c b/src/interfaces/gtk/ec_gtk_plugins.c
+index 6efd9458..13b91caf 100644
+--- a/src/interfaces/gtk/ec_gtk_plugins.c
++++ b/src/interfaces/gtk/ec_gtk_plugins.c
+@@ -84,12 +84,9 @@ void gtkui_plugin_load(void)
+ 
+ static void gtkui_load_plugin(const char *full)
+ {
+-   const char *path;
+    char *file;
+    int ret;
+ 
+-   path = strdup(full);
+-
+ #ifdef OS_WINDOWS
+    file = strrchr(full, '\\');
+ #else
+@@ -97,15 +94,14 @@ static void gtkui_load_plugin(const char *full)
+ #endif
+    /* remove the last /
+       split path and file
+-      increment file pointer to point to filenam */
++      increment file pointer to point to filename */
+    *file++ = 0;
+ 
+-   DEBUG_MSG("gtk_load_plugin %s/%s", path, file);
++   DEBUG_MSG("gtk_load_plugin %s/%s", full, file);
+ 
+    /* load the plugin */
+-   ret = plugin_load_single(path, file);
++   ret = plugin_load_single(full, file);
+ 
+-   SAFE_FREE(path);
+ 
+    /* check the return code */
+    switch (ret) {
+diff --git a/src/interfaces/gtk/ec_gtk_view.c b/src/interfaces/gtk/ec_gtk_view.c
+index f4ebdd2c..e722bceb 100644
+--- a/src/interfaces/gtk/ec_gtk_view.c
++++ b/src/interfaces/gtk/ec_gtk_view.c
+@@ -22,7 +22,7 @@
+ #include <ec.h>
+ #include <ec_gtk.h>
+ #include <ec_format.h>
+-#include <ec_parser.h>
++#include <ec_utils.h>
+ #include <ec_encryption.h>
+ 
+ /* proto */
+diff --git a/src/interfaces/gtk/ec_gtk_view_connections.c b/src/interfaces/gtk/ec_gtk_view_connections.c
+index 957dd5f3..6a5f8fc8 100644
+--- a/src/interfaces/gtk/ec_gtk_view_connections.c
++++ b/src/interfaces/gtk/ec_gtk_view_connections.c
+@@ -1259,7 +1259,7 @@ static void gtkui_connection_inject_file(void)
+    GtkWidget *dialog, *label, *vbox, *hbox;
+    GtkWidget *button1, *button2, *button, *entry;
+    char tmp[MAX_ASCII_ADDR_LEN];
+-   char *filename = NULL;
++   const char *filename = NULL;
+    gint response = 0;
+    
+    DEBUG_MSG("gtk_connection_inject_file");
+diff --git a/tests/test_ec_decode.c b/tests/test_ec_decode.c
+index 2489f460..22eb701f 100644
+--- a/tests/test_ec_decode.c
++++ b/tests/test_ec_decode.c
+@@ -46,7 +46,7 @@ Suite* ts_test_decode (void) {
+   return suite;
+ }
+ 
+-int main (int argc, char *argv[]) {
++int main () {
+   int number_failed;
+   Suite *suite = ts_test_decode();
+   SRunner *runner = srunner_create(suite);
+

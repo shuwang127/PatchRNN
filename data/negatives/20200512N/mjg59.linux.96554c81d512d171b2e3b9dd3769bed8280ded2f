@@ -1,0 +1,93 @@
+commit 96554c81d512d171b2e3b9dd3769bed8280ded2f
+Author: H Hartley Sweeten <hartleys@visionengravers.com>
+Date:   Wed Jul 18 18:31:26 2012 -0700
+
+    staging: comedi: adv_pci1710: factor out the "find pci device" code
+    
+    Factor the "find pci device" code out of the attach function.
+    
+    Signed-off-by: H Hartley Sweeten <hsweeten@visionengravers.com>
+    Cc: Ian Abbott <abbotti@mev.co.uk>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/comedi/drivers/adv_pci1710.c b/drivers/staging/comedi/drivers/adv_pci1710.c
+index 0ed1ff9217d5..0823a3681a8e 100644
+--- a/drivers/staging/comedi/drivers/adv_pci1710.c
++++ b/drivers/staging/comedi/drivers/adv_pci1710.c
+@@ -1333,29 +1333,21 @@ static int pci1710_reset(struct comedi_device *dev)
+ 	DPRINTK("adv_pci1710 EDBG: END: pci1710_reset(...)\n");
+ }
+ 
+-static int pci1710_attach(struct comedi_device *dev,
+-			  struct comedi_devconfig *it)
++static struct pci_dev *pci1710_find_pci_dev(struct comedi_device *dev,
++					    struct comedi_devconfig *it)
+ {
+-	struct comedi_subdevice *s;
+-	int ret, subdev, n_subdevices;
+-	unsigned int irq;
+-	unsigned long iobase;
+ 	struct pci_dev *pcidev;
+ 	int opt_bus, opt_slot;
+ 	const char *errstr;
+ 	unsigned char pci_bus, pci_slot, pci_func;
+ 	int i;
+ 	int board_index;
+-
+-	dev_info(dev->class_dev, DRV_NAME ": attach\n");
++	unsigned int irq;
++	unsigned long iobase;
+ 
+ 	opt_bus = it->options[0];
+ 	opt_slot = it->options[1];
+ 
+-	ret = alloc_private(dev, sizeof(struct pci1710_private));
+-	if (ret < 0)
+-		return -ENOMEM;
+-
+ 	/* Look for matching PCI device */
+ 	errstr = "not found!";
+ 	pcidev = NULL;
+@@ -1404,7 +1396,7 @@ static int pci1710_attach(struct comedi_device *dev,
+ 		} else {
+ 			dev_err(dev->class_dev, "- Card %s\n", errstr);
+ 		}
+-		return -EIO;
++		return NULL;
+ 	}
+ 
+ 	pci_bus = pcidev->bus->number;
+@@ -1416,10 +1408,30 @@ static int pci1710_attach(struct comedi_device *dev,
+ 	dev_dbg(dev->class_dev, "b:s:f=%d:%d:%d, io=0x%4lx\n",
+ 		pci_bus, pci_slot, pci_func, iobase);
+ 
+-	dev->iobase = iobase;
++	return pcidev;
++}
++
++static int pci1710_attach(struct comedi_device *dev,
++			  struct comedi_devconfig *it)
++{
++	struct comedi_subdevice *s;
++	int ret, subdev, n_subdevices;
++	unsigned int irq;
++
++	dev_info(dev->class_dev, DRV_NAME ": attach\n");
++
++	ret = alloc_private(dev, sizeof(struct pci1710_private));
++	if (ret < 0)
++		return -ENOMEM;
++
++	devpriv->pcidev = pci1710_find_pci_dev(dev, it);
++	if (!devpriv->pcidev)
++		return -EIO;
++
++	dev->iobase = pci_resource_start(devpriv->pcidev, 2);
++	irq = devpriv->pcidev->irq;
+ 
+ 	dev->board_name = this_board->name;
+-	devpriv->pcidev = pcidev;
+ 
+ 	n_subdevices = 0;
+ 	if (this_board->n_aichan)
+

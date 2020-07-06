@@ -1,0 +1,65 @@
+commit 9c4b2867ed7c8c8784dd417ffd16e705e81eb145
+Author: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+Date:   Thu Jan 14 23:24:22 2016 +0100
+
+    cpuidle: menu: Fix menu_select() for CPUIDLE_DRIVER_STATE_START == 0
+    
+    Commit a9ceb78bc75c (cpuidle,menu: use interactivity_req to disable
+    polling) exposed a bug in menu_select() causing it to return -1
+    on systems with CPUIDLE_DRIVER_STATE_START equal to zero, although
+    it should have returned 0.  As a result, idle states are not entered
+    by CPUs on those systems.
+    
+    Namely, on the systems in question data->last_state_idx is initially
+    equal to -1 and the above commit modified the condition that would
+    have caused it to be changed to 0 to be less likely to trigger which
+    exposed the problem.  However, setting data->last_state_idx initially
+    to -1 doesn't make sense at all and on the affected systems it should
+    always be set to CPUIDLE_DRIVER_STATE_START (ie. 0) unconditionally,
+    so make that happen.
+    
+    Fixes: a9ceb78bc75c (cpuidle,menu: use interactivity_req to disable polling)
+    Reported-and-tested-by: Sudeep Holla <sudeep.holla@arm.com>
+    Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+
+diff --git a/drivers/cpuidle/governors/menu.c b/drivers/cpuidle/governors/menu.c
+index 7b0971d97cc3..be0bae0b41e9 100644
+--- a/drivers/cpuidle/governors/menu.c
++++ b/drivers/cpuidle/governors/menu.c
+@@ -294,8 +294,6 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev)
+ 		data->needs_update = 0;
+ 	}
+ 
+-	data->last_state_idx = CPUIDLE_DRIVER_STATE_START - 1;
+-
+ 	/* Special case when user has set very strict latency requirement */
+ 	if (unlikely(latency_req == 0))
+ 		return 0;
+@@ -326,14 +324,19 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev)
+ 	if (latency_req > interactivity_req)
+ 		latency_req = interactivity_req;
+ 
+-	/*
+-	 * We want to default to C1 (hlt), not to busy polling
+-	 * unless the timer is happening really really soon.
+-	 */
+-	if (interactivity_req > 20 &&
+-	    !drv->states[CPUIDLE_DRIVER_STATE_START].disabled &&
+-		dev->states_usage[CPUIDLE_DRIVER_STATE_START].disable == 0)
++	if (CPUIDLE_DRIVER_STATE_START > 0) {
++		data->last_state_idx = CPUIDLE_DRIVER_STATE_START - 1;
++		/*
++		 * We want to default to C1 (hlt), not to busy polling
++		 * unless the timer is happening really really soon.
++		 */
++		if (interactivity_req > 20 &&
++		    !drv->states[CPUIDLE_DRIVER_STATE_START].disabled &&
++			dev->states_usage[CPUIDLE_DRIVER_STATE_START].disable == 0)
++			data->last_state_idx = CPUIDLE_DRIVER_STATE_START;
++	} else {
+ 		data->last_state_idx = CPUIDLE_DRIVER_STATE_START;
++	}
+ 
+ 	/*
+ 	 * Find the idle state with the lowest power while satisfying
+

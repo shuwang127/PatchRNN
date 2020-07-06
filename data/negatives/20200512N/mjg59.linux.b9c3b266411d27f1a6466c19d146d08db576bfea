@@ -1,0 +1,89 @@
+commit b9c3b266411d27f1a6466c19d146d08db576bfea
+Author: Dexuan Cui <dexuan.cui@intel.com>
+Date:   Mon Dec 7 13:03:21 2009 +0800
+
+    PCI: support device-specific reset methods
+    
+    Add a new type of quirk for resetting devices at pci_dev_reset time.
+    This is necessary to handle device with nonstandard reset procedures,
+    especially useful for guest drivers.
+    
+    Signed-off-by: Yu Zhao <yu.zhao@intel.com>
+    Signed-off-by: Dexuan Cui <dexuan.cui@intel.com>
+    Signed-off-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+
+diff --git a/drivers/pci/pci.c b/drivers/pci/pci.c
+index 0bc27e059019..6011d064e89d 100644
+--- a/drivers/pci/pci.c
++++ b/drivers/pci/pci.c
+@@ -2284,6 +2284,21 @@ static int pci_parent_bus_reset(struct pci_dev *dev, int probe)
+ 	return 0;
+ }
+ 
++static int pci_dev_specific_reset(struct pci_dev *dev, int probe)
++{
++	struct pci_dev_reset_methods *i;
++
++	for (i = pci_dev_reset_methods; i->reset; i++) {
++		if ((i->vendor == dev->vendor ||
++		     i->vendor == (u16)PCI_ANY_ID) &&
++		    (i->device == dev->device ||
++		     i->device == (u16)PCI_ANY_ID))
++			return i->reset(dev, probe);
++	}
++
++	return -ENOTTY;
++}
++
+ static int pci_dev_reset(struct pci_dev *dev, int probe)
+ {
+ 	int rc;
+@@ -2296,6 +2311,10 @@ static int pci_dev_reset(struct pci_dev *dev, int probe)
+ 		down(&dev->dev.sem);
+ 	}
+ 
++	rc = pci_dev_specific_reset(dev, probe);
++	if (rc != -ENOTTY)
++		goto done;
++
+ 	rc = pcie_flr(dev, probe);
+ 	if (rc != -ENOTTY)
+ 		goto done;
+diff --git a/drivers/pci/pci.h b/drivers/pci/pci.h
+index 33ed8e0aba1e..709eaa4fee51 100644
+--- a/drivers/pci/pci.h
++++ b/drivers/pci/pci.h
+@@ -313,4 +313,12 @@ static inline int pci_resource_alignment(struct pci_dev *dev,
+ 
+ extern void pci_enable_acs(struct pci_dev *dev);
+ 
++struct pci_dev_reset_methods {
++	u16 vendor;
++	u16 device;
++	int (*reset)(struct pci_dev *dev, int probe);
++};
++
++extern struct pci_dev_reset_methods pci_dev_reset_methods[];
++
+ #endif /* DRIVERS_PCI_H */
+diff --git a/drivers/pci/quirks.c b/drivers/pci/quirks.c
+index f70f4e23225c..86c9177a6c6c 100644
+--- a/drivers/pci/quirks.c
++++ b/drivers/pci/quirks.c
+@@ -2636,6 +2636,15 @@ static int __init pci_apply_final_quirks(void)
+ }
+ 
+ fs_initcall_sync(pci_apply_final_quirks);
++
++/*
++ * Followings are device-specific reset methods which can be used to
++ * reset a single function if other methods (e.g. FLR, PM D0->D3) are
++ * not available.
++ */
++struct pci_dev_reset_methods pci_dev_reset_methods[] = {
++	{ 0 }
++};
+ #else
+ void pci_fixup_device(enum pci_fixup_pass pass, struct pci_dev *dev) {}
+ #endif
+

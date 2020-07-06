@@ -1,0 +1,229 @@
+commit 438b8dc457e7274dba6e988ad3406fddb7bdda45
+Author: Imre Deak <imre.deak@intel.com>
+Date:   Tue Jul 11 23:42:30 2017 +0300
+
+    drm/i915: Unify power well ID enums
+    
+    Atm, the power well IDs are defined in separate platform specific enums,
+    which isn't ideal for the following reasons:
+    - the IDs are used by helpers like lookup_power_well() in a platform
+      independent way
+    - the always-on power well is used by multiple platforms and so needs
+      now separate IDs, although these IDs refer to the same thing
+    
+    To make things more consistent use a single enum instead of the two
+    separate ones, listing the IDs per platform (or set of very similar
+    platforms like all GEN9/10). Replace the separate always-on power
+    well IDs with a single ID.
+    
+    While at it also add a note clarifying the distinction between regular
+    power wells that follow a common programming pattern and custom ones
+    that are programmed in some other way. The IDs for regular power wells
+    need to stay fixed, since they also define the request and state HW flag
+    positions in their corresponding power well control register(s).
+    
+    v2:
+    - Add comment about id to req,status bit mapping to the enum. (Rodrigo)
+    
+    Cc: Ville Syrjälä <ville.syrjala@linux.intel.com>
+    Signed-off-by: Imre Deak <imre.deak@intel.com>
+    Reviewed-by: Rodrigo Vivi <rodrigo.vivi@intel.com>
+    Link: https://patchwork.freedesktop.org/patch/msgid/20170711204236.5618-1-imre.deak@intel.com
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index b051122c960b..c4c02173b87c 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -1383,7 +1383,7 @@ struct i915_power_well {
+ 	bool hw_enabled;
+ 	u64 domains;
+ 	/* unique identifier for this power well */
+-	unsigned long id;
++	enum i915_power_well_id id;
+ 	/*
+ 	 * Arbitraty data associated with this power well. Platform and power
+ 	 * well specific.
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index c0199f2da35e..aee40eecf688 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -1063,9 +1063,20 @@ static inline bool i915_mmio_reg_valid(i915_reg_t reg)
+ #define   DP_SSS_RESET(pipe)			_DP_SSS(0x2, (pipe))
+ #define   DP_SSS_PWR_GATE(pipe)			_DP_SSS(0x3, (pipe))
+ 
+-/* See the PUNIT HAS v0.8 for the below bits */
+-enum punit_power_well {
+-	/* These numbers are fixed and must match the position of the pw bits */
++/**
++ * i915_power_well_id:
++ *
++ * Platform specific IDs used to look up power wells and - except for custom
++ * power wells - to define request/status register flag bit positions. As such
++ * the set of IDs on a given platform must be unique and except for custom
++ * power wells their value must stay fixed.
++ */
++enum i915_power_well_id {
++	/*
++	 * VLV/CHV
++	 *  - PUNIT_REG_PWRGT_CTRL (bit: id*2),
++	 *    PUNIT_REG_PWRGT_STATUS (bit: id*2) (PUNIT HAS v0.8)
++	 */
+ 	PUNIT_POWER_WELL_RENDER			= 0,
+ 	PUNIT_POWER_WELL_MEDIA			= 1,
+ 	PUNIT_POWER_WELL_DISP2D			= 3,
+@@ -1080,13 +1091,11 @@ enum punit_power_well {
+ 	/*  - custom power well */
+ 	CHV_DISP_PW_PIPE_A,			/* 13 */
+ 
+-	/* Not actual bit groups. Used as IDs for lookup_power_well() */
+-	PUNIT_POWER_WELL_ALWAYS_ON,
+-};
+-
+-enum skl_disp_power_wells {
+-	/* These numbers are fixed and must match the position of the pw bits */
+-	SKL_DISP_PW_MISC_IO,
++	/*
++	 * GEN9+
++	 *  - HSW_PWR_WELL_DRIVER (status bit: id*2, req bit: id*2+1)
++	 */
++	SKL_DISP_PW_MISC_IO = 0,
+ 	SKL_DISP_PW_DDI_A_E,
+ 	GLK_DISP_PW_DDI_A = SKL_DISP_PW_DDI_A_E,
+ 	CNL_DISP_PW_DDI_A = SKL_DISP_PW_DDI_A_E,
+@@ -1105,13 +1114,18 @@ enum skl_disp_power_wells {
+ 	SKL_DISP_PW_1 = 14,
+ 	SKL_DISP_PW_2,
+ 
+-	/* Not actual bit groups. Used as IDs for lookup_power_well() */
+-	SKL_DISP_PW_ALWAYS_ON,
++	/* - custom power wells */
+ 	SKL_DISP_PW_DC_OFF,
+-
+ 	BXT_DPIO_CMN_A,
+ 	BXT_DPIO_CMN_BC,
+-	GLK_DPIO_CMN_C,
++	GLK_DPIO_CMN_C,			/* 19 */
++
++	/*
++	 * Multiple platforms.
++	 * Must start following the highest ID of any platform.
++	 * - custom power wells
++	 */
++	I915_DISP_PW_ALWAYS_ON = 20,
+ };
+ 
+ #define SKL_POWER_WELL_STATE(pw) (1 << ((pw) * 2))
+diff --git a/drivers/gpu/drm/i915/intel_runtime_pm.c b/drivers/gpu/drm/i915/intel_runtime_pm.c
+index 44008c6c8fcc..00ae25b59661 100644
+--- a/drivers/gpu/drm/i915/intel_runtime_pm.c
++++ b/drivers/gpu/drm/i915/intel_runtime_pm.c
+@@ -50,10 +50,11 @@
+  */
+ 
+ bool intel_display_power_well_is_enabled(struct drm_i915_private *dev_priv,
+-				    int power_well_id);
++					 enum i915_power_well_id power_well_id);
+ 
+ static struct i915_power_well *
+-lookup_power_well(struct drm_i915_private *dev_priv, int power_well_id);
++lookup_power_well(struct drm_i915_private *dev_priv,
++		  enum i915_power_well_id power_well_id);
+ 
+ const char *
+ intel_display_power_domain_str(enum intel_display_power_domain domain)
+@@ -344,7 +345,7 @@ static void skl_power_well_pre_disable(struct drm_i915_private *dev_priv,
+ static void gen9_wait_for_power_well_enable(struct drm_i915_private *dev_priv,
+ 					    struct i915_power_well *power_well)
+ {
+-	int id = power_well->id;
++	enum i915_power_well_id id = power_well->id;
+ 
+ 	/* Timeout for PW1:10 us, AUX:not specified, other PWs:20 us. */
+ 	WARN_ON(intel_wait_for_register(dev_priv,
+@@ -354,7 +355,8 @@ static void gen9_wait_for_power_well_enable(struct drm_i915_private *dev_priv,
+ 					1));
+ }
+ 
+-static u32 gen9_power_well_requesters(struct drm_i915_private *dev_priv, int id)
++static u32 gen9_power_well_requesters(struct drm_i915_private *dev_priv,
++				      enum i915_power_well_id id)
+ {
+ 	u32 req_mask = SKL_POWER_WELL_REQ(id);
+ 	u32 ret;
+@@ -370,7 +372,7 @@ static u32 gen9_power_well_requesters(struct drm_i915_private *dev_priv, int id)
+ static void gen9_wait_for_power_well_disable(struct drm_i915_private *dev_priv,
+ 					     struct i915_power_well *power_well)
+ {
+-	int id = power_well->id;
++	enum i915_power_well_id id = power_well->id;
+ 	bool disabled;
+ 	u32 reqs;
+ 
+@@ -837,7 +839,7 @@ static void skl_set_power_well(struct drm_i915_private *dev_priv,
+ 	case CNL_DISP_PW_AUX_D:
+ 		break;
+ 	default:
+-		WARN(1, "Unknown power well %lu\n", power_well->id);
++		WARN(1, "Unknown power well %u\n", power_well->id);
+ 		return;
+ 	}
+ 
+@@ -1089,7 +1091,7 @@ static void i830_pipes_power_well_sync_hw(struct drm_i915_private *dev_priv,
+ static void vlv_set_power_well(struct drm_i915_private *dev_priv,
+ 			       struct i915_power_well *power_well, bool enable)
+ {
+-	enum punit_power_well power_well_id = power_well->id;
++	enum i915_power_well_id power_well_id = power_well->id;
+ 	u32 mask;
+ 	u32 state;
+ 	u32 ctrl;
+@@ -1137,7 +1139,7 @@ static void vlv_power_well_disable(struct drm_i915_private *dev_priv,
+ static bool vlv_power_well_enabled(struct drm_i915_private *dev_priv,
+ 				   struct i915_power_well *power_well)
+ {
+-	int power_well_id = power_well->id;
++	enum i915_power_well_id power_well_id = power_well->id;
+ 	bool enabled = false;
+ 	u32 mask;
+ 	u32 state;
+@@ -1324,8 +1326,9 @@ static void vlv_dpio_cmn_power_well_disable(struct drm_i915_private *dev_priv,
+ 
+ #define POWER_DOMAIN_MASK (GENMASK_ULL(POWER_DOMAIN_NUM - 1, 0))
+ 
+-static struct i915_power_well *lookup_power_well(struct drm_i915_private *dev_priv,
+-						 int power_well_id)
++static struct i915_power_well *
++lookup_power_well(struct drm_i915_private *dev_priv,
++		  enum i915_power_well_id power_well_id)
+ {
+ 	struct i915_power_domains *power_domains = &dev_priv->power_domains;
+ 	int i;
+@@ -2117,7 +2120,7 @@ static struct i915_power_well vlv_power_wells[] = {
+ 		.always_on = 1,
+ 		.domains = POWER_DOMAIN_MASK,
+ 		.ops = &i9xx_always_on_power_well_ops,
+-		.id = PUNIT_POWER_WELL_ALWAYS_ON,
++		.id = I915_DISP_PW_ALWAYS_ON,
+ 	},
+ 	{
+ 		.name = "display",
+@@ -2202,7 +2205,7 @@ static struct i915_power_well chv_power_wells[] = {
+ };
+ 
+ bool intel_display_power_well_is_enabled(struct drm_i915_private *dev_priv,
+-				    int power_well_id)
++					 enum i915_power_well_id power_well_id)
+ {
+ 	struct i915_power_well *power_well;
+ 	bool ret;
+@@ -2219,7 +2222,7 @@ static struct i915_power_well skl_power_wells[] = {
+ 		.always_on = 1,
+ 		.domains = POWER_DOMAIN_MASK,
+ 		.ops = &i9xx_always_on_power_well_ops,
+-		.id = SKL_DISP_PW_ALWAYS_ON,
++		.id = I915_DISP_PW_ALWAYS_ON,
+ 	},
+ 	{
+ 		.name = "power well 1",
+

@@ -1,0 +1,71 @@
+commit c02e3f361c75da04ca3025b4d19e947e9cc62ed3
+Author: Neil Horman <nhorman@tuxdriver.com>
+Date:   Tue Sep 22 16:43:36 2009 -0700
+
+    kmod: fix race in usermodehelper code
+    
+    The user mode helper code has a race in it.  call_usermodehelper_exec()
+    takes an allocated subprocess_info structure, which it passes to a
+    workqueue, and then passes it to a kernel thread which it creates, after
+    which it calls complete to signal to the caller of
+    call_usermodehelper_exec() that it can free the subprocess_info struct.
+    
+    But since we use that structure in the created thread, we can't call
+    complete from __call_usermodehelper(), which is where we create the kernel
+    thread.  We need to call complete() from within the kernel thread and then
+    not use subprocess_info afterward in the case of UMH_WAIT_EXEC.  Tested
+    successfully by me.
+    
+    Signed-off-by: Neil Horman <nhorman@tuxdriver.com>
+    Cc: Rusty Russell <rusty@rustcorp.com.au>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/kernel/kmod.c b/kernel/kmod.c
+index 9fcb53a11f87..689d20f39305 100644
+--- a/kernel/kmod.c
++++ b/kernel/kmod.c
+@@ -143,6 +143,7 @@ struct subprocess_info {
+ static int ____call_usermodehelper(void *data)
+ {
+ 	struct subprocess_info *sub_info = data;
++	enum umh_wait wait = sub_info->wait;
+ 	int retval;
+ 
+ 	BUG_ON(atomic_read(&sub_info->cred->usage) != 1);
+@@ -184,10 +185,14 @@ static int ____call_usermodehelper(void *data)
+ 	 */
+ 	set_user_nice(current, 0);
+ 
++	if (wait == UMH_WAIT_EXEC)
++		complete(sub_info->complete);
++
+ 	retval = kernel_execve(sub_info->path, sub_info->argv, sub_info->envp);
+ 
+ 	/* Exec failed? */
+-	sub_info->retval = retval;
++	if (wait != UMH_WAIT_EXEC)
++		sub_info->retval = retval;
+ 	do_exit(0);
+ }
+ 
+@@ -266,16 +271,14 @@ static void __call_usermodehelper(struct work_struct *work)
+ 
+ 	switch (wait) {
+ 	case UMH_NO_WAIT:
++	case UMH_WAIT_EXEC:
+ 		break;
+ 
+ 	case UMH_WAIT_PROC:
+ 		if (pid > 0)
+ 			break;
+ 		sub_info->retval = pid;
+-		/* FALLTHROUGH */
+-
+-	case UMH_WAIT_EXEC:
+-		complete(sub_info->complete);
++		break;
+ 	}
+ }
+ 
+

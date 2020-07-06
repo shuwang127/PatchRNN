@@ -1,0 +1,120 @@
+commit 25e9ffe846f8dd3860033196ea0232a323a5ca09
+Author: Stephen Sorley <ssorley@monetra.com>
+Date:   Tue Dec 19 16:18:25 2017 -0500
+
+    [base] added M_parser_read_strdup_hex
+
+diff --git a/base/data/m_parser.c b/base/data/m_parser.c
+index e56987e9a..927c22118 100644
+--- a/base/data/m_parser.c
++++ b/base/data/m_parser.c
+@@ -1269,6 +1269,20 @@ char *M_parser_read_strdup(M_parser_t *parser, size_t len)
+ }
+ 
+ 
++char *M_parser_read_strdup_hex(M_parser_t *parser, size_t len)
++{
++	char *hex;
++
++	if (parser == NULL || len == 0 || parser->data_len < len) {
++		return NULL;
++	}
++
++	hex = M_bincodec_encode_alloc(M_parser_peek(parser), parser->data_len, 0, M_BINCODEC_HEX);
++	M_parser_consume(parser, parser->data_len);
++	return hex;
++}
++
++
+ char *M_parser_read_strdup_until(M_parser_t *parser, const char *pat, M_bool eat_pat)
+ {
+ 	size_t len;
+diff --git a/include/mstdlib/base/m_parser.h b/include/mstdlib/base/m_parser.h
+index 25b6d8dd6..a8496ebac 100644
+--- a/include/mstdlib/base/m_parser.h
++++ b/include/mstdlib/base/m_parser.h
+@@ -891,6 +891,18 @@ M_API size_t M_parser_read_str_mark(M_parser_t *parser, char *buf, size_t buf_le
+ M_API char *M_parser_read_strdup(M_parser_t *parser, size_t len);
+ 
+ 
++/*! Read bytes (binary) from the parser, return as hex-encoded string and advance.
++ *
++ * \param[in,out] parser Parser object to read binary bytes from.
++ * \param[in]     len    Number of binary bytes to read from parser.
++ *
++ * \return null-terminated hex string on success, NULL if not enough bytes or other error
++ *
++ * \see M_parser_read_buf_hex
++ */
++M_API char *M_parser_read_strdup_hex(M_parser_t *parser, size_t len);
++
++
+ /*! Read data until the specified sequence of bytes is encountered in the data stream.
+  *
+  * Put the resulting bytes in a newly allocated buffer.
+diff --git a/test/base/data/check_parser.c b/test/base/data/check_parser.c
+index dac3dc4ed..d14464de7 100644
+--- a/test/base/data/check_parser.c
++++ b/test/base/data/check_parser.c
+@@ -22,22 +22,40 @@ static struct {
+ 	{ 0, 0 }
+ };
+ 
+-static const M_uint8  check_parser_buf_hex_in[] = {0x12u, 0x34u, 0x56u, 0x78u, 0x9Au, 0xBCu, 0xDEu, 0xF0u};
++static const M_uint8  check_parser_hex_in[]     = {0x12u, 0x34u, 0x56u, 0x78u, 0x9Au, 0xBCu, 0xDEu, 0xF0u};
++static const char    *check_parser_hex_out      = "123456789ABCDEF0";
+ static const char    *check_parser_buf_hex_out  = "hello 123456789ABCDEF0";
+ 
+ /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+ 
++START_TEST(check_parser_read_strdup_hex)
++{
++	M_parser_t *parser;
++	char       *hex;
++
++	parser = M_parser_create_const(check_parser_hex_in, sizeof(check_parser_hex_in), M_PARSER_FLAG_NONE);
++	hex    = M_parser_read_strdup_hex(parser, sizeof(check_parser_hex_in));
++
++	ck_assert_msg(hex != NULL, "couldn't read bytes");
++	ck_assert_msg(M_str_caseeq(hex, check_parser_hex_out), "output doesn't match");
++
++	M_parser_destroy(parser);
++	M_free(hex);
++}
++END_TEST
++
++
+ START_TEST(check_parser_read_buf_hex)
+ {
+ 	M_parser_t *parser;
+ 	M_buf_t    *buf;
+ 
+-	parser = M_parser_create_const(check_parser_buf_hex_in, sizeof(check_parser_buf_hex_in), M_PARSER_FLAG_NONE);
++	parser = M_parser_create_const(check_parser_hex_in, sizeof(check_parser_hex_in), M_PARSER_FLAG_NONE);
+ 	buf    = M_buf_create();
+ 
+ 	M_buf_add_str(buf, "hello ");
+ 
+-	ck_assert_msg(M_parser_read_buf_hex(parser, buf, sizeof(check_parser_buf_hex_in)), "couldn't read bytes");
++	ck_assert_msg(M_parser_read_buf_hex(parser, buf, sizeof(check_parser_hex_in)), "couldn't read bytes");
+ 
+ 	ck_assert_msg(M_str_caseeq(M_buf_peek(buf), check_parser_buf_hex_out), "output doesn't match");
+ 
+@@ -81,11 +99,16 @@ END_TEST
+ static Suite *M_parser_suite(void)
+ {
+ 	Suite *suite;
++	TCase *tc_parser_read_strdup_hex;
+ 	TCase *tc_parser_read_buf_hex;
+ 	TCase *tc_parser_bcd;
+ 
+ 	suite = suite_create("parser");
+ 
++	tc_parser_read_strdup_hex = tcase_create("check_parser_read_strdup_hex");
++	tcase_add_test(tc_parser_read_strdup_hex, check_parser_read_strdup_hex);
++	suite_add_tcase(suite, tc_parser_read_strdup_hex);
++
+ 	tc_parser_read_buf_hex = tcase_create("check_parser_read_buf_hex");
+ 	tcase_add_test(tc_parser_read_buf_hex, check_parser_read_buf_hex);
+ 	suite_add_tcase(suite, tc_parser_read_buf_hex);
+

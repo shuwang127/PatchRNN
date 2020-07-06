@@ -1,0 +1,102 @@
+commit 730c41d5ba583a9608300fc4e6cf236957cfe02a
+Author: Yevgeny Petrilin <yevgenyp@mellanox.co.il>
+Date:   Tue Feb 21 03:39:32 2012 +0000
+
+    mlx4: Replacing pool_lock with mutex
+    
+    Under the spinlock we call request_irq(), which allocates memory with GFP_KERNEL,
+    This causes the following trace when DEBUG_SPINLOCK is enabled, it can cause
+    the following trace:
+    
+     BUG: spinlock wrong CPU on CPU#2, ethtool/2595
+     lock: ffff8801f9cbc2b0, .magic: dead4ead, .owner: ethtool/2595, .owner_cpu: 0
+     Pid: 2595, comm: ethtool Not tainted 3.0.18 #2
+     Call Trace:
+     spin_bug+0xa2/0xf0
+     do_raw_spin_unlock+0x71/0xa0
+     _raw_spin_unlock+0xe/0x10
+     mlx4_assign_eq+0x12b/0x190 [mlx4_core]
+     mlx4_en_activate_cq+0x252/0x2d0 [mlx4_en]
+     ? mlx4_en_activate_rx_rings+0x227/0x370 [mlx4_en]
+     mlx4_en_start_port+0x189/0xb90 [mlx4_en]
+     mlx4_en_set_ringparam+0x29a/0x340 [mlx4_en]
+     dev_ethtool+0x816/0xb10
+     ? dev_get_by_name_rcu+0xa4/0xe0
+     dev_ioctl+0x2b5/0x470
+     handle_mm_fault+0x1cd/0x2d0
+     sock_do_ioctl+0x5d/0x70
+     sock_ioctl+0x79/0x2f0
+     do_vfs_ioctl+0x8c/0x340
+     sys_ioctl+0xa1/0xb0
+     system_call_fastpath+0x16/0x1b
+    
+    Replacing with mutex, which is enough in this case.
+    
+    Signed-off-by: Yevgeny Petrilin <yevgenyp@mellanox.co.il>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/mellanox/mlx4/eq.c b/drivers/net/ethernet/mellanox/mlx4/eq.c
+index 8fa41f3082cf..9129ace02560 100644
+--- a/drivers/net/ethernet/mellanox/mlx4/eq.c
++++ b/drivers/net/ethernet/mellanox/mlx4/eq.c
+@@ -1036,7 +1036,7 @@ int mlx4_assign_eq(struct mlx4_dev *dev, char* name, int * vector)
+ 	struct mlx4_priv *priv = mlx4_priv(dev);
+ 	int vec = 0, err = 0, i;
+ 
+-	spin_lock(&priv->msix_ctl.pool_lock);
++	mutex_lock(&priv->msix_ctl.pool_lock);
+ 	for (i = 0; !vec && i < dev->caps.comp_pool; i++) {
+ 		if (~priv->msix_ctl.pool_bm & 1ULL << i) {
+ 			priv->msix_ctl.pool_bm |= 1ULL << i;
+@@ -1058,7 +1058,7 @@ int mlx4_assign_eq(struct mlx4_dev *dev, char* name, int * vector)
+ 			eq_set_ci(&priv->eq_table.eq[vec], 1);
+ 		}
+ 	}
+-	spin_unlock(&priv->msix_ctl.pool_lock);
++	mutex_unlock(&priv->msix_ctl.pool_lock);
+ 
+ 	if (vec) {
+ 		*vector = vec;
+@@ -1079,13 +1079,13 @@ void mlx4_release_eq(struct mlx4_dev *dev, int vec)
+ 	if (likely(i >= 0)) {
+ 		/*sanity check , making sure were not trying to free irq's
+ 		  Belonging to a legacy EQ*/
+-		spin_lock(&priv->msix_ctl.pool_lock);
++		mutex_lock(&priv->msix_ctl.pool_lock);
+ 		if (priv->msix_ctl.pool_bm & 1ULL << i) {
+ 			free_irq(priv->eq_table.eq[vec].irq,
+ 				 &priv->eq_table.eq[vec]);
+ 			priv->msix_ctl.pool_bm &= ~(1ULL << i);
+ 		}
+-		spin_unlock(&priv->msix_ctl.pool_lock);
++		mutex_unlock(&priv->msix_ctl.pool_lock);
+ 	}
+ 
+ }
+diff --git a/drivers/net/ethernet/mellanox/mlx4/main.c b/drivers/net/ethernet/mellanox/mlx4/main.c
+index 9c5fbad513f8..5c655a2a3809 100644
+--- a/drivers/net/ethernet/mellanox/mlx4/main.c
++++ b/drivers/net/ethernet/mellanox/mlx4/main.c
+@@ -1828,7 +1828,7 @@ static int __mlx4_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
+ 		goto err_master_mfunc;
+ 
+ 	priv->msix_ctl.pool_bm = 0;
+-	spin_lock_init(&priv->msix_ctl.pool_lock);
++	mutex_init(&priv->msix_ctl.pool_lock);
+ 
+ 	mlx4_enable_msi_x(dev);
+ 	if ((mlx4_is_mfunc(dev)) &&
+diff --git a/drivers/net/ethernet/mellanox/mlx4/mlx4.h b/drivers/net/ethernet/mellanox/mlx4/mlx4.h
+index c92269f8c057..28f8251561f4 100644
+--- a/drivers/net/ethernet/mellanox/mlx4/mlx4.h
++++ b/drivers/net/ethernet/mellanox/mlx4/mlx4.h
+@@ -697,7 +697,7 @@ struct mlx4_sense {
+ 
+ struct mlx4_msix_ctl {
+ 	u64		pool_bm;
+-	spinlock_t	pool_lock;
++	struct mutex	pool_lock;
+ };
+ 
+ struct mlx4_steer {
+

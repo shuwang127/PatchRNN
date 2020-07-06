@@ -1,0 +1,567 @@
+commit fc2fffe7706ef269005bf4eef56570346c9ca3da
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Thu May 5 22:24:36 2016 +0200
+
+    tree-wide: introduce new SOCKADDR_UN_LEN() macro, and use it everywhere
+    
+    The macro determines the right length of a AF_UNIX "struct sockaddr_un" to pass to
+    connect() or bind(). It automatically figures out if the socket refers to an
+    abstract namespace socket, or a socket in the file system, and properly handles
+    the full length of the path field.
+    
+    This macro is not only safer, but also simpler to use, than the usual
+    offsetof() + strlen() logic.
+
+diff --git a/src/basic/log.c b/src/basic/log.c
+index d89e6f727..3ea643b6e 100644
+--- a/src/basic/log.c
++++ b/src/basic/log.c
+@@ -165,7 +165,7 @@ static int log_open_syslog(void) {
+                 goto fail;
+         }
+ 
+-        if (connect(syslog_fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path)) < 0) {
++        if (connect(syslog_fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
+                 safe_close(syslog_fd);
+ 
+                 /* Some legacy syslog systems still use stream
+@@ -177,7 +177,7 @@ static int log_open_syslog(void) {
+                         goto fail;
+                 }
+ 
+-                if (connect(syslog_fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path)) < 0) {
++                if (connect(syslog_fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
+                         r = -errno;
+                         goto fail;
+                 }
+@@ -215,7 +215,7 @@ static int log_open_journal(void) {
+                 goto fail;
+         }
+ 
+-        if (connect(journal_fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path)) < 0) {
++        if (connect(journal_fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
+                 r = -errno;
+                 goto fail;
+         }
+diff --git a/src/basic/socket-util.h b/src/basic/socket-util.h
+index d17a2f35f..daa4b24a3 100644
+--- a/src/basic/socket-util.h
++++ b/src/basic/socket-util.h
+@@ -137,3 +137,14 @@ ssize_t next_datagram_size_fd(int fd);
+ 
+ #define CMSG_FOREACH(cmsg, mh)                                          \
+         for ((cmsg) = CMSG_FIRSTHDR(mh); (cmsg); (cmsg) = CMSG_NXTHDR((mh), (cmsg)))
++
++/* Covers only file system and abstract AF_UNIX socket addresses, but not unnamed socket addresses. */
++#define SOCKADDR_UN_LEN(sa)                                             \
++        ({                                                              \
++                const struct sockaddr_un *_sa = &(sa);                  \
++                assert(_sa->sun_family == AF_UNIX);                     \
++                offsetof(struct sockaddr_un, sun_path) +                \
++                        (_sa->sun_path[0] == 0 ?                        \
++                         1 + strnlen(_sa->sun_path+1, sizeof(_sa->sun_path)-1) : \
++                         strnlen(_sa->sun_path, sizeof(_sa->sun_path))); \
++        })
+diff --git a/src/cgroups-agent/cgroups-agent.c b/src/cgroups-agent/cgroups-agent.c
+index 333ce110d..d7c722ac3 100644
+--- a/src/cgroups-agent/cgroups-agent.c
++++ b/src/cgroups-agent/cgroups-agent.c
+@@ -52,7 +52,7 @@ int main(int argc, char *argv[]) {
+ 
+         l = strlen(argv[1]);
+ 
+-        n = sendto(fd, argv[1], l, 0, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path));
++        n = sendto(fd, argv[1], l, 0, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+         if (n < 0) {
+                 log_debug_errno(errno, "Failed to send cgroups agent message: %m");
+                 return EXIT_FAILURE;
+diff --git a/src/core/dbus.c b/src/core/dbus.c
+index c8375a047..3422a02d6 100644
+--- a/src/core/dbus.c
++++ b/src/core/dbus.c
+@@ -975,7 +975,7 @@ static int bus_init_private(Manager *m) {
+                         return 0;
+ 
+                 strcpy(sa.un.sun_path, "/run/systemd/private");
+-                salen = offsetof(union sockaddr_union, un.sun_path) + strlen("/run/systemd/private");
++                salen = SOCKADDR_UN_LEN(sa.un);
+         } else {
+                 size_t left = sizeof(sa.un.sun_path);
+                 char *p = sa.un.sun_path;
+diff --git a/src/core/execute.c b/src/core/execute.c
+index ac2ac3989..5eb3f1369 100644
+--- a/src/core/execute.c
++++ b/src/core/execute.c
+@@ -271,7 +271,7 @@ static int connect_journal_socket(int fd, uid_t uid, gid_t gid) {
+                 }
+         }
+ 
+-        r = connect(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path));
++        r = connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+         if (r < 0)
+                 r = -errno;
+ 
+diff --git a/src/core/manager.c b/src/core/manager.c
+index 17b940c11..e192cd475 100644
+--- a/src/core/manager.c
++++ b/src/core/manager.c
+@@ -705,7 +705,7 @@ static int manager_setup_notify(Manager *m) {
+                 (void) unlink(m->notify_socket);
+ 
+                 strncpy(sa.un.sun_path, m->notify_socket, sizeof(sa.un.sun_path)-1);
+-                r = bind(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path));
++                r = bind(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+                 if (r < 0)
+                         return log_error_errno(errno, "bind(%s) failed: %m", sa.un.sun_path);
+ 
+@@ -782,7 +782,7 @@ static int manager_setup_cgroups_agent(Manager *m) {
+ 
+                 /* Only allow root to connect to this socket */
+                 RUN_WITH_UMASK(0077)
+-                        r = bind(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path));
++                        r = bind(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+                 if (r < 0)
+                         return log_error_errno(errno, "bind(%s) failed: %m", sa.un.sun_path);
+ 
+@@ -2245,11 +2245,10 @@ void manager_send_unit_audit(Manager *m, Unit *u, int type, bool success) {
+ }
+ 
+ void manager_send_unit_plymouth(Manager *m, Unit *u) {
+-        union sockaddr_union sa = PLYMOUTH_SOCKET;
+-
+-        int n = 0;
++        static const union sockaddr_union sa = PLYMOUTH_SOCKET;
+         _cleanup_free_ char *message = NULL;
+         _cleanup_close_ int fd = -1;
++        int n = 0;
+ 
+         /* Don't generate plymouth events if the service was already
+          * started and we're just deserializing */
+@@ -2275,7 +2274,7 @@ void manager_send_unit_plymouth(Manager *m, Unit *u) {
+                 return;
+         }
+ 
+-        if (connect(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + 1 + strlen(sa.un.sun_path+1)) < 0) {
++        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
+ 
+                 if (!IN_SET(errno, EPIPE, EAGAIN, ENOENT, ECONNREFUSED, ECONNRESET, ECONNABORTED))
+                         log_error_errno(errno, "connect() failed: %m");
+diff --git a/src/coredump/coredump.c b/src/coredump/coredump.c
+index 41fc1993d..01fdcfa90 100644
+--- a/src/coredump/coredump.c
++++ b/src/coredump/coredump.c
+@@ -847,7 +847,7 @@ static int send_iovec(const struct iovec iovec[], size_t n_iovec, int input_fd)
+         if (fd < 0)
+                 return log_error_errno(errno, "Failed to create coredump socket: %m");
+ 
+-        if (connect(fd, &sa.sa, offsetof(union sockaddr_union, un.sun_path) + strlen(sa.un.sun_path)) < 0)
++        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0)
+                 return log_error_errno(errno, "Failed to connect to coredump service: %m");
+ 
+         for (i = 0; i < n_iovec; i++) {
+diff --git a/src/fsck/fsck.c b/src/fsck/fsck.c
+index 6f56066da..d32e1d923 100644
+--- a/src/fsck/fsck.c
++++ b/src/fsck/fsck.c
+@@ -262,7 +262,7 @@ static int fsck_progress_socket(void) {
+         if (fd < 0)
+                 return log_warning_errno(errno, "socket(): %m");
+ 
+-        if (connect(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path)) < 0) {
++        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0) {
+                 r = log_full_errno(errno == ECONNREFUSED || errno == ENOENT ? LOG_DEBUG : LOG_WARNING,
+                                    errno, "Failed to connect to progress socket %s, ignoring: %m", sa.un.sun_path);
+                 safe_close(fd);
+diff --git a/src/import/importd.c b/src/import/importd.c
+index d2a5867a6..956a82945 100644
+--- a/src/import/importd.c
++++ b/src/import/importd.c
+@@ -677,7 +677,7 @@ static int manager_new(Manager **ret) {
+         (void) mkdir_parents_label(sa.un.sun_path, 0755);
+         (void) unlink(sa.un.sun_path);
+ 
+-        if (bind(m->notify_fd, &sa.sa, offsetof(union sockaddr_union, un.sun_path) + strlen(sa.un.sun_path)) < 0)
++        if (bind(m->notify_fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0)
+                 return -errno;
+ 
+         if (setsockopt(m->notify_fd, SOL_SOCKET, SO_PASSCRED, &one, sizeof(one)) < 0)
+diff --git a/src/journal/journal-send.c b/src/journal/journal-send.c
+index f0959b623..5e8a3e320 100644
+--- a/src/journal/journal-send.c
++++ b/src/journal/journal-send.c
+@@ -208,13 +208,13 @@ _public_ int sd_journal_sendv(const struct iovec *iov, int n) {
+         struct iovec *w;
+         uint64_t *l;
+         int i, j = 0;
+-        struct sockaddr_un sa = {
+-                .sun_family = AF_UNIX,
+-                .sun_path = "/run/systemd/journal/socket",
++        static const union sockaddr_union sa = {
++                .un.sun_family = AF_UNIX,
++                .un.sun_path = "/run/systemd/journal/socket",
+         };
+         struct msghdr mh = {
+-                .msg_name = &sa,
+-                .msg_namelen = offsetof(struct sockaddr_un, sun_path) + strlen(sa.sun_path),
++                .msg_name = (struct sockaddr*) &sa.sa,
++                .msg_namelen = SOCKADDR_UN_LEN(sa.un),
+         };
+         ssize_t k;
+         bool have_syslog_identifier = false;
+@@ -392,7 +392,7 @@ _public_ int sd_journal_perror(const char *message) {
+ }
+ 
+ _public_ int sd_journal_stream_fd(const char *identifier, int priority, int level_prefix) {
+-        union sockaddr_union sa = {
++        static const union sockaddr_union sa = {
+                 .un.sun_family = AF_UNIX,
+                 .un.sun_path = "/run/systemd/journal/stdout",
+         };
+@@ -408,7 +408,7 @@ _public_ int sd_journal_stream_fd(const char *identifier, int priority, int leve
+         if (fd < 0)
+                 return -errno;
+ 
+-        r = connect(fd, &sa.sa, offsetof(union sockaddr_union, un.sun_path) + strlen(sa.un.sun_path));
++        r = connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+         if (r < 0)
+                 return -errno;
+ 
+diff --git a/src/journal/journald-native.c b/src/journal/journald-native.c
+index a445291a5..0a1ce205c 100644
+--- a/src/journal/journald-native.c
++++ b/src/journal/journald-native.c
+@@ -448,24 +448,24 @@ void server_process_native_file(
+ }
+ 
+ int server_open_native_socket(Server*s) {
++
++        static const union sockaddr_union sa = {
++                .un.sun_family = AF_UNIX,
++                .un.sun_path = "/run/systemd/journal/socket",
++        };
+         static const int one = 1;
+         int r;
+ 
+         assert(s);
+ 
+         if (s->native_fd < 0) {
+-                union sockaddr_union sa = {
+-                        .un.sun_family = AF_UNIX,
+-                        .un.sun_path = "/run/systemd/journal/socket",
+-                };
+-
+                 s->native_fd = socket(AF_UNIX, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0);
+                 if (s->native_fd < 0)
+                         return log_error_errno(errno, "socket() failed: %m");
+ 
+-                unlink(sa.un.sun_path);
++                (void) unlink(sa.un.sun_path);
+ 
+-                r = bind(s->native_fd, &sa.sa, offsetof(union sockaddr_union, un.sun_path) + strlen(sa.un.sun_path));
++                r = bind(s->native_fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+                 if (r < 0)
+                         return log_error_errno(errno, "bind(%s) failed: %m", sa.un.sun_path);
+ 
+diff --git a/src/journal/journald-server.c b/src/journal/journald-server.c
+index e14d0ad98..8f82d2a83 100644
+--- a/src/journal/journald-server.c
++++ b/src/journal/journald-server.c
+@@ -1696,7 +1696,7 @@ static int server_connect_notify(Server *s) {
+         if (sa.un.sun_path[0] == '@')
+                 sa.un.sun_path[0] = 0;
+ 
+-        r = connect(s->notify_fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(e));
++        r = connect(s->notify_fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+         if (r < 0)
+                 return log_error_errno(errno, "Failed to connect to notify socket: %m");
+ 
+diff --git a/src/journal/journald-stream.c b/src/journal/journald-stream.c
+index 59352bcb3..4ad16ee41 100644
+--- a/src/journal/journald-stream.c
++++ b/src/journal/journald-stream.c
+@@ -700,23 +700,22 @@ fail:
+ }
+ 
+ int server_open_stdout_socket(Server *s) {
++        static const union sockaddr_union sa = {
++                .un.sun_family = AF_UNIX,
++                .un.sun_path = "/run/systemd/journal/stdout",
++        };
+         int r;
+ 
+         assert(s);
+ 
+         if (s->stdout_fd < 0) {
+-                union sockaddr_union sa = {
+-                        .un.sun_family = AF_UNIX,
+-                        .un.sun_path = "/run/systemd/journal/stdout",
+-                };
+-
+                 s->stdout_fd = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0);
+                 if (s->stdout_fd < 0)
+                         return log_error_errno(errno, "socket() failed: %m");
+ 
+-                unlink(sa.un.sun_path);
++                (void) unlink(sa.un.sun_path);
+ 
+-                r = bind(s->stdout_fd, &sa.sa, offsetof(union sockaddr_union, un.sun_path) + strlen(sa.un.sun_path));
++                r = bind(s->stdout_fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+                 if (r < 0)
+                         return log_error_errno(errno, "bind(%s) failed: %m", sa.un.sun_path);
+ 
+diff --git a/src/journal/journald-syslog.c b/src/journal/journald-syslog.c
+index 5153fd0cc..ead47887d 100644
+--- a/src/journal/journald-syslog.c
++++ b/src/journal/journald-syslog.c
+@@ -52,8 +52,7 @@ static void forward_syslog_iovec(Server *s, const struct iovec *iovec, unsigned
+                 .msg_iov = (struct iovec *) iovec,
+                 .msg_iovlen = n_iovec,
+                 .msg_name = (struct sockaddr*) &sa.sa,
+-                .msg_namelen = offsetof(union sockaddr_union, un.sun_path)
+-                               + strlen("/run/systemd/journal/syslog"),
++                .msg_namelen = SOCKADDR_UN_LEN(sa.un),
+         };
+         struct cmsghdr *cmsg;
+         union {
+@@ -383,24 +382,24 @@ void server_process_syslog_message(
+ }
+ 
+ int server_open_syslog_socket(Server *s) {
++
++        static const union sockaddr_union sa = {
++                .un.sun_family = AF_UNIX,
++                .un.sun_path = "/run/systemd/journal/dev-log",
++        };
+         static const int one = 1;
+         int r;
+ 
+         assert(s);
+ 
+         if (s->syslog_fd < 0) {
+-                static const union sockaddr_union sa = {
+-                        .un.sun_family = AF_UNIX,
+-                        .un.sun_path = "/run/systemd/journal/dev-log",
+-                };
+-
+                 s->syslog_fd = socket(AF_UNIX, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0);
+                 if (s->syslog_fd < 0)
+                         return log_error_errno(errno, "socket() failed: %m");
+ 
+-                unlink(sa.un.sun_path);
++                (void) unlink(sa.un.sun_path);
+ 
+-                r = bind(s->syslog_fd, &sa.sa, offsetof(union sockaddr_union, un.sun_path) + strlen(sa.un.sun_path));
++                r = bind(s->syslog_fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+                 if (r < 0)
+                         return log_error_errno(errno, "bind(%s) failed: %m", sa.un.sun_path);
+ 
+@@ -437,6 +436,7 @@ int server_open_syslog_socket(Server *s) {
+ 
+ void server_maybe_warn_forward_syslog_missed(Server *s) {
+         usec_t n;
++
+         assert(s);
+ 
+         if (s->n_forward_syslog_missed <= 0)
+diff --git a/src/libsystemd/sd-bus/sd-bus.c b/src/libsystemd/sd-bus/sd-bus.c
+index 04da94e7e..ed5f94e13 100644
+--- a/src/libsystemd/sd-bus/sd-bus.c
++++ b/src/libsystemd/sd-bus/sd-bus.c
+@@ -836,7 +836,7 @@ static int parse_container_unix_address(sd_bus *b, const char **p, char **guid)
+ 
+         b->sockaddr.un.sun_family = AF_UNIX;
+         strncpy(b->sockaddr.un.sun_path, "/var/run/dbus/system_bus_socket", sizeof(b->sockaddr.un.sun_path));
+-        b->sockaddr_size = offsetof(struct sockaddr_un, sun_path) + strlen("/var/run/dbus/system_bus_socket");
++        b->sockaddr_size = SOCKADDR_UN_LEN(b->sockaddr.un);
+ 
+         return 0;
+ }
+diff --git a/src/libsystemd/sd-daemon/sd-daemon.c b/src/libsystemd/sd-daemon/sd-daemon.c
+index bd1c7f15f..4da9dbfd6 100644
+--- a/src/libsystemd/sd-daemon/sd-daemon.c
++++ b/src/libsystemd/sd-daemon/sd-daemon.c
+@@ -458,9 +458,7 @@ _public_ int sd_pid_notify_with_fds(pid_t pid, int unset_environment, const char
+         if (sockaddr.un.sun_path[0] == '@')
+                 sockaddr.un.sun_path[0] = 0;
+ 
+-        msghdr.msg_namelen = offsetof(struct sockaddr_un, sun_path) + strlen(e);
+-        if (msghdr.msg_namelen > sizeof(struct sockaddr_un))
+-                msghdr.msg_namelen = sizeof(struct sockaddr_un);
++        msghdr.msg_namelen = SOCKADDR_UN_LEN(sockaddr.un);
+ 
+         have_pid = pid != 0 && pid != getpid();
+ 
+diff --git a/src/login/pam_systemd.c b/src/login/pam_systemd.c
+index 40e246bb0..98dc20134 100644
+--- a/src/login/pam_systemd.c
++++ b/src/login/pam_systemd.c
+@@ -150,7 +150,7 @@ static int get_seat_from_display(const char *display, const char **seat, uint32_
+         if (fd < 0)
+                 return -errno;
+ 
+-        if (connect(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path)) < 0)
++        if (connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0)
+                 return -errno;
+ 
+         r = getpeercred(fd, &ucred);
+diff --git a/src/reply-password/reply-password.c b/src/reply-password/reply-password.c
+index e29175896..17eab9772 100644
+--- a/src/reply-password/reply-password.c
++++ b/src/reply-password/reply-password.c
+@@ -26,14 +26,12 @@
+ #include "fd-util.h"
+ #include "log.h"
+ #include "macro.h"
++#include "socket-util.h"
+ #include "string-util.h"
+ #include "util.h"
+ 
+ static int send_on_socket(int fd, const char *socket_name, const void *packet, size_t size) {
+-        union {
+-                struct sockaddr sa;
+-                struct sockaddr_un un;
+-        } sa = {
++        union sockaddr_union sa = {
+                 .un.sun_family = AF_UNIX,
+         };
+ 
+@@ -43,7 +41,7 @@ static int send_on_socket(int fd, const char *socket_name, const void *packet, s
+ 
+         strncpy(sa.un.sun_path, socket_name, sizeof(sa.un.sun_path));
+ 
+-        if (sendto(fd, packet, size, MSG_NOSIGNAL, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(socket_name)) < 0)
++        if (sendto(fd, packet, size, MSG_NOSIGNAL, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0)
+                 return log_error_errno(errno, "Failed to send: %m");
+ 
+         return 0;
+diff --git a/src/shared/ask-password-api.c b/src/shared/ask-password-api.c
+index 6805873f9..4a4bd8d3b 100644
+--- a/src/shared/ask-password-api.c
++++ b/src/shared/ask-password-api.c
+@@ -431,7 +431,7 @@ static int create_socket(char **name) {
+         snprintf(sa.un.sun_path, sizeof(sa.un.sun_path)-1, "/run/systemd/ask-password/sck.%" PRIx64, random_u64());
+ 
+         RUN_WITH_UMASK(0177) {
+-                if (bind(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path)) < 0)
++                if (bind(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un)) < 0)
+                         return -errno;
+         }
+ 
+diff --git a/src/socket-proxy/socket-proxyd.c b/src/socket-proxy/socket-proxyd.c
+index 1157a0c72..52b4db887 100644
+--- a/src/socket-proxy/socket-proxyd.c
++++ b/src/socket-proxy/socket-proxyd.c
+@@ -400,28 +400,19 @@ static int resolve_remote(Connection *c) {
+ 
+         union sockaddr_union sa = {};
+         const char *node, *service;
+-        socklen_t salen;
+         int r;
+ 
+         if (path_is_absolute(arg_remote_host)) {
+                 sa.un.sun_family = AF_UNIX;
+-                strncpy(sa.un.sun_path, arg_remote_host, sizeof(sa.un.sun_path)-1);
+-                sa.un.sun_path[sizeof(sa.un.sun_path)-1] = 0;
+-
+-                salen = offsetof(union sockaddr_union, un.sun_path) + strlen(sa.un.sun_path);
+-
+-                return connection_start(c, &sa.sa, salen);
++                strncpy(sa.un.sun_path, arg_remote_host, sizeof(sa.un.sun_path));
++                return connection_start(c, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+         }
+ 
+         if (arg_remote_host[0] == '@') {
+                 sa.un.sun_family = AF_UNIX;
+                 sa.un.sun_path[0] = 0;
+-                strncpy(sa.un.sun_path+1, arg_remote_host+1, sizeof(sa.un.sun_path)-2);
+-                sa.un.sun_path[sizeof(sa.un.sun_path)-1] = 0;
+-
+-                salen = offsetof(union sockaddr_union, un.sun_path) + 1 + strlen(sa.un.sun_path + 1);
+-
+-                return connection_start(c, &sa.sa, salen);
++                strncpy(sa.un.sun_path+1, arg_remote_host+1, sizeof(sa.un.sun_path)-1);
++                return connection_start(c, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+         }
+ 
+         service = strrchr(arg_remote_host, ':');
+diff --git a/src/test/test-socket-util.c b/src/test/test-socket-util.c
+index 33ff3755b..9e01f3afd 100644
+--- a/src/test/test-socket-util.c
++++ b/src/test/test-socket-util.c
+@@ -343,6 +343,21 @@ static void test_sockaddr_equal(void) {
+         assert_se(!sockaddr_equal(&b, &c));
+ }
+ 
++static void test_sockaddr_un_len(void) {
++        static const struct sockaddr_un fs = {
++                .sun_family = AF_UNIX,
++                .sun_path = "/foo/bar/waldo",
++        };
++
++        static const struct sockaddr_un abstract = {
++                .sun_family = AF_UNIX,
++                .sun_path = "\0foobar",
++        };
++
++        assert_se(SOCKADDR_UN_LEN(fs) == offsetof(struct sockaddr_un, sun_path) + strlen(fs.sun_path));
++        assert_se(SOCKADDR_UN_LEN(abstract) == offsetof(struct sockaddr_un, sun_path) + 1 + strlen(abstract.sun_path + 1));
++}
++
+ int main(int argc, char *argv[]) {
+ 
+         log_set_max_level(LOG_DEBUG);
+@@ -363,5 +378,7 @@ int main(int argc, char *argv[]) {
+ 
+         test_sockaddr_equal();
+ 
++        test_sockaddr_un_len();
++
+         return 0;
+ }
+diff --git a/src/tty-ask-password-agent/tty-ask-password-agent.c b/src/tty-ask-password-agent/tty-ask-password-agent.c
+index c7ded451a..ee879c7b8 100644
+--- a/src/tty-ask-password-agent/tty-ask-password-agent.c
++++ b/src/tty-ask-password-agent/tty-ask-password-agent.c
+@@ -65,8 +65,8 @@ static int ask_password_plymouth(
+                 const char *flag_file,
+                 char ***ret) {
+ 
++        static const union sockaddr_union sa = PLYMOUTH_SOCKET;
+         _cleanup_close_ int fd = -1, notify = -1;
+-        union sockaddr_union sa = PLYMOUTH_SOCKET;
+         _cleanup_free_ char *packet = NULL;
+         ssize_t k;
+         int r, n;
+@@ -94,7 +94,7 @@ static int ask_password_plymouth(
+         if (fd < 0)
+                 return -errno;
+ 
+-        r = connect(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + 1 + strlen(sa.un.sun_path+1));
++        r = connect(fd, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+         if (r < 0)
+                 return -errno;
+ 
+@@ -269,8 +269,7 @@ static int send_passwords(const char *socket_name, char **passwords) {
+ 
+         strncpy(sa.un.sun_path, socket_name, sizeof(sa.un.sun_path));
+ 
+-        r = sendto(socket_fd, packet, packet_length, MSG_NOSIGNAL, &sa.sa,
+-                   offsetof(struct sockaddr_un, sun_path) + strlen(socket_name));
++        r = sendto(socket_fd, packet, packet_length, MSG_NOSIGNAL, &sa.sa, SOCKADDR_UN_LEN(sa.un));
+         if (r < 0)
+                 r = log_debug_errno(errno, "sendto(): %m");
+ 
+diff --git a/src/udev/udev-ctrl.c b/src/udev/udev-ctrl.c
+index 962de22f4..f68a09d7a 100644
+--- a/src/udev/udev-ctrl.c
++++ b/src/udev/udev-ctrl.c
+@@ -105,7 +105,7 @@ struct udev_ctrl *udev_ctrl_new_from_fd(struct udev *udev, int fd) {
+ 
+         uctrl->saddr.un.sun_family = AF_LOCAL;
+         strscpy(uctrl->saddr.un.sun_path, sizeof(uctrl->saddr.un.sun_path), "/run/udev/control");
+-        uctrl->addrlen = offsetof(struct sockaddr_un, sun_path) + strlen(uctrl->saddr.un.sun_path);
++        uctrl->addrlen = SOCKADDR_UN_LEN(uctrl->saddr.un);
+         return uctrl;
+ }
+ 
+

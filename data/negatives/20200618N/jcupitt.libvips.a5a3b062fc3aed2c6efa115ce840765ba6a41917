@@ -1,0 +1,116 @@
+commit a5a3b062fc3aed2c6efa115ce840765ba6a41917
+Author: John Cupitt <jcupitt@gmail.com>
+Date:   Fri Apr 17 16:59:28 2015 +0100
+
+    support saving 1 and 2 band images to webp
+    
+    see https://github.com/jcupitt/libvips/issues/267
+    
+    libwebp does not supportG and GA images
+    
+    make a new SAVEABLE type for savers which only do RGB and RGBA
+
+diff --git a/libvips/foreign/foreign.c b/libvips/foreign/foreign.c
+index be2dff69..ac14d649 100644
+--- a/libvips/foreign/foreign.c
++++ b/libvips/foreign/foreign.c
+@@ -1132,6 +1132,7 @@ vips_foreign_convert_saveable( VipsForeignSave *save )
+ 		vips_colourspace_issupported( in ) &&
+ 		(class->saveable == VIPS_SAVEABLE_RGB ||
+ 		 class->saveable == VIPS_SAVEABLE_RGBA ||
++		 class->saveable == VIPS_SAVEABLE_RGBA_ONLY ||
+ 		 class->saveable == VIPS_SAVEABLE_RGB_CMYK) ) { 
+ 		VipsImage *out;
+ 		VipsInterpretation interpretation;
+@@ -1154,6 +1155,34 @@ vips_foreign_convert_saveable( VipsForeignSave *save )
+ 		in = out;
+ 	}
+ 
++	/* VIPS_SAVEABLE_RGBA_ONLY does not support 1 or 2 bands ... convert 
++	 * to sRGB. 
++	 */
++	if( !class->coding[VIPS_CODING_RAD] &&
++		in->Bands < 3 &&
++		vips_colourspace_issupported( in ) &&
++		class->saveable == VIPS_SAVEABLE_RGBA_ONLY ) { 
++		VipsImage *out;
++		VipsInterpretation interpretation;
++
++		/* Do we make RGB or RGB16? We don't want to squash a 16-bit
++		 * RGB down to 8 bits if the saver supports 16. 
++		 */
++		if( vips_band_format_is8bit( 
++			class->format_table[in->BandFmt] ) )
++			interpretation = VIPS_INTERPRETATION_sRGB;
++		else
++			interpretation = VIPS_INTERPRETATION_RGB16;
++
++		if( vips_colourspace( in, &out, interpretation, NULL ) ) {
++			g_object_unref( in );
++			return( -1 );
++		}
++		g_object_unref( in );
++
++		in = out;
++	}
++
+ 	/* Get the bands right. We must do this after all colourspace
+ 	 * transforms, since they can change the number of bands. 
+ 	 */
+@@ -1211,7 +1240,8 @@ vips_foreign_convert_saveable( VipsForeignSave *save )
+ 		else if( in->Bands > 4 && 
+ 			((class->saveable == VIPS_SAVEABLE_RGB_CMYK &&
+ 			  in->Type == VIPS_INTERPRETATION_CMYK) ||
+-			 class->saveable == VIPS_SAVEABLE_RGBA) ) {
++			 class->saveable == VIPS_SAVEABLE_RGBA ||
++			 class->saveable == VIPS_SAVEABLE_RGBA_ONLY) ) {
+ 			VipsImage *out;
+ 
+ 			if( vips_extract_band( in, &out, 0, 
+diff --git a/libvips/foreign/webpsave.c b/libvips/foreign/webpsave.c
+index b61a3f74..03120c0d 100644
+--- a/libvips/foreign/webpsave.c
++++ b/libvips/foreign/webpsave.c
+@@ -92,7 +92,7 @@ vips_foreign_save_webp_class_init( VipsForeignSaveWebpClass *class )
+ 
+ 	foreign_class->suffs = vips__webp_suffs;
+ 
+-	save_class->saveable = VIPS_SAVEABLE_RGBA;
++	save_class->saveable = VIPS_SAVEABLE_RGBA_ONLY;
+ 	save_class->format_table = bandfmt_webp;
+ 
+ 	VIPS_ARG_INT( class, "Q", 10, 
+diff --git a/libvips/include/vips/foreign.h b/libvips/include/vips/foreign.h
+index adc9f259..4a22920d 100644
+--- a/libvips/include/vips/foreign.h
++++ b/libvips/include/vips/foreign.h
+@@ -239,7 +239,7 @@ gboolean vips_foreign_is_a_buffer( const char *loader, void *data, size_t size )
+  * VipsSaveable:
+  * @VIPS_SAVEABLE_MONO: 1 band (eg. CSV)
+  * @VIPS_SAVEABLE_RGB: 1 or 3 bands (eg. PPM) 
+- * @VIPS_SAVEABLE_RGBA: 1, 2, 3 or 4 bands (eg. PNG)
++ * @VIPS_SAVEABLE_RGBA_ONLY: 3 or 4 bands (eg. WEBP)
+  * @VIPS_SAVEABLE_RGB_CMYK: 1, 3 or 4 bands (eg. JPEG)
+  * @VIPS_SAVEABLE_ANY: any number of bands (eg. TIFF)
+  *
+@@ -249,6 +249,7 @@ typedef enum {
+ 	VIPS_SAVEABLE_MONO,
+ 	VIPS_SAVEABLE_RGB,
+ 	VIPS_SAVEABLE_RGBA,
++	VIPS_SAVEABLE_RGBA_ONLY,
+ 	VIPS_SAVEABLE_RGB_CMYK,
+ 	VIPS_SAVEABLE_ANY,
+ 	VIPS_SAVEABLE_LAST
+diff --git a/libvips/iofuncs/enumtypes.c b/libvips/iofuncs/enumtypes.c
+index 586c18de..ccdd9796 100644
+--- a/libvips/iofuncs/enumtypes.c
++++ b/libvips/iofuncs/enumtypes.c
+@@ -35,6 +35,7 @@ vips_saveable_get_type( void )
+ 			{VIPS_SAVEABLE_MONO, "VIPS_SAVEABLE_MONO", "mono"},
+ 			{VIPS_SAVEABLE_RGB, "VIPS_SAVEABLE_RGB", "rgb"},
+ 			{VIPS_SAVEABLE_RGBA, "VIPS_SAVEABLE_RGBA", "rgba"},
++			{VIPS_SAVEABLE_RGBA_ONLY, "VIPS_SAVEABLE_RGBA_ONLY", "rgba-only"},
+ 			{VIPS_SAVEABLE_RGB_CMYK, "VIPS_SAVEABLE_RGB_CMYK", "rgb-cmyk"},
+ 			{VIPS_SAVEABLE_ANY, "VIPS_SAVEABLE_ANY", "any"},
+ 			{VIPS_SAVEABLE_LAST, "VIPS_SAVEABLE_LAST", "last"},
+

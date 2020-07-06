@@ -1,0 +1,84 @@
+commit 7bdc072086939093238a970f054e8e63d531253d
+Author: Yakir Yang <ykk@rock-chips.com>
+Date:   Wed Jun 29 17:15:18 2016 +0800
+
+    drm/bridge: analogix_dp: some rockchip chips need to flip REF_CLK bit setting
+    
+    As vendor document indicate, when REF_CLK bit set 0, then DP
+    phy's REF_CLK should switch to 24M source clock.
+    
+    But due to IC PHY layout mistaken, some chips need to flip this
+    bit(like RK3288), and unfortunately they didn't indicate in the
+    DP version register. That's why we have to make this little hack.
+    
+    Signed-off-by: Yakir Yang <ykk@rock-chips.com>
+    Reviewed-by: Tomasz Figa <tomasz.figa@chromium.com>
+    Tested-by: Javier Martinez Canillas <javier@osg.samsung.com>
+    Reviewed-by: Sean Paul <seanpaul@chromium.org>
+
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.c b/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.c
+index 49205ef02be3..48030f0cf497 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.c
++++ b/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.c
+@@ -74,8 +74,12 @@ void analogix_dp_init_analog_param(struct analogix_dp_device *dp)
+ 	reg = SEL_24M | TX_DVDD_BIT_1_0625V;
+ 	writel(reg, dp->reg_base + ANALOGIX_DP_ANALOG_CTL_2);
+ 
+-	if (dp->plat_data && (dp->plat_data->dev_type == RK3288_DP)) {
+-		writel(REF_CLK_24M, dp->reg_base + ANALOGIX_DP_PLL_REG_1);
++	if (dp->plat_data && is_rockchip(dp->plat_data->dev_type)) {
++		reg = REF_CLK_24M;
++		if (dp->plat_data->dev_type == RK3288_DP)
++			reg ^= REF_CLK_MASK;
++
++		writel(reg, dp->reg_base + ANALOGIX_DP_PLL_REG_1);
+ 		writel(0x95, dp->reg_base + ANALOGIX_DP_PLL_REG_2);
+ 		writel(0x40, dp->reg_base + ANALOGIX_DP_PLL_REG_3);
+ 		writel(0x58, dp->reg_base + ANALOGIX_DP_PLL_REG_4);
+@@ -244,7 +248,7 @@ void analogix_dp_set_analog_power_down(struct analogix_dp_device *dp,
+ 	u32 reg;
+ 	u32 phy_pd_addr = ANALOGIX_DP_PHY_PD;
+ 
+-	if (dp->plat_data && (dp->plat_data->dev_type == RK3288_DP))
++	if (dp->plat_data && is_rockchip(dp->plat_data->dev_type))
+ 		phy_pd_addr = ANALOGIX_DP_PD;
+ 
+ 	switch (block) {
+@@ -448,7 +452,7 @@ void analogix_dp_init_aux(struct analogix_dp_device *dp)
+ 	analogix_dp_reset_aux(dp);
+ 
+ 	/* Disable AUX transaction H/W retry */
+-	if (dp->plat_data && (dp->plat_data->dev_type == RK3288_DP))
++	if (dp->plat_data && is_rockchip(dp->plat_data->dev_type))
+ 		reg = AUX_BIT_PERIOD_EXPECTED_DELAY(0) |
+ 		      AUX_HW_RETRY_COUNT_SEL(3) |
+ 		      AUX_HW_RETRY_INTERVAL_600_MICROSECONDS;
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.h b/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.h
+index 88d56ad5c010..cdcc6c5add5e 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.h
++++ b/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.h
+@@ -165,6 +165,7 @@
+ /* ANALOGIX_DP_PLL_REG_1 */
+ #define REF_CLK_24M				(0x1 << 0)
+ #define REF_CLK_27M				(0x0 << 0)
++#define REF_CLK_MASK				(0x1 << 0)
+ 
+ /* ANALOGIX_DP_LANE_MAP */
+ #define LANE3_MAP_LOGIC_LANE_0			(0x0 << 6)
+diff --git a/include/drm/bridge/analogix_dp.h b/include/drm/bridge/analogix_dp.h
+index 25afb31f0389..790ab5d07a88 100644
+--- a/include/drm/bridge/analogix_dp.h
++++ b/include/drm/bridge/analogix_dp.h
+@@ -18,6 +18,11 @@ enum analogix_dp_devtype {
+ 	RK3288_DP,
+ };
+ 
++static inline bool is_rockchip(enum analogix_dp_devtype type)
++{
++	return type == RK3288_DP;
++}
++
+ struct analogix_dp_plat_data {
+ 	enum analogix_dp_devtype dev_type;
+ 	struct drm_panel *panel;
+

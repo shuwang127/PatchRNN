@@ -1,0 +1,45 @@
+commit 7a7c13acd1cb4d0a55f8529a67b6a6fe9c97d18f
+Author: mikeb <mikeb@openbsd.org>
+Date:   Sun May 7 18:18:20 2017 +0000
+
+    Fix stage transition from the initial one to DROPPING
+    
+    When the initial state is set to DROPPING, the code immediately
+    jumps to a CONTROL state bypassing DROPPING. To fix this we start
+    with an explicit INITIAL state so that we do an INITIAL->DROPPING
+    transition right off the bat in the beginning of the loop and
+    then perform a DROPPING->CONTROL and either CONTROL->DROPPING and
+    restart the loop or CONTROL->RECOVERY/ACCEPTING and terminate.
+
+diff --git a/sys/net/fq_codel.c b/sys/net/fq_codel.c
+index 0a27ce99dc3..db871c2b333 100644
+--- a/sys/net/fq_codel.c
++++ b/sys/net/fq_codel.c
+@@ -354,7 +354,7 @@ codel_next_packet(struct codel *cd, struct codel_params *cp, int64_t now,
+ 	return (m);
+ }
+ 
+-enum { ACCEPTING, FIRSTDROP, DROPPING, CONTROL, RECOVERY };
++enum { INITIAL, ACCEPTING, FIRSTDROP, DROPPING, CONTROL, RECOVERY };
+ 
+ static inline int
+ codel_state_change(struct codel *cd, int64_t now, struct mbuf *m, int drop,
+@@ -367,7 +367,7 @@ codel_state_change(struct codel *cd, int64_t now, struct mbuf *m, int drop,
+ 		if (!drop)
+ 			return (RECOVERY);
+ 		else if (now >= cd->next)
+-			return (state == CONTROL ? DROPPING : CONTROL);
++			return (state == DROPPING ? CONTROL : DROPPING);
+ 	} else if (drop)
+ 		return (FIRSTDROP);
+ 
+@@ -387,7 +387,7 @@ codel_dequeue(struct codel *cd, struct codel_params *cp, int64_t now,
+ 
+ 	*dpkts = *dbytes = 0;
+ 
+-	state = cd->dropping ? DROPPING : ACCEPTING;
++	state = INITIAL;
+ 
+ 	while (!done) {
+ 		m = codel_next_packet(cd, cp, now, &drop);
+

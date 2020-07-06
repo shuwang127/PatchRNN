@@ -1,0 +1,292 @@
+commit a4ffdde6e56fdf8c34ddadc2674d6eb978083369
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Wed Jun 2 17:38:30 2010 -0400
+
+    simplify checks for I_CLEAR/I_FREEING
+    
+    add I_CLEAR instead of replacing I_FREEING with it.  I_CLEAR is
+    equivalent to I_FREEING for almost all code looking at either;
+    it's there to keep track of having called clear_inode() exactly
+    once per inode lifetime, at some point after having set I_FREEING.
+    I_CLEAR and I_FREEING never get set at the same time with the
+    current code, so we can switch to setting i_flags to I_FREEING | I_CLEAR
+    instead of I_CLEAR without loss of information.  As the result of
+    such change, checks become simpler and the amount of code that needs
+    to know about I_CLEAR shrinks a lot.
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index 7f9e0536db1a..95eac0116963 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -3860,7 +3860,7 @@ static void inode_tree_add(struct inode *inode)
+ 			p = &parent->rb_right;
+ 		else {
+ 			WARN_ON(!(entry->vfs_inode.i_state &
+-				  (I_WILL_FREE | I_FREEING | I_CLEAR)));
++				  (I_WILL_FREE | I_FREEING)));
+ 			rb_erase(parent, &root->inode_tree);
+ 			RB_CLEAR_NODE(parent);
+ 			spin_unlock(&root->inode_lock);
+diff --git a/fs/drop_caches.c b/fs/drop_caches.c
+index 83c4f600786a..2195c213ab2f 100644
+--- a/fs/drop_caches.c
++++ b/fs/drop_caches.c
+@@ -18,7 +18,7 @@ static void drop_pagecache_sb(struct super_block *sb, void *unused)
+ 
+ 	spin_lock(&inode_lock);
+ 	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
+-		if (inode->i_state & (I_FREEING|I_CLEAR|I_WILL_FREE|I_NEW))
++		if (inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW))
+ 			continue;
+ 		if (inode->i_mapping->nrpages == 0)
+ 			continue;
+diff --git a/fs/fs-writeback.c b/fs/fs-writeback.c
+index d5be1693ac93..7608880b5c58 100644
+--- a/fs/fs-writeback.c
++++ b/fs/fs-writeback.c
+@@ -352,7 +352,7 @@ writeback_single_inode(struct inode *inode, struct writeback_control *wbc)
+ 
+ 	spin_lock(&inode_lock);
+ 	inode->i_state &= ~I_SYNC;
+-	if (!(inode->i_state & (I_FREEING | I_CLEAR))) {
++	if (!(inode->i_state & I_FREEING)) {
+ 		if ((inode->i_state & I_DIRTY_PAGES) && wbc->for_kupdate) {
+ 			/*
+ 			 * More pages get dirtied by a fast dirtier.
+@@ -499,7 +499,7 @@ static int writeback_sb_inodes(struct super_block *sb, struct bdi_writeback *wb,
+ 		if (inode_dirtied_after(inode, wbc->wb_start))
+ 			return 1;
+ 
+-		BUG_ON(inode->i_state & (I_FREEING | I_CLEAR));
++		BUG_ON(inode->i_state & I_FREEING);
+ 		__iget(inode);
+ 		pages_skipped = wbc->pages_skipped;
+ 		writeback_single_inode(inode, wbc);
+@@ -935,7 +935,7 @@ void __mark_inode_dirty(struct inode *inode, int flags)
+ 			if (hlist_unhashed(&inode->i_hash))
+ 				goto out;
+ 		}
+-		if (inode->i_state & (I_FREEING|I_CLEAR))
++		if (inode->i_state & I_FREEING)
+ 			goto out;
+ 
+ 		/*
+@@ -1001,7 +1001,7 @@ static void wait_sb_inodes(struct super_block *sb)
+ 	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
+ 		struct address_space *mapping;
+ 
+-		if (inode->i_state & (I_FREEING|I_CLEAR|I_WILL_FREE|I_NEW))
++		if (inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW))
+ 			continue;
+ 		mapping = inode->i_mapping;
+ 		if (mapping->nrpages == 0)
+diff --git a/fs/gfs2/inode.c b/fs/gfs2/inode.c
+index 6c023a3b5d25..08140f185a37 100644
+--- a/fs/gfs2/inode.c
++++ b/fs/gfs2/inode.c
+@@ -84,7 +84,7 @@ static int iget_skip_test(struct inode *inode, void *opaque)
+ 	struct gfs2_skip_data *data = opaque;
+ 
+ 	if (ip->i_no_addr == data->no_addr) {
+-		if (inode->i_state & (I_FREEING|I_CLEAR|I_WILL_FREE)){
++		if (inode->i_state & (I_FREEING|I_WILL_FREE)){
+ 			data->skipped = 1;
+ 			return 0;
+ 		}
+diff --git a/fs/inode.c b/fs/inode.c
+index 722860b323a9..71fe079ca32a 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -317,7 +317,7 @@ void clear_inode(struct inode *inode)
+ 		bd_forget(inode);
+ 	if (S_ISCHR(inode->i_mode) && inode->i_cdev)
+ 		cd_forget(inode);
+-	inode->i_state = I_CLEAR;
++	inode->i_state = I_FREEING | I_CLEAR;
+ }
+ EXPORT_SYMBOL(clear_inode);
+ 
+@@ -553,7 +553,7 @@ static struct inode *find_inode(struct super_block *sb,
+ 			continue;
+ 		if (!test(inode, data))
+ 			continue;
+-		if (inode->i_state & (I_FREEING|I_CLEAR|I_WILL_FREE)) {
++		if (inode->i_state & (I_FREEING|I_WILL_FREE)) {
+ 			__wait_on_freeing_inode(inode);
+ 			goto repeat;
+ 		}
+@@ -578,7 +578,7 @@ static struct inode *find_inode_fast(struct super_block *sb,
+ 			continue;
+ 		if (inode->i_sb != sb)
+ 			continue;
+-		if (inode->i_state & (I_FREEING|I_CLEAR|I_WILL_FREE)) {
++		if (inode->i_state & (I_FREEING|I_WILL_FREE)) {
+ 			__wait_on_freeing_inode(inode);
+ 			goto repeat;
+ 		}
+@@ -840,7 +840,7 @@ EXPORT_SYMBOL(iunique);
+ struct inode *igrab(struct inode *inode)
+ {
+ 	spin_lock(&inode_lock);
+-	if (!(inode->i_state & (I_FREEING|I_CLEAR|I_WILL_FREE)))
++	if (!(inode->i_state & (I_FREEING|I_WILL_FREE)))
+ 		__iget(inode);
+ 	else
+ 		/*
+@@ -1089,7 +1089,7 @@ int insert_inode_locked(struct inode *inode)
+ 				continue;
+ 			if (old->i_sb != sb)
+ 				continue;
+-			if (old->i_state & (I_FREEING|I_CLEAR|I_WILL_FREE))
++			if (old->i_state & (I_FREEING|I_WILL_FREE))
+ 				continue;
+ 			break;
+ 		}
+@@ -1128,7 +1128,7 @@ int insert_inode_locked4(struct inode *inode, unsigned long hashval,
+ 				continue;
+ 			if (!test(old, data))
+ 				continue;
+-			if (old->i_state & (I_FREEING|I_CLEAR|I_WILL_FREE))
++			if (old->i_state & (I_FREEING|I_WILL_FREE))
+ 				continue;
+ 			break;
+ 		}
+@@ -1218,7 +1218,7 @@ void generic_delete_inode(struct inode *inode)
+ 	hlist_del_init(&inode->i_hash);
+ 	spin_unlock(&inode_lock);
+ 	wake_up_inode(inode);
+-	BUG_ON(inode->i_state != I_CLEAR);
++	BUG_ON(inode->i_state != (I_FREEING | I_CLEAR));
+ 	destroy_inode(inode);
+ }
+ EXPORT_SYMBOL(generic_delete_inode);
+@@ -1322,7 +1322,7 @@ static inline void iput_final(struct inode *inode)
+ void iput(struct inode *inode)
+ {
+ 	if (inode) {
+-		BUG_ON(inode->i_state == I_CLEAR);
++		BUG_ON(inode->i_state & I_CLEAR);
+ 
+ 		if (atomic_dec_and_lock(&inode->i_count, &inode_lock))
+ 			iput_final(inode);
+diff --git a/fs/nilfs2/gcdat.c b/fs/nilfs2/gcdat.c
+index dd5f7e0a95f6..84a45d1d5464 100644
+--- a/fs/nilfs2/gcdat.c
++++ b/fs/nilfs2/gcdat.c
+@@ -78,7 +78,7 @@ void nilfs_clear_gcdat_inode(struct the_nilfs *nilfs)
+ 	struct inode *gcdat = nilfs->ns_gc_dat;
+ 	struct nilfs_inode_info *gii = NILFS_I(gcdat);
+ 
+-	gcdat->i_state = I_CLEAR;
++	gcdat->i_state = I_FREEING | I_CLEAR;
+ 	gii->i_flags = 0;
+ 
+ 	nilfs_palloc_clear_cache(gcdat);
+diff --git a/fs/notify/inode_mark.c b/fs/notify/inode_mark.c
+index 0399bcbe09c8..152b83ec005d 100644
+--- a/fs/notify/inode_mark.c
++++ b/fs/notify/inode_mark.c
+@@ -369,11 +369,11 @@ void fsnotify_unmount_inodes(struct list_head *list)
+ 		struct inode *need_iput_tmp;
+ 
+ 		/*
+-		 * We cannot __iget() an inode in state I_CLEAR, I_FREEING,
++		 * We cannot __iget() an inode in state I_FREEING,
+ 		 * I_WILL_FREE, or I_NEW which is fine because by that point
+ 		 * the inode cannot have any associated watches.
+ 		 */
+-		if (inode->i_state & (I_CLEAR|I_FREEING|I_WILL_FREE|I_NEW))
++		if (inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW))
+ 			continue;
+ 
+ 		/*
+@@ -397,7 +397,7 @@ void fsnotify_unmount_inodes(struct list_head *list)
+ 		/* In case the dropping of a reference would nuke next_i. */
+ 		if ((&next_i->i_sb_list != list) &&
+ 		    atomic_read(&next_i->i_count) &&
+-		    !(next_i->i_state & (I_CLEAR | I_FREEING | I_WILL_FREE))) {
++		    !(next_i->i_state & (I_FREEING | I_WILL_FREE))) {
+ 			__iget(next_i);
+ 			need_iput = next_i;
+ 		}
+diff --git a/fs/notify/inotify/inotify.c b/fs/notify/inotify/inotify.c
+index 27b75ebc7460..cf6b0429a257 100644
+--- a/fs/notify/inotify/inotify.c
++++ b/fs/notify/inotify/inotify.c
+@@ -377,11 +377,11 @@ void inotify_unmount_inodes(struct list_head *list)
+ 		struct list_head *watches;
+ 
+ 		/*
+-		 * We cannot __iget() an inode in state I_CLEAR, I_FREEING,
++		 * We cannot __iget() an inode in state I_FREEING,
+ 		 * I_WILL_FREE, or I_NEW which is fine because by that point
+ 		 * the inode cannot have any associated watches.
+ 		 */
+-		if (inode->i_state & (I_CLEAR|I_FREEING|I_WILL_FREE|I_NEW))
++		if (inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW))
+ 			continue;
+ 
+ 		/*
+@@ -403,8 +403,7 @@ void inotify_unmount_inodes(struct list_head *list)
+ 		/* In case the dropping of a reference would nuke next_i. */
+ 		if ((&next_i->i_sb_list != list) &&
+ 				atomic_read(&next_i->i_count) &&
+-				!(next_i->i_state & (I_CLEAR | I_FREEING |
+-					I_WILL_FREE))) {
++				!(next_i->i_state & (I_FREEING|I_WILL_FREE))) {
+ 			__iget(next_i);
+ 			need_iput = next_i;
+ 		}
+diff --git a/fs/quota/dquot.c b/fs/quota/dquot.c
+index 437d2ca2de97..5cec3e2348f1 100644
+--- a/fs/quota/dquot.c
++++ b/fs/quota/dquot.c
+@@ -885,7 +885,7 @@ static void add_dquot_ref(struct super_block *sb, int type)
+ 
+ 	spin_lock(&inode_lock);
+ 	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
+-		if (inode->i_state & (I_FREEING|I_CLEAR|I_WILL_FREE|I_NEW))
++		if (inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW))
+ 			continue;
+ #ifdef CONFIG_QUOTA_DEBUG
+ 		if (unlikely(inode_get_rsv_space(inode) > 0))
+diff --git a/fs/xfs/linux-2.6/xfs_iops.c b/fs/xfs/linux-2.6/xfs_iops.c
+index 62dd349facee..68be25dcd301 100644
+--- a/fs/xfs/linux-2.6/xfs_iops.c
++++ b/fs/xfs/linux-2.6/xfs_iops.c
+@@ -80,7 +80,7 @@ xfs_mark_inode_dirty_sync(
+ {
+ 	struct inode	*inode = VFS_I(ip);
+ 
+-	if (!(inode->i_state & (I_WILL_FREE|I_FREEING|I_CLEAR)))
++	if (!(inode->i_state & (I_WILL_FREE|I_FREEING)))
+ 		mark_inode_dirty_sync(inode);
+ }
+ 
+@@ -90,7 +90,7 @@ xfs_mark_inode_dirty(
+ {
+ 	struct inode	*inode = VFS_I(ip);
+ 
+-	if (!(inode->i_state & (I_WILL_FREE|I_FREEING|I_CLEAR)))
++	if (!(inode->i_state & (I_WILL_FREE|I_FREEING)))
+ 		mark_inode_dirty(inode);
+ }
+ 
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 5547b1b027db..218693d8d446 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1616,8 +1616,8 @@ struct super_operations {
+  * I_FREEING		Set when inode is about to be freed but still has dirty
+  *			pages or buffers attached or the inode itself is still
+  *			dirty.
+- * I_CLEAR		Set by clear_inode().  In this state the inode is clean
+- *			and can be destroyed.
++ * I_CLEAR		Added by clear_inode().  In this state the inode is clean
++ *			and can be destroyed.  Inode keeps I_FREEING.
+  *
+  *			Inodes that are I_WILL_FREE, I_FREEING or I_CLEAR are
+  *			prohibited for many purposes.  iget() must wait for
+

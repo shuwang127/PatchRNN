@@ -1,0 +1,178 @@
+commit 3876ec9ef3775d062345b3760d3271ecb8cd3fea
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Mon Sep 27 12:44:35 2010 +0000
+
+    genirq: Provide compat handling for bus_lock/bus_sync_unlock
+    
+    Wrap the old chip functions for bus_lock/bus_sync_unlock until the
+    migration is complete and the old chip functions are removed.
+    
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    LKML-Reference: <20100927121841.842536121@linutronix.de>
+    Reviewed-by: H. Peter Anvin <hpa@zytor.com>
+    Reviewed-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/kernel/irq/chip.c b/kernel/irq/chip.c
+index e0e93ff10afd..77e551d92239 100644
+--- a/kernel/irq/chip.c
++++ b/kernel/irq/chip.c
+@@ -324,6 +324,17 @@ static void default_shutdown(unsigned int irq)
+ 	desc->status |= IRQ_MASKED;
+ }
+ 
++/* Temporary migration helpers */
++static void compat_bus_lock(struct irq_data *data)
++{
++	data->chip->bus_lock(data->irq);
++}
++
++static void compat_bus_sync_unlock(struct irq_data *data)
++{
++	data->chip->bus_sync_unlock(data->irq);
++}
++
+ /*
+  * Fixup enable/disable function pointers
+  */
+@@ -346,6 +357,11 @@ void irq_chip_set_defaults(struct irq_chip *chip)
+ 			chip->disable : default_shutdown;
+ 	if (!chip->end)
+ 		chip->end = dummy_irq_chip.end;
++
++	if (chip->bus_lock)
++		chip->irq_bus_lock = compat_bus_lock;
++	if (chip->bus_sync_unlock)
++		chip->irq_bus_sync_unlock = compat_bus_sync_unlock;
+ }
+ 
+ static inline void mask_ack_irq(struct irq_desc *desc, int irq)
+@@ -687,7 +703,7 @@ __set_irq_handler(unsigned int irq, irq_flow_handler_t handle, int is_chained,
+ 		desc->irq_data.chip = &dummy_irq_chip;
+ 	}
+ 
+-	chip_bus_lock(irq, desc);
++	chip_bus_lock(desc);
+ 	raw_spin_lock_irqsave(&desc->lock, flags);
+ 
+ 	/* Uninstall? */
+@@ -707,7 +723,7 @@ __set_irq_handler(unsigned int irq, irq_flow_handler_t handle, int is_chained,
+ 		desc->irq_data.chip->startup(irq);
+ 	}
+ 	raw_spin_unlock_irqrestore(&desc->lock, flags);
+-	chip_bus_sync_unlock(irq, desc);
++	chip_bus_sync_unlock(desc);
+ }
+ EXPORT_SYMBOL_GPL(__set_irq_handler);
+ 
+diff --git a/kernel/irq/internals.h b/kernel/irq/internals.h
+index 562fc7eeabec..ecafbfee5b12 100644
+--- a/kernel/irq/internals.h
++++ b/kernel/irq/internals.h
+@@ -43,16 +43,16 @@ extern int irq_select_affinity_usr(unsigned int irq);
+ extern void irq_set_thread_affinity(struct irq_desc *desc);
+ 
+ /* Inline functions for support of irq chips on slow busses */
+-static inline void chip_bus_lock(unsigned int irq, struct irq_desc *desc)
++static inline void chip_bus_lock(struct irq_desc *desc)
+ {
+-	if (unlikely(desc->irq_data.chip->bus_lock))
+-		desc->irq_data.chip->bus_lock(irq);
++	if (unlikely(desc->irq_data.chip->irq_bus_lock))
++		desc->irq_data.chip->irq_bus_lock(&desc->irq_data);
+ }
+ 
+-static inline void chip_bus_sync_unlock(unsigned int irq, struct irq_desc *desc)
++static inline void chip_bus_sync_unlock(struct irq_desc *desc)
+ {
+-	if (unlikely(desc->irq_data.chip->bus_sync_unlock))
+-		desc->irq_data.chip->bus_sync_unlock(irq);
++	if (unlikely(desc->irq_data.chip->irq_bus_sync_unlock))
++		desc->irq_data.chip->irq_bus_sync_unlock(&desc->irq_data);
+ }
+ 
+ /*
+diff --git a/kernel/irq/manage.c b/kernel/irq/manage.c
+index 4dfb19521d9f..dfb02ff7d2ef 100644
+--- a/kernel/irq/manage.c
++++ b/kernel/irq/manage.c
+@@ -246,11 +246,11 @@ void disable_irq_nosync(unsigned int irq)
+ 	if (!desc)
+ 		return;
+ 
+-	chip_bus_lock(irq, desc);
++	chip_bus_lock(desc);
+ 	raw_spin_lock_irqsave(&desc->lock, flags);
+ 	__disable_irq(desc, irq, false);
+ 	raw_spin_unlock_irqrestore(&desc->lock, flags);
+-	chip_bus_sync_unlock(irq, desc);
++	chip_bus_sync_unlock(desc);
+ }
+ EXPORT_SYMBOL(disable_irq_nosync);
+ 
+@@ -323,11 +323,11 @@ void enable_irq(unsigned int irq)
+ 	if (!desc)
+ 		return;
+ 
+-	chip_bus_lock(irq, desc);
++	chip_bus_lock(desc);
+ 	raw_spin_lock_irqsave(&desc->lock, flags);
+ 	__enable_irq(desc, irq, false);
+ 	raw_spin_unlock_irqrestore(&desc->lock, flags);
+-	chip_bus_sync_unlock(irq, desc);
++	chip_bus_sync_unlock(desc);
+ }
+ EXPORT_SYMBOL(enable_irq);
+ 
+@@ -507,7 +507,7 @@ static int irq_wait_for_interrupt(struct irqaction *action)
+ static void irq_finalize_oneshot(unsigned int irq, struct irq_desc *desc)
+ {
+ again:
+-	chip_bus_lock(irq, desc);
++	chip_bus_lock(desc);
+ 	raw_spin_lock_irq(&desc->lock);
+ 
+ 	/*
+@@ -521,7 +521,7 @@ static void irq_finalize_oneshot(unsigned int irq, struct irq_desc *desc)
+ 	 */
+ 	if (unlikely(desc->status & IRQ_INPROGRESS)) {
+ 		raw_spin_unlock_irq(&desc->lock);
+-		chip_bus_sync_unlock(irq, desc);
++		chip_bus_sync_unlock(desc);
+ 		cpu_relax();
+ 		goto again;
+ 	}
+@@ -531,7 +531,7 @@ static void irq_finalize_oneshot(unsigned int irq, struct irq_desc *desc)
+ 		desc->irq_data.chip->unmask(irq);
+ 	}
+ 	raw_spin_unlock_irq(&desc->lock);
+-	chip_bus_sync_unlock(irq, desc);
++	chip_bus_sync_unlock(desc);
+ }
+ 
+ #ifdef CONFIG_SMP
+@@ -997,9 +997,9 @@ void free_irq(unsigned int irq, void *dev_id)
+ 	if (!desc)
+ 		return;
+ 
+-	chip_bus_lock(irq, desc);
++	chip_bus_lock(desc);
+ 	kfree(__free_irq(irq, dev_id));
+-	chip_bus_sync_unlock(irq, desc);
++	chip_bus_sync_unlock(desc);
+ }
+ EXPORT_SYMBOL(free_irq);
+ 
+@@ -1086,9 +1086,9 @@ int request_threaded_irq(unsigned int irq, irq_handler_t handler,
+ 	action->name = devname;
+ 	action->dev_id = dev_id;
+ 
+-	chip_bus_lock(irq, desc);
++	chip_bus_lock(desc);
+ 	retval = __setup_irq(irq, desc, action);
+-	chip_bus_sync_unlock(irq, desc);
++	chip_bus_sync_unlock(desc);
+ 
+ 	if (retval)
+ 		kfree(action);
+

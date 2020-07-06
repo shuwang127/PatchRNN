@@ -1,0 +1,171 @@
+commit 54e991242850edc8c53f71fa5aa3ba7a93ce38f5
+Author: Dhaval Giani <dhaval@linux.vnet.ibm.com>
+Date:   Fri Feb 27 15:13:54 2009 +0530
+
+    sched: don't allow setuid to succeed if the user does not have rt bandwidth
+    
+    Impact: fix hung task with certain (non-default) rt-limit settings
+    
+    Corey Hickey reported that on using setuid to change the uid of a
+    rt process, the process would be unkillable and not be running.
+    This is because there was no rt runtime for that user group. Add
+    in a check to see if a user can attach an rt task to its task group.
+    On failure, return EINVAL, which is also returned in
+    CONFIG_CGROUP_SCHED.
+    
+    Reported-by: Corey Hickey <bugfood-ml@fatooh.org>
+    Signed-off-by: Dhaval Giani <dhaval@linux.vnet.ibm.com>
+    Acked-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 8981e52c714f..8c216e057c94 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -2291,9 +2291,13 @@ extern long sched_group_rt_runtime(struct task_group *tg);
+ extern int sched_group_set_rt_period(struct task_group *tg,
+ 				      long rt_period_us);
+ extern long sched_group_rt_period(struct task_group *tg);
++extern int sched_rt_can_attach(struct task_group *tg, struct task_struct *tsk);
+ #endif
+ #endif
+ 
++extern int task_can_switch_user(struct user_struct *up,
++					struct task_struct *tsk);
++
+ #ifdef CONFIG_TASK_XACCT
+ static inline void add_rchar(struct task_struct *tsk, ssize_t amt)
+ {
+diff --git a/kernel/sched.c b/kernel/sched.c
+index c3baa9653d1d..8e2558c2ba67 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -9224,6 +9224,16 @@ static int sched_rt_global_constraints(void)
+ 
+ 	return ret;
+ }
++
++int sched_rt_can_attach(struct task_group *tg, struct task_struct *tsk)
++{
++	/* Don't accept realtime tasks when there is no way for them to run */
++	if (rt_task(tsk) && tg->rt_bandwidth.rt_runtime == 0)
++		return 0;
++
++	return 1;
++}
++
+ #else /* !CONFIG_RT_GROUP_SCHED */
+ static int sched_rt_global_constraints(void)
+ {
+@@ -9317,8 +9327,7 @@ cpu_cgroup_can_attach(struct cgroup_subsys *ss, struct cgroup *cgrp,
+ 		      struct task_struct *tsk)
+ {
+ #ifdef CONFIG_RT_GROUP_SCHED
+-	/* Don't accept realtime tasks when there is no way for them to run */
+-	if (rt_task(tsk) && cgroup_tg(cgrp)->rt_bandwidth.rt_runtime == 0)
++	if (!sched_rt_can_attach(cgroup_tg(cgrp), tsk))
+ 		return -EINVAL;
+ #else
+ 	/* We don't support RT-tasks being in separate groups */
+diff --git a/kernel/sys.c b/kernel/sys.c
+index f145c415bc16..37f458e6882a 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -559,7 +559,7 @@ error:
+ 	abort_creds(new);
+ 	return retval;
+ }
+-  
++
+ /*
+  * change the user struct in a credentials set to match the new UID
+  */
+@@ -571,6 +571,11 @@ static int set_user(struct cred *new)
+ 	if (!new_user)
+ 		return -EAGAIN;
+ 
++	if (!task_can_switch_user(new_user, current)) {
++		free_uid(new_user);
++		return -EINVAL;
++	}
++
+ 	if (atomic_read(&new_user->processes) >=
+ 				current->signal->rlim[RLIMIT_NPROC].rlim_cur &&
+ 			new_user != INIT_USER) {
+@@ -631,10 +636,11 @@ SYSCALL_DEFINE2(setreuid, uid_t, ruid, uid_t, euid)
+ 			goto error;
+ 	}
+ 
+-	retval = -EAGAIN;
+-	if (new->uid != old->uid && set_user(new) < 0)
+-		goto error;
+-
++	if (new->uid != old->uid) {
++		retval = set_user(new);
++		if (retval < 0)
++			goto error;
++	}
+ 	if (ruid != (uid_t) -1 ||
+ 	    (euid != (uid_t) -1 && euid != old->uid))
+ 		new->suid = new->euid;
+@@ -680,9 +686,10 @@ SYSCALL_DEFINE1(setuid, uid_t, uid)
+ 	retval = -EPERM;
+ 	if (capable(CAP_SETUID)) {
+ 		new->suid = new->uid = uid;
+-		if (uid != old->uid && set_user(new) < 0) {
+-			retval = -EAGAIN;
+-			goto error;
++		if (uid != old->uid) {
++			retval = set_user(new);
++			if (retval < 0)
++				goto error;
+ 		}
+ 	} else if (uid != old->uid && uid != new->suid) {
+ 		goto error;
+@@ -734,11 +741,13 @@ SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)
+ 			goto error;
+ 	}
+ 
+-	retval = -EAGAIN;
+ 	if (ruid != (uid_t) -1) {
+ 		new->uid = ruid;
+-		if (ruid != old->uid && set_user(new) < 0)
+-			goto error;
++		if (ruid != old->uid) {
++			retval = set_user(new);
++			if (retval < 0)
++				goto error;
++		}
+ 	}
+ 	if (euid != (uid_t) -1)
+ 		new->euid = euid;
+diff --git a/kernel/user.c b/kernel/user.c
+index 3551ac742395..6a9b696128c8 100644
+--- a/kernel/user.c
++++ b/kernel/user.c
+@@ -362,6 +362,24 @@ static void free_user(struct user_struct *up, unsigned long flags)
+ 
+ #endif
+ 
++#if defined(CONFIG_RT_GROUP_SCHED) && defined(CONFIG_USER_SCHED)
++/*
++ * We need to check if a setuid can take place. This function should be called
++ * before successfully completing the setuid.
++ */
++int task_can_switch_user(struct user_struct *up, struct task_struct *tsk)
++{
++
++	return sched_rt_can_attach(up->tg, tsk);
++
++}
++#else
++int task_can_switch_user(struct user_struct *up, struct task_struct *tsk)
++{
++	return 1;
++}
++#endif
++
+ /*
+  * Locate the user_struct for the passed UID.  If found, take a ref on it.  The
+  * caller must undo that ref with free_uid().
+

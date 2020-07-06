@@ -1,0 +1,641 @@
+commit 28861ff805a74645d1e043fcbd9a42c3125acfff
+Author: Jonas Oreland <jonas@mysql.com>
+Date:   Mon May 4 15:01:07 2009 +0200
+
+    ndb spj - add support for setting ANY_VALUE directly in LQHKEYREQ/SCAN_FRAGREQ to be used as correlation factor
+
+diff --git a/storage/ndb/include/kernel/AttributeHeader.hpp b/storage/ndb/include/kernel/AttributeHeader.hpp
+index a6645ba5860..e165fb70f18 100644
+--- a/storage/ndb/include/kernel/AttributeHeader.hpp
++++ b/storage/ndb/include/kernel/AttributeHeader.hpp
+@@ -51,6 +51,7 @@ public:
+   STATIC_CONST( READ_ALL     = 0xFFF0 );
+   STATIC_CONST( READ_LCP     = 0xFFEF );
+   STATIC_CONST( FLUSH_AI     = 0xFFEE );
++  STATIC_CONST( READ_ANY_VALUE = 0xFFED );
+   
+   /**
+    * Optimize pseudo column and optimization options
+diff --git a/storage/ndb/include/kernel/signaldata/LqhKey.hpp b/storage/ndb/include/kernel/signaldata/LqhKey.hpp
+index 02e2738930d..a5eaf53b32d 100644
+--- a/storage/ndb/include/kernel/signaldata/LqhKey.hpp
++++ b/storage/ndb/include/kernel/signaldata/LqhKey.hpp
+@@ -153,6 +153,12 @@ private:
+    */
+   static UintR getNormalProtocolFlag(const UintR & requestInfo);
+   static void setNormalProtocolFlag(UintR & requestInfo, UintR val);
++
++  /**
++   * Include any-value
++   */
++  static UintR getAnyValueFlag(const UintR & requestInfo);
++  static void setAnyValueFlag(UintR & requestInfo, UintR val);
+ };
+ 
+ /**
+@@ -180,6 +186,7 @@ private:
+  * g = gci flag               - 1  Bit (12)
+  * n = NR copy                - 1  Bit (13)
+  * P = Do normal protocol even if dirty-read - 1 Bit (14)
++ * A = AnyValue flag          - 1  Bit (24)
+ 
+  * Short LQHKEYREQ :
+  *             1111111111222222222233
+@@ -190,7 +197,7 @@ private:
+  * Long LQHKEYREQ :
+  *             1111111111222222222233
+  *   01234567890123456789012345678901
+- *             llgn pdisooorr   cumxz
++ *             llgnPpdisooorrA  cumxz
+  *
+  */
+ 
+@@ -218,6 +225,7 @@ private:
+ #define RI_GCI_SHIFT         (12)
+ #define RI_NR_COPY_SHIFT     (13)
+ #define RI_NORMAL_DIRTY      (14)
++#define RI_ANY_VALUE         (24)
+ 
+ /**
+  * Scan Info
+@@ -594,6 +602,19 @@ LqhKeyReq::getNormalProtocolFlag(const UintR & requestInfo){
+   return (requestInfo >> RI_NORMAL_DIRTY) & 1;
+ }
+ 
++inline
++void
++LqhKeyReq::setAnyValueFlag(UintR & requestInfo, UintR val){
++  ASSERT_BOOL(val, "LqhKeyReq::setNrCopyFlag");
++  requestInfo |= (val << RI_ANY_VALUE);
++}
++
++inline
++UintR
++LqhKeyReq::getAnyValueFlag(const UintR & requestInfo){
++  return (requestInfo >> RI_ANY_VALUE) & 1;
++}
++
+ class LqhKeyConf {
+   /**
+    * Reciver(s)
+diff --git a/storage/ndb/include/kernel/signaldata/ScanFrag.hpp b/storage/ndb/include/kernel/signaldata/ScanFrag.hpp
+index ede1faa3844..918faa581ce 100644
+--- a/storage/ndb/include/kernel/signaldata/ScanFrag.hpp
++++ b/storage/ndb/include/kernel/signaldata/ScanFrag.hpp
+@@ -63,6 +63,7 @@ public:
+   };
+   Uint32 batch_size_rows;
+   Uint32 batch_size_bytes;
++  Uint32 variableData[1];
+   
+   static Uint32 getLockMode(const Uint32 & requestInfo);
+   static Uint32 getHoldLockFlag(const Uint32 & requestInfo);
+@@ -90,6 +91,9 @@ public:
+ 
+   static void setReorgFlag(Uint32 & requestInfo, Uint32 val);
+   static Uint32 getReorgFlag(const Uint32 & requestInfo);
++
++  static void setAnyValueFlag(Uint32 & requestInfo, Uint32 val);
++  static Uint32 getAnyValueFlag(const Uint32 & requestInfo);
+ };
+ 
+ /*
+@@ -252,11 +256,12 @@ public:
+  * t = tup scan              - 1  Bit 11 (implies x=z=0)
+  * p = Scan prio             - 4  Bits (12-15) -> max 15
+  * r = Reorg flag            - 2  Bits (1-2)
++ * A = any value flag        - 1  Bit  (16)
+  *
+  *           1111111111222222222233
+  * 01234567890123456789012345678901
+  *  rrcdlxhkrztppppaaaaaaaaaaaaaaaa   Short variant ( < 6.4.0)
+- *  rrcdlxhkrztpppp                   Long variant (6.4.0 +)
++ *  rrcdlxhkrztppppA                  Long variant (6.4.0 +)
+  */
+ #define SF_LOCK_MODE_SHIFT   (5)
+ #define SF_LOCK_MODE_MASK    (1)
+@@ -279,6 +284,8 @@ public:
+ #define SF_REORG_SHIFT      (1)
+ #define SF_REORG_MASK       (3)
+ 
++#define SF_ANY_VALUE_SHIFT  (16)
++
+ inline 
+ Uint32
+ ScanFragReq::getLockMode(const Uint32 & requestInfo){
+@@ -455,4 +462,17 @@ ScanFragReq::setReorgFlag(UintR & requestInfo, UintR val){
+   requestInfo |= (val << SF_REORG_SHIFT);
+ }
+ 
++inline
++Uint32
++ScanFragReq::getAnyValueFlag(const Uint32 & requestInfo){
++  return (requestInfo >> SF_ANY_VALUE_SHIFT) & 1;
++}
++
++inline
++void
++ScanFragReq::setAnyValueFlag(UintR & requestInfo, UintR val){
++  ASSERT_BOOL(val, "ScanFragReq::setAnyValueFlag");
++  requestInfo |= (val << SF_ANY_VALUE_SHIFT);
++}
++
+ #endif
+diff --git a/storage/ndb/include/kernel/signaldata/TupKey.hpp b/storage/ndb/include/kernel/signaldata/TupKey.hpp
+index 65eb767ad79..6c7136b0714 100644
+--- a/storage/ndb/include/kernel/signaldata/TupKey.hpp
++++ b/storage/ndb/include/kernel/signaldata/TupKey.hpp
+@@ -35,7 +35,7 @@ class TupKeyReq {
+   friend bool printTUPKEYREQ(FILE * output, const Uint32 * theData, Uint32 len, Uint16 receiverBlockNo);
+ 
+ public:
+-  STATIC_CONST( SignalLength = 19 );
++  STATIC_CONST( SignalLength = 20 );
+ 
+ private:
+ 
+@@ -61,6 +61,7 @@ private:
+   Uint32 m_row_id_page_no;
+   Uint32 m_row_id_page_idx;
+   Uint32 attrInfoIVal;
++  Uint32 anyValue;
+ };
+ 
+ class TupKeyConf {
+diff --git a/storage/ndb/src/common/debugger/signaldata/LqhKey.cpp b/storage/ndb/src/common/debugger/signaldata/LqhKey.cpp
+index 397890856cf..ff3d71f37ec 100644
+--- a/storage/ndb/src/common/debugger/signaldata/LqhKey.cpp
++++ b/storage/ndb/src/common/debugger/signaldata/LqhKey.cpp
+@@ -143,6 +143,12 @@ printLQHKEYREQ(FILE * output, const Uint32 * theData, Uint32 len, Uint16 receive
+     fprintf(output, " GCI: %u", sig->variableData[nextPos + 0]);
+     nextPos++;
+   }
++
++  if (LqhKeyReq::getAnyValueFlag(reqInfo))
++  {
++    fprintf(output, " AnyValue: 0x%x", sig->variableData[nextPos + 0]);
++    nextPos++;
++  }
+   
+   if(!LqhKeyReq::getInterpretedFlag(reqInfo)){
+     fprintf(output, " AttrInfo: ");
+diff --git a/storage/ndb/src/common/debugger/signaldata/ScanFrag.cpp b/storage/ndb/src/common/debugger/signaldata/ScanFrag.cpp
+index eca7ffa0df3..4f5655a1943 100644
+--- a/storage/ndb/src/common/debugger/signaldata/ScanFrag.cpp
++++ b/storage/ndb/src/common/debugger/signaldata/ScanFrag.cpp
+@@ -23,9 +23,9 @@ bool
+ printSCAN_FRAGREQ(FILE * output, const Uint32 * theData, 
+ 		  Uint32 len, Uint16 receiverBlockNo) {
+   const ScanFragReq * const sig = (ScanFragReq *)theData;
+-  fprintf(output, " senderData: %x\n", sig->senderData);
+-  fprintf(output, " resultRef: %x\n", sig->resultRef);
+-  fprintf(output, " savePointId: %x\n", sig->savePointId);
++  fprintf(output, " senderData: 0x%x\n", sig->senderData);
++  fprintf(output, " resultRef: 0x%x\n", sig->resultRef);
++  fprintf(output, " savePointId: %u\n", sig->savePointId);
+ 
+   fprintf(output, " flags: ");
+   if (ScanFragReq::getLockMode(sig->requestInfo))
+@@ -51,15 +51,20 @@ printSCAN_FRAGREQ(FILE * output, const Uint32 * theData,
+   fprintf(output, " prio: %u\n",
+           ScanFragReq::getScanPrio(sig->requestInfo));
+ 
+-  fprintf(output, " tableId: %x\n", sig->tableId);
+-  fprintf(output, " fragmentNo: %x\n", sig->fragmentNoKeyLen & 0xFFFF);
+-  fprintf(output, " keyLen: %x\n", sig->fragmentNoKeyLen >> 16);
+-  fprintf(output, " schemaVersion: %x\n", sig->schemaVersion);
+-  fprintf(output, " transId1: %x\n", sig->transId1);
+-  fprintf(output, " transId2: %x\n", sig->transId2);
+-  fprintf(output, " clientOpPtr: %x\n", sig->clientOpPtr);
+-  fprintf(output, " batch_size_rows: %x\n", sig->batch_size_rows);
+-  fprintf(output, " batch_size_bytes: %x\n", sig->batch_size_bytes);
++  fprintf(output, " tableId: %u\n", sig->tableId);
++  fprintf(output, " fragmentNo: %u\n", sig->fragmentNoKeyLen & 0xFFFF);
++  fprintf(output, " keyLen: %u\n", sig->fragmentNoKeyLen >> 16);
++  fprintf(output, " schemaVersion: 0x%x\n", sig->schemaVersion);
++  fprintf(output, " transId1: 0x%x\n", sig->transId1);
++  fprintf(output, " transId2: 0x%x\n", sig->transId2);
++  fprintf(output, " clientOpPtr: 0x%x\n", sig->clientOpPtr);
++  fprintf(output, " batch_size_rows: %u\n", sig->batch_size_rows);
++  fprintf(output, " batch_size_bytes: %u\n", sig->batch_size_bytes);
++  if (len > ScanFragReq::SignalLength)
++  {
++    fprintf(output, " AnyValue: 0x%x\n", sig->variableData[0]);
++  }
++
+   return true;
+ }
+ 
+diff --git a/storage/ndb/src/kernel/blocks/dblqh/Dblqh.hpp b/storage/ndb/src/kernel/blocks/dblqh/Dblqh.hpp
+index d6d0e80b117..29882a4cea1 100755
+--- a/storage/ndb/src/kernel/blocks/dblqh/Dblqh.hpp
++++ b/storage/ndb/src/kernel/blocks/dblqh/Dblqh.hpp
+@@ -1978,6 +1978,7 @@ public:
+       Uint32 m_scan_curr_range_no;
+       UintR noFiredTriggers;
+     };
++    Uint32 m_anyValue;
+     Uint16 errorCode;
+     Uint16 logStartPageIndex;
+     Uint16 logStartPageNo;
+diff --git a/storage/ndb/src/kernel/blocks/dblqh/DblqhMain.cpp b/storage/ndb/src/kernel/blocks/dblqh/DblqhMain.cpp
+index fe1b1d5312e..55172b13bc9 100644
+--- a/storage/ndb/src/kernel/blocks/dblqh/DblqhMain.cpp
++++ b/storage/ndb/src/kernel/blocks/dblqh/DblqhMain.cpp
+@@ -4010,6 +4010,13 @@ void Dblqh::execLQHKEYREQ(Signal* signal)
+     nextPos++;
+   }//if
+ 
++  Uint32 TanyValueFlag = LqhKeyReq::getAnyValueFlag(Treqinfo);
++  regTcPtr->m_anyValue = 0;
++  if (TanyValueFlag == 1) {
++    regTcPtr->m_anyValue = lqhKeyReq->variableData[nextPos];
++    nextPos++;
++  }
++
+   UintR TitcKeyLen = 0;
+   Uint32 keyLenWithLQHReq = 0;
+   UintR TreclenAiLqhkey   = 0;
+@@ -5235,6 +5242,7 @@ Dblqh::acckeyconf_tupkeyreq(Signal* signal, TcConnectionrec* regTcPtr,
+ 
+   sig0 = regTcPtr->m_row_id.m_page_no;
+   sig1 = regTcPtr->m_row_id.m_page_idx;
++  sig2 = regTcPtr->m_anyValue;
+   
+   tupKeyReq->primaryReplica = (tcConnectptr.p->seqNoReplica == 0)?true:false;
+   tupKeyReq->coordinatorTC = tcConnectptr.p->tcBlockref;
+@@ -5244,6 +5252,7 @@ Dblqh::acckeyconf_tupkeyreq(Signal* signal, TcConnectionrec* regTcPtr,
+ 
+   tupKeyReq->m_row_id_page_no = sig0;
+   tupKeyReq->m_row_id_page_idx = sig1;
++  tupKeyReq->anyValue = sig2;
+   
+   TRACE_OP(regTcPtr, "TUPKEYREQ");
+   
+@@ -9226,6 +9235,16 @@ void Dblqh::execSCAN_FRAGREQ(Signal* signal)
+     handle.clear();
+   }
+ 
++  if (true)
++  {
++    /**
++     * TODO this needs to be parameterized using get/setAnyValueFlag
++     *      and nextPos (see execLQHKEYREQ)
++     *      but since long/short SCAN_FRAGREQ can arrive...we skip it for now
++     */
++    tcConnectptr.p->m_anyValue = scanFragReq->variableData[0];
++  }
++
+   errorCode = initScanrec(scanFragReq, aiLen);
+   if (errorCode != ZOK) {
+     jam();
+@@ -9962,6 +9981,7 @@ Dblqh::next_scanconf_tupkeyreq(Signal* signal,
+   tupKeyReq->disk_page= disk_page;
+   /* No AttrInfo sent to TUP, it uses a stored procedure */
+   tupKeyReq->attrInfoIVal= RNIL;
++  tupKeyReq->anyValue = regTcPtr->m_anyValue+scanPtr.p->m_curr_batch_size_rows;
+   Uint32 blockNo = refToMain(regTcPtr->tcTupBlockref);
+   EXECUTE_DIRECT(blockNo, GSN_TUPKEYREQ, signal, 
+ 		 TupKeyReq::SignalLength);
+diff --git a/storage/ndb/src/kernel/blocks/dbspj/Dbspj.hpp b/storage/ndb/src/kernel/blocks/dbspj/Dbspj.hpp
+index 1c56ba59a58..eee4596a153 100644
+--- a/storage/ndb/src/kernel/blocks/dbspj/Dbspj.hpp
++++ b/storage/ndb/src/kernel/blocks/dbspj/Dbspj.hpp
+@@ -81,6 +81,7 @@ public:
+     Uint32 m_type;
+     Uint32 m_src_node_no;
+     Uint32 m_src_node_ptrI;
++    Uint32 m_src_correlation;
+ 
+     struct Header
+     {
+@@ -215,7 +216,7 @@ public:
+     Uint32 m_api_resultRef;
+     Uint32 m_api_resultData;
+     Uint32 m_outstanding;
+-    Uint32 m_lqhKeyReq[LqhKeyReq::FixedSignalLength + 2];
++    Uint32 m_lqhKeyReq[LqhKeyReq::FixedSignalLength + 3];
+   };
+ 
+   struct ScanFragData
+@@ -242,7 +243,7 @@ public:
+     Uint32 m_scan_status;    // fragmentCompleted
+     Uint32 m_rows_received;  // #execTRANSID_AI
+     Uint32 m_rows_expecting; // ScanFragConf
+-    Uint32 m_scanFragReq[ScanFragReq::SignalLength];
++    Uint32 m_scanFragReq[ScanFragReq::SignalLength + 1];
+   };
+ 
+   /**
+@@ -336,6 +337,7 @@ public:
+ 
+     struct {
+       Uint32 m_ref;              // dst for signal
++      Uint32 m_correlation;      // correlation value
+       Uint32 m_keyInfoPtrI;      // keyInfoSection
+       Uint32 m_attrInfoPtrI;     // attrInfoSection
+       Uint32 m_attrInfoParamPtrI;// attrInfoParamSection
+@@ -447,6 +449,7 @@ private:
+    */
+   Uint32 buildRowHeader(RowRef::Header *, SegmentedSectionPtr);
+   Uint32 buildRowHeader(RowRef::Header *, const Uint32 * src, Uint32 len);
++  Uint32 getColData32(const RowRef::Section&, Uint32 colNo);
+   Uint32 appendToPattern(Local_pattern_store &, DABuffer & tree, Uint32);
+   Uint32 appendColToPattern(Local_pattern_store&,const RowRef::Linear&, Uint32);
+ 
+diff --git a/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp b/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp
+index a9f5f2b1f00..692324c727e 100644
+--- a/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp
++++ b/storage/ndb/src/kernel/blocks/dbspj/DbspjMain.cpp
+@@ -600,6 +600,7 @@ Dbspj::createNode(Build_context& ctx, Ptr<Request> requestPtr,
+     treeNodePtr.p->m_requestPtrI = requestPtr.i;
+     treeNodePtr.p->m_bits = TreeNode::T_LEAF; // start as leaf...
+     treeNodePtr.p->m_state = TreeNode::TN_BUILDING;
++    treeNodePtr.p->m_send.m_correlation = 0;
+     treeNodePtr.p->m_send.m_keyInfoPtrI = RNIL;
+     treeNodePtr.p->m_send.m_attrInfoPtrI = RNIL;
+     treeNodePtr.p->m_send.m_attrInfoParamPtrI = RNIL;
+@@ -908,8 +909,8 @@ Dbspj::execTRANSID_AI(Signal* signal)
+   /**
+    * build easy-access-array for row
+    */
+-  Uint32 tmp[1+MAX_ATTRIBUTES_IN_TABLE];
+-  buildRowHeader((RowRef::Header*)tmp, dataPtr);
++  Uint32 tmp[2+MAX_ATTRIBUTES_IN_TABLE];
++  Uint32 cnt = buildRowHeader((RowRef::Header*)tmp, dataPtr);
+ 
+   /**
+    * TODO: If row needs to be buffered (m_bits & ROW_BUFFER)
+@@ -921,6 +922,7 @@ Dbspj::execTRANSID_AI(Signal* signal)
+   row.m_src_node_no = treeNodePtr.p->m_node_no;
+   row.m_row_data.m_section.m_header = (RowRef::Header*)tmp;
+   row.m_row_data.m_section.m_dataPtr = dataPtr;
++  row.m_src_correlation = getColData32(row.m_row_data.m_section, cnt - 1);
+ 
+   ndbrequire(treeNodePtr.p->m_info&&treeNodePtr.p->m_info->m_execTRANSID_AI);
+   (this->*(treeNodePtr.p->m_info->m_execTRANSID_AI))(signal,
+@@ -988,6 +990,8 @@ Dbspj::lookup_build(Build_context& ctx,
+       /**
+        * TODO reference()+treeNodePtr.i is passed twice
+        *   this can likely be optimized using the requestInfo-bits
++       * UPDATE: This can be accomplished by *not* setApplicationAddressFlag
++       *         and patch LQH to then instead use tcBlockref/clientConnectPtr
+        */
+       dst->transId1 = transId1;
+       dst->transId2 = transId2;
+@@ -1002,6 +1006,7 @@ Dbspj::lookup_build(Build_context& ctx,
+       LqhKeyReq::setDirtyFlag(requestInfo, 1);
+       LqhKeyReq::setSimpleFlag(requestInfo, 1);
+       LqhKeyReq::setNormalProtocolFlag(requestInfo, 1);
++      LqhKeyReq::setAnyValueFlag(requestInfo, 1);
+       dst->requestInfo = requestInfo;
+     }
+ 
+@@ -1138,6 +1143,7 @@ Dbspj::lookup_send(Signal* signal,
+   LqhKeyReq* req = (LqhKeyReq*)signal->getDataPtrSend();
+   memcpy(req, treeNodePtr.p->m_lookup_data.m_lqhKeyReq,
+ 	 sizeof(treeNodePtr.p->m_lookup_data.m_lqhKeyReq));
++  req->variableData[2] = treeNodePtr.p->m_send.m_correlation;
+ 
+   SectionHandle handle(this);
+ 
+@@ -1190,7 +1196,8 @@ Dbspj::lookup_send(Signal* signal,
+ #ifdef DEBUG_LQHKEYREQ
+   ndbout_c("LQHKEYREQ to %x", ref);
+   printLQHKEYREQ(stdout, signal->getDataPtrSend(),
+-		 LqhKeyReq::FixedSignalLength + 2, DBLQH);
++		 NDB_ARRAY_SIZE(treeNodePtr.p->m_lookup_data.m_lqhKeyReq),
++                 DBLQH);
+   printf("KEYINFO: ");
+   print(handle.m_ptr[0], stdout);
+   printf("ATTRINFO: ");
+@@ -1198,8 +1205,8 @@ Dbspj::lookup_send(Signal* signal,
+ #endif
+ 
+   sendSignal(ref, GSN_LQHKEYREQ, signal,
+-	     LqhKeyReq::FixedSignalLength + 2, JBB,
+-	     &handle);
++	     NDB_ARRAY_SIZE(treeNodePtr.p->m_lookup_data.m_lqhKeyReq),
++             JBB, &handle);
+ 
+   Uint32 add = 2;
+   if (treeNodePtr.p->m_bits & TreeNode::T_LEAF)
+@@ -1320,6 +1327,7 @@ Dbspj::lookup_start_child(Signal* signal,
+   Uint32 err;
+   const LqhKeyReq* src = (LqhKeyReq*)treeNodePtr.p->m_lookup_data.m_lqhKeyReq;
+   const Uint32 tableId = LqhKeyReq::getTableId(src->tableSchemaVersion);
++  const Uint32 corrVal = rowRef.m_src_correlation;
+ 
+   do
+   {
+@@ -1358,6 +1366,10 @@ Dbspj::lookup_start_child(Signal* signal,
+      * TODO merge better with lookup_start (refactor)
+      */
+     {
++      /**
++       * TODO, how should correlation factor really be constructed
++       */
++      treeNodePtr.p->m_send.m_correlation = (corrVal << 16); 
+       treeNodePtr.p->m_send.m_ref = tmp.receiverRef;
+       LqhKeyReq * dst = (LqhKeyReq*)treeNodePtr.p->m_lookup_data.m_lqhKeyReq;
+       dst->hashValue = tmp.hashInfo[0];
+@@ -1497,6 +1509,8 @@ Dbspj::scanFrag_build(Build_context& ctx,
+     Uint32 requestInfo = 0;
+     ScanFragReq::setReadCommittedFlag(requestInfo, 1);
+     ScanFragReq::setScanPrio(requestInfo, ctx.m_scanPrio);
++    ScanFragReq::setAnyValueFlag(requestInfo, 1);
++
+ #if 0
+     static void setDescendingFlag(Uint32 & requestInfo, Uint32 descending);
+     static void setTupScanFlag(Uint32 & requestInfo, Uint32 tupScan);
+@@ -1630,6 +1644,7 @@ Dbspj::scanFrag_send(Signal* signal,
+   ScanFragReq* req = (ScanFragReq*)signal->getDataPtrSend();
+   memcpy(req, treeNodePtr.p->m_scanfrag_data.m_scanFragReq,
+ 	 sizeof(treeNodePtr.p->m_scanfrag_data.m_scanFragReq));
++  req->variableData[0] = treeNodePtr.p->m_send.m_correlation;
+ 
+   SectionHandle handle(this);
+ 
+@@ -1692,7 +1707,8 @@ Dbspj::scanFrag_send(Signal* signal,
+ #ifdef DEBUG_SCAN_FRAGREQ
+   ndbout_c("SCAN_FRAGREQ to %x", ref);
+   printSCAN_FRAGREQ(stdout, signal->getDataPtrSend(),
+-                    ScanFragReq::SignalLength, DBLQH);
++                    NDB_ARRAY_SIZE(treeNodePtr.p->m_scanfrag_data.m_scanFragReq),
++                    DBLQH);
+   printf("ATTRINFO: ");
+   print(handle.m_ptr[0], stdout);
+   if (handle.m_cnt > 1)
+@@ -1703,7 +1719,8 @@ Dbspj::scanFrag_send(Signal* signal,
+ #endif
+ 
+   sendSignal(ref, GSN_SCAN_FRAGREQ, signal,
+-	     ScanFragReq::SignalLength, JBB, &handle);
++	     NDB_ARRAY_SIZE(treeNodePtr.p->m_scanfrag_data.m_scanFragReq),
++             JBB, &handle);
+ 
+   treeNodePtr.p->m_scanfrag_data.m_scan_state = ScanFragData::SF_RUNNING;
+   treeNodePtr.p->m_scanfrag_data.m_scan_status = 0;
+@@ -1930,7 +1947,7 @@ Dbspj::buildRowHeader(RowRef::Header * header, SegmentedSectionPtr ptr)
+     * dst++ = tmp;
+   } while (r0.step(len));
+ 
+-  return header->m_len = (save - dst);
++  return header->m_len = (dst - save);
+ }
+ 
+ /**
+@@ -1950,7 +1967,7 @@ Dbspj::buildRowHeader(RowRef::Header * header, const Uint32 * src, Uint32 len)
+     src += tmp_len;
+   }
+ 
+-  return header->m_len = (save - dst);
++  return header->m_len = (dst - save);
+ }
+ 
+ Uint32
+@@ -2008,6 +2025,29 @@ Dbspj::appendTreeToSection(Uint32 & ptrI, SectionReader & tree, Uint32 len)
+   return 0;
+ }
+ 
++Uint32
++Dbspj::getColData32(const RowRef::Section & row, Uint32 col)
++{
++  /**
++   * TODO handle errors
++   */
++  const Uint32 * header = (const Uint32*)row.m_header->m_headers;
++  SegmentedSectionPtr ptr(row.m_dataPtr);
++  SectionReader reader(ptr, getSectionSegmentPool());
++  Uint32 offset = 0;
++  for (Uint32 i = 0; i<col; i++)
++  {
++    offset += 1 + AttributeHeader::getDataSize(* header++);
++  }
++  ndbrequire(reader.step(offset));
++  Uint32 tmp;
++  ndbrequire(reader.getWord(&tmp));
++  Uint32 len = AttributeHeader::getDataSize(tmp);
++  ndbrequire(len == 1);
++  ndbrequire(reader.getWord(&tmp));
++  return tmp;
++}
++
+ Uint32
+ Dbspj::appendColToSection(Uint32 & dst, const RowRef::Section & row, Uint32 col)
+ {
+@@ -2509,7 +2549,7 @@ Dbspj::parseDA(Build_context& ctx,
+       }
+ 
+       Uint32 sum_read = 0;
+-      Uint32 dst[MAX_ATTRIBUTES_IN_TABLE];
++      Uint32 dst[MAX_ATTRIBUTES_IN_TABLE + 2];
+ 
+       if (paramBits & DABits::PI_ATTR_LIST)
+       {
+@@ -2560,14 +2600,19 @@ Dbspj::parseDA(Build_context& ctx,
+         for (Uint32 i = 0; i<cnt; i++)
+           dst[i] <<= 16;
+ 
++        /**
++         * Read correlation factor
++         */
++        dst[cnt] = AttributeHeader::READ_ANY_VALUE << 16;
++
+         err = DbspjErr::OutOfSectionMemory;
+-        if (!appendToSection(attrInfoPtrI, dst, cnt))
++        if (!appendToSection(attrInfoPtrI, dst, cnt + 1))
+         {
+           DEBUG_CRASH();
+           break;
+         }
+ 
+-        sum_read += cnt;
++        sum_read += cnt + 1;
+       }
+ 
+       if (interpreted)
+diff --git a/storage/ndb/src/kernel/blocks/dbtup/DbtupExecQuery.cpp b/storage/ndb/src/kernel/blocks/dbtup/DbtupExecQuery.cpp
+index bbe0650f9dd..90a6b628b5e 100644
+--- a/storage/ndb/src/kernel/blocks/dbtup/DbtupExecQuery.cpp
++++ b/storage/ndb/src/kernel/blocks/dbtup/DbtupExecQuery.cpp
+@@ -111,8 +111,6 @@ void Dbtup::copyAttrinfo(Operationrec * regOperPtr,
+     copy(inBuffer, attrInfoIVal);
+   }
+ 
+-  regOperPtr->m_any_value= 0;
+-  
+   return;
+ }
+ 
+@@ -533,11 +531,13 @@ void Dbtup::execTUPKEYREQ(Signal* signal)
+  /* -----------    INITIATE THE OPERATION RECORD       -------------- */
+  /* ----------------------------------------------------------------- */
+    Uint32 Rstoredid= tupKeyReq->storedProcedure;
++   Uint32 anyValue = tupKeyReq->anyValue;
+ 
+    regOperPtr->fragmentPtr= Rfragptr;
+    regOperPtr->op_struct.op_type= (TrequestInfo >> 6) & 0xf;
+    regOperPtr->op_struct.delete_insert_flag = false;
+    regOperPtr->op_struct.m_reorg = (TrequestInfo >> 12) & 3;
++   regOperPtr->m_any_value = anyValue;
+ 
+    regOperPtr->m_copy_tuple_location.setNull();
+    regOperPtr->tupVersion= ZNIL;
+diff --git a/storage/ndb/src/kernel/blocks/dbtup/DbtupRoutines.cpp b/storage/ndb/src/kernel/blocks/dbtup/DbtupRoutines.cpp
+index 15eb36dff51..250050f01ba 100644
+--- a/storage/ndb/src/kernel/blocks/dbtup/DbtupRoutines.cpp
++++ b/storage/ndb/src/kernel/blocks/dbtup/DbtupRoutines.cpp
+@@ -2399,6 +2399,12 @@ Dbtup::read_pseudo(const Uint32 * inBuffer, Uint32 inPos,
+     flush_read_buffer(req_struct, outBuf, resultRef, resultData);
+     return 2;
+   }
++  case AttributeHeader::READ_ANY_VALUE:{
++    jam();
++    sz = 1;
++    outBuffer[1] = operPtr.p->m_any_value;
++    break;
++  }
+   default:
+     return 0;
+   }
+diff --git a/storage/ndb/test/tools/test_spj.cpp b/storage/ndb/test/tools/test_spj.cpp
+index 35956b3e6cf..36a4e4363ba 100644
+--- a/storage/ndb/test/tools/test_spj.cpp
++++ b/storage/ndb/test/tools/test_spj.cpp
+@@ -303,10 +303,15 @@ int main(int argc, char** argv){
+     };
+     p1.requestInfo = DABits::PI_ATTR_LIST;
+     p1.resultData = 0x10000; //NdbScanFilterImpl::getTransPtr(pOp);
+-    p1.optional[0] = 1; // Length of user projecttion
++    p1.optional[0] = 2; // Length of user projecttion
+     AttributeHeader::init(p1.optional + 1, AttributeHeader::READ_ALL,
+                           pTab->getNoOfColumns());
+-    QueryNode::setOpLen(p1.len, QueryNode::QN_SCAN_FRAG, p1.NodeSize + 2);
++    /**
++     * correlation value
++     */
++    AttributeHeader::init(p1.optional + 2, AttributeHeader::READ_ANY_VALUE,
++                          0);
++    QueryNode::setOpLen(p1.len, QueryNode::QN_SCAN_FRAG, p1.NodeSize + 3);
+ 
+ 
+     union {
+@@ -332,10 +337,14 @@ int main(int argc, char** argv){
+     };
+     p2.requestInfo = DABits::PI_ATTR_LIST;
+     p2.resultData = 0x20000; //NdbScanFilterImpl::getTransPtr(pOp);
+-    p2.optional[0] = 1; // Length of user projection
++    p2.optional[0] = 2; // Length of user projection
+     AttributeHeader::init(p2.optional+1, AttributeHeader::READ_ALL,
+                           pTab->getNoOfColumns());
+-    QueryNode::setOpLen(p2.len, QueryNode::QN_LOOKUP, p2.NodeSize + 2);
++    /**
++     * correlation value
++     */
++    AttributeHeader::init(p2.optional+2, AttributeHeader::READ_ANY_VALUE, 0);
++    QueryNode::setOpLen(p2.len, QueryNode::QN_LOOKUP, p2.NodeSize + 3);
+ 
+ 
+     union {
+

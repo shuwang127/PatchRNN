@@ -1,0 +1,138 @@
+commit bc3698b8892df8003b410daea6f5bbcd20433808
+Author: Timo Sirainen <tss@iki.fi>
+Date:   Sat Jul 23 13:13:54 2005 +0300
+
+    Send untagged FLAGS / PERMANENTFLAGS replies if keywords list changed.
+    
+    --HG--
+    branch : HEAD
+
+diff --git a/src/imap/commands-util.c b/src/imap/commands-util.c
+index 89ccafbb6..848062d76 100644
+--- a/src/imap/commands-util.c
++++ b/src/imap/commands-util.c
+@@ -159,10 +159,12 @@ static int is_valid_keyword(struct client_command_context *cmd,
+ 	unsigned int i, count;
+ 
+ 	/* if it already exists, skip validity checks */
+-	names = array_get(&cmd->client->keywords.keywords, &count);
+-	for (i = 0; i < count; i++) {
+-		if (strcasecmp(names[i], keyword) == 0)
+-			return TRUE;
++	if (array_is_created(&cmd->client->keywords.keywords)) {
++		names = array_get(&cmd->client->keywords.keywords, &count);
++		for (i = 0; i < count; i++) {
++			if (strcasecmp(names[i], keyword) == 0)
++				return TRUE;
++		}
+ 	}
+ 
+ 	if (strlen(keyword) > max_keyword_length) {
+@@ -283,23 +285,47 @@ void client_send_mailbox_flags(struct client *client, struct mailbox *box,
+ 	}
+ }
+ 
+-void client_save_keywords(struct mailbox_keywords *dest,
+-			  const array_t *keywords)
++int client_save_keywords(struct mailbox_keywords *dest,
++			 const array_t *keywords)
+ {
+ 	ARRAY_SET_TYPE(keywords, const char *);
+-	const char *const *names;
+-	unsigned int i, count;
++	const char *const *names, *const *old_names;
++	unsigned int i, count, old_count;
++	int changed;
++
++	names = array_get(keywords, &count);
++
++	/* first check if anything changes */
++	if (!array_is_created(&dest->keywords))
++		changed = count != 0;
++	else {
++		old_names = array_get(&dest->keywords, &old_count);
++		if (count != old_count)
++			changed = TRUE;
++		else {
++			changed = FALSE;
++			for (i = 0; i < count; i++) {
++				if (strcmp(names[i], old_names[i]) != 0) {
++					changed = TRUE;
++					break;
++				}
++			}
++		}
++	}
++
++	if (!changed)
++		return FALSE;
+ 
+ 	p_clear(dest->pool);
+ 	ARRAY_CREATE(&dest->keywords, dest->pool,
+ 		     const char *, array_count(keywords));
+ 
+-	names = array_get(keywords, &count);
+ 	for (i = 0; i < count; i++) {
+ 		const char *name = p_strdup(dest->pool, names[i]);
+ 
+ 		array_append(&dest->keywords, &name, 1);
+ 	}
++	return TRUE;
+ }
+ 
+ int mailbox_equals(struct mailbox *box1, struct mail_storage *storage2,
+diff --git a/src/imap/commands-util.h b/src/imap/commands-util.h
+index 41ca8f05d..740d82fb2 100644
+--- a/src/imap/commands-util.h
++++ b/src/imap/commands-util.h
+@@ -46,9 +46,10 @@ int client_parse_mail_flags(struct client_command_context *cmd,
+ void client_send_mailbox_flags(struct client *client, struct mailbox *box,
+ 			       const array_t *keywords);
+ 
+-/* Copy keywords into dest. dest must have been initialized. */
+-void client_save_keywords(struct mailbox_keywords *dest,
+-			  const array_t *keywords);
++/* Copy keywords into dest. dest must have been initialized. Returns TRUE if
++   keywords changed. */
++int client_save_keywords(struct mailbox_keywords *dest,
++			 const array_t *keywords);
+ 
+ int mailbox_equals(struct mailbox *box1, struct mail_storage *storage2,
+ 		   const char *name2);
+diff --git a/src/imap/imap-sync.c b/src/imap/imap-sync.c
+index e5c58056a..c5a3bfe45 100644
+--- a/src/imap/imap-sync.c
++++ b/src/imap/imap-sync.c
+@@ -33,6 +33,7 @@ imap_sync_init(struct client *client, struct mailbox *box,
+ 	       enum mailbox_sync_flags flags)
+ {
+ 	struct imap_sync_context *ctx;
++	struct mailbox_status status;
+ 
+ 	i_assert(client->mailbox == box);
+ 
+@@ -44,6 +45,13 @@ imap_sync_init(struct client *client, struct mailbox *box,
+ 	ctx->t = mailbox_transaction_begin(box, 0);
+ 	ctx->mail = mail_alloc(ctx->t, MAIL_FETCH_FLAGS, 0);
+ 	ctx->messages_count = client->messages_count;
++
++	/* if keyword list changed, send the new list before flag changes */
++	if (mailbox_get_status(ctx->box, STATUS_KEYWORDS, &status) == 0) {
++		if (client_save_keywords(&client->keywords, status.keywords))
++			client_send_mailbox_flags(client, box, status.keywords);
++	}
++
+ 	return ctx;
+ }
+ 
+@@ -74,9 +82,6 @@ int imap_sync_deinit(struct imap_sync_context *ctx)
+ 			t_strdup_printf("* %u RECENT", status.recent));
+ 	}
+ 
+-	/*FIXME:client_save_keywords(&client->keywords, keywords, keywords_count);
+-	client_send_mailbox_flags(client, mailbox, keywords, keywords_count);*/
+-
+ 	t_pop();
+ 	i_free(ctx);
+ 	return 0;
+

@@ -1,0 +1,231 @@
+commit 9b8f0211cb3b79818cfeb4feebdc98b67d57667f
+Author: Robert Stepanek <rsto@paranoia.at>
+Date:   Tue Oct 27 10:11:13 2015 +1100
+
+    caldav: fix memory leaks when using sched_param
+    
+    Summary:
+    Memory allocated for userid and server name in sched_param
+     weren't freed. Similarly, a malloc'ed caldav_mboxname wasn't freed.
+     This change fixes both.
+    
+    Test Plan: Passed all Cassandane tests with valgrind. Passed all unit tests.
+    
+    Reviewers: #imap_reviewers, murchison
+    
+    Reviewed By: #imap_reviewers, murchison
+    
+    Subscribers: murchison
+    
+    Differential Revision: https://git.cyrus.foundation/D75
+
+diff --git a/imap/http_caldav.c b/imap/http_caldav.c
+index 45071329f..9c4c4972a 100644
+--- a/imap/http_caldav.c
++++ b/imap/http_caldav.c
+@@ -2684,8 +2684,10 @@ static int caldav_put(struct transaction_t *txn, void *obj,
+ 
+             /* Lookup the organizer */
+             r = caladdress_lookup(organizer, &sparam, userid);
+-            if (r == HTTP_NOT_FOUND)
++            if (r == HTTP_NOT_FOUND) {
++                sched_param_free(&sparam);
+                 break;  /* not a local organiser?  Just skip it */
++            }
+             if (r) {
+                 syslog(LOG_ERR,
+                        "meth_put: failed to process scheduling message in %s"
+@@ -2693,6 +2695,7 @@ static int caldav_put(struct transaction_t *txn, void *obj,
+                        txn->req_tgt.mbentry->name, organizer);
+                 txn->error.desc = "Failed to lookup organizer address\r\n";
+                 ret = HTTP_SERVER_ERROR;
++                sched_param_free(&sparam);
+                 goto done;
+             }
+ 
+@@ -2705,6 +2708,7 @@ static int caldav_put(struct transaction_t *txn, void *obj,
+                 if (r) {
+                     txn->error.desc = "Failed to read record \r\n";
+                     ret = HTTP_SERVER_ERROR;
++                    sched_param_free(&sparam);
+                     goto done;
+                 }
+                 oldical = record_to_ical(mailbox, &record);
+@@ -2733,6 +2737,7 @@ static int caldav_put(struct transaction_t *txn, void *obj,
+                 /* Attendee scheduling object resource */
+                 if (ret) {
+                     txn->error.precond = CALDAV_ALLOWED_ATT_CHANGE;
++                    sched_param_free(&sparam);
+                     goto done;
+                 }
+ #if 0
+@@ -2745,6 +2750,7 @@ static int caldav_put(struct transaction_t *txn, void *obj,
+                 }
+ #endif
+                 sched_reply(userid, oldical, ical);
++                sched_param_free(&sparam);
+             }
+ 
+             flags |= NEW_STAG;
+diff --git a/imap/http_caldav_sched.c b/imap/http_caldav_sched.c
+index 39a82f261..a212b64b7 100644
+--- a/imap/http_caldav_sched.c
++++ b/imap/http_caldav_sched.c
+@@ -105,7 +105,7 @@ int caladdress_lookup(const char *addr, struct sched_param *param, const char *m
+         mbname_t *mbname = NULL;
+ 
+         if (!found) return HTTP_NOT_FOUND;
+-        else param->userid = xstrndup(userid, len); /* XXX - memleak */
++        else param->userid = xstrndup(userid, len); /* freed by sched_param_free */
+ 
+         /* Lookup user's cal-home-set to see if its on this server */
+ 
+@@ -117,7 +117,7 @@ int caladdress_lookup(const char *addr, struct sched_param *param, const char *m
+         mbname_free(&mbname);
+ 
+         if (!r) {
+-            param->server = xstrdupnull(mbentry->server); /* XXX - memory leak */
++            param->server = xstrdupnull(mbentry->server); /* freed by sched_param_free */
+             mboxlist_entry_free(&mbentry);
+             if (param->server) param->flags |= SCHEDTYPE_ISCHEDULE;
+             return 0;
+@@ -128,7 +128,7 @@ int caladdress_lookup(const char *addr, struct sched_param *param, const char *m
+     /* User is outside of our domain(s) -
+        Do remote scheduling (default = iMIP) */
+     if (param->userid) free(param->userid);
+-    param->userid = xstrdupnull(userid); /* XXX - memleak */
++    param->userid = xstrdupnull(userid); /* freed by sched_param_free */
+     param->flags |= SCHEDTYPE_REMOTE;
+ 
+ #ifdef WITH_DKIM
+@@ -139,17 +139,17 @@ int caladdress_lookup(const char *addr, struct sched_param *param, const char *m
+ 
+ #ifdef IOPTEST  /* CalConnect ioptest */
+     if (!strcmp(p, "example.com")) {
+-        param->server = "ischedule.example.com";
++        param->server = xstrdup("ischedule.example.com");
+         param->port = 8008;
+         param->flags |= SCHEDTYPE_ISCHEDULE;
+     }
+     else if (!strcmp(p, "mysite.edu")) {
+-        param->server = "ischedule.mysite.edu";
++        param->server = xstrdup("ischedule.mysite.edu");
+         param->port = 8080;
+         param->flags |= SCHEDTYPE_ISCHEDULE;
+     }
+     else if (!strcmp(p, "bedework.org")) {
+-        param->server = "www.bedework.org";
++        param->server = xstrdrup("www.bedework.org");
+         param->port = 80;
+         param->flags |= SCHEDTYPE_ISCHEDULE;
+     }
+@@ -646,7 +646,7 @@ static void busytime_query_remote(const char *server __attribute__((unused)),
+ }
+ 
+ 
+-static void free_sched_param(void *data)
++static void free_sched_param_props(void *data)
+ {
+     struct sched_param *sched_param = (struct sched_param *) data;
+ 
+@@ -879,7 +879,7 @@ int sched_busytime_query(struct transaction_t *txn,
+         struct remote_rock rrock = { txn, ical, root, ns };
+         hash_enumerate(&remote_table, busytime_query_remote, &rrock);
+     }
+-    free_hash_table(&remote_table, free_sched_param);
++    free_hash_table(&remote_table, free_sched_param_props);
+ 
+     /* Output the XML response */
+     if (!ret) xml_response(HTTP_OK, txn, root->doc);
+@@ -2169,7 +2169,7 @@ void sched_request(const char *organizer, struct sched_param *sparam,
+         int rights = 0;
+         mbentry_t *mbentry = NULL;
+         /* Check ACL of auth'd user on userid's Scheduling Outbox */
+-        const char *outboxname = caldav_mboxname(sparam->userid, SCHED_OUTBOX);
++        char *outboxname = caldav_mboxname(sparam->userid, SCHED_OUTBOX);
+ 
+         r = mboxlist_lookup(outboxname, &mbentry, NULL);
+         if (r) {
+@@ -2179,6 +2179,7 @@ void sched_request(const char *organizer, struct sched_param *sparam,
+         else {
+             rights = httpd_myrights(httpd_authstate, mbentry->acl);
+         }
++        free(outboxname);
+         mboxlist_entry_free(&mbentry);
+ 
+         if (!(rights & DACL_INVITE)) {
+@@ -2418,6 +2419,8 @@ static icalcomponent *trim_attendees(icalcomponent *comp, const char *userid,
+             /* Some other attendee, remove it */
+             icalcomponent_remove_invitee(copy, prop);
+         }
++
++        sched_param_free(&sparam);
+     }
+ 
+     if (attendee) *attendee = myattendee;
+@@ -2429,6 +2432,7 @@ static icalcomponent *trim_attendees(icalcomponent *comp, const char *userid,
+         else *recurid = "";
+     }
+ 
++
+     return copy;
+ }
+ 
+@@ -2468,7 +2472,7 @@ void sched_reply(const char *userid,
+ {
+     int r, rights = 0;
+     mbentry_t *mbentry = NULL;
+-    const char *outboxname;
++    char *outboxname;
+     icalcomponent *ical;
+     struct sched_data *sched_data;
+     struct auth_state *authstate;
+@@ -2522,6 +2526,7 @@ void sched_reply(const char *userid,
+     else {
+         rights = httpd_myrights(httpd_authstate, mbentry->acl);
+     }
++    free(outboxname);
+     mboxlist_entry_free(&mbentry);
+ 
+     if (!(rights & DACL_REPLY)) {
+@@ -2667,3 +2672,12 @@ void sched_reply(const char *userid,
+     /* Cleanup */
+     free_sched_data(sched_data);
+ }
++
++void sched_param_free(struct sched_param *sparam) {
++    if (sparam->userid) free(sparam->userid);
++    if (sparam->server) free(sparam->server);
++    if (sparam->props) {
++        free_sched_param_props(sparam->props);
++    }
++    memset(sparam, 0, sizeof(struct sched_param));
++}
+diff --git a/imap/http_caldav_sched.h b/imap/http_caldav_sched.h
+index 05c96da3f..d9081597d 100644
+--- a/imap/http_caldav_sched.h
++++ b/imap/http_caldav_sched.h
+@@ -96,6 +96,7 @@ struct proplist {
+ };
+ 
+ /* Each calendar user address has the following scheduling protocol params */
++/* All memory must be freed with sched_param_free. */
+ struct sched_param {
+     char *userid;       /* Userid corresponding to calendar address */
+     char *server;       /* Remote server user lives on */
+@@ -105,6 +106,8 @@ struct sched_param {
+     struct proplist *props; /* List of attendee iCal properties */
+ };
+ 
++extern void sched_param_free(struct sched_param *sparam);
++
+ struct freebusy {
+     struct icalperiodtype per;
+     icalparameter_fbtype type;
+@@ -180,4 +183,5 @@ extern xmlNodePtr xml_add_schedresponse(xmlNodePtr root, xmlNsPtr dav_ns,
+ extern int caladdress_lookup(const char *addr, struct sched_param *param,
+                              const char *myuserid);
+ 
++
+ #endif /* HTTP_CALDAV_SCHED_H */
+

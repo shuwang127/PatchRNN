@@ -1,0 +1,162 @@
+commit 86072d8112595ea1b6beeb33f578e7c2839e014e
+Author: Tejun Heo <tj@kernel.org>
+Date:   Mon Jun 4 20:40:54 2012 -0700
+
+    block: drop custom queue draining used by scsi_transport_{iscsi|fc}
+    
+    iscsi_remove_host() uses bsg_remove_queue() which implements custom
+    queue draining.  fc_bsg_remove() open-codes mostly identical logic.
+    
+    The draining logic isn't correct in that blk_stop_queue() doesn't
+    prevent new requests from being queued - it just stops processing, so
+    nothing prevents new requests to be queued after the logic determines
+    that the queue is drained.
+    
+    blk_cleanup_queue() now implements proper queue draining and these
+    custom draining logics aren't necessary.  Drop them and use
+    bsg_unregister_queue() + blk_cleanup_queue() instead.
+    
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Reviewed-by: Mike Christie <michaelc@cs.wisc.edu>
+    Acked-by: Vivek Goyal <vgoyal@redhat.com>
+    Cc: James Bottomley <James.Bottomley@HansenPartnership.com>
+    Cc: James Smart <james.smart@emulex.com>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/block/bsg-lib.c b/block/bsg-lib.c
+index 7ad49c88f6b1..deee61fbb741 100644
+--- a/block/bsg-lib.c
++++ b/block/bsg-lib.c
+@@ -243,56 +243,3 @@ int bsg_setup_queue(struct device *dev, struct request_queue *q,
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(bsg_setup_queue);
+-
+-/**
+- * bsg_remove_queue - Deletes the bsg dev from the q
+- * @q:	the request_queue that is to be torn down.
+- *
+- * Notes:
+- *   Before unregistering the queue empty any requests that are blocked
+- */
+-void bsg_remove_queue(struct request_queue *q)
+-{
+-	struct request *req; /* block request */
+-	int counts; /* totals for request_list count and starved */
+-
+-	if (!q)
+-		return;
+-
+-	/* Stop taking in new requests */
+-	spin_lock_irq(q->queue_lock);
+-	blk_stop_queue(q);
+-
+-	/* drain all requests in the queue */
+-	while (1) {
+-		/* need the lock to fetch a request
+-		 * this may fetch the same reqeust as the previous pass
+-		 */
+-		req = blk_fetch_request(q);
+-		/* save requests in use and starved */
+-		counts = q->rq.count[0] + q->rq.count[1] +
+-			 q->rq.starved[0] + q->rq.starved[1];
+-		spin_unlock_irq(q->queue_lock);
+-		/* any requests still outstanding? */
+-		if (counts == 0)
+-			break;
+-
+-		/* This may be the same req as the previous iteration,
+-		 * always send the blk_end_request_all after a prefetch.
+-		 * It is not okay to not end the request because the
+-		 * prefetch started the request.
+-		 */
+-		if (req) {
+-			/* return -ENXIO to indicate that this queue is
+-			 * going away
+-			 */
+-			req->errors = -ENXIO;
+-			blk_end_request_all(req, -ENXIO);
+-		}
+-
+-		msleep(200); /* allow bsg to possibly finish */
+-		spin_lock_irq(q->queue_lock);
+-	}
+-	bsg_unregister_queue(q);
+-}
+-EXPORT_SYMBOL_GPL(bsg_remove_queue);
+diff --git a/drivers/scsi/scsi_transport_fc.c b/drivers/scsi/scsi_transport_fc.c
+index 579760420d53..a9617ad05f33 100644
+--- a/drivers/scsi/scsi_transport_fc.c
++++ b/drivers/scsi/scsi_transport_fc.c
+@@ -4130,45 +4130,7 @@ fc_bsg_rportadd(struct Scsi_Host *shost, struct fc_rport *rport)
+ static void
+ fc_bsg_remove(struct request_queue *q)
+ {
+-	struct request *req; /* block request */
+-	int counts; /* totals for request_list count and starved */
+-
+ 	if (q) {
+-		/* Stop taking in new requests */
+-		spin_lock_irq(q->queue_lock);
+-		blk_stop_queue(q);
+-
+-		/* drain all requests in the queue */
+-		while (1) {
+-			/* need the lock to fetch a request
+-			 * this may fetch the same reqeust as the previous pass
+-			 */
+-			req = blk_fetch_request(q);
+-			/* save requests in use and starved */
+-			counts = q->rq.count[0] + q->rq.count[1] +
+-				q->rq.starved[0] + q->rq.starved[1];
+-			spin_unlock_irq(q->queue_lock);
+-			/* any requests still outstanding? */
+-			if (counts == 0)
+-				break;
+-
+-			/* This may be the same req as the previous iteration,
+-			 * always send the blk_end_request_all after a prefetch.
+-			 * It is not okay to not end the request because the
+-			 * prefetch started the request.
+-			 */
+-			if (req) {
+-				/* return -ENXIO to indicate that this queue is
+-				 * going away
+-				 */
+-				req->errors = -ENXIO;
+-				blk_end_request_all(req, -ENXIO);
+-			}
+-
+-			msleep(200); /* allow bsg to possibly finish */
+-			spin_lock_irq(q->queue_lock);
+-		}
+-
+ 		bsg_unregister_queue(q);
+ 		blk_cleanup_queue(q);
+ 	}
+diff --git a/drivers/scsi/scsi_transport_iscsi.c b/drivers/scsi/scsi_transport_iscsi.c
+index 1cf640e575da..c737a16b0a1d 100644
+--- a/drivers/scsi/scsi_transport_iscsi.c
++++ b/drivers/scsi/scsi_transport_iscsi.c
+@@ -575,7 +575,7 @@ static int iscsi_remove_host(struct transport_container *tc,
+ 	struct iscsi_cls_host *ihost = shost->shost_data;
+ 
+ 	if (ihost->bsg_q) {
+-		bsg_remove_queue(ihost->bsg_q);
++		bsg_unregister_queue(ihost->bsg_q);
+ 		blk_cleanup_queue(ihost->bsg_q);
+ 	}
+ 	return 0;
+diff --git a/include/linux/bsg-lib.h b/include/linux/bsg-lib.h
+index f55ab8cdc106..4d0fb3df2f4a 100644
+--- a/include/linux/bsg-lib.h
++++ b/include/linux/bsg-lib.h
+@@ -67,7 +67,6 @@ void bsg_job_done(struct bsg_job *job, int result,
+ int bsg_setup_queue(struct device *dev, struct request_queue *q, char *name,
+ 		    bsg_job_fn *job_fn, int dd_job_size);
+ void bsg_request_fn(struct request_queue *q);
+-void bsg_remove_queue(struct request_queue *q);
+ void bsg_goose_queue(struct request_queue *q);
+ 
+ #endif
+

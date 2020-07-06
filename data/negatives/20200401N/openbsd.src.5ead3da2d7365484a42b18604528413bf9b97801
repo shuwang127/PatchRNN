@@ -1,0 +1,184 @@
+commit 5ead3da2d7365484a42b18604528413bf9b97801
+Author: djm <djm@openbsd.org>
+Date:   Fri May 1 03:23:51 2015 +0000
+
+    prevent authorized_keys options picked up on public key tests without
+    a corresponding private key authentication being applied to other
+    authentication methods. Reported by halex@, ok markus@
+
+diff --git a/usr.bin/ssh/auth.h b/usr.bin/ssh/auth.h
+index a42cd013e41..b4f93004a4e 100644
+--- a/usr.bin/ssh/auth.h
++++ b/usr.bin/ssh/auth.h
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: auth.h,v 1.82 2015/02/16 22:13:32 djm Exp $ */
++/* $OpenBSD: auth.h,v 1.83 2015/05/01 03:23:51 djm Exp $ */
+ 
+ /*
+  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
+@@ -117,7 +117,7 @@ int	 auth_rsa_key_allowed(struct passwd *, BIGNUM *, Key **);
+ 
+ int	 auth_rhosts_rsa_key_allowed(struct passwd *, char *, char *, Key *);
+ int	 hostbased_key_allowed(struct passwd *, const char *, char *, Key *);
+-int	 user_key_allowed(struct passwd *, Key *);
++int	 user_key_allowed(struct passwd *, Key *, int);
+ void	 pubkey_auth_info(Authctxt *, const Key *, const char *, ...)
+ 	    __attribute__((__format__ (printf, 3, 4)));
+ void	 auth2_record_userkey(Authctxt *, struct sshkey *);
+diff --git a/usr.bin/ssh/auth2-pubkey.c b/usr.bin/ssh/auth2-pubkey.c
+index 316c60c9ec2..f53a67fc8e3 100644
+--- a/usr.bin/ssh/auth2-pubkey.c
++++ b/usr.bin/ssh/auth2-pubkey.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: auth2-pubkey.c,v 1.47 2015/02/17 00:14:05 djm Exp $ */
++/* $OpenBSD: auth2-pubkey.c,v 1.48 2015/05/01 03:23:51 djm Exp $ */
+ /*
+  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
+  *
+@@ -166,7 +166,7 @@ userauth_pubkey(Authctxt *authctxt)
+ 
+ 		/* test for correct signature */
+ 		authenticated = 0;
+-		if (PRIVSEP(user_key_allowed(authctxt->pw, key)) &&
++		if (PRIVSEP(user_key_allowed(authctxt->pw, key, 1)) &&
+ 		    PRIVSEP(key_verify(key, sig, slen, buffer_ptr(&b),
+ 		    buffer_len(&b))) == 1) {
+ 			authenticated = 1;
+@@ -188,7 +188,7 @@ userauth_pubkey(Authctxt *authctxt)
+ 		 * if a user is not allowed to login. is this an
+ 		 * issue? -markus
+ 		 */
+-		if (PRIVSEP(user_key_allowed(authctxt->pw, key))) {
++		if (PRIVSEP(user_key_allowed(authctxt->pw, key, 0))) {
+ 			packet_start(SSH2_MSG_USERAUTH_PK_OK);
+ 			packet_put_string(pkalg, alen);
+ 			packet_put_string(pkblob, blen);
+@@ -668,7 +668,7 @@ user_key_command_allowed2(struct passwd *user_pw, Key *key)
+  * Check whether key authenticates and authorises the user.
+  */
+ int
+-user_key_allowed(struct passwd *pw, Key *key)
++user_key_allowed(struct passwd *pw, Key *key, int auth_attempt)
+ {
+ 	u_int success, i;
+ 	char *file;
+diff --git a/usr.bin/ssh/monitor.c b/usr.bin/ssh/monitor.c
+index 3d1c7e6a3c4..2bd6753193a 100644
+--- a/usr.bin/ssh/monitor.c
++++ b/usr.bin/ssh/monitor.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: monitor.c,v 1.147 2015/04/27 01:52:30 djm Exp $ */
++/* $OpenBSD: monitor.c,v 1.148 2015/05/01 03:23:51 djm Exp $ */
+ /*
+  * Copyright 2002 Niels Provos <provos@citi.umich.edu>
+  * Copyright 2002 Markus Friedl <markus@openbsd.org>
+@@ -897,7 +897,7 @@ mm_answer_keyallowed(int sock, Buffer *m)
+ 	Key *key;
+ 	char *cuser, *chost;
+ 	u_char *blob;
+-	u_int bloblen;
++	u_int bloblen, pubkey_auth_attempt;
+ 	enum mm_keytype type = 0;
+ 	int allowed = 0;
+ 
+@@ -907,6 +907,7 @@ mm_answer_keyallowed(int sock, Buffer *m)
+ 	cuser = buffer_get_string(m, NULL);
+ 	chost = buffer_get_string(m, NULL);
+ 	blob = buffer_get_string(m, &bloblen);
++	pubkey_auth_attempt = buffer_get_int(m);
+ 
+ 	key = key_from_blob(blob, bloblen);
+ 
+@@ -929,10 +930,12 @@ mm_answer_keyallowed(int sock, Buffer *m)
+ 			    match_pattern_list(sshkey_ssh_name(key),
+ 			    options.pubkey_key_types,
+ 			    strlen(options.pubkey_key_types), 0) == 1 &&
+-			    user_key_allowed(authctxt->pw, key);
++			    user_key_allowed(authctxt->pw, key,
++			    pubkey_auth_attempt);
+ 			pubkey_auth_info(authctxt, key, NULL);
+ 			auth_method = "publickey";
+-			if (options.pubkey_authentication && allowed != 1)
++			if (options.pubkey_authentication &&
++			    (!pubkey_auth_attempt || allowed != 1))
+ 				auth_clear_options();
+ 			break;
+ 		case MM_HOSTKEY:
+diff --git a/usr.bin/ssh/monitor_wrap.c b/usr.bin/ssh/monitor_wrap.c
+index bf5ae17ea92..60c34f1755c 100644
+--- a/usr.bin/ssh/monitor_wrap.c
++++ b/usr.bin/ssh/monitor_wrap.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: monitor_wrap.c,v 1.84 2015/02/16 22:13:32 djm Exp $ */
++/* $OpenBSD: monitor_wrap.c,v 1.85 2015/05/01 03:23:51 djm Exp $ */
+ /*
+  * Copyright 2002 Niels Provos <provos@citi.umich.edu>
+  * Copyright 2002 Markus Friedl <markus@openbsd.org>
+@@ -357,16 +357,17 @@ mm_auth_password(Authctxt *authctxt, char *password)
+ }
+ 
+ int
+-mm_user_key_allowed(struct passwd *pw, Key *key)
++mm_user_key_allowed(struct passwd *pw, Key *key, int pubkey_auth_attempt)
+ {
+-	return (mm_key_allowed(MM_USERKEY, NULL, NULL, key));
++	return (mm_key_allowed(MM_USERKEY, NULL, NULL, key,
++	    pubkey_auth_attempt));
+ }
+ 
+ int
+ mm_hostbased_key_allowed(struct passwd *pw, char *user, char *host,
+     Key *key)
+ {
+-	return (mm_key_allowed(MM_HOSTKEY, user, host, key));
++	return (mm_key_allowed(MM_HOSTKEY, user, host, key, 0));
+ }
+ 
+ int
+@@ -376,13 +377,14 @@ mm_auth_rhosts_rsa_key_allowed(struct passwd *pw, char *user,
+ 	int ret;
+ 
+ 	key->type = KEY_RSA; /* XXX hack for key_to_blob */
+-	ret = mm_key_allowed(MM_RSAHOSTKEY, user, host, key);
++	ret = mm_key_allowed(MM_RSAHOSTKEY, user, host, key, 0);
+ 	key->type = KEY_RSA1;
+ 	return (ret);
+ }
+ 
+ int
+-mm_key_allowed(enum mm_keytype type, char *user, char *host, Key *key)
++mm_key_allowed(enum mm_keytype type, char *user, char *host, Key *key,
++    int pubkey_auth_attempt)
+ {
+ 	Buffer m;
+ 	u_char *blob;
+@@ -400,6 +402,7 @@ mm_key_allowed(enum mm_keytype type, char *user, char *host, Key *key)
+ 	buffer_put_cstring(&m, user ? user : "");
+ 	buffer_put_cstring(&m, host ? host : "");
+ 	buffer_put_string(&m, blob, len);
++	buffer_put_int(&m, pubkey_auth_attempt);
+ 	free(blob);
+ 
+ 	mm_request_send(pmonitor->m_recvfd, MONITOR_REQ_KEYALLOWED, &m);
+diff --git a/usr.bin/ssh/monitor_wrap.h b/usr.bin/ssh/monitor_wrap.h
+index 8ced84140cf..b53b9fe1a49 100644
+--- a/usr.bin/ssh/monitor_wrap.h
++++ b/usr.bin/ssh/monitor_wrap.h
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: monitor_wrap.h,v 1.26 2015/02/16 22:13:32 djm Exp $ */
++/* $OpenBSD: monitor_wrap.h,v 1.27 2015/05/01 03:23:51 djm Exp $ */
+ 
+ /*
+  * Copyright 2002 Niels Provos <provos@citi.umich.edu>
+@@ -45,8 +45,8 @@ void mm_inform_authserv(char *, char *);
+ struct passwd *mm_getpwnamallow(const char *);
+ char *mm_auth2_read_banner(void);
+ int mm_auth_password(struct Authctxt *, char *);
+-int mm_key_allowed(enum mm_keytype, char *, char *, Key *);
+-int mm_user_key_allowed(struct passwd *, Key *);
++int mm_key_allowed(enum mm_keytype, char *, char *, Key *, int);
++int mm_user_key_allowed(struct passwd *, Key *, int);
+ int mm_hostbased_key_allowed(struct passwd *, char *, char *, Key *);
+ int mm_auth_rhosts_rsa_key_allowed(struct passwd *, char *, char *, Key *);
+ int mm_key_verify(Key *, u_char *, u_int, u_char *, u_int);
+

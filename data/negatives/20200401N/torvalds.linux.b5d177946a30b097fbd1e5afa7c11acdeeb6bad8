@@ -1,0 +1,62 @@
+commit b5d177946a30b097fbd1e5afa7c11acdeeb6bad8
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Thu Nov 22 13:07:20 2012 +0000
+
+    drm/i915: Wait upon the last request seqno, rather than a future seqno
+    
+    In commit 69c2fc891343cb5217c866d10709343cff190bdc
+    Author: Chris Wilson <chris@chris-wilson.co.uk>
+    Date:   Fri Jul 20 12:41:03 2012 +0100
+    
+        drm/i915: Remove the per-ring write list
+    
+    the explicit flush was removed from i915_ring_idle(). However, we
+    continued to wait upon the next seqno which now did not correspond to
+    any request (except for the unusual condition of a failure to queue a
+    request after execbuffer) and so would wait indefinitely.
+    
+    This has an important side-effect that i915_gpu_idle() does not cause
+    the seqno to be incremented. This is vital if we are to be able to idle
+    the GPU to handle seqno wraparound, as in subsequent patches.
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Reviewed-by: Mika Kuoppala <mika.kuoppala@intel.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index b0016bb65631..9be450e7c54f 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2462,10 +2462,29 @@ i915_gem_object_unbind(struct drm_i915_gem_object *obj)
+ 
+ static int i915_ring_idle(struct intel_ring_buffer *ring)
+ {
+-	if (list_empty(&ring->active_list))
++	u32 seqno;
++	int ret;
++
++	/* We need to add any requests required to flush the objects */
++	if (!list_empty(&ring->active_list)) {
++		seqno = list_entry(ring->active_list.prev,
++				   struct drm_i915_gem_object,
++				   ring_list)->last_read_seqno;
++
++		ret = i915_gem_check_olr(ring, seqno);
++		if (ret)
++			return ret;
++	}
++
++	/* Wait upon the last request to be completed */
++	if (list_empty(&ring->request_list))
+ 		return 0;
+ 
+-	return i915_wait_seqno(ring, i915_gem_next_request_seqno(ring));
++	seqno = list_entry(ring->request_list.prev,
++			   struct drm_i915_gem_request,
++			   list)->seqno;
++
++	return i915_wait_seqno(ring, seqno);
+ }
+ 
+ int i915_gpu_idle(struct drm_device *dev)
+

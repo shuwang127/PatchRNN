@@ -1,0 +1,57 @@
+commit 709d6710d047566c71f03e579a02c3d99fe15a3e
+Author: Patrik Flykt <patrik.flykt@linux.intel.com>
+Date:   Wed Jun 25 15:37:58 2014 +0300
+
+    sd-dhcp6-lease: Add helper function to compute remaining expiry time
+    
+    Create a helper function to compute the remaining time in seconds from
+    time T2 to the IPv6 address with the longest lifetime. The computed
+    time is used as the Maximum Retransmission Duration in Rebinding state.
+    See RFC 3315, section 18.1.4. for details.
+
+diff --git a/src/libsystemd-network/dhcp6-lease-internal.h b/src/libsystemd-network/dhcp6-lease-internal.h
+index 295c22320..62c16c5b6 100644
+--- a/src/libsystemd-network/dhcp6-lease-internal.h
++++ b/src/libsystemd-network/dhcp6-lease-internal.h
+@@ -42,6 +42,7 @@ struct sd_dhcp6_lease {
+ };
+ 
+ int dhcp6_lease_clear_timers(DHCP6IA *ia);
++int dhcp6_lease_ia_rebind_expire(const DHCP6IA *ia, uint32_t *expire);
+ DHCP6IA *dhcp6_lease_free_ia(DHCP6IA *ia);
+ 
+ int dhcp6_lease_set_serverid(sd_dhcp6_lease *lease, const uint8_t *id,
+diff --git a/src/libsystemd-network/sd-dhcp6-lease.c b/src/libsystemd-network/sd-dhcp6-lease.c
+index cbda7d8c8..17a4b6406 100644
+--- a/src/libsystemd-network/sd-dhcp6-lease.c
++++ b/src/libsystemd-network/sd-dhcp6-lease.c
+@@ -33,6 +33,28 @@ int dhcp6_lease_clear_timers(DHCP6IA *ia) {
+         return 0;
+ }
+ 
++int dhcp6_lease_ia_rebind_expire(const DHCP6IA *ia, uint32_t *expire) {
++        DHCP6Address *addr;
++        uint32_t valid = 0, t;
++
++        assert_return(ia, -EINVAL);
++        assert_return(expire, -EINVAL);
++
++        LIST_FOREACH(addresses, addr, ia->addresses) {
++                t = be32toh(addr->lifetime_valid);
++                if (valid < t)
++                        valid = t;
++        }
++
++        t = be32toh(ia->lifetime_t2);
++        if (t > valid)
++                return -EINVAL;
++
++        *expire = valid - t;
++
++        return 0;
++}
++
+ DHCP6IA *dhcp6_lease_free_ia(DHCP6IA *ia) {
+         DHCP6Address *address;
+ 
+

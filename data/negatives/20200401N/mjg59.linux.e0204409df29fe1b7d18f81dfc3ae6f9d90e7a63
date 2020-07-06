@@ -1,0 +1,433 @@
+commit e0204409df29fe1b7d18f81dfc3ae6f9d90e7a63
+Author: David S. Miller <davem@sunset.davemloft.net>
+Date:   Mon Jul 16 03:49:40 2007 -0700
+
+    [SPARC64]: dr-cpu unconfigure support.
+    
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/arch/sparc64/kernel/ds.c b/arch/sparc64/kernel/ds.c
+index b6331718ee0c..1c587107cef0 100644
+--- a/arch/sparc64/kernel/ds.c
++++ b/arch/sparc64/kernel/ds.c
+@@ -20,6 +20,7 @@
+ #include <asm/power.h>
+ #include <asm/mdesc.h>
+ #include <asm/head.h>
++#include <asm/irq.h>
+ 
+ #define DRV_MODULE_NAME		"ds"
+ #define PFX DRV_MODULE_NAME	": "
+@@ -559,6 +560,9 @@ static int dr_cpu_configure(struct ds_cap_state *cp, u64 req_num,
+ 
+ 	kfree(resp);
+ 
++	/* Redistribute IRQs, taking into account the new cpus.  */
++	fixup_irqs();
++
+ 	return 0;
+ }
+ 
+@@ -566,7 +570,8 @@ static int dr_cpu_unconfigure(struct ds_cap_state *cp, u64 req_num,
+ 			      cpumask_t *mask)
+ {
+ 	struct ds_data *resp;
+-	int resp_len, ncpus;
++	int resp_len, ncpus, cpu;
++	unsigned long flags;
+ 
+ 	ncpus = cpus_weight(*mask);
+ 	resp_len = dr_cpu_size_response(ncpus);
+@@ -578,9 +583,25 @@ static int dr_cpu_unconfigure(struct ds_cap_state *cp, u64 req_num,
+ 			     resp_len, ncpus, mask,
+ 			     DR_CPU_STAT_UNCONFIGURED);
+ 
++	for_each_cpu_mask(cpu, *mask) {
++		int err;
++
++		printk(KERN_INFO PFX "CPU[%d]: Shutting down cpu %d...\n",
++		       smp_processor_id(), cpu);
++		err = cpu_down(cpu);
++		if (err)
++			dr_cpu_mark(resp, cpu, ncpus,
++				    DR_CPU_RES_FAILURE,
++				    DR_CPU_STAT_CONFIGURED);
++	}
++
++	spin_lock_irqsave(&ds_lock, flags);
++	ds_send(ds_info->lp, resp, resp_len);
++	spin_unlock_irqrestore(&ds_lock, flags);
++
+ 	kfree(resp);
+ 
+-	return -EOPNOTSUPP;
++	return 0;
+ }
+ 
+ static void process_dr_cpu_list(struct ds_cap_state *cp)
+diff --git a/arch/sparc64/kernel/irq.c b/arch/sparc64/kernel/irq.c
+index a1c916f35baa..8cb3358674f5 100644
+--- a/arch/sparc64/kernel/irq.c
++++ b/arch/sparc64/kernel/irq.c
+@@ -803,6 +803,26 @@ void handler_irq(int irq, struct pt_regs *regs)
+ 	set_irq_regs(old_regs);
+ }
+ 
++#ifdef CONFIG_HOTPLUG_CPU
++void fixup_irqs(void)
++{
++	unsigned int irq;
++
++	for (irq = 0; irq < NR_IRQS; irq++) {
++		unsigned long flags;
++
++		spin_lock_irqsave(&irq_desc[irq].lock, flags);
++		if (irq_desc[irq].action &&
++		    !(irq_desc[irq].status & IRQ_PER_CPU)) {
++			if (irq_desc[irq].chip->set_affinity)
++				irq_desc[irq].chip->set_affinity(irq,
++					irq_desc[irq].affinity);
++		}
++		spin_unlock_irqrestore(&irq_desc[irq].lock, flags);
++	}
++}
++#endif
++
+ struct sun5_timer {
+ 	u64	count0;
+ 	u64	limit0;
+diff --git a/arch/sparc64/kernel/process.c b/arch/sparc64/kernel/process.c
+index f5f97e2c669c..93557507ec9f 100644
+--- a/arch/sparc64/kernel/process.c
++++ b/arch/sparc64/kernel/process.c
+@@ -29,6 +29,7 @@
+ #include <linux/compat.h>
+ #include <linux/tick.h>
+ #include <linux/init.h>
++#include <linux/cpu.h>
+ 
+ #include <asm/oplib.h>
+ #include <asm/uaccess.h>
+@@ -49,7 +50,7 @@
+ 
+ /* #define VERBOSE_SHOWREGS */
+ 
+-static void sparc64_yield(void)
++static void sparc64_yield(int cpu)
+ {
+ 	if (tlb_type != hypervisor)
+ 		return;
+@@ -57,7 +58,7 @@ static void sparc64_yield(void)
+ 	clear_thread_flag(TIF_POLLING_NRFLAG);
+ 	smp_mb__after_clear_bit();
+ 
+-	while (!need_resched()) {
++	while (!need_resched() && !cpu_is_offline(cpu)) {
+ 		unsigned long pstate;
+ 
+ 		/* Disable interrupts. */
+@@ -68,7 +69,7 @@ static void sparc64_yield(void)
+ 			: "=&r" (pstate)
+ 			: "i" (PSTATE_IE));
+ 
+-		if (!need_resched())
++		if (!need_resched() && !cpu_is_offline(cpu))
+ 			sun4v_cpu_yield();
+ 
+ 		/* Re-enable interrupts. */
+@@ -86,15 +87,25 @@ static void sparc64_yield(void)
+ /* The idle loop on sparc64. */
+ void cpu_idle(void)
+ {
++	int cpu = smp_processor_id();
++
+ 	set_thread_flag(TIF_POLLING_NRFLAG);
+ 
+ 	while(1) {
+ 		tick_nohz_stop_sched_tick();
+-		while (!need_resched())
+-			sparc64_yield();
++
++		while (!need_resched() && !cpu_is_offline(cpu))
++			sparc64_yield(cpu);
++
+ 		tick_nohz_restart_sched_tick();
+ 
+ 		preempt_enable_no_resched();
++
++#ifdef CONFIG_HOTPLUG_CPU
++		if (cpu_is_offline(cpu))
++			cpu_play_dead();
++#endif
++
+ 		schedule();
+ 		preempt_disable();
+ 	}
+diff --git a/arch/sparc64/kernel/smp.c b/arch/sparc64/kernel/smp.c
+index e038ae65cb62..b448d33321c6 100644
+--- a/arch/sparc64/kernel/smp.c
++++ b/arch/sparc64/kernel/smp.c
+@@ -44,6 +44,7 @@
+ #include <asm/prom.h>
+ #include <asm/mdesc.h>
+ #include <asm/ldc.h>
++#include <asm/hypervisor.h>
+ 
+ extern void calibrate_delay(void);
+ 
+@@ -62,7 +63,6 @@ EXPORT_SYMBOL(cpu_sibling_map);
+ EXPORT_SYMBOL(cpu_core_map);
+ 
+ static cpumask_t smp_commenced_mask;
+-static cpumask_t cpu_callout_map;
+ 
+ void smp_info(struct seq_file *m)
+ {
+@@ -83,6 +83,8 @@ void smp_bogo(struct seq_file *m)
+ 			   i, cpu_data(i).clock_tick);
+ }
+ 
++static __cacheline_aligned_in_smp DEFINE_SPINLOCK(call_lock);
++
+ extern void setup_sparc64_timer(void);
+ 
+ static volatile unsigned long callin_flag = 0;
+@@ -121,7 +123,9 @@ void __devinit smp_callin(void)
+ 	while (!cpu_isset(cpuid, smp_commenced_mask))
+ 		rmb();
+ 
++	spin_lock(&call_lock);
+ 	cpu_set(cpuid, cpu_online_map);
++	spin_unlock(&call_lock);
+ 
+ 	/* idle thread is expected to have preempt disabled */
+ 	preempt_disable();
+@@ -324,6 +328,9 @@ static void ldom_startcpu_cpuid(unsigned int cpu, unsigned long thread_reg)
+ 	hv_err = sun4v_cpu_start(cpu, trampoline_ra,
+ 				 kimage_addr_to_ra(&sparc64_ttable_tl0),
+ 				 __pa(hdesc));
++	if (hv_err)
++		printk(KERN_ERR "ldom_startcpu_cpuid: sun4v_cpu_start() "
++		       "gives error %lu\n", hv_err);
+ }
+ #endif
+ 
+@@ -350,7 +357,6 @@ static int __devinit smp_boot_one_cpu(unsigned int cpu)
+ 	p = fork_idle(cpu);
+ 	callin_flag = 0;
+ 	cpu_new_thread = task_thread_info(p);
+-	cpu_set(cpu, cpu_callout_map);
+ 
+ 	if (tlb_type == hypervisor) {
+ 		/* Alloc the mondo queues, cpu will load them.  */
+@@ -379,7 +385,6 @@ static int __devinit smp_boot_one_cpu(unsigned int cpu)
+ 		ret = 0;
+ 	} else {
+ 		printk("Processor %d is stuck.\n", cpu);
+-		cpu_clear(cpu, cpu_callout_map);
+ 		ret = -ENODEV;
+ 	}
+ 	cpu_new_thread = NULL;
+@@ -791,7 +796,6 @@ struct call_data_struct {
+ 	int wait;
+ };
+ 
+-static __cacheline_aligned_in_smp DEFINE_SPINLOCK(call_lock);
+ static struct call_data_struct *call_data;
+ 
+ extern unsigned long xcall_call_function;
+@@ -1241,7 +1245,7 @@ void __devinit smp_fill_in_sib_core_maps(void)
+ {
+ 	unsigned int i;
+ 
+-	for_each_possible_cpu(i) {
++	for_each_present_cpu(i) {
+ 		unsigned int j;
+ 
+ 		cpus_clear(cpu_core_map[i]);
+@@ -1250,14 +1254,14 @@ void __devinit smp_fill_in_sib_core_maps(void)
+ 			continue;
+ 		}
+ 
+-		for_each_possible_cpu(j) {
++		for_each_present_cpu(j) {
+ 			if (cpu_data(i).core_id ==
+ 			    cpu_data(j).core_id)
+ 				cpu_set(j, cpu_core_map[i]);
+ 		}
+ 	}
+ 
+-	for_each_possible_cpu(i) {
++	for_each_present_cpu(i) {
+ 		unsigned int j;
+ 
+ 		cpus_clear(cpu_sibling_map[i]);
+@@ -1266,7 +1270,7 @@ void __devinit smp_fill_in_sib_core_maps(void)
+ 			continue;
+ 		}
+ 
+-		for_each_possible_cpu(j) {
++		for_each_present_cpu(j) {
+ 			if (cpu_data(i).proc_id ==
+ 			    cpu_data(j).proc_id)
+ 				cpu_set(j, cpu_sibling_map[i]);
+@@ -1296,16 +1300,106 @@ int __cpuinit __cpu_up(unsigned int cpu)
+ }
+ 
+ #ifdef CONFIG_HOTPLUG_CPU
++void cpu_play_dead(void)
++{
++	int cpu = smp_processor_id();
++	unsigned long pstate;
++
++	idle_task_exit();
++
++	if (tlb_type == hypervisor) {
++		struct trap_per_cpu *tb = &trap_block[cpu];
++
++		sun4v_cpu_qconf(HV_CPU_QUEUE_CPU_MONDO,
++				tb->cpu_mondo_pa, 0);
++		sun4v_cpu_qconf(HV_CPU_QUEUE_DEVICE_MONDO,
++				tb->dev_mondo_pa, 0);
++		sun4v_cpu_qconf(HV_CPU_QUEUE_RES_ERROR,
++				tb->resum_mondo_pa, 0);
++		sun4v_cpu_qconf(HV_CPU_QUEUE_NONRES_ERROR,
++				tb->nonresum_mondo_pa, 0);
++	}
++
++	cpu_clear(cpu, smp_commenced_mask);
++	membar_safe("#Sync");
++
++	local_irq_disable();
++
++	__asm__ __volatile__(
++		"rdpr	%%pstate, %0\n\t"
++		"wrpr	%0, %1, %%pstate"
++		: "=r" (pstate)
++		: "i" (PSTATE_IE));
++
++	while (1)
++		barrier();
++}
++
+ int __cpu_disable(void)
+ {
+-	printk(KERN_ERR "SMP: __cpu_disable() on cpu %d\n",
+-	       smp_processor_id());
+-	return -ENODEV;
++	int cpu = smp_processor_id();
++	cpuinfo_sparc *c;
++	int i;
++
++	for_each_cpu_mask(i, cpu_core_map[cpu])
++		cpu_clear(cpu, cpu_core_map[i]);
++	cpus_clear(cpu_core_map[cpu]);
++
++	for_each_cpu_mask(i, cpu_sibling_map[cpu])
++		cpu_clear(cpu, cpu_sibling_map[i]);
++	cpus_clear(cpu_sibling_map[cpu]);
++
++	c = &cpu_data(cpu);
++
++	c->core_id = 0;
++	c->proc_id = -1;
++
++	spin_lock(&call_lock);
++	cpu_clear(cpu, cpu_online_map);
++	spin_unlock(&call_lock);
++
++	smp_wmb();
++
++	/* Make sure no interrupts point to this cpu.  */
++	fixup_irqs();
++
++	local_irq_enable();
++	mdelay(1);
++	local_irq_disable();
++
++	return 0;
+ }
+ 
+ void __cpu_die(unsigned int cpu)
+ {
+-	printk(KERN_ERR "SMP: __cpu_die(%u)\n", cpu);
++	int i;
++
++	for (i = 0; i < 100; i++) {
++		smp_rmb();
++		if (!cpu_isset(cpu, smp_commenced_mask))
++			break;
++		msleep(100);
++	}
++	if (cpu_isset(cpu, smp_commenced_mask)) {
++		printk(KERN_ERR "CPU %u didn't die...\n", cpu);
++	} else {
++#if defined(CONFIG_SUN_LDOMS)
++		unsigned long hv_err;
++		int limit = 100;
++
++		do {
++			hv_err = sun4v_cpu_stop(cpu);
++			if (hv_err == HV_EOK) {
++				cpu_clear(cpu, cpu_present_map);
++				break;
++			}
++		} while (--limit > 0);
++		if (limit <= 0) {
++			printk(KERN_ERR "sun4v_cpu_stop() fails err=%lu\n",
++			       hv_err);
++		}
++#endif
++	}
+ }
+ #endif
+ 
+diff --git a/include/asm-sparc64/irq.h b/include/asm-sparc64/irq.h
+index 90781e34a95c..e6c436ef9356 100644
+--- a/include/asm-sparc64/irq.h
++++ b/include/asm-sparc64/irq.h
+@@ -53,6 +53,8 @@ extern unsigned int sun4v_build_msi(u32 devhandle, unsigned int *virt_irq_p,
+ extern void sun4v_destroy_msi(unsigned int virt_irq);
+ extern unsigned int sbus_build_irq(void *sbus, unsigned int ino);
+ 
++extern void fixup_irqs(void);
++
+ static __inline__ void set_softint(unsigned long bits)
+ {
+ 	__asm__ __volatile__("wr	%0, 0x0, %%set_softint"
+diff --git a/include/asm-sparc64/mmu_context.h b/include/asm-sparc64/mmu_context.h
+index 8d129032013e..9fc225ed5500 100644
+--- a/include/asm-sparc64/mmu_context.h
++++ b/include/asm-sparc64/mmu_context.h
+@@ -76,6 +76,9 @@ static inline void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm, str
+ 	unsigned long ctx_valid, flags;
+ 	int cpu;
+ 
++	if (unlikely(mm == &init_mm))
++		return;
++
+ 	spin_lock_irqsave(&mm->context.lock, flags);
+ 	ctx_valid = CTX_VALID(mm->context);
+ 	if (!ctx_valid)
+diff --git a/include/asm-sparc64/smp.h b/include/asm-sparc64/smp.h
+index c42c5a035c73..e8a96a31761b 100644
+--- a/include/asm-sparc64/smp.h
++++ b/include/asm-sparc64/smp.h
+@@ -41,7 +41,7 @@ extern int hard_smp_processor_id(void);
+ #define raw_smp_processor_id() (current_thread_info()->cpu)
+ 
+ extern void smp_fill_in_sib_core_maps(void);
+-extern unsigned char boot_cpu_id;
++extern void cpu_play_dead(void);
+ 
+ #ifdef CONFIG_HOTPLUG_CPU
+ extern int __cpu_disable(void);
+@@ -54,7 +54,6 @@ extern void __cpu_die(unsigned int cpu);
+ 
+ #define hard_smp_processor_id()		0
+ #define smp_fill_in_sib_core_maps() do { } while (0)
+-#define boot_cpu_id	(0)
+ 
+ #endif /* !(CONFIG_SMP) */
+ 
+

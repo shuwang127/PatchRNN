@@ -1,0 +1,163 @@
+commit d22390f33eedbd2413debabc0662dde5241b1aa6
+Author: Timo Sirainen <tss@iki.fi>
+Date:   Fri Nov 12 00:24:08 2004 +0200
+
+    dovecot-shared file was supposed to show permissions/gid for files created
+    in the maildir, but it didn't work for indexes.
+    
+    --HG--
+    branch : HEAD
+
+diff --git a/src/lib-index/mail-cache-compress.c b/src/lib-index/mail-cache-compress.c
+index 57a4f5f25..f10c4d402 100644
+--- a/src/lib-index/mail-cache-compress.c
++++ b/src/lib-index/mail-cache-compress.c
+@@ -7,6 +7,8 @@
+ #include "file-set-size.h"
+ #include "mail-cache-private.h"
+ 
++#include <sys/stat.h>
++
+ struct mail_cache_copy_context {
+ 	int new_msg;
+ 	buffer_t *buffer, *field_seen;
+@@ -234,6 +236,7 @@ mail_cache_copy(struct mail_cache *cache, struct mail_index_view *view, int fd)
+ 
+ int mail_cache_compress(struct mail_cache *cache, struct mail_index_view *view)
+ {
++        mode_t old_mask;
+ 	int fd, ret, locked;
+ 
+ 	if ((ret = mail_cache_lock(cache)) < 0)
+@@ -250,16 +253,25 @@ int mail_cache_compress(struct mail_cache *cache, struct mail_index_view *view)
+ 	i_warning("Compressing cache file %s", cache->filepath);
+ #endif
+ 
++	old_mask = umask(cache->index->mode ^ 0666);
+ 	fd = file_dotlock_open(cache->filepath, NULL, NULL,
+ 			       MAIL_CACHE_LOCK_TIMEOUT,
+ 			       MAIL_CACHE_LOCK_CHANGE_TIMEOUT,
+ 			       MAIL_CACHE_LOCK_IMMEDIATE_TIMEOUT, NULL, NULL);
++	umask(old_mask);
++
+ 	if (fd == -1) {
+ 		mail_cache_set_syscall_error(cache, "file_dotlock_open()");
+ 		if (locked) mail_cache_unlock(cache);
+ 		return -1;
+ 	}
+ 
++	if (cache->index->gid != (gid_t)-1 &&
++	    fchown(fd, (uid_t)-1, cache->index->gid) < 0) {
++		mail_cache_set_syscall_error(cache, "fchown()");
++		return -1;
++	}
++
+ 	// FIXME: check that cache file wasn't just recreated
+ 
+ 	ret = 0;
+diff --git a/src/lib-index/mail-index.c b/src/lib-index/mail-index.c
+index 218677f15..183ce898e 100644
+--- a/src/lib-index/mail-index.c
++++ b/src/lib-index/mail-index.c
+@@ -853,16 +853,18 @@ int mail_index_write_base_header(struct mail_index *index,
+ 
+ int mail_index_create_tmp_file(struct mail_index *index, const char **path_r)
+ {
++        mode_t old_mask;
+ 	const char *path;
+ 	int fd;
+ 
+ 	path = *path_r = t_strconcat(index->filepath, ".tmp", NULL);
++	old_mask = umask(0);
+ 	fd = open(path, O_RDWR|O_CREAT|O_TRUNC, index->mode);
++	umask(old_mask);
+ 	if (fd == -1)
+ 		return mail_index_file_set_syscall_error(index, path, "open()");
+ 
+-	if (index->gid != (gid_t)-1 &&
+-	    fchown(index->fd, (uid_t)-1, index->gid) < 0) {
++	if (index->gid != (gid_t)-1 && fchown(fd, (uid_t)-1, index->gid) < 0) {
+ 		mail_index_file_set_syscall_error(index, path, "fchown()");
+ 		return -1;
+ 	}
+diff --git a/src/lib-index/mail-transaction-log.c b/src/lib-index/mail-transaction-log.c
+index 41e7a411e..176aa58a5 100644
+--- a/src/lib-index/mail-transaction-log.c
++++ b/src/lib-index/mail-transaction-log.c
+@@ -392,20 +392,30 @@ static int
+ mail_transaction_log_file_create(struct mail_transaction_log *log,
+ 				 const char *path, dev_t dev, ino_t ino)
+ {
++        mode_t old_mask;
+ 	int fd, fd2;
+ 
+ 	/* With dotlocking we might already have path.lock created, so this
+ 	   filename has to be different. */
++	old_mask = umask(log->index->mode ^ 0666);
+ 	fd = file_dotlock_open(path, NULL, LOG_NEW_DOTLOCK_SUFFIX,
+ 			       LOG_DOTLOCK_TIMEOUT,
+ 			       LOG_DOTLOCK_STALE_TIMEOUT,
+ 			       LOG_DOTLOCK_IMMEDIATE_STALE_TIMEOUT, NULL, NULL);
++	umask(old_mask);
++
+ 	if (fd == -1) {
+ 		mail_index_file_set_syscall_error(log->index, path,
+ 						  "file_dotlock_open()");
+ 		return -1;
+ 	}
+ 
++	if (log->index->gid != (gid_t)-1 &&
++	    fchown(fd, (uid_t)-1, log->index->gid) < 0) {
++		mail_index_file_set_syscall_error(log->index, path, "fchown()");
++		return -1;
++	}
++
+ 	fd2 = mail_transaction_log_file_create2(log, path, fd, dev, ino);
+ 	if (fd2 < 0) {
+ 		(void)file_dotlock_delete(path, LOG_NEW_DOTLOCK_SUFFIX, fd);
+diff --git a/src/lib-storage/index/maildir/maildir-storage.c b/src/lib-storage/index/maildir/maildir-storage.c
+index d5f3933f5..ae1bdfe53 100644
+--- a/src/lib-storage/index/maildir/maildir-storage.c
++++ b/src/lib-storage/index/maildir/maildir-storage.c
+@@ -358,6 +358,7 @@ maildir_open(struct index_storage *storage, const char *name,
+ 	struct mail_index *index;
+ 	const char *path, *index_dir, *control_dir;
+ 	struct stat st;
++	int shared;
+ 
+ 	path = maildir_get_path(storage, name);
+ 	index_dir = maildir_get_index_path(storage, name);
+@@ -365,6 +366,12 @@ maildir_open(struct index_storage *storage, const char *name,
+ 
+ 	index = index_storage_alloc(index_dir, path, MAILDIR_INDEX_PREFIX);
+ 
++	/* for shared mailboxes get the create mode from the
++	   permissions of dovecot-shared file. */
++	shared = stat(t_strconcat(path, "/dovecot-shared", NULL), &st) == 0;
++	if (shared)
++		mail_index_set_permissions(index, st.st_mode & 0666, st.st_gid);
++
+ 	ibox = index_storage_mailbox_init(storage, &maildir_mailbox,
+ 					  index, name, flags);
+ 	if (ibox == NULL)
+@@ -377,17 +384,14 @@ maildir_open(struct index_storage *storage, const char *name,
+ 	ibox->uidlist = maildir_uidlist_init(ibox);
+ 	ibox->is_recent = maildir_is_recent;
+ 
+-	/* for shared mailboxes get the create mode from the
+-	   permissions of dovecot-shared file */
+-	if (stat(t_strconcat(path, "/dovecot-shared", NULL), &st) < 0)
++	if (!shared)
+ 		ibox->mail_create_mode = 0600;
+ 	else {
+ 		ibox->mail_create_mode = st.st_mode & 0666;
+ 		ibox->private_flags_mask = MAIL_SEEN;
+-		mail_index_set_permissions(ibox->index, st.st_mode & 0666,
+-					   st.st_gid);
+ 	}
+ 
++
+ 	return &ibox->box;
+ }
+ 
+

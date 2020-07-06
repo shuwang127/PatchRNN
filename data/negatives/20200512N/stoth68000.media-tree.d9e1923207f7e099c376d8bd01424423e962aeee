@@ -1,0 +1,87 @@
+commit d9e1923207f7e099c376d8bd01424423e962aeee
+Author: Ian Kent <raven@themaw.net>
+Date:   Tue Oct 11 13:53:05 2016 -0700
+
+    autofs: add autofs_dev_ioctl_version() for AUTOFS_DEV_IOCTL_VERSION_CMD
+    
+    No functional changes, based on the following justification.
+    
+    1. Make the code more consistent using the ioctl vector _ioctls[],
+       rather than assigning NULL only for this ioctl command.
+    2. Remove goto done; for better maintainability in the long run.
+    3. The existing code is based on the fact that validate_dev_ioctl()
+       sets ioctl version for any command, but AUTOFS_DEV_IOCTL_VERSION_CMD
+       should explicitly set it regardless of the default behavior.
+    
+    Link: http://lkml.kernel.org/r/20160812024846.12352.9885.stgit@pluto.themaw.net
+    Signed-off-by: Tomohiro Kusumi <kusumi.tomohiro@gmail.com>
+    Signed-off-by: Ian Kent <ikent@redhat.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/autofs4/dev-ioctl.c b/fs/autofs4/dev-ioctl.c
+index 13e75177f892..7289216708d2 100644
+--- a/fs/autofs4/dev-ioctl.c
++++ b/fs/autofs4/dev-ioctl.c
+@@ -172,6 +172,17 @@ static struct autofs_sb_info *autofs_dev_ioctl_sbi(struct file *f)
+ 	return sbi;
+ }
+ 
++/* Return autofs dev ioctl version */
++static int autofs_dev_ioctl_version(struct file *fp,
++				    struct autofs_sb_info *sbi,
++				    struct autofs_dev_ioctl *param)
++{
++	/* This should have already been set. */
++	param->ver_major = AUTOFS_DEV_IOCTL_VERSION_MAJOR;
++	param->ver_minor = AUTOFS_DEV_IOCTL_VERSION_MINOR;
++	return 0;
++}
++
+ /* Return autofs module protocol version */
+ static int autofs_dev_ioctl_protover(struct file *fp,
+ 				     struct autofs_sb_info *sbi,
+@@ -590,7 +601,8 @@ static ioctl_fn lookup_dev_ioctl(unsigned int cmd)
+ 		int cmd;
+ 		ioctl_fn fn;
+ 	} _ioctls[] = {
+-		{cmd_idx(AUTOFS_DEV_IOCTL_VERSION_CMD), NULL},
++		{cmd_idx(AUTOFS_DEV_IOCTL_VERSION_CMD),
++			 autofs_dev_ioctl_version},
+ 		{cmd_idx(AUTOFS_DEV_IOCTL_PROTOVER_CMD),
+ 			 autofs_dev_ioctl_protover},
+ 		{cmd_idx(AUTOFS_DEV_IOCTL_PROTOSUBVER_CMD),
+@@ -655,10 +667,6 @@ static int _autofs_dev_ioctl(unsigned int command,
+ 	if (err)
+ 		goto out;
+ 
+-	/* The validate routine above always sets the version */
+-	if (cmd == AUTOFS_DEV_IOCTL_VERSION_CMD)
+-		goto done;
+-
+ 	fn = lookup_dev_ioctl(cmd);
+ 	if (!fn) {
+ 		pr_warn("unknown command 0x%08x\n", command);
+@@ -672,9 +680,11 @@ static int _autofs_dev_ioctl(unsigned int command,
+ 	/*
+ 	 * For obvious reasons the openmount can't have a file
+ 	 * descriptor yet. We don't take a reference to the
+-	 * file during close to allow for immediate release.
++	 * file during close to allow for immediate release,
++	 * and the same for retrieving ioctl version.
+ 	 */
+-	if (cmd != AUTOFS_DEV_IOCTL_OPENMOUNT_CMD &&
++	if (cmd != AUTOFS_DEV_IOCTL_VERSION_CMD &&
++	    cmd != AUTOFS_DEV_IOCTL_OPENMOUNT_CMD &&
+ 	    cmd != AUTOFS_DEV_IOCTL_CLOSEMOUNT_CMD) {
+ 		fp = fget(param->ioctlfd);
+ 		if (!fp) {
+@@ -707,7 +717,6 @@ static int _autofs_dev_ioctl(unsigned int command,
+ 
+ 	if (fp)
+ 		fput(fp);
+-done:
+ 	if (err >= 0 && copy_to_user(user, param, AUTOFS_DEV_IOCTL_SIZE))
+ 		err = -EFAULT;
+ out:
+

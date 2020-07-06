@@ -1,0 +1,175 @@
+commit 472f16f33c7d53515af83c805d4babd8a6c24a19
+Author: Dmitry Kalinkin <dmitry.kalinkin@gmail.com>
+Date:   Fri Sep 18 02:01:43 2015 +0300
+
+    vme: include address space in error filtering
+    
+    Also changes vme_bus_error_handler to take generic address modifier code
+    instead of raw contents of a device-specific attribute register.
+    
+    Signed-off-by: Dmitry Kalinkin <dmitry.kalinkin@gmail.com>
+    Cc: Igor Alekseev <igor.alekseev@itep.ru>
+    Acked-by: Martyn Welch <martyn@welchs.me.uk>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/vme/bridges/vme_tsi148.c b/drivers/vme/bridges/vme_tsi148.c
+index 60c4933ca0c8..4520d985379f 100644
+--- a/drivers/vme/bridges/vme_tsi148.c
++++ b/drivers/vme/bridges/vme_tsi148.c
+@@ -169,6 +169,7 @@ static u32 tsi148_VERR_irqhandler(struct vme_bridge *tsi148_bridge)
+ 	unsigned int error_addr_high, error_addr_low;
+ 	unsigned long long error_addr;
+ 	u32 error_attrib;
++	int error_am;
+ 	struct tsi148_driver *bridge;
+ 
+ 	bridge = tsi148_bridge->driver_priv;
+@@ -176,6 +177,7 @@ static u32 tsi148_VERR_irqhandler(struct vme_bridge *tsi148_bridge)
+ 	error_addr_high = ioread32be(bridge->base + TSI148_LCSR_VEAU);
+ 	error_addr_low = ioread32be(bridge->base + TSI148_LCSR_VEAL);
+ 	error_attrib = ioread32be(bridge->base + TSI148_LCSR_VEAT);
++	error_am = (error_attrib & TSI148_LCSR_VEAT_AM_M) >> 8;
+ 
+ 	reg_join(error_addr_high, error_addr_low, &error_addr);
+ 
+@@ -186,7 +188,7 @@ static u32 tsi148_VERR_irqhandler(struct vme_bridge *tsi148_bridge)
+ 	}
+ 
+ 	if (err_chk)
+-		vme_bus_error_handler(tsi148_bridge, error_addr, error_attrib);
++		vme_bus_error_handler(tsi148_bridge, error_addr, error_am);
+ 	else
+ 		dev_err(tsi148_bridge->parent,
+ 			"VME Bus Error at address: 0x%llx, attributes: %08x\n",
+diff --git a/drivers/vme/vme.c b/drivers/vme/vme.c
+index 6803744978b2..2b79cd2715da 100644
+--- a/drivers/vme/vme.c
++++ b/drivers/vme/vme.c
+@@ -223,6 +223,39 @@ int vme_check_window(u32 aspace, unsigned long long vme_base,
+ }
+ EXPORT_SYMBOL(vme_check_window);
+ 
++static u32 vme_get_aspace(int am)
++{
++	switch (am) {
++	case 0x29:
++	case 0x2D:
++		return VME_A16;
++	case 0x38:
++	case 0x39:
++	case 0x3A:
++	case 0x3B:
++	case 0x3C:
++	case 0x3D:
++	case 0x3E:
++	case 0x3F:
++		return VME_A24;
++	case 0x8:
++	case 0x9:
++	case 0xA:
++	case 0xB:
++	case 0xC:
++	case 0xD:
++	case 0xE:
++	case 0xF:
++		return VME_A32;
++	case 0x0:
++	case 0x1:
++	case 0x3:
++		return VME_A64;
++	}
++
++	return 0;
++}
++
+ /*
+  * Request a slave image with specific attributes, return some unique
+  * identifier.
+@@ -991,14 +1024,14 @@ int vme_dma_free(struct vme_resource *resource)
+ EXPORT_SYMBOL(vme_dma_free);
+ 
+ void vme_bus_error_handler(struct vme_bridge *bridge,
+-			   unsigned long long address, u32 attributes)
++			   unsigned long long address, int am)
+ {
+ 	struct vme_bus_error *error;
+ 
+ 	error = kmalloc(sizeof(struct vme_bus_error), GFP_ATOMIC);
+ 	if (error) {
++		error->aspace = vme_get_aspace(am);
+ 		error->address = address;
+-		error->attributes = attributes;
+ 		list_add_tail(&error->list, &bridge->vme_errors);
+ 	} else {
+ 		dev_err(bridge->parent,
+@@ -1019,19 +1052,13 @@ struct vme_bus_error *vme_find_error(struct vme_bridge *bridge, u32 aspace,
+ 
+ 	bound = address + count;
+ 
+-	/*
+-	 * XXX We are currently not looking at the address space when parsing
+-	 *     for errors. This is because parsing the Address Modifier Codes
+-	 *     is going to be quite resource intensive to do properly. We
+-	 *     should be OK just looking at the addresses and this is certainly
+-	 *     much better than what we had before.
+-	 */
+ 	err_pos = NULL;
+ 	/* Iterate through errors */
+ 	list_for_each(err_pos, &bridge->vme_errors) {
+ 		vme_err = list_entry(err_pos, struct vme_bus_error, list);
+-		if ((vme_err->address >= address) &&
+-			(vme_err->address < bound)) {
++		if ((vme_err->aspace == aspace) &&
++		    (vme_err->address >= address) &&
++		    (vme_err->address < bound)) {
+ 
+ 			valid = vme_err;
+ 			break;
+@@ -1054,20 +1081,14 @@ void vme_clear_errors(struct vme_bridge *bridge, u32 aspace,
+ 
+ 	bound = address + count;
+ 
+-	/*
+-	 * XXX We are currently not looking at the address space when parsing
+-	 *     for errors. This is because parsing the Address Modifier Codes
+-	 *     is going to be quite resource intensive to do properly. We
+-	 *     should be OK just looking at the addresses and this is certainly
+-	 *     much better than what we had before.
+-	 */
+ 	err_pos = NULL;
+ 	/* Iterate through errors */
+ 	list_for_each_safe(err_pos, temp, &bridge->vme_errors) {
+ 		vme_err = list_entry(err_pos, struct vme_bus_error, list);
+ 
+-		if ((vme_err->address >= address) &&
+-			(vme_err->address < bound)) {
++		if ((vme_err->aspace == aspace) &&
++		    (vme_err->address >= address) &&
++		    (vme_err->address < bound)) {
+ 
+ 			list_del(err_pos);
+ 			kfree(vme_err);
+diff --git a/drivers/vme/vme_bridge.h b/drivers/vme/vme_bridge.h
+index d8d6b144003b..92fbe18cbc42 100644
+--- a/drivers/vme/vme_bridge.h
++++ b/drivers/vme/vme_bridge.h
+@@ -77,8 +77,8 @@ struct vme_lm_resource {
+ 
+ struct vme_bus_error {
+ 	struct list_head list;
++	u32 aspace;
+ 	unsigned long long address;
+-	u32 attributes;
+ };
+ 
+ struct vme_callback {
+@@ -167,7 +167,7 @@ struct vme_bridge {
+ };
+ 
+ void vme_bus_error_handler(struct vme_bridge *bridge,
+-			   unsigned long long address, u32 attributes);
++			   unsigned long long address, int am);
+ struct vme_bus_error *vme_find_error(struct vme_bridge *bridge, u32 aspace,
+ 				     unsigned long long address, size_t count);
+ void vme_clear_errors(struct vme_bridge *bridge, u32 aspace,
+

@@ -1,0 +1,69 @@
+commit cee216a696b2004017a5ecb583366093d90b1568
+Author: Aneesh Kumar K.V <aneesh.kumar@linux.vnet.ibm.com>
+Date:   Fri Feb 24 14:59:13 2017 -0800
+
+    mm/autonuma: don't use set_pte_at when updating protnone ptes
+    
+    Architectures like ppc64, use privilege access bit to mark pte non
+    accessible.  This implies that kernel can do a copy_to_user to an
+    address marked for numa fault.  This also implies that there can be a
+    parallel hardware update for the pte.  set_pte_at cannot be used in such
+    scenarios.  Hence switch the pte update to use ptep_get_and_clear and
+    set_pte_at combination.
+    
+    [akpm@linux-foundation.org: remove unwanted ppc change, per Aneesh]
+    Link: http://lkml.kernel.org/r/1486400776-28114-1-git-send-email-aneesh.kumar@linux.vnet.ibm.com
+    Signed-off-by: Aneesh Kumar K.V <aneesh.kumar@linux.vnet.ibm.com>
+    Acked-by: Rik van Riel <riel@redhat.com>
+    Acked-by: Mel Gorman <mgorman@techsingularity.net>
+    Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/memory.c b/mm/memory.c
+index bfad9fe316c1..0c759ba122e1 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -3400,32 +3400,32 @@ static int do_numa_page(struct vm_fault *vmf)
+ 	int last_cpupid;
+ 	int target_nid;
+ 	bool migrated = false;
+-	pte_t pte = vmf->orig_pte;
+-	bool was_writable = pte_write(pte);
++	pte_t pte;
++	bool was_writable = pte_write(vmf->orig_pte);
+ 	int flags = 0;
+ 
+ 	/*
+ 	 * The "pte" at this point cannot be used safely without
+ 	 * validation through pte_unmap_same(). It's of NUMA type but
+ 	 * the pfn may be screwed if the read is non atomic.
+-	 *
+-	 * We can safely just do a "set_pte_at()", because the old
+-	 * page table entry is not accessible, so there would be no
+-	 * concurrent hardware modifications to the PTE.
+ 	 */
+ 	vmf->ptl = pte_lockptr(vma->vm_mm, vmf->pmd);
+ 	spin_lock(vmf->ptl);
+-	if (unlikely(!pte_same(*vmf->pte, pte))) {
++	if (unlikely(!pte_same(*vmf->pte, vmf->orig_pte))) {
+ 		pte_unmap_unlock(vmf->pte, vmf->ptl);
+ 		goto out;
+ 	}
+ 
+-	/* Make it present again */
++	/*
++	 * Make it present again, Depending on how arch implementes non
++	 * accessible ptes, some can allow access by kernel mode.
++	 */
++	pte = ptep_modify_prot_start(vma->vm_mm, vmf->address, vmf->pte);
+ 	pte = pte_modify(pte, vma->vm_page_prot);
+ 	pte = pte_mkyoung(pte);
+ 	if (was_writable)
+ 		pte = pte_mkwrite(pte);
+-	set_pte_at(vma->vm_mm, vmf->address, vmf->pte, pte);
++	ptep_modify_prot_commit(vma->vm_mm, vmf->address, vmf->pte, pte);
+ 	update_mmu_cache(vma, vmf->address, vmf->pte);
+ 
+ 	page = vm_normal_page(vma, vmf->address, pte);
+

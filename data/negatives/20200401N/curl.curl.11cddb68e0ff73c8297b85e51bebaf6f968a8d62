@@ -1,0 +1,252 @@
+commit 11cddb68e0ff73c8297b85e51bebaf6f968a8d62
+Author: Yang Tse <yangsita@gmail.com>
+Date:   Tue Nov 30 22:14:37 2010 +0100
+
+    fix getinfo CURLINFO_LOCAL* for reused connections (take 2)
+
+diff --git a/lib/connect.c b/lib/connect.c
+index 3d829f7b7..0e5a73cb0 100644
+--- a/lib/connect.c
++++ b/lib/connect.c
+@@ -532,6 +532,16 @@ static CURLcode trynextip(struct connectdata *conn,
+   return CURLE_COULDNT_CONNECT;
+ }
+ 
++/* Copies connection info into the session handle to make it available
++   when the session handle is no longer associated with a connection. */
++void Curl_persistconninfo(struct connectdata *conn)
++{
++  memcpy(conn->data->info.conn_primary_ip, conn->primary_ip, MAX_IPADR_LEN);
++  memcpy(conn->data->info.conn_local_ip, conn->local_ip, MAX_IPADR_LEN);
++  conn->data->info.conn_primary_port = conn->primary_port;
++  conn->data->info.conn_local_port = conn->local_port;
++}
++
+ /* retrieves ip address and port from a sockaddr structure */
+ static bool getaddressinfo(struct sockaddr* sa, char* addr,
+                            long* port)
+@@ -587,43 +597,45 @@ void Curl_updateconninfo(struct connectdata *conn, curl_socket_t sockfd)
+   struct Curl_sockaddr_storage ssrem;
+   struct Curl_sockaddr_storage ssloc;
+   struct SessionHandle *data = conn->data;
+-  struct PureInfo *info = &conn->data->info;
+ 
+-  if(conn->bits.reuse)
+-    /* reusing same connection */
+-    return;
++  if(!conn->bits.reuse) {
+ 
+-  len = sizeof(struct Curl_sockaddr_storage);
+-  if(getpeername(sockfd, (struct sockaddr*) &ssrem, &len)) {
+-    error = SOCKERRNO;
+-    failf(data, "getpeername() failed with errno %d: %s",
+-          error, Curl_strerror(conn, error));
+-    return;
+-  }
++    len = sizeof(struct Curl_sockaddr_storage);
++    if(getpeername(sockfd, (struct sockaddr*) &ssrem, &len)) {
++      error = SOCKERRNO;
++      failf(data, "getpeername() failed with errno %d: %s",
++            error, Curl_strerror(conn, error));
++      return;
++    }
+ 
+-  len = sizeof(struct Curl_sockaddr_storage);
+-  if(getsockname(sockfd, (struct sockaddr*) &ssloc, &len)) {
+-    error = SOCKERRNO;
+-    failf(data, "getsockname() failed with errno %d: %s",
+-          error, Curl_strerror(conn, error));
+-    return;
+-  }
++    len = sizeof(struct Curl_sockaddr_storage);
++    if(getsockname(sockfd, (struct sockaddr*) &ssloc, &len)) {
++      error = SOCKERRNO;
++      failf(data, "getsockname() failed with errno %d: %s",
++            error, Curl_strerror(conn, error));
++      return;
++    }
+ 
+-  if(!getaddressinfo((struct sockaddr*)&ssrem,
+-                      info->primary_ip, &info->primary_port)) {
+-    error = ERRNO;
+-    failf(data, "ssrem inet_ntop() failed with errno %d: %s",
+-          error, Curl_strerror(conn, error));
+-    return;
+-  }
++    if(!getaddressinfo((struct sockaddr*)&ssrem,
++                        conn->primary_ip, &conn->primary_port)) {
++      error = ERRNO;
++      failf(data, "ssrem inet_ntop() failed with errno %d: %s",
++            error, Curl_strerror(conn, error));
++      return;
++    }
++
++    if(!getaddressinfo((struct sockaddr*)&ssloc,
++                       conn->local_ip, &conn->local_port)) {
++      error = ERRNO;
++      failf(data, "ssloc inet_ntop() failed with errno %d: %s",
++            error, Curl_strerror(conn, error));
++      return;
++    }
+ 
+-  if(!getaddressinfo((struct sockaddr*)&ssloc,
+-                     info->local_ip, &info->local_port)) {
+-    error = ERRNO;
+-    failf(data, "ssloc inet_ntop() failed with errno %d: %s",
+-          error, Curl_strerror(conn, error));
+-    return;
+   }
++
++  /* persist connection info in session handle */
++  Curl_persistconninfo(conn);
+ }
+ 
+ /*
+@@ -865,14 +877,16 @@ singleipconnect(struct connectdata *conn,
+ 
+   /* store remote address and port used in this connection attempt */
+   if(!getaddressinfo((struct sockaddr*)&addr.sa_addr,
+-                     data->info.primary_ip, &data->info.primary_port)) {
++                     conn->primary_ip, &conn->primary_port)) {
+     error = ERRNO;
+     failf(data, "sa_addr inet_ntop() failed with errno %d: %s",
+           error, Curl_strerror(conn, error));
+   }
+-  strcpy(conn->ip_addr_str, data->info.primary_ip);
++  memcpy(conn->ip_addr_str, conn->primary_ip, MAX_IPADR_LEN);
+   infof(data, "  Trying %s... ", conn->ip_addr_str);
+ 
++  Curl_persistconninfo(conn);
++
+ #ifdef ENABLE_IPV6
+   if(addr.family == AF_INET6)
+     conn->bits.ipv6 = TRUE;
+diff --git a/lib/connect.h b/lib/connect.h
+index 2c6b10a38..6cc403d9f 100644
+--- a/lib/connect.h
++++ b/lib/connect.h
+@@ -69,4 +69,6 @@ void Curl_sndbufset(curl_socket_t sockfd);
+ 
+ void Curl_updateconninfo(struct connectdata *conn, curl_socket_t sockfd);
+ 
++void Curl_persistconninfo(struct connectdata *conn);
++
+ #endif
+diff --git a/lib/getinfo.c b/lib/getinfo.c
+index 5412c0ffc..946686281 100644
+--- a/lib/getinfo.c
++++ b/lib/getinfo.c
+@@ -67,6 +67,11 @@ CURLcode Curl_initinfo(struct SessionHandle *data)
+   info->request_size = 0;
+   info->numconnects = 0;
+ 
++  info->conn_primary_ip[0] = '\0';
++  info->conn_local_ip[0] = '\0';
++  info->conn_primary_port = 0;
++  info->conn_local_port = 0;
++
+   return CURLE_OK;
+ }
+ 
+@@ -233,20 +238,20 @@ CURLcode Curl_getinfo(struct SessionHandle *data, CURLINFO info, ...)
+     break;
+   case CURLINFO_PRIMARY_IP:
+     /* Return the ip address of the most recent (primary) connection */
+-    *param_charp = data->info.primary_ip;
++    *param_charp = data->info.conn_primary_ip;
+     break;
+   case CURLINFO_PRIMARY_PORT:
+     /* Return the (remote) port of the most recent (primary) connection */
+-    *param_longp = data->info.primary_port;
++    *param_longp = data->info.conn_primary_port;
+     break;
+   case CURLINFO_LOCAL_IP:
+     /* Return the source/local ip address of the most recent (primary)
+        connection */
+-    *param_charp = data->info.local_ip;
++    *param_charp = data->info.conn_local_ip;
+     break;
+   case CURLINFO_LOCAL_PORT:
+     /* Return the local port of the most recent (primary) connection */
+-    *param_longp = data->info.local_port;
++    *param_longp = data->info.conn_local_port;
+     break;
+   case CURLINFO_CERTINFO:
+     /* Return the a pointer to the certinfo struct. Not really an slist
+diff --git a/lib/url.c b/lib/url.c
+index e3d89ebe6..858d72927 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -4599,7 +4599,8 @@ static void reuse_conn(struct connectdata *old_conn,
+   else
+     free(old_conn->host.rawalloc); /* free the newly allocated name buffer */
+ 
+-  strcpy(conn->ip_addr_str, old_conn->ip_addr_str);
++  /* persist connection info in session handle */
++  Curl_persistconninfo(conn);
+ 
+   /* re-use init */
+   conn->bits.reuse = TRUE; /* yes, we're re-using here */
+diff --git a/lib/urldata.h b/lib/urldata.h
+index 19ed4beb3..62dabebd8 100644
+--- a/lib/urldata.h
++++ b/lib/urldata.h
+@@ -757,6 +757,23 @@ struct connectdata {
+   unsigned short remote_port; /* what remote port to connect to,
+                                  not the proxy port! */
+ 
++  /* 'primary_ip' and 'primary_port' get filled with peer's numerical
++     ip address and port number whenever an outgoing connection is
++     *attemted* from the primary socket to a remote address. When more
++     than one address is tried for a connection these will hold data
++     for the last attempt. When the connection is actualy established
++     these are updated with data which comes directly from the socket. */
++
++  char primary_ip[MAX_IPADR_LEN];
++  long primary_port;
++
++  /* 'local_ip' and 'local_port' get filled with local's numerical
++     ip address and port number whenever an outgoing connection is
++     **established** from the primary socket to a remote address. */
++
++  char local_ip[MAX_IPADR_LEN];
++  long local_port;
++
+   char *user;    /* user name string, allocated */
+   char *passwd;  /* password string, allocated */
+ 
+@@ -915,22 +932,19 @@ struct PureInfo {
+   char *contenttype; /* the content type of the object */
+   char *wouldredirect; /* URL this would've been redirected to if asked to */
+ 
+-  /* 'primary_ip' and 'primary_port' get filled with peer's numerical
+-     ip address and port number whenever an outgoing connection is
+-     *attemted* from the primary socket to a remote address. When more
+-     than one address is tried for a connection these will hold data
+-     for the last attempt. When the connection is actualy established
+-     these are updated with data which comes directly from the socket. */
++  /* PureInfo members 'conn_primary_ip', 'conn_primary_port', 'conn_local_ip'
++     and, 'conn_local_port' are copied over from the connectdata struct in
++     order to allow curl_easy_getinfo() to return this information even when
++     the session handle is no longer associated with a connection, and also
++     allow curl_easy_reset() to clear this information from the session handle
++     without disturbing information which is still alive, and that might be
++     reused, in the connection cache. */
+ 
+-  char primary_ip[MAX_IPADR_LEN];
+-  long primary_port;
++  char conn_primary_ip[MAX_IPADR_LEN];
++  long conn_primary_port;
+ 
+-  /* 'local_ip' and 'local_port' get filled with local's numerical
+-     ip address and port number whenever an outgoing connection is
+-     **established** from the primary socket to a remote address. */
+-
+-  char local_ip[MAX_IPADR_LEN];
+-  long local_port;
++  char conn_local_ip[MAX_IPADR_LEN];
++  long conn_local_port;
+ 
+   struct curl_certinfo certs; /* info about the certs, only populated in
+                                  OpenSSL builds. Asked for with
+

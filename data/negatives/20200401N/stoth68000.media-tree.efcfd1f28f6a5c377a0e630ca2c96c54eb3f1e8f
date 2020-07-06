@@ -1,0 +1,55 @@
+commit efcfd1f28f6a5c377a0e630ca2c96c54eb3f1e8f
+Author: Andrey Yurovsky <andrey@cozybit.com>
+Date:   Thu Jun 18 09:51:57 2009 -0700
+
+    libertas: correct card cleanup order in SPI driver
+    
+    The SPI driver does a couple of card cleanup steps in the wrong order on
+    module removal.  If IEEE PS is enabled, this results in the card being
+    left in IEEE PS mode and subsequent failures to reload the module.  The
+    problem is that the surpriseremoved flag is set before calling
+    lbs_remove_card, but that function needs to issue a command to exit IEEE
+    PS mode (the flag blocks the command path).  In addition, lbs_stop_card
+    should be called first because it clears out any pending commands.
+    
+    Tested on a GSPI device with V9 firmware by confirming that we can
+    reload the module with or without IEEE PS enabled.
+    
+    Also fix a warning from the wrong uint format in a printk.
+    
+    V2: use z modifier, thanks Sebastian.
+    
+    Signed-off-by: Andrey Yurovsky <andrey@cozybit.com>
+    Acked-by: Dan Williams <dcbw@redhat.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/libertas/if_spi.c b/drivers/net/wireless/libertas/if_spi.c
+index b213de437ae6..963c20125fc9 100644
+--- a/drivers/net/wireless/libertas/if_spi.c
++++ b/drivers/net/wireless/libertas/if_spi.c
+@@ -737,7 +737,7 @@ static int if_spi_c2h_data(struct if_spi_card *card)
+ 		goto out;
+ 	} else if (len > MRVDRV_ETH_RX_PACKET_BUFFER_SIZE) {
+ 		lbs_pr_err("%s: error: card has %d bytes of data, but "
+-			   "our maximum skb size is %lu\n",
++			   "our maximum skb size is %zu\n",
+ 			   __func__, len, MRVDRV_ETH_RX_PACKET_BUFFER_SIZE);
+ 		err = -EINVAL;
+ 		goto out;
+@@ -1170,12 +1170,13 @@ static int __devexit libertas_spi_remove(struct spi_device *spi)
+ 
+ 	lbs_deb_spi("libertas_spi_remove\n");
+ 	lbs_deb_enter(LBS_DEB_SPI);
+-	priv->surpriseremoved = 1;
+ 
+ 	lbs_stop_card(priv);
++	lbs_remove_card(priv); /* will call free_netdev */
++
++	priv->surpriseremoved = 1;
+ 	free_irq(spi->irq, card);
+ 	if_spi_terminate_spi_thread(card);
+-	lbs_remove_card(priv); /* will call free_netdev */
+ 	if (card->pdata->teardown)
+ 		card->pdata->teardown(spi);
+ 	free_if_spi_card(card);
+

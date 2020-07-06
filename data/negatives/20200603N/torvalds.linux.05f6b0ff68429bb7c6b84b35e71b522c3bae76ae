@@ -1,0 +1,57 @@
+commit 05f6b0ff68429bb7c6b84b35e71b522c3bae76ae
+Author: Yoshihiro Shimoda <yoshihiro.shimoda.uh@renesas.com>
+Date:   Mon Aug 22 17:48:26 2016 +0900
+
+    usb: gadget: u_ether: add a flag to avoid skb_reserve() calling
+    
+    This patch adds a flag "no_skb_reserve" in struct eth_dev.
+    So, if a peripheral driver sets the quirk_avoids_skb_reserve flag,
+    upper network gadget drivers (e.g. f_ncm.c) can avoid skb_reserve()
+    calling using the flag as well.
+    
+    Signed-off-by: Yoshihiro Shimoda <yoshihiro.shimoda.uh@renesas.com>
+    Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+
+diff --git a/drivers/usb/gadget/function/u_ether.c b/drivers/usb/gadget/function/u_ether.c
+index 5f562c1ec795..3be4b93fd415 100644
+--- a/drivers/usb/gadget/function/u_ether.c
++++ b/drivers/usb/gadget/function/u_ether.c
+@@ -82,6 +82,7 @@ struct eth_dev {
+ #define	WORK_RX_MEMORY		0
+ 
+ 	bool			zlp;
++	bool			no_skb_reserve;
+ 	u8			host_mac[ETH_ALEN];
+ 	u8			dev_mac[ETH_ALEN];
+ };
+@@ -233,7 +234,8 @@ rx_submit(struct eth_dev *dev, struct usb_request *req, gfp_t gfp_flags)
+ 	 * but on at least one, checksumming fails otherwise.  Note:
+ 	 * RNDIS headers involve variable numbers of LE32 values.
+ 	 */
+-	skb_reserve(skb, NET_IP_ALIGN);
++	if (likely(!dev->no_skb_reserve))
++		skb_reserve(skb, NET_IP_ALIGN);
+ 
+ 	req->buf = skb->data;
+ 	req->length = size;
+@@ -1063,6 +1065,7 @@ struct net_device *gether_connect(struct gether *link)
+ 
+ 	if (result == 0) {
+ 		dev->zlp = link->is_zlp_ok;
++		dev->no_skb_reserve = link->no_skb_reserve;
+ 		DBG(dev, "qlen %d\n", qlen(dev->gadget, dev->qmult));
+ 
+ 		dev->header_len = link->header_len;
+diff --git a/drivers/usb/gadget/function/u_ether.h b/drivers/usb/gadget/function/u_ether.h
+index c77145bd6b5b..81d94a7ae4b4 100644
+--- a/drivers/usb/gadget/function/u_ether.h
++++ b/drivers/usb/gadget/function/u_ether.h
+@@ -64,6 +64,7 @@ struct gether {
+ 	struct usb_ep			*out_ep;
+ 
+ 	bool				is_zlp_ok;
++	bool				no_skb_reserve;
+ 
+ 	u16				cdc_filter;
+ 
+

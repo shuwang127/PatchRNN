@@ -1,0 +1,250 @@
+commit 34b631f6799a9fc81980f3027865b6258452df43
+Author: Kalle Sommer Nielsen <kalle@php.net>
+Date:   Wed Aug 18 13:34:40 2010 +0000
+
+    Pass the TSRMS pointers to sapi_module_struct.log_message, this saves some TSRMLS_FETCH() calls in a few of our SAPI's
+
+diff --git a/ext/standard/basic_functions.c b/ext/standard/basic_functions.c
+index df6ca7e41a..55194145c1 100644
+--- a/ext/standard/basic_functions.c
++++ b/ext/standard/basic_functions.c
+@@ -4633,7 +4633,7 @@ PHPAPI int _php_error_log_ex(int opt_err, char *message, int message_len, char *
+ 
+ 		case 4: /* send to SAPI */
+ 			if (sapi_module.log_message) {
+-				sapi_module.log_message(message);
++				sapi_module.log_message(message TSRMLS_CC);
+ 			} else {
+ 				return FAILURE;
+ 			}
+diff --git a/main/SAPI.h b/main/SAPI.h
+index 972a6b0e05..3d14ae53f8 100644
+--- a/main/SAPI.h
++++ b/main/SAPI.h
+@@ -237,7 +237,7 @@ struct _sapi_module_struct {
+ 	char *(*read_cookies)(TSRMLS_D);
+ 
+ 	void (*register_server_variables)(zval *track_vars_array TSRMLS_DC);
+-	void (*log_message)(char *message);
++	void (*log_message)(char *message TSRMLS_DC);
+ 	time_t (*get_request_time)(TSRMLS_D);
+ 	void (*terminate_process)(TSRMLS_D);
+ 
+diff --git a/main/main.c b/main/main.c
+index 9d8a5f2f2f..c03bf73024 100644
+--- a/main/main.c
++++ b/main/main.c
+@@ -567,7 +567,7 @@ PHPAPI void php_log_err(char *log_message TSRMLS_DC)
+ 	/* Otherwise fall back to the default logging location, if we have one */
+ 
+ 	if (sapi_module.log_message) {
+-		sapi_module.log_message(log_message);
++		sapi_module.log_message(log_message TSRMLS_CC);
+ 	}
+ 	PG(in_error_log) = 0;
+ }
+diff --git a/sapi/apache/mod_php5.c b/sapi/apache/mod_php5.c
+index 2b64270b99..1d858a5bc1 100644
+--- a/sapi/apache/mod_php5.c
++++ b/sapi/apache/mod_php5.c
+@@ -307,10 +307,8 @@ static int php_apache_startup(sapi_module_struct *sapi_module)
+ 
+ /* {{{ php_apache_log_message
+  */
+-static void php_apache_log_message(char *message)
++static void php_apache_log_message(char *message TSRMLS_DC)
+ {
+-	TSRMLS_FETCH();
+-
+ 	if (SG(server_context)) {
+ #if MODULE_MAGIC_NUMBER >= 19970831
+ 		aplog_error(NULL, 0, APLOG_ERR | APLOG_NOERRNO, ((request_rec *) SG(server_context))->server, "%s", message);
+diff --git a/sapi/apache2filter/sapi_apache2.c b/sapi/apache2filter/sapi_apache2.c
+index 2a7d5b7dd0..5aa798c53d 100644
+--- a/sapi/apache2filter/sapi_apache2.c
++++ b/sapi/apache2filter/sapi_apache2.c
+@@ -282,10 +282,9 @@ php_apache_sapi_flush(void *server_context)
+ 	}
+ }
+ 
+-static void php_apache_sapi_log_message(char *msg)
++static void php_apache_sapi_log_message(char *msg TSRMLS_DC)
+ {
+ 	php_struct *ctx;
+-	TSRMLS_FETCH();
+ 
+ 	ctx = SG(server_context);
+    
+diff --git a/sapi/apache2handler/sapi_apache2.c b/sapi/apache2handler/sapi_apache2.c
+index ae757f5702..f8eb2d47ea 100644
+--- a/sapi/apache2handler/sapi_apache2.c
++++ b/sapi/apache2handler/sapi_apache2.c
+@@ -313,10 +313,9 @@ php_apache_sapi_flush(void *server_context)
+ 	}
+ }
+ 
+-static void php_apache_sapi_log_message(char *msg)
++static void php_apache_sapi_log_message(char *msg TSRMLS_DC)
+ {
+ 	php_struct *ctx;
+-	TSRMLS_FETCH();
+ 
+ 	ctx = SG(server_context);
+ 
+@@ -327,12 +326,12 @@ static void php_apache_sapi_log_message(char *msg)
+ 	}
+ }
+ 
+-static void php_apache_sapi_log_message_ex(char *msg, request_rec *r)
++static void php_apache_sapi_log_message_ex(char *msg, request_rec *r TSRMLS_DC)
+ {
+ 	if (r) {
+ 		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, msg, r->filename);
+ 	} else {
+-		php_apache_sapi_log_message(msg);
++		php_apache_sapi_log_message(msg TSRMLS_CC);
+ 	}
+ }
+ 
+@@ -589,12 +588,12 @@ normal:
+ 	}
+ 
+ 	if (r->finfo.filetype == 0) {
+-		php_apache_sapi_log_message_ex("script '%s' not found or unable to stat", r);
++		php_apache_sapi_log_message_ex("script '%s' not found or unable to stat", r TSRMLS_CC);
+ 		PHPAP_INI_OFF;
+ 		return HTTP_NOT_FOUND;
+ 	}
+ 	if (r->finfo.filetype == APR_DIR) {
+-		php_apache_sapi_log_message_ex("attempt to invoke directory '%s' as script", r);
++		php_apache_sapi_log_message_ex("attempt to invoke directory '%s' as script", r TSRMLS_CC);
+ 		PHPAP_INI_OFF;
+ 		return HTTP_FORBIDDEN;
+ 	}
+diff --git a/sapi/apache_hooks/mod_php5.c b/sapi/apache_hooks/mod_php5.c
+index 8e7cd2f292..f7fadd9919 100644
+--- a/sapi/apache_hooks/mod_php5.c
++++ b/sapi/apache_hooks/mod_php5.c
+@@ -430,10 +430,8 @@ static int php_apache_startup(sapi_module_struct *sapi_module)
+ 
+ /* {{{ php_apache_log_message
+  */
+-static void php_apache_log_message(char *message)
++static void php_apache_log_message(char *message TSRMLS_DC)
+ {
+-	TSRMLS_FETCH();
+-
+ 	if (SG(server_context)) {
+ #if MODULE_MAGIC_NUMBER >= 19970831
+ 		aplog_error(NULL, 0, APLOG_ERR | APLOG_NOERRNO, ((request_rec *) SG(server_context))->server, "%s", message);
+diff --git a/sapi/cgi/cgi_main.c b/sapi/cgi/cgi_main.c
+index 599f2ba420..b57abd3e1b 100644
+--- a/sapi/cgi/cgi_main.c
++++ b/sapi/cgi/cgi_main.c
+@@ -676,10 +676,8 @@ static void sapi_cgi_register_variables(zval *track_vars_array TSRMLS_DC)
+ 	}
+ }
+ 
+-static void sapi_cgi_log_message(char *message)
++static void sapi_cgi_log_message(char *message TSRMLS_DC)
+ {
+-	TSRMLS_FETCH();
+-
+ 	if (fcgi_is_fastcgi() && CGIG(fcgi_logging)) {
+ 		fcgi_request *request;
+ 
+diff --git a/sapi/cli/php_cli.c b/sapi/cli/php_cli.c
+index 8856bf8e6c..2fdba62a0d 100644
+--- a/sapi/cli/php_cli.c
++++ b/sapi/cli/php_cli.c
+@@ -374,7 +374,7 @@ static void sapi_cli_register_variables(zval *track_vars_array TSRMLS_DC) /* {{{
+ }
+ /* }}} */
+ 
+-static void sapi_cli_log_message(char *message) /* {{{ */
++static void sapi_cli_log_message(char *message TSRMLS_DC) /* {{{ */
+ {
+ 	fprintf(stderr, "%s\n", message);
+ }
+@@ -476,7 +476,7 @@ static sapi_module_struct cli_sapi_module = {
+ 	sapi_cli_log_message,			/* Log message */
+ 	NULL,							/* Get request time */
+ 	NULL,							/* Child terminate */
+-
++	
+ 	STANDARD_SAPI_MODULE_PROPERTIES
+ };
+ /* }}} */
+diff --git a/sapi/continuity/capi.c b/sapi/continuity/capi.c
+index dc3586e455..87190a32fe 100644
+--- a/sapi/continuity/capi.c
++++ b/sapi/continuity/capi.c
+@@ -343,9 +343,8 @@ static void sapi_capi_register_server_variables(zval * track_vars_array TSRMLS_D
+ 
+ }
+ 
+-static void capi_log_message(char *message)
++static void capi_log_message(char *message TSRMLS_DC)
+ {
+-   TSRMLS_FETCH();
+    capi_request_context *rc = (capi_request_context *) SG(server_context);
+    logFmsg(0, "mod/php: %s", message);
+ }
+diff --git a/sapi/embed/php_embed.c b/sapi/embed/php_embed.c
+index 3f5e8dc2c3..9cce17aaf0 100644
+--- a/sapi/embed/php_embed.c
++++ b/sapi/embed/php_embed.c
+@@ -90,7 +90,7 @@ static void php_embed_send_header(sapi_header_struct *sapi_header, void *server_
+ {
+ }
+ 
+-static void php_embed_log_message(char *message)
++static void php_embed_log_message(char *message TSRMLS_DC)
+ {
+ 	fprintf (stderr, "%s\n", message);
+ }
+diff --git a/sapi/fpm/fpm/fpm_main.c b/sapi/fpm/fpm/fpm_main.c
+index 8f25c98732..5f7244f577 100644
+--- a/sapi/fpm/fpm/fpm_main.c
++++ b/sapi/fpm/fpm/fpm_main.c
+@@ -698,10 +698,8 @@ static void sapi_cgi_register_variables(zval *track_vars_array TSRMLS_DC)
+ 	}
+ }
+ 
+-static void sapi_cgi_log_message(char *message)
++static void sapi_cgi_log_message(char *message TSRMLS_DC)
+ {
+-	TSRMLS_FETCH();
+-
+ 	if (fcgi_is_fastcgi() && CGIG(fcgi_logging)) {
+ 		fcgi_request *request;
+ 
+diff --git a/sapi/litespeed/lsapi_main.c b/sapi/litespeed/lsapi_main.c
+index fa8248e5d6..907afda290 100644
+--- a/sapi/litespeed/lsapi_main.c
++++ b/sapi/litespeed/lsapi_main.c
+@@ -268,7 +268,7 @@ static int sapi_lsapi_send_headers(sapi_headers_struct *sapi_headers TSRMLS_DC)
+ 
+ /* {{{ sapi_lsapi_send_headers
+  */
+-static void sapi_lsapi_log_message(char *message)
++static void sapi_lsapi_log_message(char *message TSRMLS_DC)
+ {
+ 	int len = strlen( message );
+ 	LSAPI_Write_Stderr( message, len);
+diff --git a/sapi/nsapi/nsapi.c b/sapi/nsapi/nsapi.c
+index b35dd5f0af..eaa20f7fff 100644
+--- a/sapi/nsapi/nsapi.c
++++ b/sapi/nsapi/nsapi.c
+@@ -773,9 +773,8 @@ static void sapi_nsapi_register_server_variables(zval *track_vars_array TSRMLS_D
+ 	}
+ }
+ 
+-static void nsapi_log_message(char *message)
++static void nsapi_log_message(char *message TSRMLS_DC)
+ {
+-	TSRMLS_FETCH();
+ 	nsapi_request_context *rc = (nsapi_request_context *)SG(server_context);
+ 
+ 	if (rc) {
+

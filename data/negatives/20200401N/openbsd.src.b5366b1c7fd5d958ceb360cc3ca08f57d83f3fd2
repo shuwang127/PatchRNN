@@ -1,0 +1,80 @@
+commit b5366b1c7fd5d958ceb360cc3ca08f57d83f3fd2
+Author: fgsch <fgsch@openbsd.org>
+Date:   Sun Dec 14 16:48:04 2008 +0000
+
+    o Correctly clear UGEN_ASLP in all cases.
+    o Use the timeout for isochronous transfers as well
+    o Allow to set the timeout for both, read and write
+    
+    From FreeBSD. you@ ok some time ago.
+
+diff --git a/sys/dev/usb/ugen.c b/sys/dev/usb/ugen.c
+index 6e573e12763..24b185341f2 100644
+--- a/sys/dev/usb/ugen.c
++++ b/sys/dev/usb/ugen.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ugen.c,v 1.55 2008/09/08 19:35:25 martynas Exp $ */
++/*	$OpenBSD: ugen.c,v 1.56 2008/12/14 16:48:04 fgsch Exp $ */
+ /*	$NetBSD: ugen.c,v 1.63 2002/11/26 18:49:48 christos Exp $	*/
+ /*	$FreeBSD: src/sys/dev/usb/ugen.c,v 1.26 1999/11/17 22:33:41 n_hibma Exp $	*/
+ 
+@@ -504,6 +504,7 @@ ugen_do_read(struct ugen_softc *sc, int endpt, struct uio *uio, int flag)
+ 			DPRINTFN(5, ("ugenread: sleep on %p\n", sce));
+ 			error = tsleep(sce, PZERO | PCATCH, "ugenri",
+ 			    (sce->timeout * hz) / 1000);
++			sce->state &= ~UGEN_ASLP;
+ 			DPRINTFN(5, ("ugenread: woke, error=%d\n", error));
+ 			if (sc->sc_dying)
+ 				error = EIO;
+@@ -511,10 +512,8 @@ ugen_do_read(struct ugen_softc *sc, int endpt, struct uio *uio, int flag)
+ 				error = 0;
+ 				break;
+ 			}
+-			if (error) {
+-				sce->state &= ~UGEN_ASLP;
++			if (error)
+ 				break;
+-			}
+ 		}
+ 		splx(s);
+ 
+@@ -571,14 +570,18 @@ ugen_do_read(struct ugen_softc *sc, int endpt, struct uio *uio, int flag)
+ 			}
+ 			sce->state |= UGEN_ASLP;
+ 			DPRINTFN(5, ("ugenread: sleep on %p\n", sce));
+-			error = tsleep(sce, PZERO | PCATCH, "ugenri", 0);
++			error = tsleep(sce, PZERO | PCATCH, "ugenri",
++			    (sce->timeout * hz) / 1000);
++			sce->state &= ~UGEN_ASLP;
+ 			DPRINTFN(5, ("ugenread: woke, error=%d\n", error));
+ 			if (sc->sc_dying)
+ 				error = EIO;
+-			if (error) {
+-				sce->state &= ~UGEN_ASLP;
++			if (error == EWOULDBLOCK) {	/* timeout, return 0 */
++				error = 0;
+ 				break;
+ 			}
++			if (error)
++				break;
+ 		}
+ 
+ 		while (sce->cur != sce->fill && uio->uio_resid > 0 && !error) {
+@@ -1021,11 +1024,11 @@ ugen_do_ioctl(struct ugen_softc *sc, int endpt, u_long cmd,
+ 		return (0);
+ 	case USB_SET_TIMEOUT:
+ 		sce = &sc->sc_endpoints[endpt][IN];
+-		if (sce == NULL
+-		    /* XXX this shouldn't happen, but the distinction between
+-		       input and output pipes isn't clear enough.
+-		       || sce->pipeh == NULL */
+-			)
++		if (sce == NULL)
++			return (EINVAL);
++		sce->timeout = *(int *)addr;
++		sce = &sc->sc_endpoints[endpt][OUT];
++		if (sce == NULL)
+ 			return (EINVAL);
+ 		sce->timeout = *(int *)addr;
+ 		return (0);
+

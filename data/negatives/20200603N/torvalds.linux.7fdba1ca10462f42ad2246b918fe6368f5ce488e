@@ -1,0 +1,79 @@
+commit 7fdba1ca10462f42ad2246b918fe6368f5ce488e
+Author: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date:   Fri Jul 22 13:41:54 2011 +0200
+
+    perf, x86: Avoid kfree() in CPU_STARTING
+    
+    On -rt kfree() can schedule, but CPU_STARTING is before the CPU is
+    fully up and running. These are contradictory, so avoid it. Instead
+    push the kfree() to CPU_ONLINE where we're free to schedule.
+    
+    Reported-by: Thomas Gleixner <tglx@linutronix.de>
+    Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Link: http://lkml.kernel.org/n/tip-kwd4j6ayld5thrscvaxgjquv@git.kernel.org
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/arch/x86/kernel/cpu/perf_event.c b/arch/x86/kernel/cpu/perf_event.c
+index 4ee3abf20ed6..594d42513e60 100644
+--- a/arch/x86/kernel/cpu/perf_event.c
++++ b/arch/x86/kernel/cpu/perf_event.c
+@@ -129,6 +129,8 @@ struct cpu_hw_events {
+ 	 * AMD specific bits
+ 	 */
+ 	struct amd_nb		*amd_nb;
++
++	void			*kfree_on_online;
+ };
+ 
+ #define __EVENT_CONSTRAINT(c, n, m, w) {\
+@@ -1466,10 +1468,12 @@ static int __cpuinit
+ x86_pmu_notifier(struct notifier_block *self, unsigned long action, void *hcpu)
+ {
+ 	unsigned int cpu = (long)hcpu;
++	struct cpu_hw_events *cpuc = &per_cpu(cpu_hw_events, cpu);
+ 	int ret = NOTIFY_OK;
+ 
+ 	switch (action & ~CPU_TASKS_FROZEN) {
+ 	case CPU_UP_PREPARE:
++		cpuc->kfree_on_online = NULL;
+ 		if (x86_pmu.cpu_prepare)
+ 			ret = x86_pmu.cpu_prepare(cpu);
+ 		break;
+@@ -1479,6 +1483,10 @@ x86_pmu_notifier(struct notifier_block *self, unsigned long action, void *hcpu)
+ 			x86_pmu.cpu_starting(cpu);
+ 		break;
+ 
++	case CPU_ONLINE:
++		kfree(cpuc->kfree_on_online);
++		break;
++
+ 	case CPU_DYING:
+ 		if (x86_pmu.cpu_dying)
+ 			x86_pmu.cpu_dying(cpu);
+diff --git a/arch/x86/kernel/cpu/perf_event_amd.c b/arch/x86/kernel/cpu/perf_event_amd.c
+index 941caa2e449b..ee9436c3e5d6 100644
+--- a/arch/x86/kernel/cpu/perf_event_amd.c
++++ b/arch/x86/kernel/cpu/perf_event_amd.c
+@@ -350,7 +350,7 @@ static void amd_pmu_cpu_starting(int cpu)
+ 			continue;
+ 
+ 		if (nb->nb_id == nb_id) {
+-			kfree(cpuc->amd_nb);
++			cpuc->kfree_on_online = cpuc->amd_nb;
+ 			cpuc->amd_nb = nb;
+ 			break;
+ 		}
+diff --git a/arch/x86/kernel/cpu/perf_event_intel.c b/arch/x86/kernel/cpu/perf_event_intel.c
+index f88af2c2a561..3751494e70f5 100644
+--- a/arch/x86/kernel/cpu/perf_event_intel.c
++++ b/arch/x86/kernel/cpu/perf_event_intel.c
+@@ -1362,7 +1362,7 @@ static void intel_pmu_cpu_starting(int cpu)
+ 
+ 		pc = per_cpu(cpu_hw_events, i).shared_regs;
+ 		if (pc && pc->core_id == core_id) {
+-			kfree(cpuc->shared_regs);
++			cpuc->kfree_on_online = cpuc->shared_regs;
+ 			cpuc->shared_regs = pc;
+ 			break;
+ 		}
+

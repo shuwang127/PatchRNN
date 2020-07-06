@@ -1,0 +1,110 @@
+commit be6e8c7e974e7768bd4a3443c557f210275f887f
+Author: Henning Westerholt <henning.westerholt@1und1.de>
+Date:   Tue Sep 18 08:00:02 2007 +0000
+
+    - fix a potential mem leak in one error case in add_route_tree
+    - decrease log level for msg rewrite, add and extend some log messages
+    - add some memsets and NULLs after memory allocation, just to be safe
+    
+    
+    git-svn-id: https://openser.svn.sourceforge.net/svnroot/openser/trunk@2787 689a6050-402a-0410-94f2-e92a70836424
+
+diff --git a/modules_k/carrierroute/carrier_tree.c b/modules_k/carrierroute/carrier_tree.c
+index c256b6582..0bce8cd18 100644
+--- a/modules_k/carrierroute/carrier_tree.c
++++ b/modules_k/carrierroute/carrier_tree.c
+@@ -369,6 +369,7 @@ int add_tree(const char * tree, int carrier_id) {
+ 			LM_ERR("out of shared memory\n");
+ 			return -1;
+ 		}
++		*script_trees = NULL;
+ 	}
+ 	tmp = *script_trees;
+ 
+diff --git a/modules_k/carrierroute/route_func.c b/modules_k/carrierroute/route_func.c
+index b83d9e283..27c55b864 100644
+--- a/modules_k/carrierroute/route_func.c
++++ b/modules_k/carrierroute/route_func.c
+@@ -668,7 +668,7 @@ static int carrier_rewrite_msg(int carrier, int level,
+ 		goto unlock_and_out;
+ 	}
+ 
+-	LM_NOTICE("uri %.*s was rewritten to %.*s\n", user->len, user->s, dest.len, dest.s);
++	LM_INFO("uri %.*s was rewritten to %.*s\n", user->len, user->s, dest.len, dest.s);
+ 
+ 	act.n = 1;
+ 	act.type = SET_URI_T;
+diff --git a/modules_k/carrierroute/route_rule.c b/modules_k/carrierroute/route_rule.c
+index deb3fbe5d..a8bf32de4 100644
+--- a/modules_k/carrierroute/route_rule.c
++++ b/modules_k/carrierroute/route_rule.c
+@@ -156,6 +156,7 @@ int add_route_rule(struct route_tree_item * route_tree, const char * prefix,
+ 			destroy_route_rule(shm_rr);
+ 			return -1;
+ 		}
++		memset(shm_rr->backup, 0, sizeof(struct route_rule_p_list));
+ 		shm_rr->backup->hash_index = backup;
+ 	}
+ 	shm_rr->backed_up = NULL;
+@@ -245,6 +246,7 @@ static int rule_fixup_recursor(struct route_tree_item * rt) {
+ 		}
+ 		if(rt->rules){
+ 			shm_free(rt->rules);
++            rt->rules = NULL;
+ 		}
+ 		if ((rt->rules = shm_malloc(sizeof(struct route_rule *) * rt->rule_num)) == NULL) {
+ 			LM_ERR("out of shared memory\n");
+@@ -285,7 +287,7 @@ static int rule_fixup_recursor(struct route_tree_item * rt) {
+ 			}
+ 		}
+ 		if (rr) {
+-			LM_ERR("Could not populate rules\n");
++			LM_ERR("Could not populate rules: rr: %p\n", rr);
+ 			return -1;
+ 		}
+ 		for(i=0; i<rt->rule_num; i++){
+@@ -355,6 +357,7 @@ int add_backup_route(struct route_rule * rule, struct route_rule * backup){
+ 		LM_ERR("out of shared memory\n");
+ 		return -1;
+ 	}
++	memset(tmp, 0, sizeof(struct route_rule_p_list));
+ 	tmp->hash_index = rule->hash_index;
+ 	tmp->rr = rule;
+ 	tmp->next = backup->backed_up;
+@@ -365,6 +368,7 @@ int add_backup_route(struct route_rule * rule, struct route_rule * backup){
+ 		LM_ERR("out of shared memory\n");
+ 		return -1;
+ 	}
++	memset(tmp, 0, sizeof(struct route_rule_p_list));
+ 	tmp->hash_index = backup->hash_index;
+ 	tmp->rr = backup;
+ 	rule->backup = tmp;
+diff --git a/modules_k/carrierroute/route_tree.c b/modules_k/carrierroute/route_tree.c
+index 9e59f7648..8697ed30c 100644
+--- a/modules_k/carrierroute/route_tree.c
++++ b/modules_k/carrierroute/route_tree.c
+@@ -100,6 +100,7 @@ struct route_tree_item * get_route_tree(const char * domain, struct carrier_tree
+ 	}
+ 	if (add_route_tree(rd, rt) < 0) {
+ 		LM_ERR("couldn't add route tree\n");
++		destroy_route_tree(rt);
+ 		return NULL;
+ 	}
+ 	LM_INFO("created route tree: %s, %i\n", rt->name.s, rt->id);
+@@ -115,6 +116,7 @@ static int add_route_tree(struct carrier_tree * ct, struct route_tree * rt) {
+ 			return 0;
+ 		}
+ 	}
++	LM_ERR("can't add route trees via command line\n");
+ 	return -1;
+ }
+ 
+@@ -317,6 +319,7 @@ int add_domain(const char * domain) {
+ 			LM_ERR("out of shared memory\n");
+ 			return -1;
+ 		}
++		memset(script_routes, 0, sizeof(struct route_map *));
+ 	}
+ 
+ 	tmp = *script_routes;
+

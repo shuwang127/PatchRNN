@@ -1,0 +1,96 @@
+commit 35abf5942427f5062e4aae90dab9edb9dda8d200
+Author: Lars Ellenberg <lars.ellenberg@linbit.com>
+Date:   Wed Feb 23 12:39:46 2011 +0100
+
+    drbd: add page pool to be used for meta data IO
+    
+    Signed-off-by: Philipp Reisner <philipp.reisner@linbit.com>
+    Signed-off-by: Lars Ellenberg <lars.ellenberg@linbit.com>
+
+diff --git a/drivers/block/drbd/drbd_int.h b/drivers/block/drbd/drbd_int.h
+index 783526ab7b20..2444a1683475 100644
+--- a/drivers/block/drbd/drbd_int.h
++++ b/drivers/block/drbd/drbd_int.h
+@@ -1463,11 +1463,32 @@ extern struct kmem_cache *drbd_al_ext_cache;	/* activity log extents */
+ extern mempool_t *drbd_request_mempool;
+ extern mempool_t *drbd_ee_mempool;
+ 
+-extern struct page *drbd_pp_pool; /* drbd's page pool */
++/* drbd's page pool, used to buffer data received from the peer,
++ * or data requested by the peer.
++ *
++ * This does not have an emergency reserve.
++ *
++ * When allocating from this pool, it first takes pages from the pool.
++ * Only if the pool is depleted will try to allocate from the system.
++ *
++ * The assumption is that pages taken from this pool will be processed,
++ * and given back, "quickly", and then can be recycled, so we can avoid
++ * frequent calls to alloc_page(), and still will be able to make progress even
++ * under memory pressure.
++ */
++extern struct page *drbd_pp_pool;
+ extern spinlock_t   drbd_pp_lock;
+ extern int	    drbd_pp_vacant;
+ extern wait_queue_head_t drbd_pp_wait;
+ 
++/* We also need a standard (emergency-reserve backed) page pool
++ * for meta data IO (activity log, bitmap).
++ * We can keep it global, as long as it is used as "N pages at a time".
++ * 128 should be plenty, currently we probably can get away with as few as 1.
++ */
++#define DRBD_MIN_POOL_PAGES	128
++extern mempool_t *drbd_md_io_page_pool;
++
+ extern rwlock_t global_state_lock;
+ 
+ extern int conn_lowest_minor(struct drbd_tconn *tconn);
+diff --git a/drivers/block/drbd/drbd_main.c b/drivers/block/drbd/drbd_main.c
+index 12c9a704ea01..5f4c95905d5e 100644
+--- a/drivers/block/drbd/drbd_main.c
++++ b/drivers/block/drbd/drbd_main.c
+@@ -129,6 +129,7 @@ struct kmem_cache *drbd_bm_ext_cache;	/* bitmap extents */
+ struct kmem_cache *drbd_al_ext_cache;	/* activity log extents */
+ mempool_t *drbd_request_mempool;
+ mempool_t *drbd_ee_mempool;
++mempool_t *drbd_md_io_page_pool;
+ 
+ /* I do not use a standard mempool, because:
+    1) I want to hand out the pre-allocated objects first.
+@@ -1952,6 +1953,8 @@ static void drbd_destroy_mempools(void)
+ 
+ 	/* D_ASSERT(atomic_read(&drbd_pp_vacant)==0); */
+ 
++	if (drbd_md_io_page_pool)
++		mempool_destroy(drbd_md_io_page_pool);
+ 	if (drbd_ee_mempool)
+ 		mempool_destroy(drbd_ee_mempool);
+ 	if (drbd_request_mempool)
+@@ -1965,6 +1968,7 @@ static void drbd_destroy_mempools(void)
+ 	if (drbd_al_ext_cache)
+ 		kmem_cache_destroy(drbd_al_ext_cache);
+ 
++	drbd_md_io_page_pool = NULL;
+ 	drbd_ee_mempool      = NULL;
+ 	drbd_request_mempool = NULL;
+ 	drbd_ee_cache        = NULL;
+@@ -1988,6 +1992,7 @@ static int drbd_create_mempools(void)
+ 	drbd_bm_ext_cache    = NULL;
+ 	drbd_al_ext_cache    = NULL;
+ 	drbd_pp_pool         = NULL;
++	drbd_md_io_page_pool = NULL;
+ 
+ 	/* caches */
+ 	drbd_request_cache = kmem_cache_create(
+@@ -2011,6 +2016,10 @@ static int drbd_create_mempools(void)
+ 		goto Enomem;
+ 
+ 	/* mempools */
++	drbd_md_io_page_pool = mempool_create_page_pool(DRBD_MIN_POOL_PAGES, 0);
++	if (drbd_md_io_page_pool == NULL)
++		goto Enomem;
++
+ 	drbd_request_mempool = mempool_create(number,
+ 		mempool_alloc_slab, mempool_free_slab, drbd_request_cache);
+ 	if (drbd_request_mempool == NULL)
+

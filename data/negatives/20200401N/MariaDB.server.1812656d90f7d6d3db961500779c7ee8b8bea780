@@ -1,0 +1,62 @@
+commit 1812656d90f7d6d3db961500779c7ee8b8bea780
+Author: kroki/tomash@moonlight.home <>
+Date:   Fri Mar 16 20:50:37 2007 +0300
+
+    Fix compilation on Windows broken with the push of bug#16420.
+    Fix three compilation warnings.
+
+diff --git a/sql/event_data_objects.cc b/sql/event_data_objects.cc
+index 36f20c34200..4a78c1affb0 100644
+--- a/sql/event_data_objects.cc
++++ b/sql/event_data_objects.cc
+@@ -1293,7 +1293,7 @@ bool get_next_time(const Time_zone *time_zone, my_time_t *next,
+       time, and this will greatly reduce the effect of the
+       optimization.  So instead we keep the code simple and clean.
+     */
+-    interval.month= diff_months - diff_months % months;
++    interval.month= (ulong) (diff_months - diff_months % months);
+     next_time= add_interval(&local_start, time_zone,
+                             INTERVAL_MONTH, interval);
+     if (next_time == 0)
+@@ -1301,7 +1301,7 @@ bool get_next_time(const Time_zone *time_zone, my_time_t *next,
+ 
+     if (next_time <= time_now)
+     {
+-      interval.month= months;
++      interval.month= (ulong) months;
+       next_time= add_interval(&local_start, time_zone,
+                               INTERVAL_MONTH, interval);
+       if (next_time == 0)
+diff --git a/sql/event_queue.cc b/sql/event_queue.cc
+index bcfe0a222f1..0efd9bb85d1 100644
+--- a/sql/event_queue.cc
++++ b/sql/event_queue.cc
+@@ -65,13 +65,10 @@ struct event_queue_param
+ static int 
+ event_queue_element_compare_q(void *vptr, byte* a, byte *b)
+ {
+-  /*
+-    Note that no overflow is possible here because both values are
+-    non-negative, and subtraction is done in the signed my_time_t
+-    type.
+-  */
+-  return (((Event_queue_element *)a)->execute_at
+-          - ((Event_queue_element *)b)->execute_at);
++  my_time_t lhs = ((Event_queue_element *)a)->execute_at;
++  my_time_t rhs = ((Event_queue_element *)b)->execute_at;
++
++  return (lhs < rhs ? -1 : (lhs > rhs ? 1 : 0));
+ }
+ 
+ 
+@@ -580,8 +577,7 @@ Event_queue::get_top_for_execution_if_time(THD *thd,
+         time or until signaled. Release LOCK_queue while waiting.
+       */
+       struct timespec top_time;
+-      top_time.tv_sec= next_activation_at;
+-      top_time.tv_nsec= 0;
++      set_timespec(top_time, next_activation_at - thd->query_start());
+       cond_wait(thd, &top_time, queue_wait_msg, SCHED_FUNC, __LINE__);
+ 
+       continue;
+

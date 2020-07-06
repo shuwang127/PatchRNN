@@ -1,0 +1,77 @@
+commit 77e258e85769ac58e4f9820509b5e33f8f9ffa41
+Author: phessler <phessler@openbsd.org>
+Date:   Thu May 19 15:00:17 2011 +0000
+
+    Fix some possible NULL pointer dereferences, and a little bit of cleanup.
+    
+    From Lawrence Teo (thanks!)
+    
+    OK krw@
+
+diff --git a/usr.sbin/cron/crontab.c b/usr.sbin/cron/crontab.c
+index 450e99714e5..5efef36124e 100644
+--- a/usr.sbin/cron/crontab.c
++++ b/usr.sbin/cron/crontab.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: crontab.c,v 1.61 2011/04/04 15:17:52 millert Exp $	*/
++/*	$OpenBSD: crontab.c,v 1.62 2011/05/19 15:00:17 phessler Exp $	*/
+ 
+ /* Copyright 1988,1990,1993,1994 by Paul Vixie
+  * All rights reserved
+@@ -547,7 +547,7 @@ replace_cmd(void) {
+ 		case FALSE:
+ 			e = load_entry(tmp, check_error, pw, envp);
+ 			if (e)
+-				free(e);
++				free_entry(e);
+ 			break;
+ 		case TRUE:
+ 			break;
+diff --git a/usr.sbin/cron/entry.c b/usr.sbin/cron/entry.c
+index d2e011b5f24..8d391ed95fc 100644
+--- a/usr.sbin/cron/entry.c
++++ b/usr.sbin/cron/entry.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: entry.c,v 1.32 2009/10/29 18:56:47 markus Exp $	*/
++/*	$OpenBSD: entry.c,v 1.33 2011/05/19 15:00:17 phessler Exp $	*/
+ 
+ /*
+  * Copyright 1988,1990,1993,1994 by Paul Vixie
+@@ -59,7 +59,8 @@ void
+ free_entry(entry *e) {
+ 	free(e->cmd);
+ 	free(e->pwd);
+-	env_free(e->envp);
++	if (e->envp)
++		env_free(e->envp);
+ 	free(e);
+ }
+ 
+@@ -103,6 +104,10 @@ load_entry(FILE *file, void (*error_func)(const char *), struct passwd *pw,
+ 	 */
+ 
+ 	e = (entry *) calloc(sizeof(entry), sizeof(char));
++	if (e == NULL) {
++		ecode = e_memory;
++		goto eof;
++	}
+ 
+ 	if (ch == '@') {
+ 		/* all of these should be flagged and load-limited; i.e.,
+@@ -387,13 +392,8 @@ load_entry(FILE *file, void (*error_func)(const char *), struct passwd *pw,
+ 	return (e);
+ 
+  eof:
+-	if (e->envp)
+-		env_free(e->envp);
+-	if (e->pwd)
+-		free(e->pwd);
+-	if (e->cmd)
+-		free(e->cmd);
+-	free(e);
++	if (e)
++		free_entry(e);
+ 	while (ch != '\n' && !feof(file))
+ 		ch = get_char(file);
+ 	if (ecode != e_none && error_func)
+

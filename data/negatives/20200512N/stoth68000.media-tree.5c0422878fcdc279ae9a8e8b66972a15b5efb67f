@@ -1,0 +1,142 @@
+commit 5c0422878fcdc279ae9a8e8b66972a15b5efb67f
+Author: Ben Widawsky <ben@bwidawsk.net>
+Date:   Mon Oct 17 15:51:55 2011 -0700
+
+    drm/i915: ILK + VT-d workaround
+    
+    Idle the GPU before doing any unmaps. We know if VT-d is in use through
+    an exported variable from iommu code.
+    
+    This should avoid a known HW issue.
+    
+    Signed-off-by: Ben Widawsky <ben@bwidawsk.net>
+    Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Signed-off-by: Keith Packard <keithp@keithp.com>
+
+diff --git a/drivers/char/agp/intel-gtt.c b/drivers/char/agp/intel-gtt.c
+index 85151019dde1..80a7ed0a7df5 100644
+--- a/drivers/char/agp/intel-gtt.c
++++ b/drivers/char/agp/intel-gtt.c
+@@ -923,6 +923,9 @@ static int intel_fake_agp_insert_entries(struct agp_memory *mem,
+ {
+ 	int ret = -EINVAL;
+ 
++	if (intel_private.base.do_idle_maps)
++		return -ENODEV;
++
+ 	if (intel_private.clear_fake_agp) {
+ 		int start = intel_private.base.stolen_size / PAGE_SIZE;
+ 		int end = intel_private.base.gtt_mappable_entries;
+@@ -985,6 +988,9 @@ static int intel_fake_agp_remove_entries(struct agp_memory *mem,
+ 	if (mem->page_count == 0)
+ 		return 0;
+ 
++	if (intel_private.base.do_idle_maps)
++		return -ENODEV;
++
+ 	intel_gtt_clear_range(pg_start, mem->page_count);
+ 
+ 	if (intel_private.base.needs_dmar) {
+@@ -1177,6 +1183,25 @@ static void gen6_cleanup(void)
+ {
+ }
+ 
++/* Certain Gen5 chipsets require require idling the GPU before
++ * unmapping anything from the GTT when VT-d is enabled.
++ */
++extern int intel_iommu_gfx_mapped;
++static inline int needs_idle_maps(void)
++{
++	const unsigned short gpu_devid = intel_private.pcidev->device;
++
++	/* Query intel_iommu to see if we need the workaround. Presumably that
++	 * was loaded first.
++	 */
++	if ((gpu_devid == PCI_DEVICE_ID_INTEL_IRONLAKE_M_HB ||
++	     gpu_devid == PCI_DEVICE_ID_INTEL_IRONLAKE_M_IG) &&
++	     intel_iommu_gfx_mapped)
++		return 1;
++
++	return 0;
++}
++
+ static int i9xx_setup(void)
+ {
+ 	u32 reg_addr;
+@@ -1211,6 +1236,9 @@ static int i9xx_setup(void)
+ 		intel_private.gtt_bus_addr = reg_addr + gtt_offset;
+ 	}
+ 
++	if (needs_idle_maps());
++		intel_private.base.do_idle_maps = 1;
++
+ 	intel_i9xx_setup_flush();
+ 
+ 	return 0;
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index 7a709cd8d543..6042c5e6d278 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -49,6 +49,28 @@ static unsigned int cache_level_to_agp_type(struct drm_device *dev,
+ 	}
+ }
+ 
++static bool do_idling(struct drm_i915_private *dev_priv)
++{
++	bool ret = dev_priv->mm.interruptible;
++
++	if (unlikely(dev_priv->mm.gtt->do_idle_maps)) {
++		dev_priv->mm.interruptible = false;
++		if (i915_gpu_idle(dev_priv->dev)) {
++			DRM_ERROR("Couldn't idle GPU\n");
++			/* Wait a bit, in hopes it avoids the hang */
++			udelay(10);
++		}
++	}
++
++	return ret;
++}
++
++static void undo_idling(struct drm_i915_private *dev_priv, bool interruptible)
++{
++	if (unlikely(dev_priv->mm.gtt->do_idle_maps))
++		dev_priv->mm.interruptible = interruptible;
++}
++
+ void i915_gem_restore_gtt_mappings(struct drm_device *dev)
+ {
+ 	struct drm_i915_private *dev_priv = dev->dev_private;
+@@ -117,6 +139,12 @@ void i915_gem_gtt_rebind_object(struct drm_i915_gem_object *obj,
+ 
+ void i915_gem_gtt_unbind_object(struct drm_i915_gem_object *obj)
+ {
++	struct drm_device *dev = obj->base.dev;
++	struct drm_i915_private *dev_priv = dev->dev_private;
++	bool interruptible;
++
++	interruptible = do_idling(dev_priv);
++
+ 	intel_gtt_clear_range(obj->gtt_space->start >> PAGE_SHIFT,
+ 			      obj->base.size >> PAGE_SHIFT);
+ 
+@@ -124,4 +152,6 @@ void i915_gem_gtt_unbind_object(struct drm_i915_gem_object *obj)
+ 		intel_gtt_unmap_memory(obj->sg_list, obj->num_sg);
+ 		obj->sg_list = NULL;
+ 	}
++
++	undo_idling(dev_priv, interruptible);
+ }
+diff --git a/include/drm/intel-gtt.h b/include/drm/intel-gtt.h
+index 9e343c0998b4..b174620cc9b3 100644
+--- a/include/drm/intel-gtt.h
++++ b/include/drm/intel-gtt.h
+@@ -13,6 +13,8 @@ const struct intel_gtt {
+ 	unsigned int gtt_mappable_entries;
+ 	/* Whether i915 needs to use the dmar apis or not. */
+ 	unsigned int needs_dmar : 1;
++	/* Whether we idle the gpu before mapping/unmapping */
++	unsigned int do_idle_maps : 1;
+ } *intel_gtt_get(void);
+ 
+ void intel_gtt_chipset_flush(void);
+

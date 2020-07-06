@@ -1,0 +1,59 @@
+commit f6e7d66b9f1db07ae80af3d75dabaf95f7f43a15
+Author: Douglas Christman <DouglasChristman@gmail.com>
+Date:   Tue Nov 22 12:57:07 2016 -0500
+
+    calendarspec: add upper bound on year
+    
+    Stop looking for matches after MAX_YEAR so impossible dates like
+    "*-02-30" and "*-04-31" don't cause an infinite loop.
+
+diff --git a/src/basic/calendarspec.c b/src/basic/calendarspec.c
+index fda293fcb..2fc5ceb42 100644
+--- a/src/basic/calendarspec.c
++++ b/src/basic/calendarspec.c
+@@ -34,6 +34,8 @@
+ 
+ /* Longest valid date/time range is 1970..2199 */
+ #define MAX_RANGE_LEN   230
++#define MIN_YEAR       1970
++#define MAX_YEAR       2199
+ #define BITS_WEEKDAYS   127
+ 
+ static void free_chain(CalendarComponent *c) {
+@@ -169,7 +171,7 @@ _pure_ bool calendar_spec_valid(CalendarSpec *c) {
+         if (c->weekdays_bits > BITS_WEEKDAYS)
+                 return false;
+ 
+-        if (!chain_valid(c->year, 1970, 2199))
++        if (!chain_valid(c->year, MIN_YEAR, MAX_YEAR))
+                 return false;
+ 
+         if (!chain_valid(c->month, 1, 12))
+@@ -1017,6 +1019,14 @@ static bool tm_out_of_bounds(const struct tm *tm, bool utc) {
+         if (mktime_or_timegm(&t, utc) == (time_t) -1)
+                 return true;
+ 
++        /*
++         * Set an upper bound on the year so impossible dates like "*-02-31"
++         * don't cause find_next() to loop forever. tm_year contains years
++         * since 1900, so adjust it accordingly.
++         */
++        if (tm->tm_year + 1900 > MAX_YEAR)
++                return true;
++
+         /* Did any normalization take place? If so, it was out of bounds before */
+         return
+                 t.tm_year != tm->tm_year ||
+diff --git a/src/test/test-calendarspec.c b/src/test/test-calendarspec.c
+index 59217b131..18e46f2ac 100644
+--- a/src/test/test-calendarspec.c
++++ b/src/test/test-calendarspec.c
+@@ -190,6 +190,7 @@ int main(int argc, char* argv[]) {
+         test_next("2015-11-13 09:11:23.42/1.77", "EET", 1447398683420000, 1447398685190000);
+         test_next("2015-11-13 09:11:23.42/1.77", "EET", 1447398683419999, 1447398683420000);
+         test_next("Sun 16:00:00", "CET", 1456041600123456, 1456066800000000);
++        test_next("*-04-31", "", 12345, -1);
+ 
+         assert_se(calendar_spec_from_string("test", &c) < 0);
+         assert_se(calendar_spec_from_string("", &c) < 0);
+

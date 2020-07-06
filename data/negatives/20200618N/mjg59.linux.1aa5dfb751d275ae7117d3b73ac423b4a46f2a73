@@ -1,0 +1,100 @@
+commit 1aa5dfb751d275ae7117d3b73ac423b4a46f2a73
+Author: John Stultz <johnstul@us.ibm.com>
+Date:   Wed Aug 20 16:37:28 2008 -0700
+
+    clocksource: keep track of original clocksource frequency
+    
+    The clocksource frequency is represented by
+    clocksource->mult/2^(clocksource->shift).  Currently, when NTP makes
+    adjustments to the clock frequency, they are made directly to the mult
+    value.
+    
+    This has the drawback that once changed, we cannot know what the orignal
+    mult value was, or how much adjustment has been applied.
+    
+    This property causes problems in calculating proper ntp intervals when
+    switching back and forth between clocksources.
+    
+    This patch separates the current mult value into a mult and mult_orig
+    pair.  The mult_orig value stays constant, while the ntp clocksource
+    adjustments are done only to the mult value.
+    
+    This allows for correct ntp interval calculation and additionally lays the
+    groundwork for a new notion of time, what I'm calling the monotonic-raw
+    time, which is introduced in a following patch.
+    
+    Signed-off-by: John Stultz <johnstul@us.ibm.com>
+    Signed-off-by: Roman Zippel <zippel@linux-m68k.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/include/linux/clocksource.h b/include/linux/clocksource.h
+index 55e434feec99..f0a7fb984413 100644
+--- a/include/linux/clocksource.h
++++ b/include/linux/clocksource.h
+@@ -45,7 +45,8 @@ struct clocksource;
+  * @read:		returns a cycle value
+  * @mask:		bitmask for two's complement
+  *			subtraction of non 64 bit counters
+- * @mult:		cycle to nanosecond multiplier
++ * @mult:		cycle to nanosecond multiplier (adjusted by NTP)
++ * @mult_orig:		cycle to nanosecond multiplier (unadjusted by NTP)
+  * @shift:		cycle to nanosecond divisor (power of two)
+  * @flags:		flags describing special properties
+  * @vread:		vsyscall based read
+@@ -63,6 +64,7 @@ struct clocksource {
+ 	cycle_t (*read)(void);
+ 	cycle_t mask;
+ 	u32 mult;
++	u32 mult_orig;
+ 	u32 shift;
+ 	unsigned long flags;
+ 	cycle_t (*vread)(void);
+@@ -201,16 +203,17 @@ static inline void clocksource_calculate_interval(struct clocksource *c,
+ {
+ 	u64 tmp;
+ 
+-	/* XXX - All of this could use a whole lot of optimization */
++	/* Do the ns -> cycle conversion first, using original mult */
+ 	tmp = length_nsec;
+ 	tmp <<= c->shift;
+-	tmp += c->mult/2;
+-	do_div(tmp, c->mult);
++	tmp += c->mult_orig/2;
++	do_div(tmp, c->mult_orig);
+ 
+ 	c->cycle_interval = (cycle_t)tmp;
+ 	if (c->cycle_interval == 0)
+ 		c->cycle_interval = 1;
+ 
++	/* Go back from cycles -> shifted ns, this time use ntp adjused mult */
+ 	c->xtime_interval = (u64)c->cycle_interval * c->mult;
+ }
+ 
+diff --git a/kernel/time/clocksource.c b/kernel/time/clocksource.c
+index 093d4acf993b..9ed2eec97526 100644
+--- a/kernel/time/clocksource.c
++++ b/kernel/time/clocksource.c
+@@ -325,6 +325,9 @@ int clocksource_register(struct clocksource *c)
+ 	unsigned long flags;
+ 	int ret;
+ 
++	/* save mult_orig on registration */
++	c->mult_orig = c->mult;
++
+ 	spin_lock_irqsave(&clocksource_lock, flags);
+ 	ret = clocksource_enqueue(c);
+ 	if (!ret)
+diff --git a/kernel/time/jiffies.c b/kernel/time/jiffies.c
+index 4c256fdb8875..1ca99557e929 100644
+--- a/kernel/time/jiffies.c
++++ b/kernel/time/jiffies.c
+@@ -61,6 +61,7 @@ struct clocksource clocksource_jiffies = {
+ 	.read		= jiffies_read,
+ 	.mask		= 0xffffffff, /*32bits*/
+ 	.mult		= NSEC_PER_JIFFY << JIFFIES_SHIFT, /* details above */
++	.mult_orig	= NSEC_PER_JIFFY << JIFFIES_SHIFT,
+ 	.shift		= JIFFIES_SHIFT,
+ };
+ 
+

@@ -1,0 +1,55 @@
+commit 6d78059bbc0ace5461938aaea8cda95eb6719898
+Author: Andrew Banman <abanman@sgi.com>
+Date:   Wed Sep 21 11:09:20 2016 -0500
+
+    x86/platform/uv/BAU: Fix payload queue setup on UV4 hardware
+    
+    The BAU on UV4 does not need to maintain the payload queue tail pointer. Do
+    not initialize the tail pointer MMR on UV4.
+    
+    Note that write_payload_tail is not an abstracted BAU function since it is
+    an operation specific to pre-UV4 versions. Then we must switch on the UV
+    version to control its usage, for which we use uvhub_version rather than
+    is_uv*_hub because it is quicker/more concise.
+    
+    Signed-off-by: Andrew Banman <abanman@sgi.com>
+    Acked-by: Thomas Gleixner <tglx@linutronix.de>
+    Acked-by: Mike Travis <travis@sgi.com>
+    Acked-by: Dimitri Sivanich <sivanich@sgi.com>
+    Acked-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: akpm@linux-foundation.org
+    Cc: rja@sgi.com
+    Link: http://lkml.kernel.org/r/1474474161-265604-10-git-send-email-abanman@sgi.com
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/platform/uv/tlb_uv.c b/arch/x86/platform/uv/tlb_uv.c
+index 72a5de7cf2e0..7ca0e5c31477 100644
+--- a/arch/x86/platform/uv/tlb_uv.c
++++ b/arch/x86/platform/uv/tlb_uv.c
+@@ -1826,11 +1826,19 @@ static void pq_init(int node, int pnode)
+ 
+ 	first = ops.bau_gpa_to_offset(uv_gpa(pqp));
+ 	last = ops.bau_gpa_to_offset(uv_gpa(pqp + (DEST_Q_SIZE - 1)));
+-	tail = first;
+-	gnode = uv_gpa_to_gnode(uv_gpa(pqp));
+-	first = (gnode << UV_PAYLOADQ_GNODE_SHIFT) | tail;
+ 
+-	write_mmr_payload_tail(pnode, tail);
++	/*
++	 * Pre UV4, the gnode is required to locate the payload queue
++	 * and the payload queue tail must be maintained by the kernel.
++	 */
++	bcp = &per_cpu(bau_control, smp_processor_id());
++	if (bcp->uvhub_version <= 3) {
++		tail = first;
++		gnode = uv_gpa_to_gnode(uv_gpa(pqp));
++		first = (gnode << UV_PAYLOADQ_GNODE_SHIFT) | tail;
++		write_mmr_payload_tail(pnode, tail);
++	}
++
+ 	ops.write_payload_first(pnode, first);
+ 	ops.write_payload_last(pnode, last);
+ 	ops.write_g_sw_ack(pnode, 0xffffUL);
+

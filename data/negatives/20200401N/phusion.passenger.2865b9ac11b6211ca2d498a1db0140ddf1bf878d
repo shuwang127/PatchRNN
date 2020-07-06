@@ -1,0 +1,166 @@
+commit 2865b9ac11b6211ca2d498a1db0140ddf1bf878d
+Author: Hongli Lai (Phusion) <hongli@phusion.nl>
+Date:   Tue Oct 15 17:51:22 2013 +0200
+
+    Remove more usages of variable array subscripts. Fixes issues #977, #975, #979 and #981
+
+diff --git a/ext/apache2/Hooks.cpp b/ext/apache2/Hooks.cpp
+index 700428b62..426d07a07 100644
+--- a/ext/apache2/Hooks.cpp
++++ b/ext/apache2/Hooks.cpp
+@@ -918,7 +918,7 @@ private:
+ 		 */
+ 		size_t uriLen = strlen(r->uri);
+ 		unsigned int escaped = escapeUri(NULL, (const unsigned char *) r->uri, uriLen);
+-		char escapedUri[uriLen + 2 * escaped + 1];
++		char *escapedUri = (char *) apr_palloc(r->pool, uriLen + 2 * escaped + 1);
+ 		escapeUri((unsigned char *) escapedUri, (const unsigned char *) r->uri, uriLen);
+ 		escapedUri[uriLen + 2 * escaped] = '\0';
+ 		
+diff --git a/ext/common/Utils.cpp b/ext/common/Utils.cpp
+index 1cc57002c..b80565da1 100644
+--- a/ext/common/Utils.cpp
++++ b/ext/common/Utils.cpp
+@@ -414,17 +414,13 @@ getGroupName(gid_t gid) {
+ }
+ 
+ gid_t
+-lookupGid(const StaticString &groupName) {
++lookupGid(const string &groupName) {
+ 	struct group *groupEntry;
+-	char name[groupName.size() + 1];
+ 
+-	memcpy(name, groupName.data(), groupName.size());
+-	name[groupName.size()] = '\0';
+-
+-	groupEntry = getgrnam(name);
++	groupEntry = getgrnam(groupName.c_str());
+ 	if (groupEntry == NULL) {
+ 		if (looksLikePositiveNumber(groupName)) {
+-			return atoi(name);
++			return atoi(groupName);
+ 		} else {
+ 			return (gid_t) -1;
+ 		}
+@@ -852,10 +848,11 @@ getHostName() {
+ 		// https://bugzilla.redhat.com/show_bug.cgi?id=130733
+ 		hostNameMax = 255;
+ 	}
+-	char hostname[hostNameMax + 1];
+-	if (gethostname(hostname, hostNameMax) == 0) {
+-		hostname[hostNameMax] = '\0';
+-		return hostname;
++
++	string buf(hostNameMax + 1, '\0');
++	if (gethostname(&buf[0], hostNameMax + 1) == 0) {
++		buf[hostNameMax] = '\0';
++		return string(buf.c_str());
+ 	} else {
+ 		int e = errno;
+ 		throw SystemException("Unable to query the system's host name", e);
+diff --git a/ext/common/Utils.h b/ext/common/Utils.h
+index 60d6c3249..90eabda98 100644
+--- a/ext/common/Utils.h
++++ b/ext/common/Utils.h
+@@ -222,7 +222,7 @@ string getGroupName(gid_t gid);
+  *
+  * Returns `(gid_t) -1` if the lookup fails.
+  */
+-gid_t lookupGid(const StaticString &groupName);
++gid_t lookupGid(const string &groupName);
+ 
+ /**
+  * Converts a mode string into a mode_t value.
+diff --git a/ext/common/Utils/ProcessMetricsCollector.h b/ext/common/Utils/ProcessMetricsCollector.h
+index c6d2f3c0e..72194b916 100644
+--- a/ext/common/Utils/ProcessMetricsCollector.h
++++ b/ext/common/Utils/ProcessMetricsCollector.h
+@@ -219,10 +219,8 @@ private:
+ 		*data = endOfWord;
+ 		return result;
+ 	}
+-	
+-	static long long readNextWordAsLongLong(const char **data) {
+-		StaticString word = readNextWord(data);
+-		char nullTerminatedWord[word.size() + 1];
++
++	static long long processNextWordAsLongLong(const StaticString &word, char *nullTerminatedWord) {
+ 		memcpy(nullTerminatedWord, word.c_str(), word.size());
+ 		nullTerminatedWord[word.size()] = '\0';
+ 		if (*nullTerminatedWord == '\0') {
+@@ -232,9 +230,18 @@ private:
+ 		}
+ 	}
+ 	
+-	static int readNextWordAsInt(const char **data) {
++	static long long readNextWordAsLongLong(const char **data) {
+ 		StaticString word = readNextWord(data);
+-		char nullTerminatedWord[word.size() + 1];
++		if (word.size() < 50) {
++			char nullTerminatedWord[50];
++			return processNextWordAsLongLong(word, nullTerminatedWord);
++		} else {
++			string nullTerminatedWord(word.size() + 1, '\0');
++			return processNextWordAsLongLong(word, &nullTerminatedWord[0]);
++		}
++	}
++
++	static int processNextWordAsInt(const StaticString &word, char *nullTerminatedWord) {
+ 		memcpy(nullTerminatedWord, word.c_str(), word.size());
+ 		nullTerminatedWord[word.size()] = '\0';
+ 		if (*nullTerminatedWord == '\0') {
+@@ -244,6 +251,17 @@ private:
+ 		}
+ 	}
+ 	
++	static int readNextWordAsInt(const char **data) {
++		StaticString word = readNextWord(data);
++		if (word.size() < 50) {
++			char nullTerminatedWord[50];
++			return processNextWordAsInt(word, nullTerminatedWord);
++		} else {
++			string nullTerminatedWord(word.size() + 1, '\0');
++			return processNextWordAsInt(word, &nullTerminatedWord[0]);
++		}
++	}
++	
+ 	string runCommandAndCaptureOutput(const char **command) const {
+ 		pid_t pid;
+ 		int e;
+diff --git a/ext/oxt/system_calls.cpp b/ext/oxt/system_calls.cpp
+index defc87892..6504aed78 100644
+--- a/ext/oxt/system_calls.cpp
++++ b/ext/oxt/system_calls.cpp
+@@ -72,6 +72,10 @@ oxt::setup_syscall_interruption_support() {
+ 
+ void
+ oxt::setup_random_failure_simulation(const ErrorChance *_errorChances, unsigned int n) {
++	if (n > OXT_MAX_ERROR_CHANCES) {
++		throw std::runtime_error("Number of error chances may not exceed OXT_MAX_ERROR_CHANCES");
++	}
++
+ 	ErrorChance *storage = new ErrorChance[n];
+ 	for (unsigned int i = 0; i < n; i++) {
+ 		storage[i] = _errorChances[i];
+@@ -84,7 +88,7 @@ static bool
+ shouldSimulateFailure() {
+ 	if (nErrorChances > 0) {
+ 		double number = random() / (double) RAND_MAX;
+-		const ErrorChance *candidates[nErrorChances];
++		const ErrorChance *candidates[OXT_MAX_ERROR_CHANCES];
+ 		unsigned int i, n = 0;
+ 
+ 		for (i = 0; i < nErrorChances; i++) {
+diff --git a/ext/oxt/system_calls.hpp b/ext/oxt/system_calls.hpp
+index 8f8316b70..63f68a67e 100644
+--- a/ext/oxt/system_calls.hpp
++++ b/ext/oxt/system_calls.hpp
+@@ -114,6 +114,7 @@
+ 
+ namespace oxt {
+ 	static const int INTERRUPTION_SIGNAL = SIGUSR1; // SIGUSR2 is reserved by Valgrind...
++	#define OXT_MAX_ERROR_CHANCES 16
+ 	
+ 	struct ErrorChance {
+ 		double chance;
+

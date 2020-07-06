@@ -1,0 +1,307 @@
+commit d9fbce26fc52d10c7358b499056c16f7b06d48b9
+Author: Török Edvin <edwin@clamav.net>
+Date:   Fri Mar 19 15:47:26 2010 +0200
+
+    More API additions for PDF.
+
+diff --git a/libclamav/bytecode.c b/libclamav/bytecode.c
+index 2b8ab09de..51629dede 100644
+--- a/libclamav/bytecode.c
++++ b/libclamav/bytecode.c
+@@ -40,35 +40,7 @@
+ static const uint32_t nomatch[64];
+ struct cli_bc_ctx *cli_bytecode_context_alloc(void)
+ {
+-    struct cli_bc_ctx *ctx = cli_malloc(sizeof(*ctx));
+-    ctx->bc = NULL;
+-    ctx->func = NULL;
+-    ctx->values = NULL;
+-    ctx->operands = NULL;
+-    ctx->opsizes = NULL;
+-    ctx->fmap = NULL;
+-    ctx->off = 0;
+-    ctx->ctx = NULL;
+-    ctx->hooks.match_counts = nomatch;
+-    /* TODO: init all hooks with safe values */
+-    ctx->virname = NULL;
+-    ctx->outfd = -1;
+-    ctx->tempfile = NULL;
+-    ctx->written = 0;
+-    ctx->trace_level = trace_none;
+-    ctx->trace = NULL;
+-    ctx->trace_op = NULL;
+-    ctx->trace_val = NULL;
+-    ctx->trace_ptr = NULL;
+-    ctx->scope = NULL;
+-    ctx->scopeid = 0;
+-    ctx->file = "??";
+-    ctx->directory = "";
+-    ctx->line = 0;
+-    ctx->col = 0;
+-    ctx->mpool = NULL;
+-    ctx->numGlobals = 0;
+-    ctx->globals = NULL;
++    struct cli_bc_ctx *ctx = cli_calloc(1, sizeof(*ctx));
+     return ctx;
+ }
+ 
+@@ -84,7 +56,7 @@ int cli_bytecode_context_getresult_file(struct cli_bc_ctx *ctx, char **tempfilen
+     *tempfilename = ctx->tempfile;
+     fd  = ctx->outfd;
+     ctx->tempfile = NULL;
+-    ctx->outfd = -1;
++    ctx->outfd = 0;
+     return fd;
+ }
+ 
+@@ -97,18 +69,15 @@ static int cli_bytecode_context_reset(struct cli_bc_ctx *ctx)
+     ctx->operands = NULL;
+     ctx->values = NULL;
+     ctx->opsizes = NULL;
+-    ctx->written = 0;
+-    if (ctx->outfd != -1) {
+-	cli_dbgmsg("Bytecode: nobody cared about FD %d, %s\n", ctx->outfd,
+-		   ctx->tempfile);
+-	if (ftruncate(ctx->outfd, 0) == -1)
+-	    cli_dbgmsg("ftruncate failed\n");
+-	close(ctx->outfd);
+-	cli_unlink(ctx->tempfile);
++    if (ctx->outfd) {
++	cli_bcapi_extract_new(ctx, -1);
++	if (ctx->outfd)
++	    close(ctx->outfd);
+ 	free(ctx->tempfile);
+ 	ctx->tempfile = NULL;
+-	ctx->outfd = -1;
++	ctx->outfd = 0;
+     }
++    ctx->written = 0;
+ #if USE_MPOOL
+     if (ctx->mpool) {
+ 	mpool_destroy(ctx->mpool);
+@@ -1721,6 +1690,7 @@ int cli_bytecode_runlsig(cli_ctx *cctx, const struct cli_all_bc *bcs, unsigned b
+     memset(&ctx, 0, sizeof(ctx));
+     cli_bytecode_context_setfuncid(&ctx, bc, 0);
+     ctx.hooks.match_counts = lsigcnt;
++    ctx.ctx = cctx;
+     cli_bytecode_context_setfile(&ctx, map);
+ 
+     cli_dbgmsg("Running bytecode for logical signature match\n");
+diff --git a/libclamav/bytecode_api.c b/libclamav/bytecode_api.c
+index d18e4ce3c..9a0a1e4ca 100644
+--- a/libclamav/bytecode_api.c
++++ b/libclamav/bytecode_api.c
+@@ -141,7 +141,7 @@ int32_t cli_bcapi_write(struct cli_bc_ctx *ctx, uint8_t*data, int32_t len)
+ 	cli_warnmsg("Bytecode API: called with negative length!\n");
+ 	return -1;
+     }
+-    if (ctx->outfd == -1) {
++    if (!ctx->outfd) {
+ 	ctx->tempfile = cli_gentemp(cctx ? cctx->engine->tmpdir : NULL);
+ 	if (!ctx->tempfile) {
+ 	    cli_dbgmsg("Bytecode API: Unable to allocate memory for tempfile\n");
+@@ -149,10 +149,12 @@ int32_t cli_bcapi_write(struct cli_bc_ctx *ctx, uint8_t*data, int32_t len)
+ 	}
+ 	ctx->outfd = open(ctx->tempfile, O_RDWR|O_CREAT|O_EXCL|O_TRUNC|O_BINARY, 0600);
+ 	if (ctx->outfd == -1) {
++	    ctx->outfd = 0;
+ 	    cli_warnmsg("Bytecode API: Can't create file %s\n", ctx->tempfile);
+ 	    free(ctx->tempfile);
+ 	    return -1;
+ 	}
++	cli_dbgmsg("bytecode opened new tempfile: %s\n", ctx->tempfile);
+     }
+     if (cli_checklimits("bytecode api", cctx, ctx->written + len, 0, 0))
+ 	return -1;
+@@ -365,21 +367,59 @@ int32_t cli_bcapi_fill_buffer(struct cli_bc_ctx *ctx, uint8_t* buf,
+ 			      uint32_t pos, uint32_t fill)
+ {
+     int32_t res, remaining, tofill;
+-    if (!buf || !buflen || buflen > CLI_MAX_ALLOCATION || filled > buflen)
++    if (!buf || !buflen || buflen > CLI_MAX_ALLOCATION || filled > buflen) {
++	cli_dbgmsg("fill_buffer1\n");
+ 	return -1;
+-    if (ctx->off >= ctx->file_size)
++    }
++    if (ctx->off >= ctx->file_size) {
++	cli_dbgmsg("fill_buffer2\n");
+ 	return 0;
++    }
+     remaining = filled - pos;
+     if (remaining) {
+-	if (!CLI_ISCONTAINED(buf, buflen, buf+pos, remaining))
++	if (!CLI_ISCONTAINED(buf, buflen, buf+pos, remaining)) {
++	    cli_dbgmsg("fill_buffer3\n");
+ 	    return -1;
++	}
+ 	memmove(buf, buf+pos, remaining);
+     }
+     tofill = buflen - remaining;
+-    if (!CLI_ISCONTAINED(buf, buflen, buf+remaining, tofill))
++    if (!CLI_ISCONTAINED(buf, buflen, buf+remaining, tofill)) {
++	cli_dbgmsg("fill_buffer4\n");
+ 	return -1;
++    }
+     res = cli_bcapi_read(ctx, buf+remaining, tofill);
+     if (res <= 0)
+ 	return res;
+     return remaining + res;
+ }
++
++int32_t cli_bcapi_extract_new(struct cli_bc_ctx *ctx, int32_t id)
++{
++    cli_ctx *cctx;
++    int res;
++    cli_dbgmsg("previous tempfile had %u bytes\n", ctx->written);
++    if (!ctx->written)
++	return 0;
++    if (cli_updatelimits(ctx->ctx, ctx->written))
++	return -1;
++    ctx->written = 0;
++    lseek(ctx->outfd, 0, SEEK_SET);
++    cli_dbgmsg("bytecode: scanning extracted file %s\n", ctx->tempfile);
++    res = cli_magic_scandesc(ctx->outfd, ctx->ctx);
++    if (res == CL_VIRUS)
++	ctx->found = 1;
++    cctx = (cli_ctx*)ctx->ctx;
++    if ((cctx && cctx->engine->keeptmp) ||
++	(ftruncate(ctx->outfd, 0) == -1)) {
++
++	close(ctx->outfd);
++	if (!(cctx && cctx->engine->keeptmp))
++	    cli_unlink(ctx->tempfile);
++	free(ctx->tempfile);
++	ctx->tempfile = NULL;
++	ctx->outfd = 0;
++    }
++    cli_dbgmsg("bytecode: extracting new file with id %u\n", id);
++    return res;
++}
+diff --git a/libclamav/bytecode_api.h b/libclamav/bytecode_api.h
+index d7ed6810a..2ddf2a698 100644
+--- a/libclamav/bytecode_api.h
++++ b/libclamav/bytecode_api.h
+@@ -208,5 +208,13 @@ int32_t get_pe_section(struct cli_exe_section *section, uint32_t num);
+  */
+ int32_t fill_buffer(uint8_t* buffer, uint32_t len, uint32_t filled, uint32_t cur, uint32_t fill);
+ 
++/**
++ * Prepares for extracting a new file, if we've already extracted one it scans
++ * it.
++ * @param[in] id an id for the new file (for example position in container)
++ * @return 1 if previous extracted file was infected
++*/
++int32_t extract_new(int32_t id);
++
+ #endif
+ #endif
+diff --git a/libclamav/bytecode_api_decl.c b/libclamav/bytecode_api_decl.c
+index 845435536..b51d01026 100644
+--- a/libclamav/bytecode_api_decl.c
++++ b/libclamav/bytecode_api_decl.c
+@@ -54,6 +54,7 @@ uint8_t* cli_bcapi_malloc(struct cli_bc_ctx *ctx, uint32_t);
+ uint32_t cli_bcapi_test2(struct cli_bc_ctx *ctx, uint32_t);
+ int32_t cli_bcapi_get_pe_section(struct cli_bc_ctx *ctx, struct cli_exe_section*, uint32_t);
+ int32_t cli_bcapi_fill_buffer(struct cli_bc_ctx *ctx, uint8_t*, uint32_t, uint32_t, uint32_t, uint32_t);
++int32_t cli_bcapi_extract_new(struct cli_bc_ctx *ctx, int32_t);
+ 
+ const struct cli_apiglobal cli_globals[] = {
+ /* Bytecode globals BEGIN */
+@@ -76,11 +77,11 @@ static uint16_t cli_tmp4[]={16, 8, 8, 32, 32, 32, 32, 32, 32, 32, 32, 32, 16, 16
+ static uint16_t cli_tmp5[]={32, 16, 16, 32, 32, 32, 16, 16};
+ static uint16_t cli_tmp6[]={32};
+ static uint16_t cli_tmp7[]={32};
+-static uint16_t cli_tmp8[]={32, 65, 32, 32, 32, 32};
+-static uint16_t cli_tmp9[]={32, 79, 32};
+-static uint16_t cli_tmp10[]={80};
+-static uint16_t cli_tmp11[]={32, 32, 32, 32, 32, 32, 32, 32, 32};
+-static uint16_t cli_tmp12[]={32, 32};
++static uint16_t cli_tmp8[]={32, 32};
++static uint16_t cli_tmp9[]={32, 65, 32, 32, 32, 32};
++static uint16_t cli_tmp10[]={32, 80, 32};
++static uint16_t cli_tmp11[]={81};
++static uint16_t cli_tmp12[]={32, 32, 32, 32, 32, 32, 32, 32, 32};
+ static uint16_t cli_tmp13[]={65, 32};
+ static uint16_t cli_tmp14[]={32, 65, 32};
+ static uint16_t cli_tmp15[]={32, 85, 32};
+@@ -100,11 +101,11 @@ const struct cli_bc_type cli_apicall_types[]={
+ 	{DStructType, cli_tmp5, 8, 0, 0},
+ 	{DArrayType, cli_tmp6, 1, 0, 0},
+ 	{DArrayType, cli_tmp7, 64, 0, 0},
+-	{DFunctionType, cli_tmp8, 6, 0, 0},
+-	{DFunctionType, cli_tmp9, 3, 0, 0},
+-	{DPointerType, cli_tmp10, 1, 0, 0},
+-	{DStructType, cli_tmp11, 9, 0, 0},
+-	{DFunctionType, cli_tmp12, 2, 0, 0},
++	{DFunctionType, cli_tmp8, 2, 0, 0},
++	{DFunctionType, cli_tmp9, 6, 0, 0},
++	{DFunctionType, cli_tmp10, 3, 0, 0},
++	{DPointerType, cli_tmp11, 1, 0, 0},
++	{DStructType, cli_tmp12, 9, 0, 0},
+ 	{DFunctionType, cli_tmp13, 2, 0, 0},
+ 	{DFunctionType, cli_tmp14, 3, 0, 0},
+ 	{DFunctionType, cli_tmp15, 3, 0, 0},
+@@ -125,7 +126,7 @@ const struct cli_apicall cli_apicalls[]={
+ 	{"seek", 21, 1, 0},
+ 	{"setvirusname", 14, 2, 1},
+ 	{"debug_print_str", 14, 3, 1},
+-	{"debug_print_uint", 12, 0, 2},
++	{"debug_print_uint", 8, 0, 2},
+ 	{"disasm_x86", 15, 4, 1},
+ 	{"trace_directory", 14, 5, 1},
+ 	{"trace_scope", 14, 6, 1},
+@@ -133,13 +134,14 @@ const struct cli_apicall cli_apicalls[]={
+ 	{"trace_op", 14, 8, 1},
+ 	{"trace_value", 14, 9, 1},
+ 	{"trace_ptr", 14, 10, 1},
+-	{"pe_rawaddr", 12, 1, 2},
++	{"pe_rawaddr", 8, 1, 2},
+ 	{"file_find", 14, 11, 1},
+-	{"file_byteat", 12, 2, 2},
++	{"file_byteat", 8, 2, 2},
+ 	{"malloc", 13, 0, 3},
+-	{"test2", 12, 3, 2},
+-	{"get_pe_section", 9, 12, 1},
+-	{"fill_buffer", 8, 0, 4}
++	{"test2", 8, 3, 2},
++	{"get_pe_section", 10, 12, 1},
++	{"fill_buffer", 9, 0, 4},
++	{"extract_new", 8, 4, 2}
+ /* Bytecode APIcalls END */
+ };
+ const cli_apicall_int2 cli_apicalls0[] = {
+@@ -165,7 +167,8 @@ const cli_apicall_int1 cli_apicalls2[] = {
+ 	(cli_apicall_int1)cli_bcapi_debug_print_uint,
+ 	(cli_apicall_int1)cli_bcapi_pe_rawaddr,
+ 	(cli_apicall_int1)cli_bcapi_file_byteat,
+-	(cli_apicall_int1)cli_bcapi_test2
++	(cli_apicall_int1)cli_bcapi_test2,
++	(cli_apicall_int1)cli_bcapi_extract_new
+ };
+ const cli_apicall_malloclike cli_apicalls3[] = {
+ 	(cli_apicall_malloclike)cli_bcapi_malloc
+diff --git a/libclamav/bytecode_api_impl.h b/libclamav/bytecode_api_impl.h
+index c186cdf9e..7773ed702 100644
+--- a/libclamav/bytecode_api_impl.h
++++ b/libclamav/bytecode_api_impl.h
+@@ -51,5 +51,6 @@ uint8_t* cli_bcapi_malloc(struct cli_bc_ctx *ctx, uint32_t);
+ uint32_t cli_bcapi_test2(struct cli_bc_ctx *ctx, uint32_t);
+ int32_t cli_bcapi_get_pe_section(struct cli_bc_ctx *ctx, struct cli_exe_section*, uint32_t);
+ int32_t cli_bcapi_fill_buffer(struct cli_bc_ctx *ctx, uint8_t*, uint32_t, uint32_t, uint32_t, uint32_t);
++int32_t cli_bcapi_extract_new(struct cli_bc_ctx *ctx, int32_t);
+ 
+ #endif
+diff --git a/libclamav/bytecode_priv.h b/libclamav/bytecode_priv.h
+index 2daa3f7d3..85ba18064 100644
+--- a/libclamav/bytecode_priv.h
++++ b/libclamav/bytecode_priv.h
+@@ -135,6 +135,8 @@ struct cli_bc_ctx {
+     char *tempfile;
+     void *ctx;
+     unsigned written;
++    unsigned filewritten;
++    unsigned found;
+     bc_dbg_callback_trace trace;
+     bc_dbg_callback_trace_op trace_op;
+     bc_dbg_callback_trace_val trace_val;
+

@@ -1,0 +1,59 @@
+commit 996b175e39ed42ec2aa0c63b4a03cc500aa6269f
+Author: Eric Dumazet <edumazet@google.com>
+Date:   Mon Jan 6 09:36:12 2014 -0800
+
+    tcp: out_of_order_queue do not use its lock
+    
+    TCP out_of_order_queue lock is not used, as queue manipulation
+    happens with socket lock held and we therefore use the lockless
+    skb queue routines (as __skb_queue_head())
+    
+    We can use __skb_queue_head_init() instead of skb_queue_head_init()
+    to make this more consistent.
+    
+    Signed-off-by: Eric Dumazet <edumazet@google.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/include/linux/tcp.h b/include/linux/tcp.h
+index d68633452d9b..4ad0706d40eb 100644
+--- a/include/linux/tcp.h
++++ b/include/linux/tcp.h
+@@ -248,7 +248,10 @@ struct tcp_sock {
+ 	struct sk_buff* lost_skb_hint;
+ 	struct sk_buff *retransmit_skb_hint;
+ 
+-	struct sk_buff_head	out_of_order_queue; /* Out of order segments go here */
++	/* OOO segments go in this list. Note that socket lock must be held,
++	 * as we do not use sk_buff_head lock.
++	 */
++	struct sk_buff_head	out_of_order_queue;
+ 
+ 	/* SACKs data, these 2 need to be together (see tcp_options_write) */
+ 	struct tcp_sack_block duplicate_sack[1]; /* D-SACK block */
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index d099f9a055c6..e2a40515e665 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -381,7 +381,7 @@ void tcp_init_sock(struct sock *sk)
+ 	struct inet_connection_sock *icsk = inet_csk(sk);
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 
+-	skb_queue_head_init(&tp->out_of_order_queue);
++	__skb_queue_head_init(&tp->out_of_order_queue);
+ 	tcp_init_xmit_timers(sk);
+ 	tcp_prequeue_init(tp);
+ 	INIT_LIST_HEAD(&tp->tsq_node);
+diff --git a/net/ipv4/tcp_minisocks.c b/net/ipv4/tcp_minisocks.c
+index 97b684159861..3aa9e3247991 100644
+--- a/net/ipv4/tcp_minisocks.c
++++ b/net/ipv4/tcp_minisocks.c
+@@ -425,7 +425,7 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct request_sock *req,
+ 
+ 		tcp_set_ca_state(newsk, TCP_CA_Open);
+ 		tcp_init_xmit_timers(newsk);
+-		skb_queue_head_init(&newtp->out_of_order_queue);
++		__skb_queue_head_init(&newtp->out_of_order_queue);
+ 		newtp->write_seq = newtp->pushed_seq = treq->snt_isn + 1;
+ 
+ 		newtp->rx_opt.saw_tstamp = 0;
+

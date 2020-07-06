@@ -1,0 +1,104 @@
+commit 2c695fa0444273c7139a3ca4c324c95498a0bfed
+Author: Daniel Vetter <daniel.vetter@ffwll.ch>
+Date:   Wed Dec 11 11:34:36 2013 +0100
+
+    drm: remove agp_init() bus callback
+    
+    The PCI bus helper is the only user of it. Call it directly before
+    device-registration to get rid of the callback.
+    
+    Note that all drm_agp_*() calls are locked with the drm-global-mutex so we
+    need to explicitly lock it during initialization. It's not really clear
+    why it's needed, but lets be safe.
+    
+    v2: Rebase on top of the agp_init interface change.
+    
+    v3: Remove the rebase-fail where I've accidentally killed the ->irq_by_busid
+    callback a bit too early.
+    
+    Cc: David Herrmann <dh.herrmann@gmail.com>
+    Signed-off-by: David Herrmann <dh.herrmann@gmail.com> (v1)
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/drm_pci.c b/drivers/gpu/drm/drm_pci.c
+index 626e9cfd8aa5..2211c4d70c2d 100644
+--- a/drivers/gpu/drm/drm_pci.c
++++ b/drivers/gpu/drm/drm_pci.c
+@@ -293,7 +293,6 @@ static struct drm_bus drm_pci_bus = {
+ 	.set_busid = drm_pci_set_busid,
+ 	.set_unique = drm_pci_set_unique,
+ 	.irq_by_busid = drm_pci_irq_by_busid,
+-	.agp_init = drm_pci_agp_init,
+ 	.agp_destroy = drm_pci_agp_destroy,
+ };
+ 
+@@ -332,9 +331,13 @@ int drm_get_pci_dev(struct pci_dev *pdev, const struct pci_device_id *ent,
+ 	if (drm_core_check_feature(dev, DRIVER_MODESET))
+ 		pci_set_drvdata(pdev, dev);
+ 
++	mutex_lock(&drm_global_mutex);
++	drm_pci_agp_init(dev);
++	mutex_unlock(&drm_global_mutex);
++
+ 	ret = drm_dev_register(dev, ent->driver_data);
+ 	if (ret)
+-		goto err_pci;
++		goto err_agp;
+ 
+ 	DRM_INFO("Initialized %s %d.%d.%d %s for %s on minor %d\n",
+ 		 driver->name, driver->major, driver->minor, driver->patchlevel,
+@@ -347,7 +350,10 @@ int drm_get_pci_dev(struct pci_dev *pdev, const struct pci_device_id *ent,
+ 
+ 	return 0;
+ 
+-err_pci:
++err_agp:
++	mutex_lock(&drm_global_mutex);
++	drm_pci_agp_destroy(dev);
++	mutex_unlock(&drm_global_mutex);
+ 	pci_disable_device(pdev);
+ err_free:
+ 	drm_dev_free(dev);
+diff --git a/drivers/gpu/drm/drm_stub.c b/drivers/gpu/drm/drm_stub.c
+index 82141e6e8ac8..128a2b7a1f66 100644
+--- a/drivers/gpu/drm/drm_stub.c
++++ b/drivers/gpu/drm/drm_stub.c
+@@ -527,13 +527,10 @@ int drm_dev_register(struct drm_device *dev, unsigned long flags)
+ 
+ 	mutex_lock(&drm_global_mutex);
+ 
+-	if (dev->driver->bus->agp_init)
+-		dev->driver->bus->agp_init(dev);
+-
+ 	if (drm_core_check_feature(dev, DRIVER_MODESET)) {
+ 		ret = drm_get_minor(dev, &dev->control, DRM_MINOR_CONTROL);
+ 		if (ret)
+-			goto err_agp;
++			goto out_unlock;
+ 	}
+ 
+ 	if (drm_core_check_feature(dev, DRIVER_RENDER) && drm_rnodes) {
+@@ -572,9 +569,6 @@ int drm_dev_register(struct drm_device *dev, unsigned long flags)
+ 	drm_put_minor(dev->render);
+ err_control_node:
+ 	drm_put_minor(dev->control);
+-err_agp:
+-	if (dev->driver->bus->agp_destroy)
+-		dev->driver->bus->agp_destroy(dev);
+ out_unlock:
+ 	mutex_unlock(&drm_global_mutex);
+ 	return ret;
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index 04909a80735d..50a54c069518 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -767,7 +767,6 @@ struct drm_bus {
+ 			  struct drm_unique *unique);
+ 	int (*irq_by_busid)(struct drm_device *dev, struct drm_irq_busid *p);
+ 	/* hooks that are for PCI */
+-	void (*agp_init)(struct drm_device *dev);
+ 	void (*agp_destroy)(struct drm_device *dev);
+ 
+ };
+

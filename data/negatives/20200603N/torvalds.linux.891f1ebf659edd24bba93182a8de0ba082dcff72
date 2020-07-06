@@ -1,0 +1,80 @@
+commit 891f1ebf659edd24bba93182a8de0ba082dcff72
+Author: Paul Mackerras <paulus@ozlabs.org>
+Date:   Wed Sep 13 16:29:22 2017 +1000
+
+    KVM: PPC: Book3S HV: Explicitly disable HPT operations on radix guests
+    
+    This adds code to make sure that we don't try to access the
+    non-existent HPT for a radix guest using the htab file for the VM
+    in debugfs, a file descriptor obtained using the KVM_PPC_GET_HTAB_FD
+    ioctl, or via the KVM_PPC_RESIZE_HPT_{PREPARE,COMMIT} ioctls.
+    
+    At present nothing bad happens if userspace does access these
+    interfaces on a radix guest, mostly because kvmppc_hpt_npte()
+    gives 0 for a radix guest, which in turn is because 1 << -4
+    comes out as 0 on POWER processors.  However, that relies on
+    undefined behaviour, so it is better to be explicit about not
+    accessing the HPT for a radix guest.
+    
+    Signed-off-by: Paul Mackerras <paulus@ozlabs.org>
+
+diff --git a/arch/powerpc/kvm/book3s_64_mmu_hv.c b/arch/powerpc/kvm/book3s_64_mmu_hv.c
+index 7df89d58ee91..624b01175b79 100644
+--- a/arch/powerpc/kvm/book3s_64_mmu_hv.c
++++ b/arch/powerpc/kvm/book3s_64_mmu_hv.c
+@@ -1454,7 +1454,7 @@ long kvm_vm_ioctl_resize_hpt_prepare(struct kvm *kvm,
+ 	struct kvm_resize_hpt *resize;
+ 	int ret;
+ 
+-	if (flags != 0)
++	if (flags != 0 || kvm_is_radix(kvm))
+ 		return -EINVAL;
+ 
+ 	if (shift && ((shift < 18) || (shift > 46)))
+@@ -1520,7 +1520,7 @@ long kvm_vm_ioctl_resize_hpt_commit(struct kvm *kvm,
+ 	struct kvm_resize_hpt *resize;
+ 	long ret;
+ 
+-	if (flags != 0)
++	if (flags != 0 || kvm_is_radix(kvm))
+ 		return -EINVAL;
+ 
+ 	if (shift && ((shift < 18) || (shift > 46)))
+@@ -1706,6 +1706,8 @@ static ssize_t kvm_htab_read(struct file *file, char __user *buf,
+ 
+ 	if (!access_ok(VERIFY_WRITE, buf, count))
+ 		return -EFAULT;
++	if (kvm_is_radix(kvm))
++		return 0;
+ 
+ 	first_pass = ctx->first_pass;
+ 	flags = ctx->flags;
+@@ -1803,6 +1805,8 @@ static ssize_t kvm_htab_write(struct file *file, const char __user *buf,
+ 
+ 	if (!access_ok(VERIFY_READ, buf, count))
+ 		return -EFAULT;
++	if (kvm_is_radix(kvm))
++		return -EINVAL;
+ 
+ 	/* lock out vcpus from running while we're doing this */
+ 	mutex_lock(&kvm->lock);
+@@ -2001,6 +2005,10 @@ static ssize_t debugfs_htab_read(struct file *file, char __user *buf,
+ 	struct kvm *kvm;
+ 	__be64 *hptp;
+ 
++	kvm = p->kvm;
++	if (kvm_is_radix(kvm))
++		return 0;
++
+ 	ret = mutex_lock_interruptible(&p->mutex);
+ 	if (ret)
+ 		return ret;
+@@ -2023,7 +2031,6 @@ static ssize_t debugfs_htab_read(struct file *file, char __user *buf,
+ 		}
+ 	}
+ 
+-	kvm = p->kvm;
+ 	i = p->hpt_index;
+ 	hptp = (__be64 *)(kvm->arch.hpt.virt + (i * HPTE_SIZE));
+ 	for (; len != 0 && i < kvmppc_hpt_npte(&kvm->arch.hpt);
+

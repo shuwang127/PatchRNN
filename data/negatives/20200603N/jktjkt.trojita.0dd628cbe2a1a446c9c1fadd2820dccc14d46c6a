@@ -1,0 +1,368 @@
+commit 0dd628cbe2a1a446c9c1fadd2820dccc14d46c6a
+Author: Jan Kundrát <jkt@gentoo.org>
+Date:   Mon Nov 10 16:33:47 2008 +0000
+
+    UnixSocket now almost works :)
+    
+    
+    git-svn-id: svn+ssh://svn.flaska.net/var/svn/trojita/trunk@382 db1c769a-ce0d-0410-92a1-9ec0c70b6fba
+
+diff --git a/Demo/ImapModelDemo.cpp b/Demo/ImapModelDemo.cpp
+index 0061cd4f..fec4d40e 100644
+--- a/Demo/ImapModelDemo.cpp
++++ b/Demo/ImapModelDemo.cpp
+@@ -33,7 +33,7 @@ int main( int argc, char** argv) {
+     QApplication app( argc, argv );
+ 
+     Imap::Mailbox::SocketFactoryPtr factory(
+-            new Imap::Mailbox::ProcessSocketFactory( "/usr/sbin/dovecot",
++            new Imap::Mailbox::UnixProcessSocketFactory( "/usr/sbin/dovecot",
+                 QStringList() << "--exec-mail" << "imap" )
+             /*new Imap::Mailbox::ProcessSocketFactory( "ssh",
+                 QStringList() << "sosna.fzu.cz" << "/usr/sbin/imapd" )*/
+diff --git a/Imap/Streams/SocketFactory.cpp b/Imap/Streams/SocketFactory.cpp
+index 8d003b65..2d3f7b5a 100644
+--- a/Imap/Streams/SocketFactory.cpp
++++ b/Imap/Streams/SocketFactory.cpp
+@@ -19,6 +19,7 @@
+ #include <QProcess>
+ #include "SocketFactory.h"
+ #include "IODeviceSocket.h"
++#include "UnixSocket.h"
+ 
+ namespace Imap {
+ namespace Mailbox {
+@@ -41,5 +42,19 @@ Imap::SocketPtr ProcessSocketFactory::create()
+     return Imap::SocketPtr( new IODeviceSocket( proc ) );
+ }
+ 
++UnixProcessSocketFactory::UnixProcessSocketFactory(
++        const QString& executable, const QStringList& args)
++{
++    _argv << executable.toLocal8Bit();
++    for ( QStringList::const_iterator it = args.begin(); it != args.end(); ++it )
++        _argv << it->toLocal8Bit();
++}
++
++Imap::SocketPtr UnixProcessSocketFactory::create()
++{
++    return Imap::SocketPtr( new UnixSocket( _argv ) );
++}
++
++
+ }
+ }
+diff --git a/Imap/Streams/SocketFactory.h b/Imap/Streams/SocketFactory.h
+index db0e34f2..2043c449 100644
+--- a/Imap/Streams/SocketFactory.h
++++ b/Imap/Streams/SocketFactory.h
+@@ -51,6 +51,16 @@ public:
+     virtual Imap::SocketPtr create();
+ };
+ 
++/** @short Manufacture sockets based on a QProcess replacement */
++class UnixProcessSocketFactory: public SocketFactory {
++    /** @short Arguments to launch the process with */
++    QList<QByteArray> _argv;
++public:
++    UnixProcessSocketFactory( const QString& executable, const QStringList& args );
++    virtual Imap::SocketPtr create();
++};
++
++
+ }
+ 
+ }
+diff --git a/Imap/Streams/UnixSocket.cpp b/Imap/Streams/UnixSocket.cpp
+index d6b7a5c1..4e76f82f 100644
+--- a/Imap/Streams/UnixSocket.cpp
++++ b/Imap/Streams/UnixSocket.cpp
+@@ -19,6 +19,7 @@
+ #include "UnixSocket.h"
+ #include "../Exceptions.h"
+ #include <QTextStream>
++#include <QDebug>
+ #include <errno.h>
+ #include <stdlib.h>
+ 
+@@ -28,6 +29,7 @@ UnixSocket::UnixSocket( const QList<QByteArray>& args ): d(new UnixSocketThread(
+ {
+     connect( d, SIGNAL(readyRead()), this, SIGNAL(readyRead()), Qt::QueuedConnection );
+     connect( d, SIGNAL(aboutToClose()), this, SIGNAL(aboutToClose()), Qt::QueuedConnection );
++    d->start();
+ }
+ 
+ UnixSocket::~UnixSocket()
+@@ -37,50 +39,63 @@ UnixSocket::~UnixSocket()
+ 
+ bool UnixSocket::canReadLine()
+ {
++    qDebug() << "UnixSocket::canReadLine()";
+     return false; // FIXME
+ }
+ 
+ QByteArray UnixSocket::read( qint64 maxSize )
+ {
++    qDebug() << "UnixSocket::read(" << maxSize << ")";
+     //FIXME: internal buffer!
+     pauseThread();
+-    d->accessSemaphore.acquire();
+     QByteArray buf;
+     buf.resize( maxSize );
+-    qint64 ret = wrappedRead( d->fdProcess[0], buf.data(), maxSize );
++    qint64 ret = wrappedRead( d->fdStdout[0], buf.data(), maxSize );
+     buf.resize( ret );
+     d->selectSemaphore.release();
++    qDebug() << "released SELECT";
++    qDebug() << "UnixSocket::read(): return" << buf.size() << "bytes";
+     return buf;
+ 
+ }
+ 
+ QByteArray UnixSocket::readLine( qint64 maxSize )
+ {
++    qDebug() << "UnixSocket::readLine(" << maxSize << ")";
+     return QByteArray(); // FIXME
+ }
+ 
+ bool UnixSocket::waitForReadyRead( int msec )
+ {
++    qDebug() << "UnixSocket::waitForReadyRead(" << msec << ")";
+     return true; // FIXME
+ }
+ 
+ bool UnixSocket::waitForBytesWritten( int msec )
+ {
++    qDebug() << "UnixSocket::waitForBytesWritten(" << msec << ")";
+     return true;
+ }
+ 
+ qint64 UnixSocket::write( const QByteArray& byteArray )
+ {
++    qDebug() << "UnixSocket::write(" << byteArray.size() << "bytes)";
+     pauseThread();
+-    d->accessSemaphore.acquire();
+-    qint64 ret = wrappedWrite( d->fdProcess[1], byteArray.constData(), byteArray.size() );
++    qint64 ret = wrappedWrite( d->fdStdin[1], byteArray.constData(), byteArray.size() );
+     d->selectSemaphore.release();
++    qDebug() << "released SELECT";
++    qDebug() << "UnixSocket::write(): return" << ret;
+     return ret;
+ }
+ 
+ void UnixSocket::pauseThread()
+ {
+-    while ( -1 == wrappedWrite( d->fdInternalPipe[1], "x", 1 ) );
++    qDebug() << "UnixSocket::pauseThread()";
++    int ret = wrappedWrite( d->fdInternalPipe[1], "x", 1 );
++    qDebug() << "UnixSocket::pauseThread(): write() returned" << ret;
++    qDebug() << "...acquiring ACCESS...";
++    d->accessSemaphore.acquire();
++    qDebug() << "got ACCESS";
+ }
+ 
+ ssize_t UnixSocket::wrappedRead( int fd, void* buf, size_t count )
+@@ -101,7 +116,7 @@ ssize_t UnixSocket::wrappedWrite( int fd, const void* buf, size_t count )
+     return ret;
+ }
+ 
+-int UnixSocket::wrappedPipe(int pipefd[2])
++int UnixSocket::wrappedPipe( int pipefd[2] )
+ {
+     int ret;
+     do {
+@@ -110,6 +125,24 @@ int UnixSocket::wrappedPipe(int pipefd[2])
+     return ret;
+ }
+ 
++int UnixSocket::wrappedClose( int fd )
++{
++    int ret;
++    do {
++        ret = ::close( fd );
++    } while ( ret == -1 && errno == EINTR );
++    return ret;
++}
++
++int UnixSocket::wrappedDup2( int oldfd, int newfd )
++{
++    int ret;
++    do {
++        ret = ::dup2( oldfd, newfd );
++    } while ( ret == -1 && ( errno == EINTR || errno == EBUSY ) );
++    return ret;
++}
++
+ 
+ UnixSocketThread::UnixSocketThread( const QList<QByteArray>& args )
+ {
+@@ -117,26 +150,55 @@ UnixSocketThread::UnixSocketThread( const QList<QByteArray>& args )
+     if ( ret == -1 ) {
+         QByteArray buf;
+         QTextStream ss( &buf );
+-        ss << "UnixSocketThread: Can't create internal pipe (" << errno << ")";
++        ss << "UnixSocketThread: Can't create internal pipe: " << errno;
++        ss.flush();
++        throw SocketException( buf.constData() );
++    }
++    
++    ret = UnixSocket::wrappedPipe( fdStdout );
++    if ( ret == -1 ) {
++        QByteArray buf;
++        QTextStream ss( &buf );
++        ss << "UnixSocketThread: Can't create stdout pipe: " << errno;
+         ss.flush();
+         throw SocketException( buf.constData() );
+     }
+ 
+-    pid_t child = fork();
+-    while ( child == -1 && errno == EAGAIN )
+-        child = fork();
+-
+-    if ( child == 0 ) {
+-        // I'm a parent
+-    } else if ( child == -1 ) {
+-        // still failed
++    ret = UnixSocket::wrappedPipe( fdStdin );
++    if ( ret == -1 ) {
+         QByteArray buf;
+         QTextStream ss( &buf );
+-        ss << "UnixSocketThread: Can't fork (" << errno << ")";
++        ss << "UnixSocketThread: Can't create stdin pipe: " << errno;
+         ss.flush();
+         throw SocketException( buf.constData() );
+-    } else {
++    }
++
++
++    childPid = fork();
++    while ( childPid && errno == EAGAIN )
++        childPid = fork();
++
++    if ( childPid == 0 ) {
+         // I'm the child
++        if ( UnixSocket::wrappedDup2( fdStdin[0], 0 ) == -1 ) {
++            QByteArray buf;
++            QTextStream ss( &buf );
++            ss << "UnixSocketThread: Can't dup2(stdin): " << errno;
++            ss.flush();
++            throw SocketException( buf.constData() );
++        }
++        if ( UnixSocket::wrappedDup2( fdStdout[1], 1 ) == -1 ) {
++            QByteArray buf;
++            QTextStream ss( &buf );
++            ss << "UnixSocketThread: Can't dup2(stdout): " << errno;
++            ss.flush();
++            throw SocketException( buf.constData() );
++        }
++        // FIXME: error checking?
++        UnixSocket::wrappedClose( fdStdin[0] );
++        UnixSocket::wrappedClose( fdStdin[1] );
++        UnixSocket::wrappedClose( fdStdout[0] );
++        UnixSocket::wrappedClose( fdStdout[1] );
+         do {
+             // yuck
+             char **argv = new char *[args.size() + 1];
+@@ -146,23 +208,71 @@ UnixSocketThread::UnixSocketThread( const QList<QByteArray>& args )
+             ret = ::execv( args[0].constData(), argv );
+             delete[] argv;
+         } while ( ret == -1 && errno == EAGAIN );
++        QByteArray buf;
++        QTextStream ss( &buf );
++        ss << "UnixSocketThread: execv() failed: " << errno;
++        ss.flush();
++        throw SocketException( buf.constData() );
++    } else if ( childPid == -1 ) {
++        // still failed
++        QByteArray buf;
++        QTextStream ss( &buf );
++        ss << "UnixSocketThread: Can't fork: " << errno;
++        ss.flush();
++        throw SocketException( buf.constData() );
++    } else {
++        // I'm a parent
+     }
+ 
+-    // FIXME: do something with pipes here
+-
+     selectSemaphore.release();
+ }
+ 
+ void UnixSocketThread::run()
+ {
++    fd_set rfds;
++    struct timeval tv;
++    int ret;
+     while (true) {
++        qDebug() << "acquirung SELECT...";
+         selectSemaphore.acquire();
+-        // fdInternalPipe[0] is for reading
+-        // FIXME: select() goes here
++        qDebug() << "got SELECT semaphore";
++        while (true) {
++            FD_ZERO( &rfds );
++            FD_SET( fdInternalPipe[0], &rfds );
++            FD_SET( fdStdout[0], &rfds );
++            tv.tv_sec = 2;
++            tv.tv_usec = 0;
++            do {
++                ret = select( qMax( fdStdout[0], fdInternalPipe[0] ) + 1, &rfds, 0, 0, &tv );
++            } while ( ret == -1 && errno == EINTR );
++            if ( ret < 0 ) {
++                // select() failed
++                qDebug() << "select() failed";
++            } else if ( ret == 0 ) {
++                // timeout
++                qDebug() << "select(): timeout";
++            } else {
++                if ( FD_ISSET( fdInternalPipe[0], &rfds ) ) {
++                    qDebug() << "select(): big brother wants us to sleep...";
++                    break;
++                } else if ( FD_ISSET( fdStdout[0], &rfds ) ) {
++                    qDebug() << "select(): got some data";
++                    emit readyRead();
++                } else {
++                    qDebug() << "select(): wtf, got nothing?";
++                }
++            }
++        }
++        qDebug() << "releaseing ACCESS";
+         accessSemaphore.release();
+     }
+ }
+ 
++UnixSocketThread::~UnixSocketThread()
++{
++    // FIXME: kill the son
++}
++
+ }
+ 
+ #include "UnixSocket.moc"
+diff --git a/Imap/Streams/UnixSocket.h b/Imap/Streams/UnixSocket.h
+index cc6ec5af..8601fa07 100644
+--- a/Imap/Streams/UnixSocket.h
++++ b/Imap/Streams/UnixSocket.h
+@@ -52,7 +52,9 @@ namespace Imap {
+         friend class UnixSocketThread;
+         static ssize_t wrappedRead( int fd, void* buf, size_t count );
+         static ssize_t wrappedWrite( int fd, const void* buf, size_t count );
+-        static int wrappedPipe(int pipefd[2]);
++        static int wrappedPipe( int pipefd[2] );
++        static int wrappedClose( int fd );
++        static int wrappedDup2( int oldfd, int newfd );
+     };
+ 
+     class UnixSocketThread: public QThread {
+@@ -75,7 +77,9 @@ namespace Imap {
+         QSemaphore accessSemaphore;
+ 
+         int fdInternalPipe[2];
+-        int fdProcess[3];
++        int fdStdin[2];
++        int fdStdout[2];
++        pid_t childPid;
+     };
+ 
+ };
+

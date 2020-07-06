@@ -1,0 +1,56 @@
+commit 928dda1f9433f024ac48c3d97ae683bf83dd0e42
+Author: Yiwen Jiang <jiangyiwen@huawei.com>
+Date:   Fri Sep 4 15:44:25 2015 -0700
+
+    ocfs2: fix a tiny case that inode can not removed
+    
+    When running dirop_fileop_racer we found a case that inode
+    can not removed.
+    
+    Two nodes, say Node A and Node B, mount the same ocfs2 volume.  Create
+    two dirs /race/1/ and /race/2/ in the filesystem.
+    
+      Node A                            Node B
+      rm -r /race/2/
+                                        mv /race/1/ /race/2/
+      call ocfs2_unlink(), get
+      the EX mode of /race/2/
+                                        wait for B unlock /race/2/
+      decrease i_nlink of /race/2/ to 0,
+      and add inode of /race/2/ into
+      orphan dir, unlock /race/2/
+                                        got EX mode of /race/2/. because
+                                        /race/1/ is dir, so inc i_nlink
+                                        of /race/2/ and update into disk,
+                                        unlock /race/2/
+      because i_nlink of /race/2/
+      is not zero, this inode will
+      always remain in orphan dir
+    
+    This patch fixes this case by test whether i_nlink of new dir is zero.
+    
+    Signed-off-by: Yiwen Jiang <jiangyiwen@huawei.com>
+    Reviewed-by: Mark Fasheh <mfasheh@suse.de>
+    Cc: Joel Becker <jlbec@evilplan.org>
+    Cc: Joseph Qi <joseph.qi@huawei.com>
+    Cc: Xue jiufei <xuejiufei@huawei.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/ocfs2/namei.c b/fs/ocfs2/namei.c
+index 1c43993e81b0..b7dfac226b1e 100644
+--- a/fs/ocfs2/namei.c
++++ b/fs/ocfs2/namei.c
+@@ -1309,6 +1309,11 @@ static int ocfs2_rename(struct inode *old_dir,
+ 	}
+ 	parents_locked = 1;
+ 
++	if (!new_dir->i_nlink) {
++		status = -EACCES;
++		goto bail;
++	}
++
+ 	/* make sure both dirs have bhs
+ 	 * get an extra ref on old_dir_bh if old==new */
+ 	if (!new_dir_bh) {
+

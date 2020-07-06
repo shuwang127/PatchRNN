@@ -1,0 +1,103 @@
+commit 226406f693013ea3eadab258cb5fc9d8e83df916
+Author: Junio C Hamano <junkio@cox.net>
+Date:   Fri May 27 15:50:30 2005 -0700
+
+    [PATCH] Introduce diff_free_filepair() funcion.
+    
+    This introduces a new function to free a common data structure,
+    and plugs some leaks.
+    
+    Signed-off-by: Junio C Hamano <junkio@cox.net>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/diff.c b/diff.c
+index f745cdd6e..680b521a8 100644
+--- a/diff.c
++++ b/diff.c
+@@ -521,6 +521,13 @@ struct diff_filepair *diff_queue(struct diff_queue_struct *queue,
+ 	return dp;
+ }
+ 
++void diff_free_filepair(struct diff_filepair *p)
++{
++	diff_free_filespec_data(p->one);
++	diff_free_filespec_data(p->two);
++	free(p);
++}
++
+ static void diff_flush_raw(struct diff_filepair *p,
+ 			   int line_termination,
+ 			   int inter_name_termination)
+@@ -817,12 +824,8 @@ void diff_flush(int diff_output_style, int resolve_rename_copy)
+ 			break;
+ 		}
+ 	}
+-	for (i = 0; i < q->nr; i++) {
+-		struct diff_filepair *p = q->queue[i];
+-		diff_free_filespec_data(p->one);
+-		diff_free_filespec_data(p->two);
+-		free(p);
+-	}
++	for (i = 0; i < q->nr; i++)
++		diff_free_filepair(q->queue[i]);
+ 	free(q->queue);
+ 	q->queue = NULL;
+ 	q->nr = q->alloc = 0;
+diff --git a/diffcore-pathspec.c b/diffcore-pathspec.c
+index fd11822aa..c460b2e56 100644
+--- a/diffcore-pathspec.c
++++ b/diffcore-pathspec.c
+@@ -59,7 +59,7 @@ void diffcore_pathspec(const char **pathspec)
+ 		    matches_pathspec(p->two->path, spec, speccnt))
+ 			diff_q(&outq, p);
+ 		else
+-			free(p);
++			diff_free_filepair(p);
+ 	}
+ 	free(q->queue);
+ 	*q = outq;
+diff --git a/diffcore-pickaxe.c b/diffcore-pickaxe.c
+index fea62d51a..491900929 100644
+--- a/diffcore-pickaxe.c
++++ b/diffcore-pickaxe.c
+@@ -49,7 +49,7 @@ void diffcore_pickaxe(const char *needle)
+ 			 contains(p->two, needle, len))
+ 			diff_q(&outq, p);
+ 		if (onum == outq.nr)
+-			free(p);
++			diff_free_filepair(p);
+ 	}
+ 	free(q->queue);
+ 	*q = outq;
+diff --git a/diffcore-rename.c b/diffcore-rename.c
+index 81e4d9df3..39a53a88b 100644
+--- a/diffcore-rename.c
++++ b/diffcore-rename.c
+@@ -361,11 +361,8 @@ void diffcore_rename(int detect_rename, int minimum_score)
+ 			else
+ 				pair_to_free = p;
+ 		}
+-		if (pair_to_free) {
+-			diff_free_filespec_data(pair_to_free->one);
+-			diff_free_filespec_data(pair_to_free->two);
+-			free(pair_to_free);
+-		}
++		if (pair_to_free)
++			diff_free_filepair(pair_to_free);
+ 	}
+ 	diff_debug_queue("done copying original", &outq);
+ 
+diff --git a/diffcore.h b/diffcore.h
+index ee1955bf3..0f82bd933 100644
+--- a/diffcore.h
++++ b/diffcore.h
+@@ -54,6 +54,8 @@ struct diff_filepair {
+ 	(S_ISREG(mode) ? (S_IFREG | ce_permissions(mode)) : \
+ 	S_ISLNK(mode) ? S_IFLNK : S_IFDIR)
+ 
++extern void diff_free_filepair(struct diff_filepair *);
++
+ extern int diff_unmodified_pair(struct diff_filepair *);
+ 
+ struct diff_queue_struct {
+

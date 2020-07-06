@@ -1,0 +1,56 @@
+commit caf69ba62768d3bae4fa8e6ad734cd5565207bd4
+Author: Joel Stanley <joel@jms.id.au>
+Date:   Tue Jun 10 16:03:59 2014 +1000
+
+    powerpc/powernv: Fix reading of OPAL msglog
+    
+    memory_return_from_buffer returns a signed value, so ret should be
+    ssize_t.
+    
+    Fixes the following issue reported by David Binderman:
+    
+      [linux-3.15/arch/powerpc/platforms/powernv/opal-msglog.c:65]: (style)
+      Checking if unsigned variable 'ret' is less than zero.
+      [linux-3.15/arch/powerpc/platforms/powernv/opal-msglog.c:82]: (style)
+      Checking if unsigned variable 'ret' is less than zero.
+    
+      Local variable "ret" is of type size_t. This is always unsigned,
+      so it is pointless to check if it is less than zero.
+    
+      https://bugzilla.kernel.org/show_bug.cgi?id=77551
+    
+    Fixing this exposes a real bug for the case where the entire count
+    bytes is successfully read from the POS_WRAP case. The second
+    memory_read_from_buffer will return EINVAL, causing the entire read to
+    return EINVAL to userspace, despite the data being copied correctly. The
+    fix is to test for the case where the data has been read and return
+    early.
+    
+    Signed-off-by: Joel Stanley <joel@jms.id.au>
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+
+diff --git a/arch/powerpc/platforms/powernv/opal-msglog.c b/arch/powerpc/platforms/powernv/opal-msglog.c
+index 1bb25b952504..44ed78af1a0d 100644
+--- a/arch/powerpc/platforms/powernv/opal-msglog.c
++++ b/arch/powerpc/platforms/powernv/opal-msglog.c
+@@ -37,7 +37,8 @@ static ssize_t opal_msglog_read(struct file *file, struct kobject *kobj,
+ {
+ 	struct memcons *mc = bin_attr->private;
+ 	const char *conbuf;
+-	size_t ret, first_read = 0;
++	ssize_t ret;
++	size_t first_read = 0;
+ 	uint32_t out_pos, avail;
+ 
+ 	if (!mc)
+@@ -69,6 +70,9 @@ static ssize_t opal_msglog_read(struct file *file, struct kobject *kobj,
+ 		to += first_read;
+ 		count -= first_read;
+ 		pos -= avail;
++
++		if (count <= 0)
++			goto out;
+ 	}
+ 
+ 	/* Sanity check. The firmware should not do this to us. */
+

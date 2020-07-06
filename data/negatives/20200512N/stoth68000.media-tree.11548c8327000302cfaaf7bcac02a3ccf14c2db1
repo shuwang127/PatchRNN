@@ -1,0 +1,54 @@
+commit 11548c8327000302cfaaf7bcac02a3ccf14c2db1
+Author: Johan Hovold <johan@hovoldconsulting.com>
+Date:   Wed Mar 9 12:20:39 2016 +0100
+
+    greybus: interface: disable control connection on initialisation errors
+    
+    Disable the control connection immediately on any errors during
+    interface initialisation as there's no need to keep it around for an
+    interface in an error state.
+    
+    Signed-off-by: Johan Hovold <johan@hovoldconsulting.com>
+    Reviewed-by: Jeffrey Carlyle <jcarlyle@google.com>
+    Reviewed-by: Viresh Kumar <viresh.kumar@linaro.org>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@google.com>
+
+diff --git a/drivers/staging/greybus/interface.c b/drivers/staging/greybus/interface.c
+index fe4efe1bbdd5..2654fa8a1f0b 100644
+--- a/drivers/staging/greybus/interface.c
++++ b/drivers/staging/greybus/interface.c
+@@ -198,15 +198,20 @@ int gb_interface_init(struct gb_interface *intf)
+ 	size = gb_control_get_manifest_size_operation(intf);
+ 	if (size <= 0) {
+ 		dev_err(&intf->dev, "failed to get manifest size: %d\n", size);
++
+ 		if (size)
+-			return size;
++			ret = size;
+ 		else
+-			return -EINVAL;
++			ret =  -EINVAL;
++
++		goto err_disable_control;
+ 	}
+ 
+ 	manifest = kmalloc(size, GFP_KERNEL);
+-	if (!manifest)
+-		return -ENOMEM;
++	if (!manifest) {
++		ret = -ENOMEM;
++		goto err_disable_control;
++	}
+ 
+ 	/* Get manifest using control protocol on CPort */
+ 	ret = gb_control_get_manifest_operation(intf, manifest, size);
+@@ -242,6 +247,8 @@ int gb_interface_init(struct gb_interface *intf)
+ 		gb_bundle_destroy(bundle);
+ err_free_manifest:
+ 	kfree(manifest);
++err_disable_control:
++	gb_control_disable(intf->control);
+ 
+ 	return ret;
+ }
+

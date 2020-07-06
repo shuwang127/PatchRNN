@@ -1,0 +1,68 @@
+commit 1cec251c24f7736518315f3680eac3d1cad975ab
+Author: Zbigniew Jędrzejewski-Szmek <zbyszek@in.waw.pl>
+Date:   Wed Feb 1 15:50:03 2017 -0500
+
+    system-update-generator: warn if the command line blocks updates (#5173)
+    
+    If "3", "5", "systemd.unit=", or similar are present on the kernel command line,
+    the system will not enter into offline update. This behaviour is in line with the
+    general logic that configuration on the kernel command line has higher priority
+    than the configuration on disk, but is rather surprising. Emit a warning to help
+    users diagnose the situation.
+    
+    https://bugzilla.redhat.com/show_bug.cgi?id=1405439#c4
+
+diff --git a/src/system-update-generator/system-update-generator.c b/src/system-update-generator/system-update-generator.c
+index 6ffb169b2..f1514c963 100644
+--- a/src/system-update-generator/system-update-generator.c
++++ b/src/system-update-generator/system-update-generator.c
+@@ -22,6 +22,7 @@
+ 
+ #include "fs-util.h"
+ #include "log.h"
++#include "proc-cmdline.h"
+ #include "special.h"
+ #include "string-util.h"
+ #include "util.h"
+@@ -47,11 +48,27 @@ static int generate_symlink(void) {
+         if (symlink(SYSTEM_DATA_UNIT_PATH "/system-update.target", p) < 0)
+                 return log_error_errno(errno, "Failed to create symlink %s: %m", p);
+ 
++        return 1;
++}
++
++static int parse_proc_cmdline_item(const char *key, const char *value, void *data) {
++        assert(key);
++
++        /* Check if a run level is specified on the kernel command line. The
++         * command line has higher priority than any on-disk configuration, so
++         * it'll make any symlink we create moot.
++         */
++
++        if (streq(key, "systemd.unit") && !proc_cmdline_value_missing(key, value))
++                log_warning("Offline system update overriden by kernel command line systemd.unit= setting");
++        else if (!value && runlevel_to_target(key))
++                log_warning("Offline system update overriden by runlevel \"%s\" on the kernel command line", key);
++
+         return 0;
+ }
+ 
+ int main(int argc, char *argv[]) {
+-        int r;
++        int r, k;
+ 
+         if (argc > 1 && argc != 4) {
+                 log_error("This program takes three or no arguments.");
+@@ -69,5 +86,11 @@ int main(int argc, char *argv[]) {
+ 
+         r = generate_symlink();
+ 
++        if (r > 0) {
++                k = proc_cmdline_parse(parse_proc_cmdline_item, NULL, 0);
++                if (k < 0)
++                        log_warning_errno(k, "Failed to parse kernel command line, ignoring: %m");
++        }
++
+         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+ }
+

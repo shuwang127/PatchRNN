@@ -1,0 +1,85 @@
+commit a6dead43e6b3b01122f700e9e5736a1255561965
+Author: Pavel Dovgalyuk <Pavel.Dovgaluk@ispras.ru>
+Date:   Thu Aug 28 15:19:03 2014 +0400
+
+    apic_common: vapic_paddr synchronization fix
+    
+    This patch postpones vapic_paddr initialization, which is performed
+    during migration. When vapic_paddr is synchronized within the migration
+    process, apic_common functions could operate with incorrect apic state,
+    if it hadn't loaded yet. This patch postpones the synchronization until
+    the virtual machine is started, ensuring that the whole virtual machine
+    state has been loaded.
+    
+    Signed-off-by: Pavel Dovgalyuk <Pavel.Dovgaluk@ispras.ru>
+    Tested-by: Pavel Dovgalyuk <Pavel.Dovgaluk@ispras.ru>
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+
+diff --git a/hw/i386/kvmvapic.c b/hw/i386/kvmvapic.c
+index ee959632a6..2cca7a44f4 100644
+--- a/hw/i386/kvmvapic.c
++++ b/hw/i386/kvmvapic.c
+@@ -59,6 +59,7 @@ typedef struct VAPICROMState {
+     GuestROMState rom_state;
+     size_t rom_size;
+     bool rom_mapped_writable;
++    VMChangeStateEntry *vmsentry;
+ } VAPICROMState;
+ 
+ #define TYPE_VAPIC "kvmvapic"
+@@ -734,11 +735,34 @@ static void do_vapic_enable(void *data)
+     vapic_enable(s, cpu);
+ }
+ 
+-static int vapic_post_load(void *opaque, int version_id)
++static void kvmvapic_vm_state_change(void *opaque, int running,
++                                     RunState state)
+ {
+     VAPICROMState *s = opaque;
+     uint8_t *zero;
+ 
++    if (!running) {
++        return;
++    }
++
++    if (s->state == VAPIC_ACTIVE) {
++        if (smp_cpus == 1) {
++            run_on_cpu(first_cpu, do_vapic_enable, s);
++        } else {
++            zero = g_malloc0(s->rom_state.vapic_size);
++            cpu_physical_memory_write(s->vapic_paddr, zero,
++                                      s->rom_state.vapic_size);
++            g_free(zero);
++        }
++    }
++
++    qemu_del_vm_change_state_handler(s->vmsentry);
++}
++
++static int vapic_post_load(void *opaque, int version_id)
++{
++    VAPICROMState *s = opaque;
++
+     /*
+      * The old implementation of qemu-kvm did not provide the state
+      * VAPIC_STANDBY. Reconstruct it.
+@@ -752,17 +776,8 @@ static int vapic_post_load(void *opaque, int version_id)
+             return -1;
+         }
+     }
+-    if (s->state == VAPIC_ACTIVE) {
+-        if (smp_cpus == 1) {
+-            run_on_cpu(first_cpu, do_vapic_enable, s);
+-        } else {
+-            zero = g_malloc0(s->rom_state.vapic_size);
+-            cpu_physical_memory_write(s->vapic_paddr, zero,
+-                                      s->rom_state.vapic_size);
+-            g_free(zero);
+-        }
+-    }
+ 
++    s->vmsentry = qemu_add_vm_change_state_handler(kvmvapic_vm_state_change, s);
+     return 0;
+ }
+ 
+

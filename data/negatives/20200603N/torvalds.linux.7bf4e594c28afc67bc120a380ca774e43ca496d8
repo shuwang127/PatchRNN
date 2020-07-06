@@ -1,0 +1,112 @@
+commit 7bf4e594c28afc67bc120a380ca774e43ca496d8
+Author: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+Date:   Fri Jan 5 02:18:42 2018 +0100
+
+    PM / wakeup: Do not fail dev_pm_attach_wake_irq() unnecessarily
+    
+    Returning an error code from dev_pm_attach_wake_irq() if
+    device_wakeup_attach_irq() called by it returns an error is
+    pointless, because the wakeup source used by it may be deleted
+    by user space via sysfs at any time and in particular right after
+    dev_pm_attach_wake_irq() has returned.  Moreover, it requires
+    the callers of dev_pm_attach_wake_irq() to create that wakeup
+    source via device_wakeup_enable() upfront, but that obviously is
+    racy with respect to the sysfs-based manipulations of it.
+    
+    To avoid the race, modify device_wakeup_attach_irq() to check
+    that the wakeup source it is going to use is there (and return
+    early otherwise), make it void (as it cannot fail after that
+    change) and make dev_pm_attach_wake_irq() simply call it for
+    the device unconditionally.
+    
+    Tested-by: Tony Lindgren <tony@atomide.com>
+    Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+
+diff --git a/drivers/base/power/power.h b/drivers/base/power/power.h
+index 7beee75399d4..21244c53e377 100644
+--- a/drivers/base/power/power.h
++++ b/drivers/base/power/power.h
+@@ -41,20 +41,15 @@ extern void dev_pm_disable_wake_irq_check(struct device *dev);
+ 
+ #ifdef CONFIG_PM_SLEEP
+ 
+-extern int device_wakeup_attach_irq(struct device *dev,
+-				    struct wake_irq *wakeirq);
++extern void device_wakeup_attach_irq(struct device *dev, struct wake_irq *wakeirq);
+ extern void device_wakeup_detach_irq(struct device *dev);
+ extern void device_wakeup_arm_wake_irqs(void);
+ extern void device_wakeup_disarm_wake_irqs(void);
+ 
+ #else
+ 
+-static inline int
+-device_wakeup_attach_irq(struct device *dev,
+-			 struct wake_irq *wakeirq)
+-{
+-	return 0;
+-}
++static inline void device_wakeup_attach_irq(struct device *dev,
++					    struct wake_irq *wakeirq) {}
+ 
+ static inline void device_wakeup_detach_irq(struct device *dev)
+ {
+diff --git a/drivers/base/power/wakeirq.c b/drivers/base/power/wakeirq.c
+index ae0429827f31..a8ac86e4d79e 100644
+--- a/drivers/base/power/wakeirq.c
++++ b/drivers/base/power/wakeirq.c
+@@ -33,7 +33,6 @@ static int dev_pm_attach_wake_irq(struct device *dev, int irq,
+ 				  struct wake_irq *wirq)
+ {
+ 	unsigned long flags;
+-	int err;
+ 
+ 	if (!dev || !wirq)
+ 		return -EINVAL;
+@@ -45,12 +44,11 @@ static int dev_pm_attach_wake_irq(struct device *dev, int irq,
+ 		return -EEXIST;
+ 	}
+ 
+-	err = device_wakeup_attach_irq(dev, wirq);
+-	if (!err)
+-		dev->power.wakeirq = wirq;
++	dev->power.wakeirq = wirq;
++	device_wakeup_attach_irq(dev, wirq);
+ 
+ 	spin_unlock_irqrestore(&dev->power.lock, flags);
+-	return err;
++	return 0;
+ }
+ 
+ /**
+diff --git a/drivers/base/power/wakeup.c b/drivers/base/power/wakeup.c
+index b7b8b2fe89c6..e73a081c6397 100644
+--- a/drivers/base/power/wakeup.c
++++ b/drivers/base/power/wakeup.c
+@@ -291,22 +291,19 @@ EXPORT_SYMBOL_GPL(device_wakeup_enable);
+  *
+  * Call under the device's power.lock lock.
+  */
+-int device_wakeup_attach_irq(struct device *dev,
++void device_wakeup_attach_irq(struct device *dev,
+ 			     struct wake_irq *wakeirq)
+ {
+ 	struct wakeup_source *ws;
+ 
+ 	ws = dev->power.wakeup;
+-	if (!ws) {
+-		dev_err(dev, "forgot to call device_init_wakeup?\n");
+-		return -EINVAL;
+-	}
++	if (!ws)
++		return;
+ 
+ 	if (ws->wakeirq)
+-		return -EEXIST;
++		dev_err(dev, "Leftover wakeup IRQ found, overriding\n");
+ 
+ 	ws->wakeirq = wakeirq;
+-	return 0;
+ }
+ 
+ /**
+

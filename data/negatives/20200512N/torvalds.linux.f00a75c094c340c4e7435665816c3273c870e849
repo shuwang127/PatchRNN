@@ -1,0 +1,162 @@
+commit f00a75c094c340c4e7435665816c3273c870e849
+Author: Russell King <rmk+kernel@arm.linux.org.uk>
+Date:   Mon Oct 5 15:17:45 2009 +0100
+
+    ARM: Pass VMA to copy_user_highpage() implementations
+    
+    Our copy_user_highpage() implementations may require cache maintainence.
+    Ensure that implementations have all necessary details to perform this
+    maintainence.
+    
+    Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+
+diff --git a/arch/arm/include/asm/page.h b/arch/arm/include/asm/page.h
+index 3a32af4cce30..a485ac3c8696 100644
+--- a/arch/arm/include/asm/page.h
++++ b/arch/arm/include/asm/page.h
+@@ -117,11 +117,12 @@
+ #endif
+ 
+ struct page;
++struct vm_area_struct;
+ 
+ struct cpu_user_fns {
+ 	void (*cpu_clear_user_highpage)(struct page *page, unsigned long vaddr);
+ 	void (*cpu_copy_user_highpage)(struct page *to, struct page *from,
+-			unsigned long vaddr);
++			unsigned long vaddr, struct vm_area_struct *vma);
+ };
+ 
+ #ifdef MULTI_USER
+@@ -137,7 +138,7 @@ extern struct cpu_user_fns cpu_user;
+ 
+ extern void __cpu_clear_user_highpage(struct page *page, unsigned long vaddr);
+ extern void __cpu_copy_user_highpage(struct page *to, struct page *from,
+-			unsigned long vaddr);
++			unsigned long vaddr, struct vm_area_struct *vma);
+ #endif
+ 
+ #define clear_user_highpage(page,vaddr)		\
+@@ -145,7 +146,7 @@ extern void __cpu_copy_user_highpage(struct page *to, struct page *from,
+ 
+ #define __HAVE_ARCH_COPY_USER_HIGHPAGE
+ #define copy_user_highpage(to,from,vaddr,vma)	\
+-	__cpu_copy_user_highpage(to, from, vaddr)
++	__cpu_copy_user_highpage(to, from, vaddr, vma)
+ 
+ #define clear_page(page)	memset((void *)(page), 0, PAGE_SIZE)
+ extern void copy_page(void *to, const void *from);
+diff --git a/arch/arm/mm/copypage-feroceon.c b/arch/arm/mm/copypage-feroceon.c
+index 70997d5bee2d..e2e8d29c548b 100644
+--- a/arch/arm/mm/copypage-feroceon.c
++++ b/arch/arm/mm/copypage-feroceon.c
+@@ -68,7 +68,7 @@ feroceon_copy_user_page(void *kto, const void *kfrom)
+ }
+ 
+ void feroceon_copy_user_highpage(struct page *to, struct page *from,
+-	unsigned long vaddr)
++	unsigned long vaddr, struct vm_area_struct *vma)
+ {
+ 	void *kto, *kfrom;
+ 
+diff --git a/arch/arm/mm/copypage-v3.c b/arch/arm/mm/copypage-v3.c
+index de9c06854ad7..f72303e1d804 100644
+--- a/arch/arm/mm/copypage-v3.c
++++ b/arch/arm/mm/copypage-v3.c
+@@ -38,7 +38,7 @@ v3_copy_user_page(void *kto, const void *kfrom)
+ }
+ 
+ void v3_copy_user_highpage(struct page *to, struct page *from,
+-	unsigned long vaddr)
++	unsigned long vaddr, struct vm_area_struct *vma)
+ {
+ 	void *kto, *kfrom;
+ 
+diff --git a/arch/arm/mm/copypage-v4mc.c b/arch/arm/mm/copypage-v4mc.c
+index 7370a7142b04..598c51ad5071 100644
+--- a/arch/arm/mm/copypage-v4mc.c
++++ b/arch/arm/mm/copypage-v4mc.c
+@@ -69,7 +69,7 @@ mc_copy_user_page(void *from, void *to)
+ }
+ 
+ void v4_mc_copy_user_highpage(struct page *to, struct page *from,
+-	unsigned long vaddr)
++	unsigned long vaddr, struct vm_area_struct *vma)
+ {
+ 	void *kto = kmap_atomic(to, KM_USER1);
+ 
+diff --git a/arch/arm/mm/copypage-v4wb.c b/arch/arm/mm/copypage-v4wb.c
+index 9ab098414227..e9920f68b76b 100644
+--- a/arch/arm/mm/copypage-v4wb.c
++++ b/arch/arm/mm/copypage-v4wb.c
+@@ -48,7 +48,7 @@ v4wb_copy_user_page(void *kto, const void *kfrom)
+ }
+ 
+ void v4wb_copy_user_highpage(struct page *to, struct page *from,
+-	unsigned long vaddr)
++	unsigned long vaddr, struct vm_area_struct *vma)
+ {
+ 	void *kto, *kfrom;
+ 
+diff --git a/arch/arm/mm/copypage-v4wt.c b/arch/arm/mm/copypage-v4wt.c
+index 300efafd6643..172e6a55458e 100644
+--- a/arch/arm/mm/copypage-v4wt.c
++++ b/arch/arm/mm/copypage-v4wt.c
+@@ -44,7 +44,7 @@ v4wt_copy_user_page(void *kto, const void *kfrom)
+ }
+ 
+ void v4wt_copy_user_highpage(struct page *to, struct page *from,
+-	unsigned long vaddr)
++	unsigned long vaddr, struct vm_area_struct *vma)
+ {
+ 	void *kto, *kfrom;
+ 
+diff --git a/arch/arm/mm/copypage-v6.c b/arch/arm/mm/copypage-v6.c
+index 4127a7bddfe5..334d5602770e 100644
+--- a/arch/arm/mm/copypage-v6.c
++++ b/arch/arm/mm/copypage-v6.c
+@@ -34,7 +34,7 @@ static DEFINE_SPINLOCK(v6_lock);
+  * attack the kernel's existing mapping of these pages.
+  */
+ static void v6_copy_user_highpage_nonaliasing(struct page *to,
+-	struct page *from, unsigned long vaddr)
++	struct page *from, unsigned long vaddr, struct vm_area_struct *vma)
+ {
+ 	void *kto, *kfrom;
+ 
+@@ -73,7 +73,7 @@ static void discard_old_kernel_data(void *kto)
+  * Copy the page, taking account of the cache colour.
+  */
+ static void v6_copy_user_highpage_aliasing(struct page *to,
+-	struct page *from, unsigned long vaddr)
++	struct page *from, unsigned long vaddr, struct vm_area_struct *vma)
+ {
+ 	unsigned int offset = CACHE_COLOUR(vaddr);
+ 	unsigned long kfrom, kto;
+diff --git a/arch/arm/mm/copypage-xsc3.c b/arch/arm/mm/copypage-xsc3.c
+index bc4525f5ab23..18ae05d5829c 100644
+--- a/arch/arm/mm/copypage-xsc3.c
++++ b/arch/arm/mm/copypage-xsc3.c
+@@ -71,7 +71,7 @@ xsc3_mc_copy_user_page(void *kto, const void *kfrom)
+ }
+ 
+ void xsc3_mc_copy_user_highpage(struct page *to, struct page *from,
+-	unsigned long vaddr)
++	unsigned long vaddr, struct vm_area_struct *vma)
+ {
+ 	void *kto, *kfrom;
+ 
+diff --git a/arch/arm/mm/copypage-xscale.c b/arch/arm/mm/copypage-xscale.c
+index 76824d3e966a..9920c0ae2096 100644
+--- a/arch/arm/mm/copypage-xscale.c
++++ b/arch/arm/mm/copypage-xscale.c
+@@ -91,7 +91,7 @@ mc_copy_user_page(void *from, void *to)
+ }
+ 
+ void xscale_mc_copy_user_highpage(struct page *to, struct page *from,
+-	unsigned long vaddr)
++	unsigned long vaddr, struct vm_area_struct *vma)
+ {
+ 	void *kto = kmap_atomic(to, KM_USER1);
+ 
+

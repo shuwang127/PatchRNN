@@ -1,0 +1,55 @@
+commit 362a20c5e27614739c46707d1c5f55c214d164ce
+Author: David Sterba <dsterba@suse.cz>
+Date:   Mon Aug 1 18:11:57 2011 +0200
+
+    btrfs: allow cross-subvolume file clone
+    
+    Lift the EXDEV condition and allow different root trees for files being
+    cloned, then pass source inode's root when searching for extents.
+    Cloning is not allowed to cross vfsmounts, ie. when two subvolumes from
+    one filesystem are mounted separately.
+    
+    Signed-off-by: David Sterba <dsterba@suse.cz>
+
+diff --git a/fs/btrfs/ioctl.c b/fs/btrfs/ioctl.c
+index 0e92e5763005..7011871c45b8 100644
+--- a/fs/btrfs/ioctl.c
++++ b/fs/btrfs/ioctl.c
+@@ -2340,6 +2340,10 @@ static noinline long btrfs_ioctl_clone(struct file *file, unsigned long srcfd,
+ 		goto out_drop_write;
+ 	}
+ 
++	ret = -EXDEV;
++	if (src_file->f_path.mnt != file->f_path.mnt)
++		goto out_fput;
++
+ 	src = src_file->f_dentry->d_inode;
+ 
+ 	ret = -EINVAL;
+@@ -2360,7 +2364,7 @@ static noinline long btrfs_ioctl_clone(struct file *file, unsigned long srcfd,
+ 		goto out_fput;
+ 
+ 	ret = -EXDEV;
+-	if (src->i_sb != inode->i_sb || BTRFS_I(src)->root != root)
++	if (src->i_sb != inode->i_sb)
+ 		goto out_fput;
+ 
+ 	ret = -ENOMEM;
+@@ -2434,13 +2438,14 @@ static noinline long btrfs_ioctl_clone(struct file *file, unsigned long srcfd,
+ 		 * note the key will change type as we walk through the
+ 		 * tree.
+ 		 */
+-		ret = btrfs_search_slot(NULL, root, &key, path, 0, 0);
++		ret = btrfs_search_slot(NULL, BTRFS_I(src)->root, &key, path,
++				0, 0);
+ 		if (ret < 0)
+ 			goto out;
+ 
+ 		nritems = btrfs_header_nritems(path->nodes[0]);
+ 		if (path->slots[0] >= nritems) {
+-			ret = btrfs_next_leaf(root, path);
++			ret = btrfs_next_leaf(BTRFS_I(src)->root, path);
+ 			if (ret < 0)
+ 				goto out;
+ 			if (ret > 0)
+

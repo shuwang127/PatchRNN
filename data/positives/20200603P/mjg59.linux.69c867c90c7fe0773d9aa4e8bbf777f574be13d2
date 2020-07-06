@@ -1,0 +1,39 @@
+commit 69c867c90c7fe0773d9aa4e8bbf777f574be13d2
+Author: sjur.brandeland@stericsson.com <sjur.brandeland@stericsson.com>
+Date:   Sun May 22 11:18:54 2011 +0000
+
+    caif: Plug memory leak for checksum error
+    
+    In case of checksum error, the framing layer returns -EILSEQ, but
+    does not free the packet. Plug this hole by freeing the packet if
+    -EILSEQ is returned.
+    
+    Signed-off-by: Sjur Brændeland <sjur.brandeland@stericsson.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/caif/caif_dev.c b/net/caif/caif_dev.c
+index 366ca0fb7a29..682c0fedf360 100644
+--- a/net/caif/caif_dev.c
++++ b/net/caif/caif_dev.c
+@@ -142,6 +142,7 @@ static int receive(struct sk_buff *skb, struct net_device *dev,
+ {
+ 	struct cfpkt *pkt;
+ 	struct caif_device_entry *caifd;
++	int err;
+ 
+ 	pkt = cfpkt_fromnative(CAIF_DIR_IN, skb);
+ 
+@@ -159,7 +160,11 @@ static int receive(struct sk_buff *skb, struct net_device *dev,
+ 	caifd_hold(caifd);
+ 	rcu_read_unlock();
+ 
+-	caifd->layer.up->receive(caifd->layer.up, pkt);
++	err = caifd->layer.up->receive(caifd->layer.up, pkt);
++
++	/* For -EILSEQ the packet is not freed so so it now */
++	if (err == -EILSEQ)
++		cfpkt_destroy(pkt);
+ 
+ 	/* Release reference to stack upwards */
+ 	caifd_put(caifd);
+

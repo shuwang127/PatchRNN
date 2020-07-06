@@ -1,0 +1,161 @@
+commit e60e9523c62d7b9463b5aff691fa18f9a8b7a6ca
+Author: Daniel Stone <daniel@fooishbar.org>
+Date:   Tue Sep 11 12:35:24 2012 +0100
+
+    kbproto unentanglement: XkbExplicit*Mask
+    
+    Signed-off-by: Daniel Stone <daniel@fooishbar.org>
+
+diff --git a/src/keymap-dump.c b/src/keymap-dump.c
+index 13d0ebf..3fa99b1 100644
+--- a/src/keymap-dump.c
++++ b/src/keymap-dump.c
+@@ -635,7 +635,7 @@ write_symbols(struct xkb_keymap *keymap, struct buf *buf)
+ 
+         write_buf(buf, "\t\tkey %6s {", KeyNameText(key->name));
+ 
+-        if (key->explicit & XkbExplicitKeyTypesMask) {
++        if (key->explicit_groups) {
+             bool multi_type = false;
+             struct xkb_key_type *type = XkbKeyType(keymap, key, 0);
+ 
+@@ -650,7 +650,7 @@ write_symbols(struct xkb_keymap *keymap, struct buf *buf)
+ 
+             if (multi_type) {
+                 for (group = 0; group < key->num_groups; group++) {
+-                    if (!(key->explicit & (1 << group)))
++                    if (!(key->explicit_groups & (1 << group)))
+                         continue;
+                     type = XkbKeyType(keymap, key, group);
+                     write_buf(buf, "\n\t\t\ttype[group%u]= \"%s\",",
+@@ -664,7 +664,7 @@ write_symbols(struct xkb_keymap *keymap, struct buf *buf)
+             }
+         }
+ 
+-        if (key->explicit & XkbExplicitAutoRepeatMask) {
++        if (key->explicit & EXPLICIT_REPEAT) {
+             if (key->repeats)
+                 write_buf(buf, "\n\t\t\trepeat= Yes,");
+             else
+@@ -672,7 +672,7 @@ write_symbols(struct xkb_keymap *keymap, struct buf *buf)
+             simple = false;
+         }
+ 
+-        if (key->vmodmap && (key->explicit & XkbExplicitVModMapMask)) {
++        if (key->vmodmap && (key->explicit & EXPLICIT_VMODMAP)) {
+             /* XXX: vmodmap cmask? */
+             write_buf(buf, "\n\t\t\tvirtualMods= %s,",
+                       VModMaskText(keymap, key->vmodmap << XKB_NUM_CORE_MODS));
+@@ -692,7 +692,7 @@ write_symbols(struct xkb_keymap *keymap, struct buf *buf)
+             break;
+         }
+ 
+-        if (key->explicit & XkbExplicitInterpretMask)
++        if (key->explicit & EXPLICIT_INTERP)
+             showActions = (key->actions != NULL);
+         else
+             showActions = false;
+diff --git a/src/xkb-priv.h b/src/xkb-priv.h
+index d43e43e..2f1d028 100644
+--- a/src/xkb-priv.h
++++ b/src/xkb-priv.h
+@@ -336,10 +336,17 @@ enum xkb_range_exceed_type {
+     RANGE_REDIRECT,
+ };
+ 
++enum xkb_explicit_components {
++    EXPLICIT_INTERP = (1 << 0),
++    EXPLICIT_VMODMAP = (1 << 1),
++    EXPLICIT_REPEAT = (1 << 2),
++};
++
+ struct xkb_key {
+     char name[XKB_KEY_NAME_LENGTH];
+ 
+-    unsigned char explicit;
++    enum xkb_explicit_components explicit;
++    xkb_group_mask_t explicit_groups;
+ 
+     unsigned char modmap;
+     xkb_mod_mask_t vmodmap;
+diff --git a/src/xkbcomp/keymap.c b/src/xkbcomp/keymap.c
+index b917d79..51234ee 100644
+--- a/src/xkbcomp/keymap.c
++++ b/src/xkbcomp/keymap.c
+@@ -141,7 +141,7 @@ ApplyInterpsToKey(struct xkb_keymap *keymap, struct xkb_key *key)
+     xkb_level_index_t width, level;
+ 
+     /* If we've been told not to bind interps to this key, then don't. */
+-    if (key->explicit & XkbExplicitInterpretMask)
++    if (key->explicit & EXPLICIT_INTERP)
+         return true;
+ 
+     for (group = 0; group < key->num_groups; group++) {
+@@ -153,7 +153,7 @@ ApplyInterpsToKey(struct xkb_keymap *keymap, struct xkb_key *key)
+ 
+             /* Infer default key behaviours from the base level. */
+             if (group == 0 && level == 0) {
+-                if (!(key->explicit & XkbExplicitAutoRepeatMask) &&
++                if (!(key->explicit & EXPLICIT_REPEAT) &&
+                     (!interp || interp->repeat))
+                     key->repeats = true;
+             }
+@@ -180,7 +180,7 @@ ApplyInterpsToKey(struct xkb_keymap *keymap, struct xkb_key *key)
+         }
+     }
+ 
+-    if (!(key->explicit & XkbExplicitVModMapMask))
++    if (!(key->explicit & EXPLICIT_VMODMAP))
+         key->vmodmap = vmodmask;
+ 
+     return true;
+diff --git a/src/xkbcomp/symbols.c b/src/xkbcomp/symbols.c
+index 91b63d4..7ee3567 100644
+--- a/src/xkbcomp/symbols.c
++++ b/src/xkbcomp/symbols.c
+@@ -1756,7 +1756,7 @@ CopySymbolsDef(SymbolsInfo *info, KeyInfo *keyi,
+         }
+         if (FindNamedType(keymap, keyi->types[i], &types[i])) {
+             if (!autoType || keyi->numLevels[i] > 2)
+-                key->explicit |= (1 << i);
++                key->explicit_groups |= (1 << i);
+         }
+         else {
+             log_vrb(info->keymap->ctx, 3,
+@@ -1802,7 +1802,7 @@ CopySymbolsDef(SymbolsInfo *info, KeyInfo *keyi,
+ 
+     if (haveActions) {
+         key->actions = calloc(nGroups * width, sizeof(*key->actions));
+-        key->explicit |= XkbExplicitInterpretMask;
++        key->explicit |= EXPLICIT_INTERP;
+     }
+ 
+     key->out_of_range_group_number = keyi->out_of_range_group_number;
+@@ -1849,12 +1849,12 @@ CopySymbolsDef(SymbolsInfo *info, KeyInfo *keyi,
+ 
+     if (keyi->defined & KEY_FIELD_VMODMAP) {
+         key->vmodmap = keyi->vmodmap;
+-        key->explicit |= XkbExplicitVModMapMask;
++        key->explicit |= EXPLICIT_VMODMAP;
+     }
+ 
+     if (keyi->repeat != KEY_REPEAT_UNDEFINED) {
+         key->repeats = (keyi->repeat == KEY_REPEAT_YES);
+-        key->explicit |= XkbExplicitAutoRepeatMask;
++        key->explicit |= EXPLICIT_REPEAT;
+     }
+ 
+     /* do the same thing for the next key */
+diff --git a/xkbcommon/xkbcommon.h b/xkbcommon/xkbcommon.h
+index 6333f97..e003d0d 100644
+--- a/xkbcommon/xkbcommon.h
++++ b/xkbcommon/xkbcommon.h
+@@ -91,6 +91,7 @@ typedef uint32_t xkb_keysym_t;
+ typedef uint32_t xkb_mod_index_t;
+ typedef uint32_t xkb_mod_mask_t;
+ typedef uint32_t xkb_group_index_t;
++typedef uint32_t xkb_group_mask_t;
+ typedef uint32_t xkb_led_index_t;
+ 
+ #define XKB_MOD_INVALID     (0xffffffff)
+

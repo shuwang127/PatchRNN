@@ -1,0 +1,39 @@
+commit acea0018a24b794e32afea4f3be4230c58f2f8e3
+Author: David Woodhouse <David.Woodhouse@intel.com>
+Date:   Tue Jul 14 01:55:11 2009 +0100
+
+    intel-iommu: Defer the iotlb flush and iova free for intel_unmap_sg() too.
+    
+    I see no reason why we did this _only_ in intel_unmap_page().
+    
+    Signed-off-by: David Woodhouse <David.Woodhouse@intel.com>
+
+diff --git a/drivers/pci/intel-iommu.c b/drivers/pci/intel-iommu.c
+index d6a857397ec3..ee48fd073140 100644
+--- a/drivers/pci/intel-iommu.c
++++ b/drivers/pci/intel-iommu.c
+@@ -2815,11 +2815,18 @@ static void intel_unmap_sg(struct device *hwdev, struct scatterlist *sglist,
+ 	/* free page tables */
+ 	dma_pte_free_pagetable(domain, start_pfn, last_pfn);
+ 
+-	iommu_flush_iotlb_psi(iommu, domain->id, start_pfn,
+-			      (last_pfn - start_pfn + 1));
+-
+-	/* free iova */
+-	__free_iova(&domain->iovad, iova);
++	if (intel_iommu_strict) {
++		iommu_flush_iotlb_psi(iommu, domain->id, start_pfn,
++				      last_pfn - start_pfn + 1);
++		/* free iova */
++		__free_iova(&domain->iovad, iova);
++	} else {
++		add_unmap(domain, iova);
++		/*
++		 * queue up the release of the unmap to save the 1/6th of the
++		 * cpu used up by the iotlb flush operation...
++		 */
++	}
+ }
+ 
+ static int intel_nontranslate_map_sg(struct device *hddev,
+

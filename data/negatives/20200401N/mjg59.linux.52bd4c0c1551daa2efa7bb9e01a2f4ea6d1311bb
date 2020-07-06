@@ -1,0 +1,67 @@
+commit 52bd4c0c1551daa2efa7bb9e01a2f4ea6d1311bb
+Author: Nicolas Dichtel <nicolas.dichtel@6wind.com>
+Date:   Fri Jun 28 17:35:48 2013 +0200
+
+    ipv6: fix ecmp lookup when oif is specified
+    
+    There is no reason to skip ECMP lookup when oif is specified, but this implies
+    to check oif given by user when selecting another route.
+    When the new route does not match oif requirement, we simply keep the initial
+    one.
+    
+    Spotted-by: dingzhi <zhi.ding@6wind.com>
+    Signed-off-by: Nicolas Dichtel <nicolas.dichtel@6wind.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv6/route.c b/net/ipv6/route.c
+index 7ca87b37c0ef..9ff0b78a9c15 100644
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -83,6 +83,7 @@ static void		ip6_rt_update_pmtu(struct dst_entry *dst, struct sock *sk,
+ 					   struct sk_buff *skb, u32 mtu);
+ static void		rt6_do_redirect(struct dst_entry *dst, struct sock *sk,
+ 					struct sk_buff *skb);
++static int rt6_score_route(struct rt6_info *rt, int oif, int strict);
+ 
+ #ifdef CONFIG_IPV6_ROUTE_INFO
+ static struct rt6_info *rt6_add_route_info(struct net *net,
+@@ -394,7 +395,8 @@ static int rt6_info_hash_nhsfn(unsigned int candidate_count,
+ }
+ 
+ static struct rt6_info *rt6_multipath_select(struct rt6_info *match,
+-					     struct flowi6 *fl6)
++					     struct flowi6 *fl6, int oif,
++					     int strict)
+ {
+ 	struct rt6_info *sibling, *next_sibling;
+ 	int route_choosen;
+@@ -408,6 +410,8 @@ static struct rt6_info *rt6_multipath_select(struct rt6_info *match,
+ 				&match->rt6i_siblings, rt6i_siblings) {
+ 			route_choosen--;
+ 			if (route_choosen == 0) {
++				if (rt6_score_route(sibling, oif, strict) < 0)
++					break;
+ 				match = sibling;
+ 				break;
+ 			}
+@@ -743,7 +747,7 @@ restart:
+ 	rt = fn->leaf;
+ 	rt = rt6_device_match(net, rt, &fl6->saddr, fl6->flowi6_oif, flags);
+ 	if (rt->rt6i_nsiblings && fl6->flowi6_oif == 0)
+-		rt = rt6_multipath_select(rt, fl6);
++		rt = rt6_multipath_select(rt, fl6, fl6->flowi6_oif, flags);
+ 	BACKTRACK(net, &fl6->saddr);
+ out:
+ 	dst_use(&rt->dst, jiffies);
+@@ -875,8 +879,8 @@ restart_2:
+ 
+ restart:
+ 	rt = rt6_select(fn, oif, strict | reachable);
+-	if (rt->rt6i_nsiblings && oif == 0)
+-		rt = rt6_multipath_select(rt, fl6);
++	if (rt->rt6i_nsiblings)
++		rt = rt6_multipath_select(rt, fl6, oif, strict | reachable);
+ 	BACKTRACK(net, &fl6->saddr);
+ 	if (rt == net->ipv6.ip6_null_entry ||
+ 	    rt->rt6i_flags & RTF_CACHE)
+

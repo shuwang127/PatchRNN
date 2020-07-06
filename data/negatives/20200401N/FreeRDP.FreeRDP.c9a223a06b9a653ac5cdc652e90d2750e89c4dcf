@@ -1,0 +1,104 @@
+commit c9a223a06b9a653ac5cdc652e90d2750e89c4dcf
+Author: Marc-André Moreau <marcandre.moreau@gmail.com>
+Date:   Sun Apr 27 20:11:31 2014 -0400
+
+    libwinpr-smartcard: return SCARD_NO_SERVICE when no internal callback is registered
+
+diff --git a/winpr/libwinpr/smartcard/smartcard.h b/winpr/libwinpr/smartcard/smartcard.h
+index 2db6367c2..c0b6d6895 100644
+--- a/winpr/libwinpr/smartcard/smartcard.h
++++ b/winpr/libwinpr/smartcard/smartcard.h
+@@ -26,7 +26,7 @@
+ 	if (!g_Initialized) \
+ 		InitializeSCardApiStubs(); \
+ 	if (!g_SCardApi || !g_SCardApi->pfn ## _name) \
+-		return 0; \
++		return SCARD_E_NO_SERVICE; \
+ 	return g_SCardApi->pfn ## _name ( __VA_ARGS__ )
+ 
+ #define SCARDAPI_STUB_CALL_HANDLE(_name, ...) \
+diff --git a/winpr/libwinpr/smartcard/smartcard_pcsc.c b/winpr/libwinpr/smartcard/smartcard_pcsc.c
+index 0799af202..419d74f10 100644
+--- a/winpr/libwinpr/smartcard/smartcard_pcsc.c
++++ b/winpr/libwinpr/smartcard/smartcard_pcsc.c
+@@ -807,13 +807,13 @@ WINSCARDAPI LONG WINAPI PCSC_SCardListReadersA(SCARDCONTEXT hContext,
+ {
+ 	LONG status = SCARD_S_SUCCESS;
+ 
++	if (!g_PCSC.pfnSCardListReaders)
++		return SCARD_E_NO_SERVICE;
++
+ 	if (!PCSC_LockCardContext(hContext))
+ 		return SCARD_E_INVALID_HANDLE;
+ 
+-	if (g_PCSC.pfnSCardListReaders)
+-	{
+-		status = PCSC_SCardListReaders_Internal(hContext, mszGroups, mszReaders, pcchReaders);
+-	}
++	status = PCSC_SCardListReaders_Internal(hContext, mszGroups, mszReaders, pcchReaders);
+ 
+ 	if (!PCSC_UnlockCardContext(hContext))
+ 		return SCARD_E_INVALID_HANDLE;
+@@ -824,35 +824,34 @@ WINSCARDAPI LONG WINAPI PCSC_SCardListReadersA(SCARDCONTEXT hContext,
+ WINSCARDAPI LONG WINAPI PCSC_SCardListReadersW(SCARDCONTEXT hContext,
+ 		LPCWSTR mszGroups, LPWSTR mszReaders, LPDWORD pcchReaders)
+ {
++	LPSTR mszGroupsA = NULL;
++	LPSTR mszReadersA = NULL;
++	LPSTR* pMszReadersA = &mszReadersA;
+ 	LONG status = SCARD_S_SUCCESS;
+ 
++	if (!g_PCSC.pfnSCardListReaders)
++		return SCARD_E_NO_SERVICE;
++
+ 	if (!PCSC_LockCardContext(hContext))
+ 		return SCARD_E_INVALID_HANDLE;
+ 
+-	if (g_PCSC.pfnSCardListReaders)
+-	{
+-		LPSTR mszGroupsA = NULL;
+-		LPSTR mszReadersA = NULL;
+-		LPSTR* pMszReadersA = &mszReadersA;
+-
+-		mszGroups = NULL; /* mszGroups is not supported by pcsc-lite */
++	mszGroups = NULL; /* mszGroups is not supported by pcsc-lite */
+ 
+-		if (mszGroups)
+-			ConvertFromUnicode(CP_UTF8, 0, mszGroups, -1, (char**) &mszGroupsA, 0, NULL, NULL);
++	if (mszGroups)
++		ConvertFromUnicode(CP_UTF8, 0, mszGroups, -1, (char**) &mszGroupsA, 0, NULL, NULL);
+ 
+-		status = PCSC_SCardListReaders_Internal(hContext, mszGroupsA, (LPTSTR) &mszReadersA, pcchReaders);
++	status = PCSC_SCardListReaders_Internal(hContext, mszGroupsA, (LPTSTR) &mszReadersA, pcchReaders);
+ 
+-		if (status == SCARD_S_SUCCESS)
+-		{
+-			*pcchReaders = ConvertToUnicode(CP_UTF8, 0, *pMszReadersA, *pcchReaders, (WCHAR**) mszReaders, 0);
+-			PCSC_AddMemoryBlock(hContext, mszReaders);
+-
+-			PCSC_SCardFreeMemory_Internal(hContext, *pMszReadersA);
+-		}
++	if (status == SCARD_S_SUCCESS)
++	{
++		*pcchReaders = ConvertToUnicode(CP_UTF8, 0, *pMszReadersA, *pcchReaders, (WCHAR**) mszReaders, 0);
++		PCSC_AddMemoryBlock(hContext, mszReaders);
+ 
+-		free(mszGroupsA);
++		PCSC_SCardFreeMemory_Internal(hContext, *pMszReadersA);
+ 	}
+ 
++	free(mszGroupsA);
++
+ 	if (!PCSC_UnlockCardContext(hContext))
+ 		return SCARD_E_INVALID_HANDLE;
+ 
+@@ -2191,7 +2190,7 @@ int PCSC_InitializeSCardApi(void)
+ 	if (!g_PCSCModule)
+ 		g_PCSCModule = LoadLibraryA("libpcsclite.so");
+ #endif
+-	
++
+ 	if (!g_PCSCModule)
+ 		return -1;
+ 
+

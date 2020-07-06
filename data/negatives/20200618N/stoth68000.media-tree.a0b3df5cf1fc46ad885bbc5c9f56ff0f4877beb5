@@ -1,0 +1,74 @@
+commit a0b3df5cf1fc46ad885bbc5c9f56ff0f4877beb5
+Author: Jeff Layton <jlayton@redhat.com>
+Date:   Fri May 24 07:40:59 2013 -0400
+
+    cifs: add a "nosharesock" mount option to force new sockets to server to be created
+    
+    Some servers set max_vcs to 1 and actually do enforce that limit. Add a
+    new mount option to work around this behavior that forces a mount
+    request to open a new socket to the server instead of reusing an
+    existing one.
+    
+    I'd prefer to come up with a solution that doesn't require this, so
+    consider this a debug patch that you can use to determine whether this
+    is the real problem.
+    
+    Cc: Jim McDonough <jmcd@samba.org>
+    Cc: Steve French <smfrench@gmail.com>
+    Signed-off-by: Jeff Layton <jlayton@redhat.com>
+    Signed-off-by: Steve French <sfrench@us.ibm.com>
+
+diff --git a/fs/cifs/cifsglob.h b/fs/cifs/cifsglob.h
+index 4f07f6fbe494..db9f985b8c2c 100644
+--- a/fs/cifs/cifsglob.h
++++ b/fs/cifs/cifsglob.h
+@@ -441,6 +441,7 @@ struct smb_vol {
+ 	bool mfsymlinks:1; /* use Minshall+French Symlinks */
+ 	bool multiuser:1;
+ 	bool rwpidforward:1; /* pid forward for read/write operations */
++	bool nosharesock;
+ 	unsigned int rsize;
+ 	unsigned int wsize;
+ 	bool sockopt_tcp_nodelay:1;
+diff --git a/fs/cifs/connect.c b/fs/cifs/connect.c
+index e3bc39bb9d12..180d9b95fab0 100644
+--- a/fs/cifs/connect.c
++++ b/fs/cifs/connect.c
+@@ -85,7 +85,7 @@ enum {
+ 	Opt_acl, Opt_noacl, Opt_locallease,
+ 	Opt_sign, Opt_seal, Opt_noac,
+ 	Opt_fsc, Opt_mfsymlinks,
+-	Opt_multiuser, Opt_sloppy,
++	Opt_multiuser, Opt_sloppy, Opt_nosharesock,
+ 
+ 	/* Mount options which take numeric value */
+ 	Opt_backupuid, Opt_backupgid, Opt_uid,
+@@ -165,6 +165,7 @@ static const match_table_t cifs_mount_option_tokens = {
+ 	{ Opt_mfsymlinks, "mfsymlinks" },
+ 	{ Opt_multiuser, "multiuser" },
+ 	{ Opt_sloppy, "sloppy" },
++	{ Opt_nosharesock, "nosharesock" },
+ 
+ 	{ Opt_backupuid, "backupuid=%s" },
+ 	{ Opt_backupgid, "backupgid=%s" },
+@@ -1455,6 +1456,9 @@ cifs_parse_mount_options(const char *mountdata, const char *devname,
+ 		case Opt_sloppy:
+ 			sloppy = true;
+ 			break;
++		case Opt_nosharesock:
++			vol->nosharesock = true;
++			break;
+ 
+ 		/* Numeric Values */
+ 		case Opt_backupuid:
+@@ -2027,6 +2031,9 @@ static int match_server(struct TCP_Server_Info *server, struct smb_vol *vol)
+ {
+ 	struct sockaddr *addr = (struct sockaddr *)&vol->dstaddr;
+ 
++	if (vol->nosharesock)
++		return 0;
++
+ 	if ((server->vals != vol->vals) || (server->ops != vol->ops))
+ 		return 0;
+ 
+

@@ -1,0 +1,108 @@
+commit 527c73bada6f02a35983ddb34db3a0fd4360c88c
+Author: Takashi Iwai <tiwai@suse.de>
+Date:   Mon Mar 12 12:38:51 2012 +0100
+
+    ALSA: hda - Add EAPD control to Conexnat auto-parser
+    
+    Added the vmaster hook for controlling EAPD dynamically to Conexant
+    auto-parser.  When the Master is muted, EAPDs are turned off as well.
+    This will fix the missing mute-LED control on some machines in
+    addition to the more power-saving in the auto-parser mode.
+    
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+diff --git a/sound/pci/hda/patch_conexant.c b/sound/pci/hda/patch_conexant.c
+index 5a56fda83625..f1c9aed9fa69 100644
+--- a/sound/pci/hda/patch_conexant.c
++++ b/sound/pci/hda/patch_conexant.c
+@@ -70,6 +70,8 @@ struct conexant_spec {
+ 	const struct snd_kcontrol_new *mixers[5];
+ 	int num_mixers;
+ 	hda_nid_t vmaster_nid;
++	struct snd_kcontrol *vmaster_sw_kctl;
++	void (*vmaster_hook)(struct snd_kcontrol *, int);
+ 
+ 	const struct hda_verb *init_verbs[5];	/* initialization verbs
+ 						 * don't forget NULL
+@@ -513,9 +515,10 @@ static int conexant_build_controls(struct hda_codec *codec)
+ 	}
+ 	if (spec->vmaster_nid &&
+ 	    !snd_hda_find_mixer_ctl(codec, "Master Playback Switch")) {
+-		err = snd_hda_add_vmaster(codec, "Master Playback Switch",
+-					  NULL, slave_pfxs,
+-					  "Playback Switch");
++		err = __snd_hda_add_vmaster(codec, "Master Playback Switch",
++					    NULL, slave_pfxs,
++					    "Playback Switch", true,
++					    &spec->vmaster_sw_kctl);
+ 		if (err < 0)
+ 			return err;
+ 	}
+@@ -3975,6 +3978,19 @@ static void clear_unsol_on_unused_pins(struct hda_codec *codec)
+ 	}
+ }
+ 
++/* turn on/off EAPD according to Master switch */
++static void cx_auto_vmaster_hook(void *private_data, int enabled)
++{
++	struct hda_codec *codec = private_data;
++	struct conexant_spec *spec = codec->spec;
++
++	if (enabled && spec->pin_eapd_ctrls) {
++		cx_auto_update_speakers(codec);
++		return;
++	}
++	cx_auto_turn_eapd(codec, spec->num_eapds, spec->eapds, enabled);
++}
++
+ static void cx_auto_init_output(struct hda_codec *codec)
+ {
+ 	struct conexant_spec *spec = codec->spec;
+@@ -4079,11 +4095,13 @@ static void cx_auto_init_digital(struct hda_codec *codec)
+ 
+ static int cx_auto_init(struct hda_codec *codec)
+ {
++	struct conexant_spec *spec = codec->spec;
+ 	/*snd_hda_sequence_write(codec, cx_auto_init_verbs);*/
+ 	cx_auto_init_output(codec);
+ 	cx_auto_init_input(codec);
+ 	cx_auto_init_digital(codec);
+ 	snd_hda_jack_report_sync(codec);
++	snd_ctl_sync_vmaster_hook(spec->vmaster_sw_kctl);
+ 	return 0;
+ }
+ 
+@@ -4329,6 +4347,11 @@ static int cx_auto_build_controls(struct hda_codec *codec)
+ 	err = snd_hda_jack_add_kctls(codec, &spec->autocfg);
+ 	if (err < 0)
+ 		return err;
++	if (spec->vmaster_hook && spec->vmaster_sw_kctl) {
++		snd_ctl_add_vmaster_hook(spec->vmaster_sw_kctl,
++					 spec->vmaster_hook, codec);
++		snd_ctl_sync_vmaster_hook(spec->vmaster_sw_kctl);
++	}
+ 	return 0;
+ }
+ 
+@@ -4353,7 +4376,6 @@ static int cx_auto_search_adcs(struct hda_codec *codec)
+ 	return 0;
+ }
+ 
+-
+ static const struct hda_codec_ops cx_auto_patch_ops = {
+ 	.build_controls = cx_auto_build_controls,
+ 	.build_pcms = conexant_build_pcms,
+@@ -4455,6 +4477,12 @@ static int patch_conexant_auto(struct hda_codec *codec)
+ 
+ 	apply_pin_fixup(codec, cxt_fixups, cxt_pincfg_tbl);
+ 
++	/* add EAPD vmaster hook to all HP machines */
++	/* NOTE: this should be applied via fixup once when the generic
++	 *       fixup code is merged to hda_codec.c
++	 */
++	spec->vmaster_hook = cx_auto_vmaster_hook;
++
+ 	err = cx_auto_search_adcs(codec);
+ 	if (err < 0)
+ 		return err;
+

@@ -1,0 +1,57 @@
+commit 7766970cc13e9071b356b1f2a48a9eb8675bfcce
+Author: Nick Piggin <npiggin@suse.de>
+Date:   Fri Feb 27 14:03:03 2009 -0800
+
+    mm: vmap fix overflow
+    
+    The new vmap allocator can wrap the address and get confused in the case
+    of large allocations or VMALLOC_END near the end of address space.
+    
+    Problem reported by Christoph Hellwig on a 32-bit XFS workload.
+    
+    Signed-off-by: Nick Piggin <npiggin@suse.de>
+    Reported-by: Christoph Hellwig <hch@lst.de>
+    Cc: <stable@kernel.org>         [2.6.28.x]
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/vmalloc.c b/mm/vmalloc.c
+index 903cad46e796..ed3705e4b83f 100644
+--- a/mm/vmalloc.c
++++ b/mm/vmalloc.c
+@@ -323,6 +323,7 @@ static struct vmap_area *alloc_vmap_area(unsigned long size,
+ 	unsigned long addr;
+ 	int purged = 0;
+ 
++	BUG_ON(!size);
+ 	BUG_ON(size & ~PAGE_MASK);
+ 
+ 	va = kmalloc_node(sizeof(struct vmap_area),
+@@ -334,6 +335,9 @@ static struct vmap_area *alloc_vmap_area(unsigned long size,
+ 	addr = ALIGN(vstart, align);
+ 
+ 	spin_lock(&vmap_area_lock);
++	if (addr + size - 1 < addr)
++		goto overflow;
++
+ 	/* XXX: could have a last_hole cache */
+ 	n = vmap_area_root.rb_node;
+ 	if (n) {
+@@ -365,6 +369,8 @@ static struct vmap_area *alloc_vmap_area(unsigned long size,
+ 
+ 		while (addr + size > first->va_start && addr + size <= vend) {
+ 			addr = ALIGN(first->va_end + PAGE_SIZE, align);
++			if (addr + size - 1 < addr)
++				goto overflow;
+ 
+ 			n = rb_next(&first->rb_node);
+ 			if (n)
+@@ -375,6 +381,7 @@ static struct vmap_area *alloc_vmap_area(unsigned long size,
+ 	}
+ found:
+ 	if (addr + size > vend) {
++overflow:
+ 		spin_unlock(&vmap_area_lock);
+ 		if (!purged) {
+ 			purge_vmap_area_lazy();
+

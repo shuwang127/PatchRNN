@@ -1,0 +1,67 @@
+commit ba35a0fd1ff7b5e91a6eee145e56887edffa194c
+Author: Yaniv Rosner <yanivr@broadcom.com>
+Date:   Wed Apr 24 01:44:59 2013 +0000
+
+    bnx2x: Allow RX/TX pause control in autoneg
+    
+    Currently, when link is configured to auto-negotiate the flow control,
+    disabling RX/TX pause via ethtool doesn't work.
+    
+    This fixes the behaviour, advertising asymmetric pause in case either one
+    is exclusively enabled.
+    
+    Signed-off-by: Yaniv Rosner <yanivr@broadcom.com>
+    Signed-off-by: Yuval Mintz <yuvalmin@broadcom.com>
+    Signed-off-by: Eilon Greenstein <eilong@broadcom.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c
+index 88e9b47a3eb6..397537bb4448 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c
+@@ -1889,12 +1889,15 @@ static int bnx2x_set_pauseparam(struct net_device *dev,
+ 			bp->link_params.req_flow_ctrl[cfg_idx] =
+ 				BNX2X_FLOW_CTRL_AUTO;
+ 		}
+-		bp->link_params.req_fc_auto_adv = BNX2X_FLOW_CTRL_NONE;
++		bp->link_params.req_fc_auto_adv = 0;
+ 		if (epause->rx_pause)
+ 			bp->link_params.req_fc_auto_adv |= BNX2X_FLOW_CTRL_RX;
+ 
+ 		if (epause->tx_pause)
+ 			bp->link_params.req_fc_auto_adv |= BNX2X_FLOW_CTRL_TX;
++
++		if (!bp->link_params.req_fc_auto_adv)
++			bp->link_params.req_fc_auto_adv |= BNX2X_FLOW_CTRL_NONE;
+ 	}
+ 
+ 	DP(BNX2X_MSG_ETHTOOL,
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_link.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_link.c
+index 40f58d73de78..9d64b988ab34 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_link.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_link.c
+@@ -3426,13 +3426,19 @@ static void bnx2x_calc_ieee_aneg_adv(struct bnx2x_phy *phy,
+ 
+ 	switch (phy->req_flow_ctrl) {
+ 	case BNX2X_FLOW_CTRL_AUTO:
+-		if (params->req_fc_auto_adv == BNX2X_FLOW_CTRL_BOTH)
++		switch (params->req_fc_auto_adv) {
++		case BNX2X_FLOW_CTRL_BOTH:
+ 			*ieee_fc |= MDIO_COMBO_IEEE0_AUTO_NEG_ADV_PAUSE_BOTH;
+-		else
++			break;
++		case BNX2X_FLOW_CTRL_RX:
++		case BNX2X_FLOW_CTRL_TX:
+ 			*ieee_fc |=
+-			MDIO_COMBO_IEEE0_AUTO_NEG_ADV_PAUSE_ASYMMETRIC;
++				MDIO_COMBO_IEEE0_AUTO_NEG_ADV_PAUSE_ASYMMETRIC;
++			break;
++		default:
++			break;
++		}
+ 		break;
+-
+ 	case BNX2X_FLOW_CTRL_TX:
+ 		*ieee_fc |= MDIO_COMBO_IEEE0_AUTO_NEG_ADV_PAUSE_ASYMMETRIC;
+ 		break;
+

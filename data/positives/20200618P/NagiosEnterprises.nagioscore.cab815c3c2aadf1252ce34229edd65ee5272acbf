@@ -1,0 +1,48 @@
+commit cab815c3c2aadf1252ce34229edd65ee5272acbf
+Author: Andreas Ericsson <ae@op5.se>
+Date:   Fri Nov 2 11:38:05 2012 +0000
+
+    base/workers.c: Plug memory leak in wproc_destroy
+    
+    We used to stop destroying jobs when we'd destroyed half of them, since
+    destroy_job decreases jobs_running. To destroy all of them, we should go
+    on destroying while jobs_running is non-zero.
+    
+    This leak occured once every time nagios received a RESTART_PROCESS
+    command or a SIGHUP signal.
+    
+    Patch-by: Max Sikström <msikstrom@op5.com>
+    Signed-off-by: Robin Sonefors <robin.sonefors@op5.com>
+    
+    git-svn-id: https://nagios.svn.sourceforge.net/svnroot/nagios/nagioscore/trunk@2449 5f96b256-904b-4d8d-8c98-d829582c6739
+
+diff --git a/base/workers.c b/base/workers.c
+index d86e4a56..8021daf6 100644
+--- a/base/workers.c
++++ b/base/workers.c
+@@ -213,7 +213,7 @@ static int wproc_is_alive(worker_process *wp)
+ 
+ int wproc_destroy(worker_process *wp, int flags)
+ {
+-	int i = 0, destroyed = 0, force = 0, self;
++	int i = 0, force = 0, self;
+ 
+ 	if (!wp)
+ 		return 0;
+@@ -231,14 +231,11 @@ int wproc_destroy(worker_process *wp, int flags)
+ 	wp->ioc = NULL;
+ 	my_free(wp->source_name);
+ 	if (wp->jobs) {
+-		for (i = 0; i < wp->max_jobs; i++) {
++		for (i = 0; i < wp->max_jobs && wp->jobs_running; i++) {
+ 			if (!wp->jobs[i])
+ 				continue;
+ 
+ 			destroy_job(wp, wp->jobs[i]);
+-			/* we can (often) break out early */
+-			if (++destroyed >= wp->jobs_running)
+-				break;
+ 		}
+ 
+ 		free(wp->jobs);
+

@@ -1,0 +1,40 @@
+commit f7bd12d09ed6e4093a56dbbfbe8411cc52a738d1
+Author: Michael Chan <mchan@broadcom.com>
+Date:   Mon Mar 17 19:19:06 2014 -0800
+
+    cnic: Use proper ulp_ops for per device operations.
+    
+    For per device operations, cnic needs to dereference the RCU protected
+    cp->ulp_ops instead of the global cnic_ulp_tbl.  In 2 locations,
+    cnic_send_nlmsg() and cnic_copy_ulp_stats(), it was referencing the
+    global table.  If the device has been unregistered and these functions
+    are still being called (very unlikely scenarios), it could lead to NULL
+    pointer dereference.
+    
+    Signed-off-by: Michael Chan <mchan@broadcom.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/broadcom/cnic.c b/drivers/net/ethernet/broadcom/cnic.c
+index fcf9105a5476..2cb248269c8f 100644
+--- a/drivers/net/ethernet/broadcom/cnic.c
++++ b/drivers/net/ethernet/broadcom/cnic.c
+@@ -342,7 +342,7 @@ static int cnic_send_nlmsg(struct cnic_local *cp, u32 type,
+ 	while (retry < 3) {
+ 		rc = 0;
+ 		rcu_read_lock();
+-		ulp_ops = rcu_dereference(cnic_ulp_tbl[CNIC_ULP_ISCSI]);
++		ulp_ops = rcu_dereference(cp->ulp_ops[CNIC_ULP_ISCSI]);
+ 		if (ulp_ops)
+ 			rc = ulp_ops->iscsi_nl_send_msg(
+ 				cp->ulp_handle[CNIC_ULP_ISCSI],
+@@ -3244,7 +3244,8 @@ static int cnic_copy_ulp_stats(struct cnic_dev *dev, int ulp_type)
+ 	int rc;
+ 
+ 	mutex_lock(&cnic_lock);
+-	ulp_ops = cnic_ulp_tbl_prot(ulp_type);
++	ulp_ops = rcu_dereference_protected(cp->ulp_ops[ulp_type],
++					    lockdep_is_held(&cnic_lock));
+ 	if (ulp_ops && ulp_ops->cnic_get_stats)
+ 		rc = ulp_ops->cnic_get_stats(cp->ulp_handle[ulp_type]);
+ 	else
+

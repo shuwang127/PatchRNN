@@ -1,0 +1,82 @@
+commit 75c5160c141ffb18ffe16c3cf3e8bccd362c2ecb
+Author: mwilliams <mwilliams@fb.com>
+Date:   Mon May 30 10:33:26 2011 -0700
+
+    [Fix] Hotprofiler didnt check for realloc failure
+    
+    Summary:
+    If the profiler failed to realloc memory, it just went ahead and tried to use
+    it anyway, resulting in a seg fault.
+    
+    Test Plan:
+    fast_tests.
+    
+    Reviewed By: myang
+    Reviewers: myang, renglish
+    CC: ps, mwilliams, myang
+    Revert Plan:
+    Tags:
+    
+    - begin *PUBLIC* platform impact section -
+    Bugzilla: #
+    - end platform impact -
+    
+    Differential Revision: 258977
+
+diff --git a/src/runtime/ext/ext_hotprofiler.cpp b/src/runtime/ext/ext_hotprofiler.cpp
+index f3ee6ea4a5..f4589726f2 100644
+--- a/src/runtime/ext/ext_hotprofiler.cpp
++++ b/src/runtime/ext/ext_hotprofiler.cpp
+@@ -1019,14 +1019,14 @@ public:
+       overflowCalls++;
+       return false;
+     }
++    int new_array_size;
+     if (s_n_backing == 0) {
+-      s_n_backing = RuntimeOption::ProfilerTraceBuffer;
++      new_array_size = RuntimeOption::ProfilerTraceBuffer;
+     } else {
+-      int new_array_size = s_n_backing * RuntimeOption::ProfilerTraceExpansion;
+-      if (maxTraceBuffer != 0 && new_array_size > maxTraceBuffer)
+-      {
+-        new_array_size = maxTraceBuffer > s_n_backing
+-                                ? maxTraceBuffer : s_n_backing;
++      new_array_size = s_n_backing * RuntimeOption::ProfilerTraceExpansion;
++      if (maxTraceBuffer != 0 && new_array_size > maxTraceBuffer) {
++        new_array_size = maxTraceBuffer > s_n_backing ?
++          maxTraceBuffer : s_n_backing;
+       }
+       if (new_array_size - nTrace <= 5) {
+         // for this operation to succeed, we need room for the entry we're
+@@ -1036,17 +1036,26 @@ public:
+         collectStats("(trace buffer terminated)", s_trace[nTrace++]);
+         return false;
+       }
+-      collectStats("(trace buffer realloc)", s_trace[nTrace++]);
+-      s_n_backing = new_array_size;
+       track_realloc = TRUE;
+     }
+     {
+       DECLARE_THREAD_INFO
+       MemoryManager::MaskAlloc masker(info->m_mm);
+-      s_trace = (TraceEntry*)realloc((void *)s_trace,
+-                                    s_n_backing * sizeof(TraceEntry));
++      TraceEntry *r = (TraceEntry*)realloc((void *)s_trace,
++                                           new_array_size * sizeof(TraceEntry));
++
++      if (!r) {
++        full = true;
++        if (s_trace) {
++          collectStats("(trace buffer terminated)", s_trace[nTrace++]);
++        }
++        return false;
++      }
++      s_n_backing = new_array_size;
++      s_trace = r;
+     }
+     if (track_realloc) {
++      collectStats("(trace buffer realloc)", s_trace[nTrace++]);
+       collectStats(NULL, s_trace[nTrace++]);
+     }
+     return true;
+

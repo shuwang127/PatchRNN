@@ -1,0 +1,42 @@
+commit 5062af35c3c6e49110ab1ec99295339259298a3d
+Author: Filipe Manana <fdmanana@suse.com>
+Date:   Thu May 5 10:26:26 2016 +0100
+
+    Btrfs: fix number of transaction units for renames with whiteout
+    
+    When we do a rename with the whiteout flag, we need to create the whiteout
+    inode, which in the worst case requires 5 transaction units (1 inode item,
+    1 inode ref, 2 dir items and 1 xattr if selinux is enabled). So bump the
+    number of transaction units from 11 to 16 if the whiteout flag is set.
+    
+    Signed-off-by: Filipe Manana <fdmanana@suse.com>
+
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index a7db3ed6ac88..0921d2b07f1d 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -9668,6 +9668,7 @@ static int btrfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+ 			   unsigned int flags)
+ {
+ 	struct btrfs_trans_handle *trans;
++	unsigned int trans_num_items;
+ 	struct btrfs_root *root = BTRFS_I(old_dir)->root;
+ 	struct btrfs_root *dest = BTRFS_I(new_dir)->root;
+ 	struct inode *new_inode = d_inode(new_dentry);
+@@ -9730,8 +9731,14 @@ static int btrfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+ 	 * would require 5 item modifications, so we'll assume they are normal
+ 	 * inodes.  So 5 * 2 is 10, plus 1 for the new link, so 11 total items
+ 	 * should cover the worst case number of items we'll modify.
++	 * If our rename has the whiteout flag, we need more 5 units for the
++	 * new inode (1 inode item, 1 inode ref, 2 dir items and 1 xattr item
++	 * when selinux is enabled).
+ 	 */
+-	trans = btrfs_start_transaction(root, 11);
++	trans_num_items = 11;
++	if (flags & RENAME_WHITEOUT)
++		trans_num_items += 5;
++	trans = btrfs_start_transaction(root, trans_num_items);
+ 	if (IS_ERR(trans)) {
+ 		ret = PTR_ERR(trans);
+ 		goto out_notrans;
+

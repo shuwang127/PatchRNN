@@ -1,0 +1,50 @@
+commit bf54f412f0624786ac8a115110b5203430a9eebb
+Author: Filipe David Borba Manana <fdmanana@gmail.com>
+Date:   Tue Jan 28 01:38:06 2014 +0000
+
+    Btrfs: fix send file hole detection leading to data corruption
+    
+    There was a case where file hole detection was incorrect and it would
+    cause an incremental send to override a section of a file with zeroes.
+    
+    This happened in the case where between the last leaf we processed which
+    contained a file extent item for our current inode and the leaf we're
+    currently are at (and has a file extent item for our current inode) there
+    are only leafs containing exclusively file extent items for our current
+    inode, and none of them was updated since the previous send operation.
+    The file hole detection code would incorrectly consider the file range
+    covered by these leafs as a hole.
+    
+    A test case for xfstests follows soon.
+    
+    Signed-off-by: Filipe David Borba Manana <fdmanana@gmail.com>
+    Signed-off-by: Josef Bacik <jbacik@fb.com>
+    Signed-off-by: Chris Mason <clm@fb.com>
+
+diff --git a/fs/btrfs/send.c b/fs/btrfs/send.c
+index 4d31f72bdf41..85259cba784a 100644
+--- a/fs/btrfs/send.c
++++ b/fs/btrfs/send.c
+@@ -4489,6 +4489,21 @@ static int maybe_send_hole(struct send_ctx *sctx, struct btrfs_path *path,
+ 		extent_end = key->offset +
+ 			btrfs_file_extent_num_bytes(path->nodes[0], fi);
+ 	}
++
++	if (path->slots[0] == 0 &&
++	    sctx->cur_inode_last_extent < key->offset) {
++		/*
++		 * We might have skipped entire leafs that contained only
++		 * file extent items for our current inode. These leafs have
++		 * a generation number smaller (older) than the one in the
++		 * current leaf and the leaf our last extent came from, and
++		 * are located between these 2 leafs.
++		 */
++		ret = get_last_extent(sctx, key->offset - 1);
++		if (ret)
++			return ret;
++	}
++
+ 	if (sctx->cur_inode_last_extent < key->offset)
+ 		ret = send_hole(sctx, key->offset);
+ 	sctx->cur_inode_last_extent = extent_end;
+

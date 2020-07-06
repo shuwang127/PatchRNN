@@ -1,0 +1,115 @@
+commit e83753bb61f6d2184daf3c59707094d8994ec85e
+Author: Alex Deucher <alexdeucher@gmail.com>
+Date:   Tue Mar 20 17:18:08 2012 -0400
+
+    drm/radeon/kms/atom: add support for SI SetVoltage table
+    
+    Signed-off-by: Alex Deucher <alexdeucher@gmail.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/radeon/radeon.h b/drivers/gpu/drm/radeon/radeon.h
+index 2081972557f5..03ab8ff81fec 100644
+--- a/drivers/gpu/drm/radeon/radeon.h
++++ b/drivers/gpu/drm/radeon/radeon.h
+@@ -236,7 +236,6 @@ void radeon_pm_resume(struct radeon_device *rdev);
+ void radeon_combios_get_power_modes(struct radeon_device *rdev);
+ void radeon_atombios_get_power_modes(struct radeon_device *rdev);
+ void radeon_atom_set_voltage(struct radeon_device *rdev, u16 voltage_level, u8 voltage_type);
+-int radeon_atom_get_max_vddc(struct radeon_device *rdev, u16 *voltage);
+ void rs690_pm_info(struct radeon_device *rdev);
+ extern int rv6xx_get_temp(struct radeon_device *rdev);
+ extern int rv770_get_temp(struct radeon_device *rdev);
+diff --git a/drivers/gpu/drm/radeon/radeon_atombios.c b/drivers/gpu/drm/radeon/radeon_atombios.c
+index 7e2ba2580899..afb127c02b60 100644
+--- a/drivers/gpu/drm/radeon/radeon_atombios.c
++++ b/drivers/gpu/drm/radeon/radeon_atombios.c
+@@ -56,6 +56,10 @@ extern void
+ radeon_add_legacy_encoder(struct drm_device *dev, uint32_t encoder_enum,
+ 			  uint32_t supported_device);
+ 
++/* local */
++static int radeon_atom_get_max_vddc(struct radeon_device *rdev, u8 voltage_type,
++				    u16 voltage_id, u16 *voltage);
++
+ union atom_supported_devices {
+ 	struct _ATOM_SUPPORTED_DEVICES_INFO info;
+ 	struct _ATOM_SUPPORTED_DEVICES_INFO_2 info_2;
+@@ -2283,6 +2287,7 @@ static bool radeon_atombios_parse_pplib_clock_info(struct radeon_device *rdev,
+ 						   union pplib_clock_info *clock_info)
+ {
+ 	u32 sclk, mclk;
++	u16 vddc;
+ 
+ 	if (rdev->flags & RADEON_IS_IGP) {
+ 		if (rdev->family >= CHIP_PALM) {
+@@ -2321,11 +2326,18 @@ static bool radeon_atombios_parse_pplib_clock_info(struct radeon_device *rdev,
+ 	}
+ 
+ 	/* patch up vddc if necessary */
+-	if (rdev->pm.power_state[state_index].clock_info[mode_index].voltage.voltage == 0xff01) {
+-		u16 vddc;
+-
+-		if (radeon_atom_get_max_vddc(rdev, &vddc) == 0)
++	switch (rdev->pm.power_state[state_index].clock_info[mode_index].voltage.voltage) {
++	case ATOM_VIRTUAL_VOLTAGE_ID0:
++	case ATOM_VIRTUAL_VOLTAGE_ID1:
++	case ATOM_VIRTUAL_VOLTAGE_ID2:
++	case ATOM_VIRTUAL_VOLTAGE_ID3:
++		if (radeon_atom_get_max_vddc(rdev, VOLTAGE_TYPE_VDDC,
++					     rdev->pm.power_state[state_index].clock_info[mode_index].voltage.voltage,
++					     &vddc) == 0)
+ 			rdev->pm.power_state[state_index].clock_info[mode_index].voltage.voltage = vddc;
++		break;
++	default:
++		break;
+ 	}
+ 
+ 	if (rdev->flags & RADEON_IS_IGP) {
+@@ -2640,6 +2652,7 @@ union set_voltage {
+ 	struct _SET_VOLTAGE_PS_ALLOCATION alloc;
+ 	struct _SET_VOLTAGE_PARAMETERS v1;
+ 	struct _SET_VOLTAGE_PARAMETERS_V2 v2;
++	struct _SET_VOLTAGE_PARAMETERS_V1_3 v3;
+ };
+ 
+ void radeon_atom_set_voltage(struct radeon_device *rdev, u16 voltage_level, u8 voltage_type)
+@@ -2666,6 +2679,11 @@ void radeon_atom_set_voltage(struct radeon_device *rdev, u16 voltage_level, u8 v
+ 		args.v2.ucVoltageMode = SET_ASIC_VOLTAGE_MODE_SET_VOLTAGE;
+ 		args.v2.usVoltageLevel = cpu_to_le16(voltage_level);
+ 		break;
++	case 3:
++		args.v3.ucVoltageType = voltage_type;
++		args.v3.ucVoltageMode = ATOM_SET_VOLTAGE;
++		args.v3.usVoltageLevel = cpu_to_le16(voltage_level);
++		break;
+ 	default:
+ 		DRM_ERROR("Unknown table version %d, %d\n", frev, crev);
+ 		return;
+@@ -2674,8 +2692,8 @@ void radeon_atom_set_voltage(struct radeon_device *rdev, u16 voltage_level, u8 v
+ 	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+ }
+ 
+-int radeon_atom_get_max_vddc(struct radeon_device *rdev,
+-			     u16 *voltage)
++static int radeon_atom_get_max_vddc(struct radeon_device *rdev, u8 voltage_type,
++				    u16 voltage_id, u16 *voltage)
+ {
+ 	union set_voltage args;
+ 	int index = GetIndexIntoMasterTable(COMMAND, SetVoltage);
+@@ -2696,6 +2714,15 @@ int radeon_atom_get_max_vddc(struct radeon_device *rdev,
+ 
+ 		*voltage = le16_to_cpu(args.v2.usVoltageLevel);
+ 		break;
++	case 3:
++		args.v3.ucVoltageType = voltage_type;
++		args.v3.ucVoltageMode = ATOM_GET_VOLTAGE_LEVEL;
++		args.v3.usVoltageLevel = cpu_to_le16(voltage_id);
++
++		atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
++
++		*voltage = le16_to_cpu(args.v3.usVoltageLevel);
++		break;
+ 	default:
+ 		DRM_ERROR("Unknown table version %d, %d\n", frev, crev);
+ 		return -EINVAL;
+

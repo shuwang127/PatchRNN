@@ -1,0 +1,112 @@
+commit 63edaa623bee43c934a0c357e8c6498992429391
+Author: Tom Gundersen <teg@jklm.no>
+Date:   Sun Mar 9 22:51:07 2014 +0100
+
+    sd-dhcp: generalise ip header generation
+    
+    This will be needed for sd-dhcp-server.
+
+diff --git a/src/libsystemd-network/dhcp-internal.h b/src/libsystemd-network/dhcp-internal.h
+index ce83b8163..3c3e1f649 100644
+--- a/src/libsystemd-network/dhcp-internal.h
++++ b/src/libsystemd-network/dhcp-internal.h
+@@ -48,7 +48,9 @@ int dhcp_option_parse(DHCPMessage *message, size_t len,
+ int dhcp_message_init(DHCPMessage *message, uint8_t op, uint32_t xid, uint8_t type,
+                       uint8_t **opt, size_t *optlen);
+ 
+-void dhcp_packet_append_ip_headers(DHCPPacket *packet, uint16_t len);
++void dhcp_packet_append_ip_headers(DHCPPacket *packet, be32_t source_addr,
++                                   uint16_t source, be32_t destination_addr,
++                                   uint16_t destination, uint16_t len);
+ 
+ int dhcp_packet_verify_headers(DHCPPacket *packet, size_t len, bool checksum);
+ 
+diff --git a/src/libsystemd-network/dhcp-packet.c b/src/libsystemd-network/dhcp-packet.c
+index 95c4277f8..418a9773f 100644
+--- a/src/libsystemd-network/dhcp-packet.c
++++ b/src/libsystemd-network/dhcp-packet.c
+@@ -92,17 +92,19 @@ static uint16_t dhcp_checksum(void *buf, int len) {
+         return ~sum;
+ }
+ 
+-void dhcp_packet_append_ip_headers(DHCPPacket *packet, uint16_t len) {
++void dhcp_packet_append_ip_headers(DHCPPacket *packet, be32_t source_addr,
++                                   uint16_t source_port, be32_t destination_addr,
++                                   uint16_t destination_port, uint16_t len) {
+         packet->ip.version = IPVERSION;
+         packet->ip.ihl = DHCP_IP_SIZE / 4;
+         packet->ip.tot_len = htobe16(len);
+ 
+         packet->ip.protocol = IPPROTO_UDP;
+-        packet->ip.saddr = INADDR_ANY;
+-        packet->ip.daddr = INADDR_BROADCAST;
++        packet->ip.saddr = source_addr;
++        packet->ip.daddr = destination_addr;
+ 
+-        packet->udp.source = htobe16(DHCP_PORT_CLIENT);
+-        packet->udp.dest = htobe16(DHCP_PORT_SERVER);
++        packet->udp.source = htobe16(source_port);
++        packet->udp.dest = htobe16(destination_port);
+ 
+         packet->udp.len = htobe16(len - DHCP_IP_SIZE);
+ 
+diff --git a/src/libsystemd-network/sd-dhcp-client.c b/src/libsystemd-network/sd-dhcp-client.c
+index 07b27d539..e0fce5b5a 100644
+--- a/src/libsystemd-network/sd-dhcp-client.c
++++ b/src/libsystemd-network/sd-dhcp-client.c
+@@ -264,6 +264,15 @@ static int client_message_init(sd_dhcp_client *client, DHCPMessage *message,
+         return 0;
+ }
+ 
++static int dhcp_client_send_raw(sd_dhcp_client *client, DHCPPacket *packet,
++                                size_t len) {
++        dhcp_packet_append_ip_headers(packet, INADDR_ANY, DHCP_PORT_CLIENT,
++                                      INADDR_BROADCAST, DHCP_PORT_SERVER, len);
++
++        return dhcp_network_send_raw_socket(client->fd, &client->link,
++                                            packet, len);
++}
++
+ static int client_send_discover(sd_dhcp_client *client, uint16_t secs) {
+         int err = 0;
+         _cleanup_free_ DHCPPacket *discover;
+@@ -295,14 +304,13 @@ static int client_send_discover(sd_dhcp_client *client, uint16_t secs) {
+         if (err < 0)
+                 return err;
+ 
+-        dhcp_packet_append_ip_headers(discover, len);
+-
+-        err = dhcp_network_send_raw_socket(client->fd, &client->link,
+-                                           discover, len);
++        err = dhcp_client_send_raw(client, discover, len);
++        if (err < 0)
++                return err;
+ 
+         log_dhcp_client(client, "DISCOVER");
+ 
+-        return err;
++        return 0;
+ }
+ 
+ static int client_send_request(sd_dhcp_client *client, uint16_t secs) {
+@@ -348,15 +356,14 @@ static int client_send_request(sd_dhcp_client *client, uint16_t secs) {
+                                                    &request->dhcp,
+                                                    len - DHCP_IP_UDP_SIZE);
+         } else {
+-                dhcp_packet_append_ip_headers(request, len);
+-
+-                err = dhcp_network_send_raw_socket(client->fd, &client->link,
+-                                                   request, len);
++                err = dhcp_client_send_raw(client, request, len);
+         }
++        if (err < 0)
++                return err;
+ 
+         log_dhcp_client(client, "REQUEST");
+ 
+-        return err;
++        return 0;
+ }
+ 
+ static uint16_t client_update_secs(sd_dhcp_client *client, usec_t time_now)
+

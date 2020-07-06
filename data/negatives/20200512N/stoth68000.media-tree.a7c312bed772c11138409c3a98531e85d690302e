@@ -1,0 +1,110 @@
+commit a7c312bed772c11138409c3a98531e85d690302e
+Author: Masami Hiramatsu <mhiramat@redhat.com>
+Date:   Tue Dec 8 17:03:16 2009 -0500
+
+    trace-kprobe: Support delete probe syntax
+    
+    Support delete probe syntax. The syntax is "-:[group/]event".
+    
+    Signed-off-by: Masami Hiramatsu <mhiramat@redhat.com>
+    Cc: Steven Rostedt <rostedt@goodmis.org>
+    Cc: Jim Keniston <jkenisto@us.ibm.com>
+    Cc: Ananth N Mavinakayanahalli <ananth@in.ibm.com>
+    Cc: Christoph Hellwig <hch@infradead.org>
+    Cc: Frank Ch. Eigler <fche@redhat.com>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Jason Baron <jbaron@redhat.com>
+    Cc: K.Prasad <prasad@linux.vnet.ibm.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Srikar Dronamraju <srikar@linux.vnet.ibm.com>
+    Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+    Cc: systemtap <systemtap@sources.redhat.com>
+    Cc: DLE <dle-develop@lists.sourceforge.net>
+    LKML-Reference: <20091208220316.10142.39192.stgit@dhcp-100-2-132.bos.redhat.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+    Cc: Steven Rostedt <rostedt@goodmis.org>
+    Cc: Jim Keniston <jkenisto@us.ibm.com>
+    Cc: Ananth N Mavinakayanahalli <ananth@in.ibm.com>
+    Cc: Christoph Hellwig <hch@infradead.org>
+    Cc: Frank Ch. Eigler <fche@redhat.com>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Jason Baron <jbaron@redhat.com>
+    Cc: K.Prasad <prasad@linux.vnet.ibm.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Srikar Dronamraju <srikar@linux.vnet.ibm.com>
+    Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+
+diff --git a/kernel/trace/trace_kprobe.c b/kernel/trace/trace_kprobe.c
+index aff5f80b59b8..bf05fb49a6f3 100644
+--- a/kernel/trace/trace_kprobe.c
++++ b/kernel/trace/trace_kprobe.c
+@@ -606,23 +606,22 @@ static int create_trace_probe(int argc, char **argv)
+ 	 */
+ 	struct trace_probe *tp;
+ 	int i, ret = 0;
+-	int is_return = 0;
++	int is_return = 0, is_delete = 0;
+ 	char *symbol = NULL, *event = NULL, *arg = NULL, *group = NULL;
+ 	unsigned long offset = 0;
+ 	void *addr = NULL;
+ 	char buf[MAX_EVENT_NAME_LEN];
+ 
+-	if (argc < 2) {
+-		pr_info("Probe point is not specified.\n");
+-		return -EINVAL;
+-	}
+-
++	/* argc must be >= 1 */
+ 	if (argv[0][0] == 'p')
+ 		is_return = 0;
+ 	else if (argv[0][0] == 'r')
+ 		is_return = 1;
++	else if (argv[0][0] == '-')
++		is_delete = 1;
+ 	else {
+-		pr_info("Probe definition must be started with 'p' or 'r'.\n");
++		pr_info("Probe definition must be started with 'p', 'r' or"
++			" '-'.\n");
+ 		return -EINVAL;
+ 	}
+ 
+@@ -642,7 +641,29 @@ static int create_trace_probe(int argc, char **argv)
+ 			return -EINVAL;
+ 		}
+ 	}
++	if (!group)
++		group = KPROBE_EVENT_SYSTEM;
+ 
++	if (is_delete) {
++		if (!event) {
++			pr_info("Delete command needs an event name.\n");
++			return -EINVAL;
++		}
++		tp = find_probe_event(event, group);
++		if (!tp) {
++			pr_info("Event %s/%s doesn't exist.\n", group, event);
++			return -ENOENT;
++		}
++		/* delete an event */
++		unregister_trace_probe(tp);
++		free_trace_probe(tp);
++		return 0;
++	}
++
++	if (argc < 2) {
++		pr_info("Probe point is not specified.\n");
++		return -EINVAL;
++	}
+ 	if (isdigit(argv[1][0])) {
+ 		if (is_return) {
+ 			pr_info("Return probe point must be a symbol.\n");
+@@ -671,8 +692,6 @@ static int create_trace_probe(int argc, char **argv)
+ 	argc -= 2; argv += 2;
+ 
+ 	/* setup a probe */
+-	if (!group)
+-		group = KPROBE_EVENT_SYSTEM;
+ 	if (!event) {
+ 		/* Make a new event name */
+ 		if (symbol)
+

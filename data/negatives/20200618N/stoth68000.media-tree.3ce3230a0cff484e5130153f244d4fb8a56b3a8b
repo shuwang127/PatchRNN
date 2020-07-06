@@ -1,0 +1,99 @@
+commit 3ce3230a0cff484e5130153f244d4fb8a56b3a8b
+Author: Frederic Weisbecker <fweisbec@gmail.com>
+Date:   Wed Feb 8 03:37:27 2012 +0100
+
+    cgroup: Walk task list under tasklist_lock in cgroup_enable_task_cg_list
+    
+    Walking through the tasklist in cgroup_enable_task_cg_list() inside
+    an RCU read side critical section is not enough because:
+    
+    - RCU is not (yet) safe against while_each_thread()
+    
+    - If we use only RCU, a forking task that has passed cgroup_post_fork()
+      without seeing use_task_css_set_links == 1 is not guaranteed to have
+      its child immediately visible in the tasklist if we walk through it
+      remotely with RCU. In this case it will be missing in its css_set's
+      task list.
+    
+    Thus we need to traverse the list (unfortunately) under the
+    tasklist_lock. It makes us safe against while_each_thread() and also
+    make sure we see all forked task that have been added to the tasklist.
+    
+    As a secondary effect, reading and writing use_task_css_set_links are
+    now well ordered against tasklist traversing and modification. The new
+    layout is:
+    
+    CPU 0                                      CPU 1
+    
+    use_task_css_set_links = 1                write_lock(tasklist_lock)
+    read_lock(tasklist_lock)                  add task to tasklist
+    do_each_thread() {                        write_unlock(tasklist_lock)
+            add thread to css set links       if (use_task_css_set_links)
+    } while_each_thread()                         add thread to css set links
+    read_unlock(tasklist_lock)
+    
+    If CPU 0 traverse the list after the task has been added to the tasklist
+    then it is correctly added to the css set links. OTOH if CPU 0 traverse
+    the tasklist before the new task had the opportunity to be added to the
+    tasklist because it was too early in the fork process, then CPU 1
+    catches up and add the task to the css set links after it added the task
+    to the tasklist. The right value of use_task_css_set_links is guaranteed
+    to be visible from CPU 1 due to the LOCK/UNLOCK implicit barrier properties:
+    the read_unlock on CPU 0 makes the write on use_task_css_set_links happening
+    and the write_lock on CPU 1 make the read of use_task_css_set_links that comes
+    afterward to return the correct value.
+    
+    Signed-off-by: Frederic Weisbecker <fweisbec@gmail.com>
+    Acked-by: Li Zefan <lizf@cn.fujitsu.com>
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Cc: Mandeep Singh Baines <msb@chromium.org>
+    Cc: Oleg Nesterov <oleg@redhat.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+
+diff --git a/kernel/cgroup.c b/kernel/cgroup.c
+index 6e4eb4312571..c6877fe9a831 100644
+--- a/kernel/cgroup.c
++++ b/kernel/cgroup.c
+@@ -2707,6 +2707,14 @@ static void cgroup_enable_task_cg_lists(void)
+ 	struct task_struct *p, *g;
+ 	write_lock(&css_set_lock);
+ 	use_task_css_set_links = 1;
++	/*
++	 * We need tasklist_lock because RCU is not safe against
++	 * while_each_thread(). Besides, a forking task that has passed
++	 * cgroup_post_fork() without seeing use_task_css_set_links = 1
++	 * is not guaranteed to have its child immediately visible in the
++	 * tasklist if we walk through it with RCU.
++	 */
++	read_lock(&tasklist_lock);
+ 	do_each_thread(g, p) {
+ 		task_lock(p);
+ 		/*
+@@ -2718,6 +2726,7 @@ static void cgroup_enable_task_cg_lists(void)
+ 			list_add(&p->cg_list, &p->cgroups->tasks);
+ 		task_unlock(p);
+ 	} while_each_thread(g, p);
++	read_unlock(&tasklist_lock);
+ 	write_unlock(&css_set_lock);
+ }
+ 
+@@ -4522,6 +4531,17 @@ void cgroup_fork_callbacks(struct task_struct *child)
+  */
+ void cgroup_post_fork(struct task_struct *child)
+ {
++	/*
++	 * use_task_css_set_links is set to 1 before we walk the tasklist
++	 * under the tasklist_lock and we read it here after we added the child
++	 * to the tasklist under the tasklist_lock as well. If the child wasn't
++	 * yet in the tasklist when we walked through it from
++	 * cgroup_enable_task_cg_lists(), then use_task_css_set_links value
++	 * should be visible now due to the paired locking and barriers implied
++	 * by LOCK/UNLOCK: it is written before the tasklist_lock unlock
++	 * in cgroup_enable_task_cg_lists() and read here after the tasklist_lock
++	 * lock on fork.
++	 */
+ 	if (use_task_css_set_links) {
+ 		write_lock(&css_set_lock);
+ 		if (list_empty(&child->cg_list)) {
+

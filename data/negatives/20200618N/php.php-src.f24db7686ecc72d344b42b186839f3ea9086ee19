@@ -1,0 +1,149 @@
+commit f24db7686ecc72d344b42b186839f3ea9086ee19
+Author: Nikita Popov <nikita.ppv@gmail.com>
+Date:   Fri Aug 4 18:38:36 2017 +0200
+
+    Optimize mb_ord()
+    
+    Don't perform a full encoding conversion into UCS4-BE, instead only
+    perform an input conversion into a wchar device.
+
+diff --git a/ext/mbstring/libmbfl/mbfl/mbfilter.c b/ext/mbstring/libmbfl/mbfl/mbfilter.c
+index 8f18525feb..94ecc57491 100644
+--- a/ext/mbstring/libmbfl/mbfl/mbfilter.c
++++ b/ext/mbstring/libmbfl/mbfl/mbfilter.c
+@@ -1,6 +1,5 @@
+ /*
+  * charset=UTF-8
+- * vim600: encoding=utf-8
+  */
+ 
+ /*
+@@ -1053,16 +1052,7 @@ mbfl_substr_count(
+ 	if (filter == NULL) {
+ 		return (size_t) -4;
+ 	}
+-	p = needle->val;
+-	n = needle->len;
+-	if (p != NULL) {
+-		while (n > 0) {
+-			if ((*filter->filter_function)(*p++, filter) < 0) {
+-				break;
+-			}
+-			n--;
+-		}
+-	}
++	mbfl_convert_filter_feed_string(filter, needle->val, needle->len);
+ 	mbfl_convert_filter_flush(filter);
+ 	mbfl_convert_filter_delete(filter);
+ 	pc.needle_len = pc.needle.pos;
+diff --git a/ext/mbstring/libmbfl/mbfl/mbfl_convert.c b/ext/mbstring/libmbfl/mbfl/mbfl_convert.c
+index 1f4d81ae66..7a0fb60264 100644
+--- a/ext/mbstring/libmbfl/mbfl/mbfl_convert.c
++++ b/ext/mbstring/libmbfl/mbfl/mbfl_convert.c
+@@ -238,6 +238,17 @@ mbfl_convert_filter_feed(int c, mbfl_convert_filter *filter)
+ 	return (*filter->filter_function)(c, filter);
+ }
+ 
++int
++mbfl_convert_filter_feed_string(mbfl_convert_filter *filter, const unsigned char *p, size_t len) {
++	while (len > 0) {
++		if ((*filter->filter_function)(*p++, filter) < 0) {
++			return -1;
++		}
++		len--;
++	}
++	return 0;
++}
++
+ int
+ mbfl_convert_filter_flush(mbfl_convert_filter *filter)
+ {
+diff --git a/ext/mbstring/libmbfl/mbfl/mbfl_convert.h b/ext/mbstring/libmbfl/mbfl/mbfl_convert.h
+index af440becd2..31e54c61d1 100644
+--- a/ext/mbstring/libmbfl/mbfl/mbfl_convert.h
++++ b/ext/mbstring/libmbfl/mbfl/mbfl_convert.h
+@@ -69,6 +69,7 @@ MBFLAPI extern mbfl_convert_filter *mbfl_convert_filter_new2(
+     void *data );
+ MBFLAPI extern void mbfl_convert_filter_delete(mbfl_convert_filter *filter);
+ MBFLAPI extern int mbfl_convert_filter_feed(int c, mbfl_convert_filter *filter);
++MBFLAPI extern int mbfl_convert_filter_feed_string(mbfl_convert_filter *filter, const unsigned char *p, size_t len);
+ MBFLAPI extern int mbfl_convert_filter_flush(mbfl_convert_filter *filter);
+ MBFLAPI extern void mbfl_convert_filter_reset(mbfl_convert_filter *filter, const mbfl_encoding *from, const mbfl_encoding *to);
+ MBFLAPI extern void mbfl_convert_filter_copy(mbfl_convert_filter *src, mbfl_convert_filter *dist);
+diff --git a/ext/mbstring/mbstring.c b/ext/mbstring/mbstring.c
+index e34c0cf486..f6ea923a3f 100644
+--- a/ext/mbstring/mbstring.c
++++ b/ext/mbstring/mbstring.c
+@@ -63,6 +63,7 @@
+ #include "libmbfl/mbfl/mbfl_allocators.h"
+ #include "libmbfl/mbfl/mbfilter_8bit.h"
+ #include "libmbfl/mbfl/mbfilter_pass.h"
++#include "libmbfl/mbfl/mbfilter_wchar.h"
+ #include "libmbfl/filters/mbfilter_ascii.h"
+ #include "libmbfl/filters/mbfilter_base64.h"
+ #include "libmbfl/filters/mbfilter_qprint.h"
+@@ -4883,9 +4884,6 @@ static inline zend_long php_mb_ord(const char* str, size_t str_len, const char*
+ {
+ 	const mbfl_encoding *enc;
+ 	enum mbfl_no_encoding no_enc;
+-	char* ret;
+-	size_t ret_len;
+-	zend_long cp;
+ 
+ 	enc = php_mb_get_encoding(enc_name);
+ 	if (!enc) {
+@@ -4904,32 +4902,32 @@ static inline zend_long php_mb_ord(const char* str, size_t str_len, const char*
+ 	}
+ 
+ 	{
+-		long orig_illegalchars = MBSTRG(illegalchars);
+-		MBSTRG(illegalchars) = 0;
+-		ret = php_mb_convert_encoding_ex(str, str_len, &mbfl_encoding_ucs4be, enc, &ret_len);
+-		if (MBSTRG(illegalchars) != 0) {
+-			if (ret) {
+-				efree(ret);
+-			}
+-			MBSTRG(illegalchars) = orig_illegalchars;
++		mbfl_wchar_device dev;
++		mbfl_convert_filter *filter;
++		zend_long cp;
++
++		mbfl_wchar_device_init(&dev);
++		filter = mbfl_convert_filter_new(
++			enc, &mbfl_encoding_wchar,
++			mbfl_wchar_device_output, 0, &dev);
++		if (!filter) {
++			php_error_docref(NULL, E_WARNING, "Creation of filter failed");
+ 			return -1;
+ 		}
+ 
+-		MBSTRG(illegalchars) = orig_illegalchars;
+-	}
++		mbfl_convert_filter_feed_string(filter, (const unsigned char *) str, str_len);
++		mbfl_convert_filter_flush(filter);
++		mbfl_convert_filter_delete(filter);
+ 
+-	if (ret == NULL) {
+-		return -1;
+-	}
+-
+-	cp = (unsigned char) ret[0] << 24 | \
+-		 (unsigned char) ret[1] << 16 | \
+-		 (unsigned char) ret[2] <<  8 | \
+-		 (unsigned char) ret[3];
+-
+-	efree(ret);
++		if (dev.pos < 1 || filter->num_illegalchar || dev.buffer[0] >= MBFL_WCSGROUP_UCS4MAX) {
++			mbfl_wchar_device_clear(&dev);
++			return -1;
++		}
+ 
+-	return cp;
++		cp = dev.buffer[0];
++		mbfl_wchar_device_clear(&dev);
++		return cp;
++	}
+ }
+ 
+ 
+

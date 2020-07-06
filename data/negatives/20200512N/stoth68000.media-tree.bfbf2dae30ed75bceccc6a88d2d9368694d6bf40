@@ -1,0 +1,114 @@
+commit bfbf2dae30ed75bceccc6a88d2d9368694d6bf40
+Author: Steven Toth <stoth@linuxtv.org>
+Date:   Fri Sep 12 01:37:37 2008 -0300
+
+    V4L/DVB (9004): S2API: Implement GET/SET handing to the demods
+    
+    The frontends will be notified (if they chose) of all _get and _set commands
+    so they can help determine result or action. Results are now returned
+    to userspace correctly.
+    
+    Signed-off-by: Steven Toth <stoth@linuxtv.org>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+
+diff --git a/drivers/media/dvb/dvb-core/dvb_frontend.c b/drivers/media/dvb/dvb-core/dvb_frontend.c
+index 2ed748486e57..8bc3c0842b3d 100644
+--- a/drivers/media/dvb/dvb-core/dvb_frontend.c
++++ b/drivers/media/dvb/dvb-core/dvb_frontend.c
+@@ -1104,6 +1104,13 @@ int dtv_property_process_get(struct dvb_frontend *fe, struct dtv_property *tvp,
+ 
+ 	dtv_property_dump(tvp);
+ 
++	/* Allow the frontend to validate incoming properties */
++	if (fe->ops.get_property)
++		r = fe->ops.get_property(fe, tvp);
++
++	if (r < 0)
++		return r;
++
+ 	switch(tvp->cmd) {
+ 	case DTV_FREQUENCY:
+ 		tvp->u.data = fe->dtv_property_cache.frequency;
+@@ -1188,6 +1195,13 @@ int dtv_property_process_set(struct dvb_frontend *fe, struct dtv_property *tvp,
+ 	printk("%s()\n", __FUNCTION__);
+ 	dtv_property_dump(tvp);
+ 
++	/* Allow the frontend to validate incoming properties */
++	if (fe->ops.set_property)
++		r = fe->ops.set_property(fe, tvp);
++
++	if (r < 0)
++		return r;
++
+ 	switch(tvp->cmd) {
+ 	case DTV_CLEAR:
+ 		/* Reset a cache of data specific to the frontend here. This does
+@@ -1331,12 +1345,12 @@ static int dvb_frontend_ioctl_properties(struct inode *inode, struct file *file,
+ 		}
+ 
+ 		for (i = 0; i < tvps->num; i++)
+-			dtv_property_process_set(fe, tvp + i, inode, file);
++			err |= dtv_property_process_set(fe, tvp + i, inode, file);
+ 
+ 		if(fe->dtv_property_cache.state == DTV_TUNE) {
+ 			printk("%s() Property cache is full, tuning\n", __FUNCTION__);
+ 		}
+-		err = 0;
++
+ 	} else
+ 	if(cmd == FE_GET_PROPERTY) {
+ 		printk("%s() FE_GET_PROPERTY\n", __FUNCTION__);
+@@ -1364,14 +1378,13 @@ static int dvb_frontend_ioctl_properties(struct inode *inode, struct file *file,
+ 		}
+ 
+ 		for (i = 0; i < tvps->num; i++)
+-			dtv_property_process_get(fe, tvp + i, inode, file);
++			err |= dtv_property_process_get(fe, tvp + i, inode, file);
+ 
+ 		if (copy_to_user(tvps->props, tvp, tvps->num * sizeof(struct dtv_property))) {
+ 			err = -EFAULT;
+ 			goto out;
+ 		}
+ 
+-		err = 0;
+ 	} else
+ 		err = -EOPNOTSUPP;
+ 
+diff --git a/drivers/media/dvb/dvb-core/dvb_frontend.h b/drivers/media/dvb/dvb-core/dvb_frontend.h
+index 1c2090966baf..784e8fe1d3bd 100644
+--- a/drivers/media/dvb/dvb-core/dvb_frontend.h
++++ b/drivers/media/dvb/dvb-core/dvb_frontend.h
+@@ -172,7 +172,6 @@ struct dvb_frontend_ops {
+ 
+ 	int (*set_property)(struct dvb_frontend* fe, struct dtv_property* tvp);
+ 	int (*get_property)(struct dvb_frontend* fe, struct dtv_property* tvp);
+-	int (*set_params)(struct dvb_frontend* fe);
+ };
+ 
+ #define MAX_EVENT 8
+diff --git a/drivers/media/dvb/frontends/cx24116.c b/drivers/media/dvb/frontends/cx24116.c
+index 9f93930a2594..0ac2c5493087 100644
+--- a/drivers/media/dvb/frontends/cx24116.c
++++ b/drivers/media/dvb/frontends/cx24116.c
+@@ -802,9 +802,9 @@ static int cx24116_set_property(struct dvb_frontend *fe, struct dtv_property* tv
+ 	return 0;
+ }
+ 
+-static int cx24116_set_params(struct dvb_frontend *fe)
++static int cx24116_get_property(struct dvb_frontend *fe, struct dtv_property* tvp)
+ {
+-	dprintk("%s(..) We were notified that a tune request may occur\n", __func__);
++	dprintk("%s(..)\n", __func__);
+ 	return 0;
+ }
+ 
+@@ -964,7 +964,7 @@ static struct dvb_frontend_ops cx24116_ops = {
+ 	.diseqc_send_burst = cx24116_diseqc_send_burst,
+ 
+ 	.set_property = cx24116_set_property,
+-	.set_params = cx24116_set_params,
++	.get_property = cx24116_get_property,
+ 	.set_frontend = cx24116_set_frontend,
+ };
+ 
+

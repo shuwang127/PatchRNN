@@ -1,0 +1,316 @@
+commit 301a8a9b7ef75586740f0a17dc31b02442756e5d
+Author: craig.p.drummond <craig.p.drummond@b1e49159-3266-923f-9c3e-04f16369770a>
+Date:   Wed Sep 18 18:10:30 2013 +0000
+
+    - Indicate when podcast episodes have been played
+    - Display number on unplayed episodes
+
+diff --git a/models/musiclibraryitempodcast.cpp b/models/musiclibraryitempodcast.cpp
+index 1e809ff6..6b4a46e8 100644
+--- a/models/musiclibraryitempodcast.cpp
++++ b/models/musiclibraryitempodcast.cpp
+@@ -51,7 +51,7 @@ static QLatin1String constEpisodeTag("episode");
+ static QLatin1String constNameAttribute("name");
+ static QLatin1String constUrlAttribute("url");
+ static QLatin1String constTimeAttribute("time");
+-static QLatin1String constReadAttribute("read");
++static QLatin1String constPlayedAttribute("played");
+ static QLatin1String constTrue("true");
+ 
+ const QString MusicLibraryItemPodcast::constExt=QLatin1String(".xml.gz");
+@@ -89,6 +89,7 @@ bool MusicLibraryItemPodcast::load()
+     }
+ 
+     QXmlStreamReader reader(&compressor);
++    m_unplayedEpisodeCount=0;
+     while (!reader.atEnd()) {
+         reader.readNext();
+         if (!reader.error() && reader.isStartElement()) {
+@@ -112,11 +113,14 @@ bool MusicLibraryItemPodcast::load()
+                     s.file=url;
+                     s.track=++track;
+                     s.artist=m_itemData;
+-                    s.id=constTrue==attributes.value(constReadAttribute).toString() ? 1 : 0;
++                    s.id=constTrue==attributes.value(constPlayedAttribute).toString() ? 1 : 0;
+                     QString time=attributes.value(constTimeAttribute).toString();
+                     s.time=time.isEmpty() ? 0 : time.toUInt();
+                     MusicLibraryItemSong *song=new MusicLibraryItemSong(s, this);
+                     m_childItems.append(song);
++                    if (!s.id) {
++                        m_unplayedEpisodeCount++;
++                    }
+                 }
+             }
+         }
+@@ -157,6 +161,7 @@ bool MusicLibraryItemPodcast::loadRss(QIODevice *dev)
+     m_imageUrl=ch.image;
+     m_itemData=ch.name;
+ 
++    m_unplayedEpisodeCount=ch.episodes.count();
+     int track=0;
+     foreach (const RssParser::Episode &ep, ch.episodes) {
+         Song s;
+@@ -200,7 +205,7 @@ bool MusicLibraryItemPodcast::save()
+             writer.writeAttribute(constTimeAttribute, QString::number(s.time));
+         }
+         if (s.id) {
+-            writer.writeAttribute(constReadAttribute, constTrue);
++            writer.writeAttribute(constPlayedAttribute, constTrue);
+         }
+         writer.writeEndElement();
+     }
+@@ -319,8 +324,20 @@ void MusicLibraryItemPodcast::updateTrackNumbers()
+ {
+     quint16 track=0;
+     resetRows();
++    m_unplayedEpisodeCount=0;
+     foreach (MusicLibraryItem *i, m_childItems) {
+         static_cast<MusicLibraryItemSong *>(i)->setTrack(++track);
++        if (!static_cast<MusicLibraryItemSong *>(i)->song().id) {
++            m_unplayedEpisodeCount++;
++        }
++    }
++}
++
++void MusicLibraryItemPodcast::setPlayed(MusicLibraryItemSong *song)
++{
++    if (!song->song().id) {
++        song->setId(1);
++        m_unplayedEpisodeCount--;
+     }
+ }
+ 
+diff --git a/models/musiclibraryitempodcast.h b/models/musiclibraryitempodcast.h
+index 2062a7ed..0cf9d666 100644
+--- a/models/musiclibraryitempodcast.h
++++ b/models/musiclibraryitempodcast.h
+@@ -49,7 +49,8 @@ public:
+         : MusicLibraryItemContainer(QString(), parent)
+         , m_coverIsDefault(false)
+         , m_cover(0)
+-        , m_fileName(fileName) {
++        , m_fileName(fileName)
++        , m_unplayedEpisodeCount(0) {
+     }
+     virtual ~MusicLibraryItemPodcast() { }
+ 
+@@ -69,6 +70,8 @@ public:
+     const QUrl & rssUrl() const { return m_rssUrl; }
+     void removeFiles();
+     void updateTrackNumbers();
++    quint32 unplayedEpisodes() const { return m_unplayedEpisodeCount; }
++    void setPlayed(MusicLibraryItemSong *song);
+ 
+ private:
+     void setCoverImage(const QImage &img) const;
+@@ -81,6 +84,7 @@ private:
+     QUrl m_imageUrl;
+     QUrl m_rssUrl;
+     QString m_fileName;
++    quint32 m_unplayedEpisodeCount;
+ };
+ 
+ #endif
+diff --git a/models/musiclibraryitemsong.h b/models/musiclibraryitemsong.h
+index 44c66f16..21c4f5ca 100644
+--- a/models/musiclibraryitemsong.h
++++ b/models/musiclibraryitemsong.h
+@@ -47,6 +47,7 @@ public:
+     void setFile(const QString &f) { m_song.file=f; }
+     quint16 track() const { return m_song.track; }
+     void setTrack(quint16 t) { m_song.track=t; }
++    void setId(qint32 i) { m_song.id=i; }
+     quint16 disc() const { return m_song.disc; }
+     quint32 time() const { return m_song.time; }
+     const QString & genre() const { return m_song.genre; }
+diff --git a/models/onlineservicesmodel.cpp b/models/onlineservicesmodel.cpp
+index 69d8fe8e..70eee73f 100644
+--- a/models/onlineservicesmodel.cpp
++++ b/models/onlineservicesmodel.cpp
+@@ -192,6 +192,17 @@ QVariant OnlineServicesModel::data(const QModelIndex &index, int role) const
+             return v;
+         }
+     }
++    case Qt::DecorationRole:
++        if (MusicLibraryItem::Type_Song==item->itemType() && item->parentItem() && MusicLibraryItem::Type_Podcast==item->parentItem()->itemType()) {
++            if (static_cast<MusicLibraryItemSong *>(item)->song().id) {
++                return Icons::self()->playedPodcastEpisodeIcon;
++            }
++        }
++        break;
++    case Qt::DisplayRole:
++        if (MusicLibraryItem::Type_Podcast==item->itemType() && static_cast<MusicLibraryItemPodcast *>(item)->unplayedEpisodes()) {
++            return i18nc("podcast name (num unplayed episodes)", "%1 (%2)", item->data(), static_cast<MusicLibraryItemPodcast *>(item)->unplayedEpisodes());
++        }
+     default:
+         break;
+     }
+diff --git a/online/onlineservice.cpp b/online/onlineservice.cpp
+index abca8ab6..c82fc8a0 100644
+--- a/online/onlineservice.cpp
++++ b/online/onlineservice.cpp
+@@ -408,6 +408,11 @@ void OnlineService::emitError(const QString &msg)
+     emit static_cast<OnlineServicesModel *>(m_model)->error(msg);
+ }
+ 
++void OnlineService::emitDataChanged(const QModelIndex &idx)
++{
++    emit static_cast<OnlineServicesModel *>(m_model)->dataChanged(idx, idx);
++}
++
+ void OnlineService::setBusy(bool b)
+ {
+     static_cast<OnlineServicesModel *>(m_model)->setBusy(id(), b);
+diff --git a/online/onlineservice.h b/online/onlineservice.h
+index 8dd6554f..09036cd2 100644
+--- a/online/onlineservice.h
++++ b/online/onlineservice.h
+@@ -139,6 +139,7 @@ protected:
+     QModelIndex createIndex(MusicLibraryItem *child) const;
+     void emitUpdated();
+     void emitError(const QString &msg);
++    void emitDataChanged(const QModelIndex &idx);
+     void setBusy(bool b);
+     void beginInsertRows(const QModelIndex &idx, int from, int to);
+     void endInsertRows();
+diff --git a/online/podcastservice.cpp b/online/podcastservice.cpp
+index 023af507..03d9c337 100644
+--- a/online/podcastservice.cpp
++++ b/online/podcastservice.cpp
+@@ -30,6 +30,7 @@
+ #include "settings.h"
+ #include "dialog.h"
+ #include "buddylabel.h"
++#include "mpdconnection.h"
+ #include <QDir>
+ #include <QUrl>
+ #include <QSet>
+@@ -101,6 +102,7 @@ PodcastService::PodcastService(MusicModel *m)
+     setUseArtistImages(false);
+     setUseAlbumImages(false);
+     loadAll();
++    connect(MPDConnection::self(), SIGNAL(currentSongUpdated(const Song &)), this, SLOT(currentMpdSong(const Song &)));
+ }
+ 
+ Song PodcastService::fixPath(const Song &orig, bool) const
+@@ -194,9 +196,13 @@ void PodcastService::jobFinished()
+             }
+             QSet<QString> origSongs;
+             QSet<QString> newSongs;
++            QSet<QString> playedSongs;
+             foreach (MusicLibraryItem *i, orig->childItems()) {
+                 MusicLibraryItemSong *song=static_cast<MusicLibraryItemSong *>(i);
+                 origSongs.insert(song->file()+song->data());
++                if (song->song().id) {
++                    playedSongs.insert(song->file());
++                }
+             }
+             foreach (MusicLibraryItem *i, podcast->childItems()) {
+                 MusicLibraryItemSong *song=static_cast<MusicLibraryItemSong *>(i);
+@@ -218,6 +224,20 @@ void PodcastService::jobFinished()
+                     endInsertRows();
+                 }
+                 orig->updateTrackNumbers();
++
++                // Restore played status...
++                foreach (MusicLibraryItem *i, orig->childItems()) {
++                    MusicLibraryItemSong *song=static_cast<MusicLibraryItemSong *>(i);
++                    if (playedSongs.contains(song->file())) {
++                        orig->setPlayed(song);
++                        playedSongs.remove(song->file());
++                        if (playedSongs.isEmpty()) {
++                            break;
++                        }
++                    }
++                }
++
++                orig->save();
+                 emitUpdated();
+             }
+ 
+@@ -311,7 +331,7 @@ void PodcastService::startTimer()
+         updateTimer=new QTimer(this);
+         connect(updateTimer, SIGNAL(timeout()), this, SLOT(updateRss()));
+     }
+-    updateTimer->start(Settings::self()->rssUpdate()*1000);
++    updateTimer->start(Settings::self()->rssUpdate()*60*1000);
+ }
+ 
+ void PodcastService::stopTimer()
+@@ -330,3 +350,24 @@ void PodcastService::updateRss()
+         }
+     }
+ }
++
++void PodcastService::currentMpdSong(const Song &s)
++{
++    if (0xFF==s.disc && s.file.startsWith("http://") && constName==s.album) {
++        foreach (MusicLibraryItem *p, m_childItems) {
++            MusicLibraryItemPodcast *podcast=static_cast<MusicLibraryItemPodcast *>(p);
++            foreach (MusicLibraryItem *i, podcast->childItems()) {
++                MusicLibraryItemSong *song=static_cast<MusicLibraryItemSong *>(i);
++                if (song->file()==s.file) {
++                    if (!song->song().id) {
++                        podcast->setPlayed(song);
++                        emitDataChanged(createIndex(song));
++                        emitDataChanged(createIndex(podcast));
++                        podcast->save();
++                    }
++                    return;
++                }
++            }
++        }
++    }
++}
+diff --git a/online/podcastservice.h b/online/podcastservice.h
+index 8899a048..6271ec80 100644
+--- a/online/podcastservice.h
++++ b/online/podcastservice.h
+@@ -70,6 +70,7 @@ private:
+ private Q_SLOTS:
+     void jobFinished();
+     void updateRss();
++    void currentMpdSong(const Song &s);
+ 
+ private:
+     QList<NetworkJob *> jobs;
+diff --git a/widgets/icons.cpp b/widgets/icons.cpp
+index 2c3e4131..68055e4c 100644
+--- a/widgets/icons.cpp
++++ b/widgets/icons.cpp
+@@ -369,7 +369,8 @@ Icons::Icons()
+         streamIcon=Icon("applications-internet");
+     }
+     albumIcon=Icon("media-optical");
+-    podcastIcon=albumIcon; // TODO!!!
++    podcastIcon=Icon("inode-directory");
++    playedPodcastEpisodeIcon=Icon("dialog-ok");
+     audioFileIcon=Icon("audio-x-generic");
+     playlistIcon=Icon("view-media-playlist");
+     dynamicRuleIcon=Icon("media-playlist-shuffle");
+@@ -420,6 +421,12 @@ Icons::Icons()
+             connectIcon=Icon("go-bottom");
+         }
+     }
++    if (playedPodcastEpisodeIcon.isNull()) {
++        playedPodcastEpisodeIcon=Icon("gtk-stock-ok");
++        if (playedPodcastEpisodeIcon.isNull()) {
++            playedPodcastEpisodeIcon=Icon("starred");
++        }
++    }
+     if (speakerIcon.isNull()) {
+         speakerIcon=Icon("audio-speakers");
+         if (speakerIcon.isNull()) {
+diff --git a/widgets/icons.h b/widgets/icons.h
+index 09134419..d12bf0be 100644
+--- a/widgets/icons.h
++++ b/widgets/icons.h
+@@ -44,6 +44,7 @@ public:
+     Icon artistIcon;
+     Icon albumIcon;
+     Icon podcastIcon;
++    Icon playedPodcastEpisodeIcon;
+     Icon audioFileIcon;
+     Icon playlistIcon;
+     Icon dynamicRuleIcon;
+

@@ -1,0 +1,46 @@
+commit 1de913909263ba7f7054debeda1b79771a7233db
+Author: Josef Whiter <jwhiter@redhat.com>
+Date:   Mon Mar 12 16:55:07 2007 -0500
+
+    [GFS2] Fix bz 231380, unlock page before dequeing glocks in gfs2_commit_write
+    
+    If we are writing a file, and in the middle of writing the file
+    another node attempts to get a shared lock on that file (by doing a du for
+    example) the process doing the writing will hang waiting on lock_page.  The
+    reason for this is because when we have waiters on a exclusive glock, we will go
+    through and flush out all dirty pages associated with that inode and release the
+    lock.  The problem is that when we flush the dirty pages, we could hit a page
+    that we have locked durring the generic_file_buffered_write part of this
+    operation.  This patch unlocks the page before we go to dequeue the lock and
+    locks it immediatly afterwards, since generic_file_buffered_write needs the page
+    locked when the commit_write is completed.  This patch resolves the problem,
+    however if somebody sees a better way to do this please don't hesistate to yell.
+    
+    Signed-off-by: Josef Whiter <jwhiter@redhat.com>
+    Signed-off-by: Steven Whitehouse <swhiteho@redhat.com>
+
+diff --git a/fs/gfs2/ops_address.c b/fs/gfs2/ops_address.c
+index b3b7e8475359..90c287932d58 100644
+--- a/fs/gfs2/ops_address.c
++++ b/fs/gfs2/ops_address.c
+@@ -507,7 +507,9 @@ static int gfs2_commit_write(struct file *file, struct page *page,
+ 		gfs2_quota_unlock(ip);
+ 		gfs2_alloc_put(ip);
+ 	}
++	unlock_page(page);
+ 	gfs2_glock_dq_m(1, &ip->i_gh);
++	lock_page(page);
+ 	gfs2_holder_uninit(&ip->i_gh);
+ 	return 0;
+ 
+@@ -520,7 +522,9 @@ static int gfs2_commit_write(struct file *file, struct page *page,
+ 		gfs2_quota_unlock(ip);
+ 		gfs2_alloc_put(ip);
+ 	}
++	unlock_page(page);
+ 	gfs2_glock_dq_m(1, &ip->i_gh);
++	lock_page(page);
+ 	gfs2_holder_uninit(&ip->i_gh);
+ fail_nounlock:
+ 	ClearPageUptodate(page);
+

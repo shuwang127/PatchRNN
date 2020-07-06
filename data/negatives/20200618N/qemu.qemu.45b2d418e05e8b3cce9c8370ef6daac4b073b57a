@@ -1,0 +1,88 @@
+commit 45b2d418e05e8b3cce9c8370ef6daac4b073b57a
+Author: Alberto Garcia <berto@igalia.com>
+Date:   Thu Feb 18 12:26:56 2016 +0200
+
+    throttle: Make throttle_max_is_missing_limit() set errp
+    
+    The caller does not need to set it, and this will allow us to refactor
+    this function later.
+    
+    Signed-off-by: Alberto Garcia <berto@igalia.com>
+    Reviewed-by: Kevin Wolf <kwolf@redhat.com>
+    Reviewed-by: Stefan Hajnoczi <stefanha@redhat.com>
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+
+diff --git a/blockdev.c b/blockdev.c
+index 14e89dea17..52aabf7b90 100644
+--- a/blockdev.c
++++ b/blockdev.c
+@@ -355,9 +355,7 @@ static bool check_throttle_config(ThrottleConfig *cfg, Error **errp)
+         return false;
+     }
+ 
+-    if (throttle_max_is_missing_limit(cfg)) {
+-        error_setg(errp, "bps_max/iops_max require corresponding"
+-                         " bps/iops values");
++    if (throttle_max_is_missing_limit(cfg, errp)) {
+         return false;
+     }
+ 
+diff --git a/include/qemu/throttle.h b/include/qemu/throttle.h
+index 69cf171b1a..03bdec07ea 100644
+--- a/include/qemu/throttle.h
++++ b/include/qemu/throttle.h
+@@ -110,7 +110,7 @@ bool throttle_conflicting(ThrottleConfig *cfg, Error **errp);
+ 
+ bool throttle_is_valid(ThrottleConfig *cfg);
+ 
+-bool throttle_max_is_missing_limit(ThrottleConfig *cfg);
++bool throttle_max_is_missing_limit(ThrottleConfig *cfg, Error **errp);
+ 
+ void throttle_config(ThrottleState *ts,
+                      ThrottleTimers *tt,
+diff --git a/tests/test-throttle.c b/tests/test-throttle.c
+index 579b8af87e..49bd3bccaf 100644
+--- a/tests/test-throttle.c
++++ b/tests/test-throttle.c
+@@ -338,15 +338,15 @@ static void test_max_is_missing_limit(void)
+         memset(&cfg, 0, sizeof(cfg));
+         cfg.buckets[i].max = 100;
+         cfg.buckets[i].avg = 0;
+-        g_assert(throttle_max_is_missing_limit(&cfg));
++        g_assert(throttle_max_is_missing_limit(&cfg, NULL));
+ 
+         cfg.buckets[i].max = 0;
+         cfg.buckets[i].avg = 0;
+-        g_assert(!throttle_max_is_missing_limit(&cfg));
++        g_assert(!throttle_max_is_missing_limit(&cfg, NULL));
+ 
+         cfg.buckets[i].max = 0;
+         cfg.buckets[i].avg = 100;
+-        g_assert(!throttle_max_is_missing_limit(&cfg));
++        g_assert(!throttle_max_is_missing_limit(&cfg, NULL));
+     }
+ }
+ 
+diff --git a/util/throttle.c b/util/throttle.c
+index 564e13261e..77010b4a1a 100644
+--- a/util/throttle.c
++++ b/util/throttle.c
+@@ -306,13 +306,16 @@ bool throttle_is_valid(ThrottleConfig *cfg)
+ 
+ /* check if bps_max/iops_max is used without bps/iops
+  * @cfg: the throttling configuration to inspect
++ * @errp: error object
+  */
+-bool throttle_max_is_missing_limit(ThrottleConfig *cfg)
++bool throttle_max_is_missing_limit(ThrottleConfig *cfg, Error **errp)
+ {
+     int i;
+ 
+     for (i = 0; i < BUCKETS_COUNT; i++) {
+         if (cfg->buckets[i].max && !cfg->buckets[i].avg) {
++            error_setg(errp, "bps_max/iops_max require corresponding"
++                       " bps/iops values");
+             return true;
+         }
+     }
+

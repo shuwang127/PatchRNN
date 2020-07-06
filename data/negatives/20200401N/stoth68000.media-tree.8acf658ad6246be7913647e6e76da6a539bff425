@@ -1,0 +1,79 @@
+commit 8acf658ad6246be7913647e6e76da6a539bff425
+Author: Daniel Vetter <daniel.vetter@ffwll.ch>
+Date:   Mon Jan 21 23:38:37 2013 +0100
+
+    drm/fb-helper: streamline drm_fb_helper_single_fb_probe
+    
+    No need to check whether we've allocated a new fb since we're not
+    always doing that. Also, we always need to register the fbdev and add
+    it to the panic notifier.
+    
+    Reviewed-by: Rob Clark <robdclark@gmail.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/drm_fb_helper.c b/drivers/gpu/drm/drm_fb_helper.c
+index 535c2cadf4d1..e0d4b04c0eb5 100644
+--- a/drivers/gpu/drm/drm_fb_helper.c
++++ b/drivers/gpu/drm/drm_fb_helper.c
+@@ -752,10 +752,14 @@ int drm_fb_helper_pan_display(struct fb_var_screeninfo *var,
+ }
+ EXPORT_SYMBOL(drm_fb_helper_pan_display);
+ 
++/*
++ * Allocates the backing storage through the ->fb_probe callback and then
++ * registers the fbdev and sets up the panic notifier.
++ */
+ static int drm_fb_helper_single_fb_probe(struct drm_fb_helper *fb_helper,
+ 					 int preferred_bpp)
+ {
+-	int new_fb = 0;
++	int ret = 0;
+ 	int crtc_count = 0;
+ 	int i;
+ 	struct fb_info *info;
+@@ -833,9 +837,9 @@ static int drm_fb_helper_single_fb_probe(struct drm_fb_helper *fb_helper,
+ 	}
+ 
+ 	/* push down into drivers */
+-	new_fb = (*fb_helper->funcs->fb_probe)(fb_helper, &sizes);
+-	if (new_fb < 0)
+-		return new_fb;
++	ret = (*fb_helper->funcs->fb_probe)(fb_helper, &sizes);
++	if (ret < 0)
++		return ret;
+ 
+ 	info = fb_helper->fbdev;
+ 
+@@ -851,15 +855,12 @@ static int drm_fb_helper_single_fb_probe(struct drm_fb_helper *fb_helper,
+ 			fb_helper->crtc_info[i].mode_set.fb = fb_helper->fb;
+ 
+ 
+-	if (new_fb) {
+-		info->var.pixclock = 0;
+-		if (register_framebuffer(info) < 0)
+-			return -EINVAL;
+-
+-		dev_info(fb_helper->dev->dev, "fb%d: %s frame buffer device\n",
+-				info->node, info->fix.id);
++	info->var.pixclock = 0;
++	if (register_framebuffer(info) < 0)
++		return -EINVAL;
+ 
+-	}
++	dev_info(fb_helper->dev->dev, "fb%d: %s frame buffer device\n",
++			info->node, info->fix.id);
+ 
+ 	/* Switch back to kernel console on panic */
+ 	/* multi card linked list maybe */
+@@ -869,8 +870,8 @@ static int drm_fb_helper_single_fb_probe(struct drm_fb_helper *fb_helper,
+ 					       &paniced);
+ 		register_sysrq_key('v', &sysrq_drm_fb_helper_restore_op);
+ 	}
+-	if (new_fb)
+-		list_add(&fb_helper->kernel_fb_list, &kernel_fb_helper_list);
++
++	list_add(&fb_helper->kernel_fb_list, &kernel_fb_helper_list);
+ 
+ 	return 0;
+ }
+

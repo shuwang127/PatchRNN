@@ -1,0 +1,400 @@
+commit e6338c5858795c42ca45afbabe8b765d8050db58
+Author: michael <michael@b3059339-0415-0410-9bf9-f77b7e298cf2>
+Date:   Thu Jan 26 19:32:07 2006 +0000
+
+    change muxer_write_chunk() so that pts/dts _could_ be passed from encoder to muxer
+    
+    
+    git-svn-id: svn://svn.mplayerhq.hu/mplayer/trunk@17488 b3059339-0415-0410-9bf9-f77b7e298cf2
+
+diff --git a/TOOLS/vivodump.c b/TOOLS/vivodump.c
+index a35b4ddd58..568ff4e266 100644
+--- a/TOOLS/vivodump.c
++++ b/TOOLS/vivodump.c
+@@ -252,7 +252,7 @@ while((c=fgetc(f))>=0){
+ 	// end of frame:
+ 	printf("Frame size: %d\n",mux->buffer_len);
+ 	h263_decode_picture_header(mux->buffer);
+-	muxer_write_chunk(mux,mux->buffer_len,0x10);
++	muxer_write_chunk(mux,mux->buffer_len,0x10, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+ 	mux->buffer_len=0;
+ 	
+ 	if((v_id&0xF0)==0x10) fprintf(stderr,"hmm. last video packet %02X\n",v_id);
+diff --git a/libmpcodecs/ve_divx4.c b/libmpcodecs/ve_divx4.c
+index 79daf1e67e..565713bf99 100644
+--- a/libmpcodecs/ve_divx4.c
++++ b/libmpcodecs/ve_divx4.c
+@@ -396,9 +396,9 @@ static int put_image(struct vf_instance_s* vf, mp_image_t *mpi){
+     vf->priv->enc_frame.produce_empty_frame = 0;
+     encore(vf->priv->enc_handle, ENC_OPT_ENCODE, &vf->priv->enc_frame, &enc_result);
+     if(enc_result.cType == 'I')
+-        muxer_write_chunk(mux_v,vf->priv->enc_frame.length,0x10);
++        muxer_write_chunk(mux_v,vf->priv->enc_frame.length,0x10, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+     else
+-        muxer_write_chunk(mux_v,vf->priv->enc_frame.length,0);
++        muxer_write_chunk(mux_v,vf->priv->enc_frame.length,0, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+ #else
+     vf->priv->enc_frame.mvs=NULL;
+ #ifdef HAVE_XVID_VBR
+@@ -444,7 +444,7 @@ static int put_image(struct vf_instance_s* vf, mp_image_t *mpi){
+ 					       enc_result.quantizer);
+ 	}
+     }
+-    muxer_write_chunk(mux_v,vf->priv->enc_frame.length,enc_result.is_key_frame?0x10:0);
++    muxer_write_chunk(mux_v,vf->priv->enc_frame.length,enc_result.is_key_frame?0x10:0, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+ #endif
+     return 1;
+ }
+diff --git a/libmpcodecs/ve_lavc.c b/libmpcodecs/ve_lavc.c
+index 61d458e45c..2ef0065767 100644
+--- a/libmpcodecs/ve_lavc.c
++++ b/libmpcodecs/ve_lavc.c
+@@ -859,7 +859,7 @@ static int encode_frame(struct vf_instance_s* vf, AVFrame *pic){
+     if(out_size == 0)
+         return 0;
+            
+-    muxer_write_chunk(mux_v,out_size,lavc_venc_context->coded_frame->key_frame?0x10:0);
++    muxer_write_chunk(mux_v,out_size,lavc_venc_context->coded_frame->key_frame?0x10:0, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+         
+ #if LIBAVCODEC_BUILD >= 4643
+     /* store psnr / pict size / type / qscale */
+diff --git a/libmpcodecs/ve_libdv.c b/libmpcodecs/ve_libdv.c
+index ab7b2ec727..0f9430f295 100644
+--- a/libmpcodecs/ve_libdv.c
++++ b/libmpcodecs/ve_libdv.c
+@@ -77,7 +77,7 @@ static int put_image(struct vf_instance_s* vf, mp_image_t *mpi){
+ 	(mpi->flags&MP_IMGFLAG_YUV) ? e_dv_color_yuv : e_dv_color_rgb,
+ 	mux_v->buffer);
+ 
+-    muxer_write_chunk(mux_v, 480 * (vf->priv->enc->isPAL ? 300 : 250) , 0x10);
++    muxer_write_chunk(mux_v, 480 * (vf->priv->enc->isPAL ? 300 : 250) , 0x10, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+     return 1;
+ }
+ 
+diff --git a/libmpcodecs/ve_nuv.c b/libmpcodecs/ve_nuv.c
+index 2cc96cbc54..e61ac326ad 100644
+--- a/libmpcodecs/ve_nuv.c
++++ b/libmpcodecs/ve_nuv.c
+@@ -118,7 +118,7 @@ static int put_image(struct vf_instance_s* vf, mp_image_t *mpi){
+   
+     le2me_rtframeheader(ench);
+     mux_v->buffer=vf->priv->buffer;
+-    muxer_write_chunk(mux_v,FRAMEHEADERSIZE + 128*sizeof(long int), 0x10);
++    muxer_write_chunk(mux_v,FRAMEHEADERSIZE + 128*sizeof(long int), 0x10, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+     vf->priv->tbl_wrote = 1;
+     memset(ench,0,FRAMEHEADERSIZE); // Reset the header
+   }
+@@ -175,7 +175,7 @@ static int put_image(struct vf_instance_s* vf, mp_image_t *mpi){
+   ench->packetlength = len;
+   le2me_rtframeheader(ench);
+   mux_v->buffer=(void*)ench;
+-  muxer_write_chunk(mux_v, len + FRAMEHEADERSIZE, 0x10);
++  muxer_write_chunk(mux_v, len + FRAMEHEADERSIZE, 0x10, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+   return 1;
+ }
+ 
+diff --git a/libmpcodecs/ve_qtvideo.c b/libmpcodecs/ve_qtvideo.c
+index d5a1f83692..0d6fe172f5 100644
+--- a/libmpcodecs/ve_qtvideo.c
++++ b/libmpcodecs/ve_qtvideo.c
+@@ -260,7 +260,7 @@ if(!codec_inited){
+     printf("Size %i->%i   \n",stride*height,compressedsize);
+     printf("Ratio: %i:1\n",(stride*height)/compressedsize);
+ #endif
+-    muxer_write_chunk(mux_v, compressedsize , similarity?0:0x10);
++    muxer_write_chunk(mux_v, compressedsize , similarity?0:0x10, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+ 
+     if(((*desc)->idSize)>MAX_IDSIZE){
+ 	mp_msg(MSGT_MENCODER,MSGL_ERR,"FATAL! idSize=%d too big, increase MAX_IDSIZE in ve_qtvideo.c!\n",((*desc)->idSize));
+diff --git a/libmpcodecs/ve_raw.c b/libmpcodecs/ve_raw.c
+index 206b5fdf40..8557eae1da 100644
+--- a/libmpcodecs/ve_raw.c
++++ b/libmpcodecs/ve_raw.c
+@@ -117,7 +117,7 @@ static int query_format(struct vf_instance_s *vf, unsigned int fmt) {
+ 
+ static int put_image(struct vf_instance_s *vf, mp_image_t *mpi) {
+     mux_v->buffer = mpi->planes[0];
+-    muxer_write_chunk(mux_v, mpi->width*mpi->height*mux_v->bih->biBitCount/8, 0x10);
++    muxer_write_chunk(mux_v, mpi->width*mpi->height*mux_v->bih->biBitCount/8, 0x10, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+     return 1;
+ }
+ 
+diff --git a/libmpcodecs/ve_vfw.c b/libmpcodecs/ve_vfw.c
+index 063aa12535..b362908a89 100644
+--- a/libmpcodecs/ve_vfw.c
++++ b/libmpcodecs/ve_vfw.c
+@@ -243,7 +243,7 @@ static int put_image(struct vf_instance_s* vf, mp_image_t *mpi){
+     int ret;
+ //    flip_upside_down(vo_image_ptr,vo_image_ptr,3*vo_w,vo_h); // dirty hack
+     ret=vfw_encode_frame(mux_v->bih, mux_v->buffer, vfw_bih, mpi->planes[0], &flags, 10000);
+-    muxer_write_chunk(mux_v,mux_v->bih->biSizeImage,flags);
++    muxer_write_chunk(mux_v,mux_v->bih->biSizeImage,flags, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+     return 1;
+ }
+ 
+diff --git a/libmpcodecs/ve_x264.c b/libmpcodecs/ve_x264.c
+index 08b236740a..8e51796bd8 100644
+--- a/libmpcodecs/ve_x264.c
++++ b/libmpcodecs/ve_x264.c
+@@ -511,7 +511,7 @@ static int encode_frame(struct vf_instance_s *vf, x264_picture_t *pic_in)
+         int keyframe = (pic_out.i_type == X264_TYPE_IDR) ||
+                        (pic_out.i_type == X264_TYPE_I
+                         && frame_ref == 1 && !bframe);
+-        muxer_write_chunk(mod->mux, i_size, keyframe?0x10:0);
++        muxer_write_chunk(mod->mux, i_size, keyframe?0x10:0, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+     }
+ 
+     return i_size;
+diff --git a/libmpcodecs/ve_xvid.c b/libmpcodecs/ve_xvid.c
+index 45fcacf68f..bfb08b70fb 100644
+--- a/libmpcodecs/ve_xvid.c
++++ b/libmpcodecs/ve_xvid.c
+@@ -523,7 +523,7 @@ put_image(struct vf_instance_s* vf, mp_image_t *mpi)
+ #endif
+     
+     // write output
+-    muxer_write_chunk(fp->mux, fp->enc_frame.length, fp->enc_frame.intra==1 ? 0x10 : 0);
++    muxer_write_chunk(fp->mux, fp->enc_frame.length, fp->enc_frame.intra==1 ? 0x10 : 0, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+ 
+     // update the VBR engine
+     vbrUpdate(&fp->vbr_state, enc_stats.quant, fp->enc_frame.intra,
+diff --git a/libmpcodecs/ve_xvid4.c b/libmpcodecs/ve_xvid4.c
+index d0016b5cd2..3789b8dc67 100644
+--- a/libmpcodecs/ve_xvid4.c
++++ b/libmpcodecs/ve_xvid4.c
+@@ -629,7 +629,7 @@ put_image(struct vf_instance_s* vf, mp_image_t *mpi)
+ 	/* xvidcore outputed bitstream -- mux it */
+ 	muxer_write_chunk(mod->mux,
+ 			  size,
+-			  (mod->frame.out_flags & XVID_KEYFRAME)?0x10:0);
++			  (mod->frame.out_flags & XVID_KEYFRAME)?0x10:0, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+ 
+ 	return(FINE);
+ }
+@@ -1378,7 +1378,7 @@ flush_internal_buffers(xvid_mplayer_module_t *mod)
+ 
+ 			/* xvidcore outputed bitstream -- mux it */
+ 			muxer_write_chunk(mod->mux, size,
+-					(mod->frame.out_flags & XVID_KEYFRAME)?0x10:0);
++					(mod->frame.out_flags & XVID_KEYFRAME)?0x10:0, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+ 		}
+ 	} while (size>0);
+ }
+diff --git a/libmpdemux/muxer.c b/libmpdemux/muxer.c
+index e2da4efa3b..0a075886e6 100644
+--- a/libmpdemux/muxer.c
++++ b/libmpdemux/muxer.c
+@@ -52,9 +52,12 @@ muxer_t *muxer_new_muxer(int type,FILE *f){
+ /* buffer frames until we either:
+  * (a) have at least one frame from each stream
+  * (b) run out of memory */
+-void muxer_write_chunk(muxer_stream_t *s, size_t len, unsigned int flags) {
++void muxer_write_chunk(muxer_stream_t *s, size_t len, unsigned int flags, double dts, double pts) {
++    if(dts == MP_NOPTS_VALUE) dts= s->timer;
++    if(pts == MP_NOPTS_VALUE) pts= s->timer; // this is wrong
++
+     if (s->muxer->muxbuf_skip_buffer) {
+-      s->muxer->cont_write_chunk(s, len, flags);
++      s->muxer->cont_write_chunk(s, len, flags, dts, pts);
+     }
+     else {
+       int num = s->muxer->muxbuf_num++;
+@@ -70,7 +73,8 @@ void muxer_write_chunk(muxer_stream_t *s, size_t len, unsigned int flags) {
+       
+       /* buffer this frame */
+       buf->stream = s;
+-      buf->timer = s->timer;
++      buf->dts= dts;
++      buf->pts= pts;
+       buf->len = len;
+       buf->flags = flags;
+       buf->buffer = malloc(len * sizeof (unsigned char));
+@@ -89,11 +93,6 @@ void muxer_write_chunk(muxer_stream_t *s, size_t len, unsigned int flags) {
+       
+       /* see if we can flush buffer now */
+       if (s->muxer->muxbuf_skip_buffer) {
+-        muxbuf_t *tmp_buf = malloc(sizeof(muxbuf_t));
+-        if (!tmp_buf) {
+-          mp_msg(MSGT_MUXER, MSGL_FATAL, MSGTR_MuxbufMallocErr);
+-          return;
+-        }
+         mp_msg(MSGT_MUXER, MSGL_V, MSGTR_MuxbufSending, s->muxer->muxbuf_num);
+         
+         /* fix parameters for all streams */
+@@ -109,23 +108,23 @@ void muxer_write_chunk(muxer_stream_t *s, size_t len, unsigned int flags) {
+         
+         /* send all buffered frames to muxer */
+         for (num = 0; num < s->muxer->muxbuf_num; ++num) {
++          muxbuf_t tmp_buf;
+           buf = s->muxer->muxbuf + num;
+           s = buf->stream;
+           
+           /* 1. save timer and buffer (might have changed by now) */
+-          tmp_buf->timer = s->timer;
+-          tmp_buf->buffer = s->buffer;
++          tmp_buf.dts = s->timer;
++          tmp_buf.buffer = s->buffer;
+           
+           /* 2. move stored timer and buffer into stream and mux it */
+-          s->timer = buf->timer;
++          s->timer = buf->dts;
+           s->buffer = buf->buffer;
+-          s->muxer->cont_write_chunk(s, buf->len, buf->flags);
++          s->muxer->cont_write_chunk(s, buf->len, buf->flags, buf->dts, buf->pts);
+           
+           /* 3. restore saved timer and buffer */
+-          s->timer = tmp_buf->timer;
+-          s->buffer = tmp_buf->buffer;
++          s->timer = tmp_buf.dts;
++          s->buffer = tmp_buf.buffer;
+         }
+-        free(tmp_buf);
+         
+         free(s->muxer->muxbuf);
+         s->muxer->muxbuf_num = 0;
+diff --git a/libmpdemux/muxer.h b/libmpdemux/muxer.h
+index 353da665e7..fedbad64f8 100644
+--- a/libmpdemux/muxer.h
++++ b/libmpdemux/muxer.h
+@@ -76,7 +76,7 @@ typedef struct muxer_t{
+   int muxbuf_skip_buffer;
+   // functions:
+   void (*fix_stream_parameters)(muxer_stream_t *);
+-  void (*cont_write_chunk)(muxer_stream_t *,size_t,unsigned int);
++  void (*cont_write_chunk)(muxer_stream_t *,size_t,unsigned int, double dts, double pts);
+   void (*cont_write_header)(struct muxer_t *);
+   void (*cont_write_index)(struct muxer_t *);
+   muxer_stream_t* (*cont_new_stream)(struct muxer_t *,int);
+@@ -87,17 +87,19 @@ typedef struct muxer_t{
+ /* muxer frame buffer */
+ typedef struct muxbuf_t {
+   muxer_stream_t *stream; /* pointer back to corresponding stream */
+-  double timer; /* snapshot of stream timer */
++  double dts; /* decode timestamp / time at which this packet should be feeded into the decoder */
++  double pts; /* presentation timestamp / time at which the data in this packet will be presented to the user */
+   unsigned char *buffer;
+   size_t len;
+   unsigned int flags;
+ } muxbuf_t;
+ 
++#define MP_NOPTS_VALUE (-1LL<<63) //both int64_t and double should be able to represent this exactly
+ 
+ muxer_t *muxer_new_muxer(int type,FILE *);
+ #define muxer_new_stream(muxer,a) muxer->cont_new_stream(muxer,a)
+ #define muxer_stream_fix_parameters(muxer, a) muxer->fix_stream_parameters(a)
+-void muxer_write_chunk(muxer_stream_t *s, size_t len, unsigned int flags);
++void muxer_write_chunk(muxer_stream_t *s, size_t len, unsigned int flags, double dts, double pts);
+ #define muxer_write_header(muxer) muxer->cont_write_header(muxer)
+ #define muxer_write_index(muxer) muxer->cont_write_index(muxer)
+ 
+diff --git a/libmpdemux/muxer_avi.c b/libmpdemux/muxer_avi.c
+index 32d47bc947..7169a8a4b0 100644
+--- a/libmpdemux/muxer_avi.c
++++ b/libmpdemux/muxer_avi.c
+@@ -191,7 +191,7 @@ static void avifile_odml_new_riff(muxer_t *muxer)
+ 
+ static void avifile_write_header(muxer_t *muxer);
+ 
+-static void avifile_write_chunk(muxer_stream_t *s,size_t len,unsigned int flags){
++static void avifile_write_chunk(muxer_stream_t *s,size_t len,unsigned int flags, double dts, double pts){
+     off_t rifflen;
+     muxer_t *muxer=s->muxer;
+     struct avi_stream_info *si = s->priv;
+diff --git a/libmpdemux/muxer_lavf.c b/libmpdemux/muxer_lavf.c
+index 5ae2ab4f19..88aa1dfc96 100644
+--- a/libmpdemux/muxer_lavf.c
++++ b/libmpdemux/muxer_lavf.c
+@@ -248,7 +248,7 @@ static void fix_parameters(muxer_stream_t *stream)
+ 	}
+ }
+ 
+-static void write_chunk(muxer_stream_t *stream, size_t len, unsigned int flags)
++static void write_chunk(muxer_stream_t *stream, size_t len, unsigned int flags, double dts, double pts)
+ {
+ 	muxer_t *muxer = (muxer_t*) stream->muxer;
+ 	muxer_priv_t *priv = (muxer_priv_t *) muxer->priv;
+diff --git a/libmpdemux/muxer_mpeg.c b/libmpdemux/muxer_mpeg.c
+index 58c8646bb7..59751b17f8 100644
+--- a/libmpdemux/muxer_mpeg.c
++++ b/libmpdemux/muxer_mpeg.c
+@@ -2349,7 +2349,7 @@ static int parse_audio(muxer_stream_t *s, int finalize, int *nf, double *timer)
+ 
+ 
+ 
+-static void mpegfile_write_chunk(muxer_stream_t *s,size_t len,unsigned int flags){
++static void mpegfile_write_chunk(muxer_stream_t *s,size_t len,unsigned int flags, double dts_arg, double pts_arg){
+   size_t ptr=0, sz = 0;
+   uint64_t pts, tmp;
+   muxer_t *muxer = s->muxer;
+diff --git a/libmpdemux/muxer_rawaudio.c b/libmpdemux/muxer_rawaudio.c
+index 71bf56628e..a7132d227b 100644
+--- a/libmpdemux/muxer_rawaudio.c
++++ b/libmpdemux/muxer_rawaudio.c
+@@ -45,7 +45,7 @@ static muxer_stream_t* rawaudiofile_new_stream(muxer_t *muxer,int type){
+     return s;
+ }
+ 
+-static void rawaudiofile_write_chunk(muxer_stream_t *s,size_t len,unsigned int flags){
++static void rawaudiofile_write_chunk(muxer_stream_t *s,size_t len,unsigned int flags, double dts, double pts){
+     muxer_t *muxer=s->muxer;
+ 
+     // write out the chunk:
+diff --git a/libmpdemux/muxer_rawvideo.c b/libmpdemux/muxer_rawvideo.c
+index 00c4436562..fda4eb8bac 100644
+--- a/libmpdemux/muxer_rawvideo.c
++++ b/libmpdemux/muxer_rawvideo.c
+@@ -50,7 +50,7 @@ static void write_rawvideo_chunk(FILE *f,int len,void* data){
+     }
+ }
+ 
+-static void rawvideofile_write_chunk(muxer_stream_t *s,size_t len,unsigned int flags){
++static void rawvideofile_write_chunk(muxer_stream_t *s,size_t len,unsigned int flags, double dts, double pts){
+     muxer_t *muxer=s->muxer;
+ 
+     // write out the chunk:
+diff --git a/mencoder.c b/mencoder.c
+index 177116d30e..faff346eb0 100644
+--- a/mencoder.c
++++ b/mencoder.c
+@@ -1219,7 +1219,7 @@ if(sh_audio){
+ 	    }
+ 	}
+ 	if(len<=0) break; // EOF?
+-	muxer_write_chunk(mux_a,len,0x10);
++	muxer_write_chunk(mux_a,len,0x10, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+ 	if(!mux_a->h.dwSampleSize && mux_a->timer>0)
+ 	    mux_a->wf->nAvgBytesPerSec=0.5f+(double)mux_a->size/mux_a->timer; // avg bps (VBR)
+ 	if(mux_a->buffer_len>=len){
+@@ -1304,11 +1304,11 @@ ptimer_start = GetTimerMS();
+ switch(mux_v->codec){
+ case VCODEC_COPY:
+     mux_v->buffer=frame_data.start;
+-    if(skip_flag<=0) muxer_write_chunk(mux_v,frame_data.in_size,(sh_video->ds->flags&1)?0x10:0);
++    if(skip_flag<=0) muxer_write_chunk(mux_v,frame_data.in_size,(sh_video->ds->flags&1)?0x10:0, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+     break;
+ case VCODEC_FRAMENO:
+     mux_v->buffer=(unsigned char *)&decoded_frameno; // tricky
+-    if(skip_flag<=0) muxer_write_chunk(mux_v,sizeof(int),0x10);
++    if(skip_flag<=0) muxer_write_chunk(mux_v,sizeof(int),0x10, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+     break;
+ default:
+     // decode_video will callback down to ve_*.c encoders, through the video filters
+@@ -1333,7 +1333,7 @@ default:
+ 	if(skip_limit==0){
+ 	    // skipping not allowed -> write empty frame:
+ 	    if (!encode_duplicates || !sh_video->vfilter || ((vf_instance_t *)sh_video->vfilter)->control(sh_video->vfilter, VFCTRL_DUPLICATE_FRAME, 0) != CONTROL_TRUE)
+-	      muxer_write_chunk(mux_v,0,0);
++	      muxer_write_chunk(mux_v,0,0, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+ 	} else {
+ 	    // skipping allowed -> skip it and distriubute timer error:
+ 	    v_timer_corr-=(float)mux_v->h.dwScale/mux_v->h.dwRate;
+@@ -1352,7 +1352,7 @@ if(skip_flag<0){
+     while(skip_flag<0){
+ 	duplicatedframes++;
+ 	if (!encode_duplicates || !sh_video->vfilter || ((vf_instance_t *)sh_video->vfilter)->control(sh_video->vfilter, VFCTRL_DUPLICATE_FRAME, 0) != CONTROL_TRUE)
+-	    muxer_write_chunk(mux_v,0,0);
++	    muxer_write_chunk(mux_v,0,0, MP_NOPTS_VALUE, MP_NOPTS_VALUE);
+ 	++skip_flag;
+     }
+ } else
+

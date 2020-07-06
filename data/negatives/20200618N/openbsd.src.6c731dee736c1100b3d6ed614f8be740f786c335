@@ -1,0 +1,299 @@
+commit 6c731dee736c1100b3d6ed614f8be740f786c335
+Author: krw <krw@openbsd.org>
+Date:   Tue Apr 18 13:59:09 2017 +0000
+
+    Tweak parameters to decode_*, add a check or two, and thus gain most of the
+    sanity improvements reyk@ recently put into dhcrelay to ensure no more than
+    the captured packet is processed.
+
+diff --git a/sbin/dhclient/bpf.c b/sbin/dhclient/bpf.c
+index 03a56e8a444..2e6978c48b8 100644
+--- a/sbin/dhclient/bpf.c
++++ b/sbin/dhclient/bpf.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: bpf.c,v 1.48 2017/04/18 13:44:03 krw Exp $	*/
++/*	$OpenBSD: bpf.c,v 1.49 2017/04/18 13:59:09 krw Exp $	*/
+ 
+ /* BPF socket interface code, originally contributed by Archie Cobbs. */
+ 
+@@ -397,7 +397,8 @@ receive_packet(struct interface_info *ifi, struct sockaddr_in *from,
+ 		ifi->rbuf_offset += hdr.bh_hdrlen;
+ 
+ 		/* Decode the physical header. */
+-		offset = decode_hw_header(ifi->rbuf, ifi->rbuf_offset, hfrom);
++		offset = decode_hw_header(ifi->rbuf + ifi->rbuf_offset,
++		   hdr.bh_caplen, hfrom);
+ 
+ 		/*
+ 		 * If a physical layer checksum failed (dunno of any
+@@ -413,8 +414,8 @@ receive_packet(struct interface_info *ifi, struct sockaddr_in *from,
+ 		hdr.bh_caplen -= offset;
+ 
+ 		/* Decode the IP and UDP headers. */
+-		offset = decode_udp_ip_header(ifi->rbuf,
+-		    ifi->rbuf_offset, from, hdr.bh_caplen);
++		offset = decode_udp_ip_header(ifi->rbuf + ifi->rbuf_offset,
++		   hdr.bh_caplen, from);
+ 
+ 		/* If the IP or UDP checksum was bad, skip the packet. */
+ 		if (offset < 0) {
+diff --git a/sbin/dhclient/dhcpd.h b/sbin/dhclient/dhcpd.h
+index ea88b3dfdc0..13db7633103 100644
+--- a/sbin/dhclient/dhcpd.h
++++ b/sbin/dhclient/dhcpd.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: dhcpd.h,v 1.170 2017/04/11 10:40:14 krw Exp $	*/
++/*	$OpenBSD: dhcpd.h,v 1.171 2017/04/18 13:59:09 krw Exp $	*/
+ 
+ /*
+  * Copyright (c) 2004 Henning Brauer <henning@openbsd.org>
+@@ -254,9 +254,8 @@ void routehandler(struct interface_info *);
+ 
+ /* packet.c */
+ void assemble_eh_header(struct interface_info *, struct ether_header *);
+-ssize_t decode_hw_header(unsigned char *, int, struct ether_addr *);
+-ssize_t decode_udp_ip_header(unsigned char *, int, struct sockaddr_in *,
+-    u_int32_t);
++ssize_t decode_hw_header(unsigned char *, u_int32_t, struct ether_addr *);
++ssize_t decode_udp_ip_header(unsigned char *, u_int32_t, struct sockaddr_in *);
+ u_int32_t checksum(unsigned char *, u_int32_t, u_int32_t);
+ u_int32_t wrapsum(u_int32_t);
+ 
+diff --git a/sbin/dhclient/packet.c b/sbin/dhclient/packet.c
+index 9c8f1ee3f62..14cf4538085 100644
+--- a/sbin/dhclient/packet.c
++++ b/sbin/dhclient/packet.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: packet.c,v 1.34 2017/04/08 20:16:04 krw Exp $	*/
++/*	$OpenBSD: packet.c,v 1.35 2017/04/18 13:59:09 krw Exp $	*/
+ 
+ /* Packet assembly code, originally contributed by Archie Cobbs. */
+ 
+@@ -104,11 +104,14 @@ assemble_eh_header(struct interface_info *ifi, struct ether_header *eh)
+ }
+ 
+ ssize_t
+-decode_hw_header(unsigned char *buf, int bufix, struct ether_addr *from)
++decode_hw_header(unsigned char *buf, u_int32_t buflen, struct ether_addr *from)
+ {
+ 	struct ether_header eh;
+ 
+-	memcpy(&eh, buf + bufix, ETHER_HDR_LEN);
++	if (buflen < sizeof(eh))
++		return (-1);
++
++	memcpy(&eh, buf, sizeof(eh));
+ 
+ 	memcpy(from->ether_addr_octet, eh.ether_shost, ETHER_ADDR_LEN);
+ 
+@@ -116,8 +119,8 @@ decode_hw_header(unsigned char *buf, int bufix, struct ether_addr *from)
+ }
+ 
+ ssize_t
+-decode_udp_ip_header(unsigned char *buf, int bufix, struct sockaddr_in *from,
+-    u_int32_t buflen)
++decode_udp_ip_header(unsigned char *buf, u_int32_t buflen,
++    struct sockaddr_in *from)
+ {
+ 	struct ip *ip;
+ 	struct udphdr *udp;
+@@ -135,14 +138,14 @@ decode_udp_ip_header(unsigned char *buf, int bufix, struct sockaddr_in *from,
+ 	/* Assure that an entire IP header is within the buffer. */
+ 	if (sizeof(*ip) > buflen)
+ 		return (-1);
+-	ip_len = (buf[bufix] & 0xf) << 2;
++	ip_len = (*buf & 0xf) << 2;
+ 	if (ip_len > buflen)
+ 		return (-1);
+-	ip = (struct ip *)(buf + bufix);
++	ip = (struct ip *)(buf);
+ 	ip_packets_seen++;
+ 
+ 	/* Check the IP header checksum - it should be zero. */
+-	if (wrapsum(checksum(buf + bufix, ip_len, 0)) != 0) {
++	if (wrapsum(checksum((unsigned char *)ip, ip_len, 0)) != 0) {
+ 		ip_packets_bad_checksum++;
+ 		if (ip_packets_seen > 4 && ip_packets_bad_checksum != 0 &&
+ 		    (ip_packets_seen / ip_packets_bad_checksum) < 2) {
+@@ -168,13 +171,13 @@ decode_udp_ip_header(unsigned char *buf, int bufix, struct sockaddr_in *from,
+ 	/* Assure that the UDP header is within the buffer. */
+ 	if (ip_len + sizeof(*udp) > buflen)
+ 		return (-1);
+-	udp = (struct udphdr *)(buf + bufix + ip_len);
++	udp = (struct udphdr *)(buf + ip_len);
+ 	udp_packets_seen++;
+ 
+ 	/* Assure that the entire UDP packet is within the buffer. */
+ 	if (ip_len + ntohs(udp->uh_ulen) > buflen)
+ 		return (-1);
+-	data = buf + bufix + ip_len + sizeof(*udp);
++	data = buf + ip_len + sizeof(*udp);
+ 
+ 	/*
+ 	 * Compute UDP checksums, including the ``pseudo-header'', the
+@@ -183,7 +186,7 @@ decode_udp_ip_header(unsigned char *buf, int bufix, struct sockaddr_in *from,
+ 	 */
+ 	udp_packets_length_checked++;
+ 	len = ntohs(udp->uh_ulen) - sizeof(*udp);
+-	if ((len < 0) || (len + data > buf + bufix + buflen)) {
++	if ((len < 0) || (len + data > buf + buflen)) {
+ 		udp_packets_length_overflow++;
+ 		if (udp_packets_length_checked > 4 &&
+ 		    udp_packets_length_overflow != 0 &&
+@@ -198,7 +201,7 @@ decode_udp_ip_header(unsigned char *buf, int bufix, struct sockaddr_in *from,
+ 		return (-1);
+ 	}
+ #ifdef DEBUG
+-	if (len + data != buf + bufix + buflen)
++	if (len + data != buf + buflen)
+ 		log_debug("accepting packet with data after udp payload.");
+ #endif	/* DEBUG */
+ 
+diff --git a/usr.sbin/dhcpd/bpf.c b/usr.sbin/dhcpd/bpf.c
+index 863d5603eec..9b4ea9ec9c6 100644
+--- a/usr.sbin/dhcpd/bpf.c
++++ b/usr.sbin/dhcpd/bpf.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: bpf.c,v 1.17 2017/04/18 13:44:03 krw Exp $	*/
++/*	$OpenBSD: bpf.c,v 1.18 2017/04/18 13:59:09 krw Exp $	*/
+ 
+ /* BPF socket interface code, originally contributed by Archie Cobbs. */
+ 
+@@ -328,8 +328,8 @@ receive_packet(struct interface_info *interface, unsigned char *buf,
+ 		interface->rbuf_offset += hdr.bh_hdrlen;
+ 
+ 		/* Decode the physical header... */
+-		offset = decode_hw_header(interface,
+-		    interface->rbuf, interface->rbuf_offset, hfrom);
++		offset = decode_hw_header(interface->rbuf +
++		    interface->rbuf_offset, hdr.bh_caplen, hfrom);
+ 
+ 		/*
+ 		 * If a physical layer checksum failed (dunno of any
+@@ -345,8 +345,8 @@ receive_packet(struct interface_info *interface, unsigned char *buf,
+ 		hdr.bh_caplen -= offset;
+ 
+ 		/* Decode the IP and UDP headers... */
+-		offset = decode_udp_ip_header(interface, interface->rbuf,
+-		    interface->rbuf_offset, from, hdr.bh_caplen);
++		offset = decode_udp_ip_header(interface->rbuf +
++		    interface->rbuf_offset, hdr.bh_caplen, from);
+ 
+ 		/* If the IP or UDP checksum was bad, skip the packet... */
+ 		if (offset < 0) {
+diff --git a/usr.sbin/dhcpd/dhcpd.h b/usr.sbin/dhcpd/dhcpd.h
+index 2fedfa6140e..94a8d862782 100644
+--- a/usr.sbin/dhcpd/dhcpd.h
++++ b/usr.sbin/dhcpd/dhcpd.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: dhcpd.h,v 1.62 2017/04/17 18:31:08 krw Exp $ */
++/*	$OpenBSD: dhcpd.h,v 1.63 2017/04/18 13:59:09 krw Exp $ */
+ 
+ /*
+  * Copyright (c) 1995, 1996, 1997, 1998, 1999
+@@ -544,10 +544,8 @@ void assemble_hw_header(struct interface_info *, unsigned char *,
+     int *, struct hardware *);
+ void assemble_udp_ip_header(struct interface_info *, unsigned char *,
+     int *, u_int32_t, u_int32_t, unsigned int, unsigned char *, int);
+-ssize_t decode_hw_header(struct interface_info *, unsigned char *,
+-    int, struct hardware *);
+-ssize_t decode_udp_ip_header(struct interface_info *, unsigned char *,
+-    int, struct sockaddr_in *, int);
++ssize_t decode_hw_header(unsigned char *, u_int32_t, struct hardware *);
++ssize_t decode_udp_ip_header(unsigned char *, u_int32_t, struct sockaddr_in *);
+ u_int32_t	checksum(unsigned char *, u_int32_t, u_int32_t);
+ u_int32_t	wrapsum(u_int32_t);
+ 
+diff --git a/usr.sbin/dhcpd/packet.c b/usr.sbin/dhcpd/packet.c
+index 1151ebf8066..6425cd648fb 100644
+--- a/usr.sbin/dhcpd/packet.c
++++ b/usr.sbin/dhcpd/packet.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: packet.c,v 1.13 2017/04/17 18:31:08 krw Exp $	*/
++/*	$OpenBSD: packet.c,v 1.14 2017/04/18 13:59:09 krw Exp $	*/
+ 
+ /* Packet assembly code, originally contributed by Archie Cobbs. */
+ 
+@@ -150,12 +150,14 @@ assemble_udp_ip_header(struct interface_info *interface, unsigned char *buf,
+ }
+ 
+ ssize_t
+-decode_hw_header(struct interface_info *interface, unsigned char *buf,
+-    int bufix, struct hardware *from)
++decode_hw_header(unsigned char *buf, u_int32_t buflen, struct hardware *from)
+ {
+ 	struct ether_header eh;
+ 
+-	memcpy(&eh, buf + bufix, ETHER_HDR_LEN);
++	if (buflen < sizeof(eh))
++		return (-1);
++
++	memcpy(&eh, buf, sizeof(eh));
+ 
+ 	memcpy(from->haddr, eh.ether_shost, sizeof(eh.ether_shost));
+ 	from->htype = ARPHRD_ETHER;
+@@ -165,8 +167,8 @@ decode_hw_header(struct interface_info *interface, unsigned char *buf,
+ }
+ 
+ ssize_t
+-decode_udp_ip_header(struct interface_info *interface, unsigned char *buf,
+-    int bufix, struct sockaddr_in *from, int buflen)
++decode_udp_ip_header(unsigned char *buf, u_int32_t buflen,
++    struct sockaddr_in *from)
+ {
+ 	struct ip *ip;
+ 	struct udphdr *udp;
+@@ -184,15 +186,15 @@ decode_udp_ip_header(struct interface_info *interface, unsigned char *buf,
+ 	/* Assure that an entire IP header is within the buffer. */
+ 	if (sizeof(*ip) > buflen)
+ 		return (-1);
+-	ip_len = (buf[bufix] & 0xf) << 2;
++	ip_len = (*buf & 0xf) << 2;
+ 	if (ip_len > buflen)
+ 		return (-1);
+ 
+-	ip = (struct ip *)(buf + bufix);
++	ip = (struct ip *)buf;
+ 	ip_packets_seen++;
+ 
+ 	/* Check the IP header checksum - it should be zero. */
+-	if (wrapsum(checksum(buf + bufix, ip_len, 0)) != 0) {
++	if (wrapsum(checksum((unsigned char *)ip, ip_len, 0)) != 0) {
+ 		ip_packets_bad_checksum++;
+ 		if (ip_packets_seen > 4 && ip_packets_bad_checksum != 0 &&
+ 		    (ip_packets_seen / ip_packets_bad_checksum) < 2) {
+@@ -219,13 +221,13 @@ decode_udp_ip_header(struct interface_info *interface, unsigned char *buf,
+ 	/* Assure that the UDP header is within the buffer. */
+ 	if (ip_len + sizeof(*udp) > buflen)
+ 		return (-1);
+-	udp = (struct udphdr *)(buf + bufix + ip_len);
++	udp = (struct udphdr *)(buf + ip_len);
+ 	udp_packets_seen++;
+ 
+ 	/* Assure that the entire UDP packet is within the buffer. */
+ 	if (ip_len + ntohs(udp->uh_ulen) > buflen)
+ 		return (-1);
+-	data = buf + bufix + ip_len + sizeof(*udp);
++	data = buf + ip_len + sizeof(*udp);
+ 
+ 	/*
+ 	 * Compute UDP checksums, including the ``pseudo-header'', the
+@@ -234,7 +236,7 @@ decode_udp_ip_header(struct interface_info *interface, unsigned char *buf,
+ 	 */
+ 	udp_packets_length_checked++;
+ 	len = ntohs(udp->uh_ulen) - sizeof(*udp);
+-	if ((len < 0) || (len + data > buf + bufix + buflen)) {
++	if ((len < 0) || (len + data > buf + buflen)) {
+ 		udp_packets_length_overflow++;
+ 		if (udp_packets_length_checked > 4 &&
+ 		    udp_packets_length_overflow != 0 &&
+@@ -248,7 +250,7 @@ decode_udp_ip_header(struct interface_info *interface, unsigned char *buf,
+ 		}
+ 		return (-1);
+ 	}
+-	if (len + data != buf + bufix + buflen)
++	if (len + data != buf + buflen)
+ 		log_debug("accepting packet with data after udp payload.");
+ 
+ 	usum = udp->uh_sum;
+

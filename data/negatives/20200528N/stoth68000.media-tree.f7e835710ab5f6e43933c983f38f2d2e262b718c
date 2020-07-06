@@ -1,0 +1,92 @@
+commit f7e835710ab5f6e43933c983f38f2d2e262b718c
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Mon Jul 26 13:23:11 2010 +0400
+
+    convert cgroup and cpuset
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/kernel/cgroup.c b/kernel/cgroup.c
+index 5cf366965d0c..66a416b42c18 100644
+--- a/kernel/cgroup.c
++++ b/kernel/cgroup.c
+@@ -1460,9 +1460,9 @@ static int cgroup_get_rootdir(struct super_block *sb)
+ 	return 0;
+ }
+ 
+-static int cgroup_get_sb(struct file_system_type *fs_type,
++static struct dentry *cgroup_mount(struct file_system_type *fs_type,
+ 			 int flags, const char *unused_dev_name,
+-			 void *data, struct vfsmount *mnt)
++			 void *data)
+ {
+ 	struct cgroup_sb_opts opts;
+ 	struct cgroupfs_root *root;
+@@ -1596,10 +1596,9 @@ static int cgroup_get_sb(struct file_system_type *fs_type,
+ 		drop_parsed_module_refcounts(opts.subsys_bits);
+ 	}
+ 
+-	simple_set_mnt(mnt, sb);
+ 	kfree(opts.release_agent);
+ 	kfree(opts.name);
+-	return 0;
++	return dget(sb->s_root);
+ 
+  drop_new_super:
+ 	deactivate_locked_super(sb);
+@@ -1608,7 +1607,7 @@ static int cgroup_get_sb(struct file_system_type *fs_type,
+  out_err:
+ 	kfree(opts.release_agent);
+ 	kfree(opts.name);
+-	return ret;
++	return ERR_PTR(ret);
+ }
+ 
+ static void cgroup_kill_sb(struct super_block *sb) {
+@@ -1658,7 +1657,7 @@ static void cgroup_kill_sb(struct super_block *sb) {
+ 
+ static struct file_system_type cgroup_fs_type = {
+ 	.name = "cgroup",
+-	.get_sb = cgroup_get_sb,
++	.mount = cgroup_mount,
+ 	.kill_sb = cgroup_kill_sb,
+ };
+ 
+diff --git a/kernel/cpuset.c b/kernel/cpuset.c
+index 51b143e2a07a..4349935c2ad8 100644
+--- a/kernel/cpuset.c
++++ b/kernel/cpuset.c
+@@ -231,18 +231,17 @@ static DEFINE_SPINLOCK(cpuset_buffer_lock);
+  * users. If someone tries to mount the "cpuset" filesystem, we
+  * silently switch it to mount "cgroup" instead
+  */
+-static int cpuset_get_sb(struct file_system_type *fs_type,
+-			 int flags, const char *unused_dev_name,
+-			 void *data, struct vfsmount *mnt)
++static struct dentry *cpuset_mount(struct file_system_type *fs_type,
++			 int flags, const char *unused_dev_name, void *data)
+ {
+ 	struct file_system_type *cgroup_fs = get_fs_type("cgroup");
+-	int ret = -ENODEV;
++	struct dentry *ret = ERR_PTR(-ENODEV);
+ 	if (cgroup_fs) {
+ 		char mountopts[] =
+ 			"cpuset,noprefix,"
+ 			"release_agent=/sbin/cpuset_release_agent";
+-		ret = cgroup_fs->get_sb(cgroup_fs, flags,
+-					   unused_dev_name, mountopts, mnt);
++		ret = cgroup_fs->mount(cgroup_fs, flags,
++					   unused_dev_name, mountopts);
+ 		put_filesystem(cgroup_fs);
+ 	}
+ 	return ret;
+@@ -250,7 +249,7 @@ static int cpuset_get_sb(struct file_system_type *fs_type,
+ 
+ static struct file_system_type cpuset_fs_type = {
+ 	.name = "cpuset",
+-	.get_sb = cpuset_get_sb,
++	.mount = cpuset_mount,
+ };
+ 
+ /*
+

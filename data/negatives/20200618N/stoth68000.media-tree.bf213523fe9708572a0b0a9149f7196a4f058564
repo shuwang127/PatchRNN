@@ -1,0 +1,100 @@
+commit bf213523fe9708572a0b0a9149f7196a4f058564
+Author: Tomi Valkeinen <tomi.valkeinen@ti.com>
+Date:   Tue Nov 15 14:43:53 2011 +0200
+
+    OMAPDSS: APPLY: move mgr->enabled to mgr_priv_data
+    
+    struct omap_overlay_manager contains "enabled"-field, used to track if
+    the manager is enabled or not. This field should be internal to apply.c.
+    
+    This patch moves the field to mgr_priv_data, and applies the necessary
+    locking when accessing the field.
+    
+    Signed-off-by: Tomi Valkeinen <tomi.valkeinen@ti.com>
+
+diff --git a/drivers/video/omap2/dss/apply.c b/drivers/video/omap2/dss/apply.c
+index 936571b7aace..5bde08f19920 100644
+--- a/drivers/video/omap2/dss/apply.c
++++ b/drivers/video/omap2/dss/apply.c
+@@ -86,6 +86,9 @@ struct mgr_priv_data {
+ 
+ 	bool manual_update;
+ 	bool do_manual_update;
++
++	/* If true, a display is enabled using this manager */
++	bool enabled;
+ };
+ 
+ static struct {
+@@ -609,6 +612,7 @@ int omap_dss_mgr_apply(struct omap_overlay_manager *mgr)
+ 	int r;
+ 	unsigned long flags;
+ 	struct omap_overlay *ovl;
++	struct mgr_priv_data *mp = get_mgr_priv(mgr);
+ 
+ 	DSSDBG("omap_dss_mgr_apply(%s)\n", mgr->name);
+ 
+@@ -630,7 +634,7 @@ int omap_dss_mgr_apply(struct omap_overlay_manager *mgr)
+ 		omap_dss_mgr_apply_ovl_fifos(ovl);
+ 
+ 	r = 0;
+-	if (mgr->enabled && !mgr_manual_update(mgr)) {
++	if (mp->enabled && !mgr_manual_update(mgr)) {
+ 		if (!dss_data.irq_enabled)
+ 			dss_register_vsync_isr();
+ 
+@@ -646,22 +650,38 @@ int omap_dss_mgr_apply(struct omap_overlay_manager *mgr)
+ 
+ void dss_mgr_enable(struct omap_overlay_manager *mgr)
+ {
++	struct mgr_priv_data *mp = get_mgr_priv(mgr);
++	unsigned long flags;
++
+ 	mutex_lock(&apply_lock);
+ 
+ 	if (!mgr_manual_update(mgr))
+ 		dispc_mgr_enable(mgr->id, true);
+-	mgr->enabled = true;
++
++	spin_lock_irqsave(&data_lock, flags);
++
++	mp->enabled = true;
++
++	spin_unlock_irqrestore(&data_lock, flags);
+ 
+ 	mutex_unlock(&apply_lock);
+ }
+ 
+ void dss_mgr_disable(struct omap_overlay_manager *mgr)
+ {
++	struct mgr_priv_data *mp = get_mgr_priv(mgr);
++	unsigned long flags;
++
+ 	mutex_lock(&apply_lock);
+ 
+ 	if (!mgr_manual_update(mgr))
+ 		dispc_mgr_enable(mgr->id, false);
+-	mgr->enabled = false;
++
++	spin_lock_irqsave(&data_lock, flags);
++
++	mp->enabled = false;
++
++	spin_unlock_irqrestore(&data_lock, flags);
+ 
+ 	mutex_unlock(&apply_lock);
+ }
+diff --git a/include/video/omapdss.h b/include/video/omapdss.h
+index 25ef771b0a31..6e3e7a716838 100644
+--- a/include/video/omapdss.h
++++ b/include/video/omapdss.h
+@@ -430,8 +430,6 @@ struct omap_overlay_manager {
+ 	struct omap_dss_device *device;
+ 	struct omap_overlay_manager_info info;
+ 
+-	bool enabled;
+-
+ 	bool device_changed;
+ 	/* if true, info has been changed but not applied() yet */
+ 	bool info_dirty;
+

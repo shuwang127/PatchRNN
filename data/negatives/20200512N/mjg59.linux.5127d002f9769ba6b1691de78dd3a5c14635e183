@@ -1,0 +1,52 @@
+commit 5127d002f9769ba6b1691de78dd3a5c14635e183
+Author: Suzuki Kp <suzuki@in.ibm.com>
+Date:   Wed Dec 6 20:35:14 2006 -0800
+
+    [PATCH] fix rescan_partitions to return errors properly
+    
+    The current rescan_partition implementation ignores the errors that comes from
+    the lower layer.  It reports success for unknown partitions as well as I/O
+    error cases while reading the partition information.
+    
+    The unknown partition is not (and will not be) considered as an error in the
+    kernel, since there are legal users of it (e.g, members of a RAID5 MD Device
+    or a new disk which is not partitioned at all ).  Changing this behaviour
+    would scare the user about a serious problem with their disk and is not
+    recommended.  Thus for both "unknown partitions" to the Linux (eg., DEC
+    VMS,Novell Netware) and the legal users of NULL partition, would still be
+    reported as "SUCCESS".
+    
+    The patch attached here, scares the user about something which he does need to
+    worry about.  i.e, returning -EIO on disk I/O errors while reading the
+    partition information.
+    
+    Signed-off-by: Suzuki K P <suzuki@in.ibm.com>
+    Cc: Erik Mouw <erik@harddisk-recovery.com>
+    Cc: Christoph Hellwig <hch@lst.de>
+    Cc: Al Viro <viro@zeniv.linux.org.uk>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/fs/partitions/check.c b/fs/partitions/check.c
+index 6fb4b6150d77..0b6113ba3b79 100644
+--- a/fs/partitions/check.c
++++ b/fs/partitions/check.c
+@@ -177,7 +177,7 @@ check_partition(struct gendisk *hd, struct block_device *bdev)
+ 	else if (warn_no_part)
+ 		printk(" unable to read partition table\n");
+ 	kfree(state);
+-	return NULL;
++	return ERR_PTR(res);
+ }
+ 
+ /*
+@@ -494,6 +494,8 @@ int rescan_partitions(struct gendisk *disk, struct block_device *bdev)
+ 		disk->fops->revalidate_disk(disk);
+ 	if (!get_capacity(disk) || !(state = check_partition(disk, bdev)))
+ 		return 0;
++	if (IS_ERR(state))	/* I/O error reading the partition table */
++		return PTR_ERR(state);
+ 	for (p = 1; p < state->limit; p++) {
+ 		sector_t size = state->parts[p].size;
+ 		sector_t from = state->parts[p].from;
+

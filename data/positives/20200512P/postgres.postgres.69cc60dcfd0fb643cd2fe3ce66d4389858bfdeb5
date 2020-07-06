@@ -1,0 +1,39 @@
+commit 69cc60dcfd0fb643cd2fe3ce66d4389858bfdeb5
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+Date:   Fri May 10 17:15:30 2013 -0400
+
+    Guard against input_rows == 0 in estimate_num_groups().
+    
+    This case doesn't normally happen, because the planner usually clamps
+    all row estimates to at least one row; but I found that it can arise
+    when dealing with relations excluded by constraints.  Without a defense,
+    estimate_num_groups() can return zero, which leads to divisions by zero
+    inside the planner as well as assertion failures in the executor.
+    
+    An alternative fix would be to change set_dummy_rel_pathlist() to make
+    the size estimate for a dummy relation 1 row instead of 0, but that seemed
+    pretty ugly; and probably someday we'll want to drop the convention that
+    the minimum rowcount estimate is 1 row.
+    
+    Back-patch to 8.4, as the problem can be demonstrated that far back.
+
+diff --git a/src/backend/utils/adt/selfuncs.c b/src/backend/utils/adt/selfuncs.c
+index 656d03b69a..0d5cafba96 100644
+--- a/src/backend/utils/adt/selfuncs.c
++++ b/src/backend/utils/adt/selfuncs.c
+@@ -3209,6 +3209,14 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows)
+ 	double		numdistinct;
+ 	ListCell   *l;
+ 
++	/*
++	 * We don't ever want to return an estimate of zero groups, as that tends
++	 * to lead to division-by-zero and other unpleasantness.  The input_rows
++	 * estimate is usually already at least 1, but clamp it just in case it
++	 * isn't.
++	 */
++	input_rows = clamp_row_est(input_rows);
++
+ 	/*
+ 	 * If no grouping columns, there's exactly one group.  (This can't happen
+ 	 * for normal cases with GROUP BY or DISTINCT, but it is possible for
+

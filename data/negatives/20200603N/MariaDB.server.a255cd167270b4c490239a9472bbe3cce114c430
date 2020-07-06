@@ -1,0 +1,181 @@
+commit a255cd167270b4c490239a9472bbe3cce114c430
+Author: Rich Prohaska <prohaska@tokutek.com>
+Date:   Tue Apr 16 23:57:54 2013 -0400
+
+    build with icc on linux
+    
+    git-svn-id: file:///svn/toku/tokudb@12742 c7de825b-a66e-492c-adef-691d508d4ae1
+
+diff --git a/newbrt/block_table.c b/newbrt/block_table.c
+index e03bf87767b..87700dd2d18 100644
+--- a/newbrt/block_table.c
++++ b/newbrt/block_table.c
+@@ -330,9 +330,10 @@ translation_update_size_on_disk (struct translation *t) {
+ // We cannot free the disk space allocated to this blocknum if it is still in use by the given translation table.
+ static inline BOOL
+ translation_prevents_freeing(struct translation *t, BLOCKNUM b, struct block_translation_pair *old_pair) {
+-    BOOL r = t->block_translation &&
+-             b.b < t->smallest_never_used_blocknum.b &&
+-             old_pair->u.diskoff == t->block_translation[b.b].u.diskoff;
++    BOOL r = (BOOL)
++        (t->block_translation &&
++         b.b < t->smallest_never_used_blocknum.b &&
++         old_pair->u.diskoff == t->block_translation[b.b].u.diskoff);
+     return r;
+ }
+ 
+@@ -345,8 +346,9 @@ blocknum_realloc_on_disk_internal (BLOCK_TABLE bt, BLOCKNUM b, DISKOFF size, DIS
+     struct block_translation_pair old_pair = t->block_translation[b.b];
+ PRNTF("old", b.b, old_pair.size, old_pair.u.diskoff, bt);
+     //Free the old block if it is not still in use by the checkpoint in progress or the previous checkpoint
+-    BOOL cannot_free = (!for_checkpoint && translation_prevents_freeing(&bt->inprogress,   b, &old_pair)) ||
+-                                           translation_prevents_freeing(&bt->checkpointed, b, &old_pair);
++    BOOL cannot_free = (BOOL)
++        ((!for_checkpoint && translation_prevents_freeing(&bt->inprogress,   b, &old_pair)) ||
++         translation_prevents_freeing(&bt->checkpointed, b, &old_pair));
+     if (!cannot_free && old_pair.u.diskoff!=diskoff_unused) {
+ PRNTF("Freed", b.b, old_pair.size, old_pair.u.diskoff, bt);
+         block_allocator_free_block(bt->block_allocator, old_pair.u.diskoff);
+@@ -521,8 +523,9 @@ PRNTF("free_blocknum", b.b, t->block_translation[b.b].size, t->block_translation
+     //If the size is 0, no disk block has ever been assigned to this blocknum.
+     if (old_pair.size > 0) {
+         //Free the old block if it is not still in use by the checkpoint in progress or the previous checkpoint
+-        BOOL cannot_free = translation_prevents_freeing(&bt->inprogress,   b, &old_pair) ||
+-                           translation_prevents_freeing(&bt->checkpointed, b, &old_pair);
++        BOOL cannot_free = (BOOL)
++            (translation_prevents_freeing(&bt->inprogress,   b, &old_pair) ||
++             translation_prevents_freeing(&bt->checkpointed, b, &old_pair));
+         if (!cannot_free) {
+ PRNTF("free_blocknum_free", b.b, old_pair.size, old_pair.u.diskoff, bt);
+             block_allocator_free_block(bt->block_allocator, old_pair.u.diskoff);
+diff --git a/newbrt/brt-serialize.c b/newbrt/brt-serialize.c
+index dfd9ba0e60f..e930e581270 100644
+--- a/newbrt/brt-serialize.c
++++ b/newbrt/brt-serialize.c
+@@ -780,7 +780,7 @@ int toku_deserialize_brtnode_from (int fd, BLOCKNUM blocknum, u_int32_t fullhash
+ 	    se->nkeys = rbuf_ulonglong(&rc);
+ 	    se->ndata = rbuf_ulonglong(&rc);
+ 	    se->dsize = rbuf_ulonglong(&rc);
+-	    se->exact = rbuf_char(&rc);
++	    se->exact = (BOOL) (rbuf_char(&rc) != 0);
+ 	}
+ 	for (i=0; i<result->u.n.n_children-1; i++) {
+             if (result->flags & TOKU_DB_DUPSORT) {
+diff --git a/newbrt/brt.c b/newbrt/brt.c
+index 5b754e6a75a..699b68a91e1 100644
+--- a/newbrt/brt.c
++++ b/newbrt/brt.c
+@@ -2988,7 +2988,7 @@ int toku_brt_open(BRT t, const char *fname, const char *fname_in_env, int is_cre
+             mode_t mode = S_IRWXU|S_IRWXG|S_IRWXO;
+             r = toku_logger_log_fcreate(txn, fname_in_env, toku_cachefile_filenum(t->cf), mode);
+             if (r != 0) goto died_after_open;
+-            txn_created = (txn!=NULL);
++            txn_created = (BOOL)(txn!=NULL);
+         } else {
+ 	    r = toku_logger_log_fopen(txn, fname_in_env, toku_cachefile_filenum(t->cf));
+ 	}
+@@ -3186,7 +3186,7 @@ toku_brtheader_end_checkpoint (CACHEFILE cachefile, void *header_v) {
+     if (r==0) {
+         assert(h->type == BRTHEADER_CURRENT);
+ 	struct brt_header *ch = h->checkpoint_header;
+-	BOOL checkpoint_success_so_far = (ch->checkpoint_count==h->checkpoint_count+1 && ch->dirty==0);
++	BOOL checkpoint_success_so_far = (BOOL)(ch->checkpoint_count==h->checkpoint_count+1 && ch->dirty==0);
+ 	if (checkpoint_success_so_far) {
+             r = toku_cachefile_fsync(cachefile);
+ 	    if (r!=0) 
+@@ -4718,7 +4718,7 @@ toku_dump_brtnode (FILE *file, BRT brt, BLOCKNUM blocknum, int depth, bytevec lo
+ 		{
+ 		    struct subtree_estimates *e = &BNC_SUBTREE_ESTIMATES(node, i);
+ 		    fprintf(file, " est={n=%" PRIu64 " k=%" PRIu64 " s=%" PRIu64 " e=%d}",
+-			    e->ndata, e->nkeys, e->dsize, e->exact);
++			    e->ndata, e->nkeys, e->dsize, (int)e->exact);
+ 		}
+ 		fprintf(file, "\n");
+                 FIFO_ITERATE(BNC_BUFFER(node,i), key, keylen, data, datalen, type, xid,
+@@ -4748,7 +4748,7 @@ toku_dump_brtnode (FILE *file, BRT brt, BLOCKNUM blocknum, int depth, bytevec lo
+         if (lorange) { toku_print_BYTESTRING(file, lolen, (void*)lorange); } else { fprintf(file, "-\\infty"); } fprintf(file, " ");
+         if (hirange) { toku_print_BYTESTRING(file, hilen, (void*)hirange); } else { fprintf(file, "\\infty"); }
+ 	fprintf(file, " est={n=%" PRIu64 " k=%" PRIu64 " s=%" PRIu64 " e=%d}",
+-		node->u.l.leaf_stats.ndata, node->u.l.leaf_stats.nkeys, node->u.l.leaf_stats.dsize, node->u.l.leaf_stats.exact);
++		node->u.l.leaf_stats.ndata, node->u.l.leaf_stats.nkeys, node->u.l.leaf_stats.dsize, (int)node->u.l.leaf_stats.exact);
+ 	fprintf(file, "\n");
+         int size = toku_omt_size(node->u.l.buffer);
+         int i;
+diff --git a/newbrt/cachetable.c b/newbrt/cachetable.c
+index d5897e6ae78..11348f11ffc 100644
+--- a/newbrt/cachetable.c
++++ b/newbrt/cachetable.c
+@@ -383,7 +383,7 @@ int toku_cachefile_fd (CACHEFILE cf) {
+ 
+ BOOL
+ toku_cachefile_is_dev_null (CACHEFILE cf) {
+-    return cf->fname_relative_to_env==NULL;
++    return (BOOL)(cf->fname_relative_to_env==NULL);
+ }
+ 
+ int
+diff --git a/newbrt/recover.c b/newbrt/recover.c
+index a27af1027ed..f6e01ee7a8d 100644
+--- a/newbrt/recover.c
++++ b/newbrt/recover.c
+@@ -58,7 +58,7 @@ struct backward_scan_state {
+     int n_live_txns;
+     LSN min_live_txn;
+ };
+-static struct backward_scan_state initial_bss = {0,{0},0,{0}};
++static struct backward_scan_state initial_bss = {BS_INIT,{0},0,{0}};
+ 
+ static void
+ toku_recover_commit (LSN UU(lsn), TXNID UU(txnid)) {
+@@ -339,7 +339,7 @@ static int toku_recover_backward_begin_checkpoint (struct logtype_begin_checkpoi
+     case BS_SAW_CKPT:
+ 	return 0; // ignore it
+     }
+-    fprintf(stderr, "%s: %d Unknown checkpoint state %d\n", __FILE__, __LINE__, bs->bs);
++    fprintf(stderr, "%s: %d Unknown checkpoint state %d\n", __FILE__, __LINE__, (int)bs->bs);
+     abort();
+ }
+ 
+@@ -360,7 +360,7 @@ static int toku_recover_backward_end_checkpoint (struct logtype_end_checkpoint *
+     case BS_SAW_CKPT:
+ 	return 0;
+     }
+-    fprintf(stderr, "%s: %d Unknown checkpoint state %d\n", __FILE__, __LINE__, bs->bs);
++    fprintf(stderr, "%s: %d Unknown checkpoint state %d\n", __FILE__, __LINE__, (int)bs->bs);
+     abort();
+ }
+ 
+@@ -395,7 +395,7 @@ static int toku_recover_backward_xstillopen (struct logtype_xstillopen *l, struc
+     case BS_SAW_CKPT:
+ 	return 0; // ignore live txns from older checkpoints
+     }
+-    fprintf(stderr, "%s: %d Unknown checkpoint state %d\n", __FILE__, __LINE__, bs->bs);
++    fprintf(stderr, "%s: %d Unknown checkpoint state %d\n", __FILE__, __LINE__, (int)bs->bs);
+     abort();
+ }
+ 
+@@ -421,7 +421,7 @@ static int toku_recover_backward_xbegin (struct logtype_xbegin *l, struct backwa
+ 	    return 0;
+ 	}
+     }
+-    fprintf(stderr, "%s: %d Unknown checkpoint state %d\n", __FILE__, __LINE__, bs->bs);
++    fprintf(stderr, "%s: %d Unknown checkpoint state %d\n", __FILE__, __LINE__, (int)bs->bs);
+     abort();
+ }
+ 
+diff --git a/newbrt/tests/brt-serialize-test.c b/newbrt/tests/brt-serialize-test.c
+index 19477fc69f4..bc2bc95e407 100644
+--- a/newbrt/tests/brt-serialize-test.c
++++ b/newbrt/tests/brt-serialize-test.c
+@@ -42,8 +42,8 @@ static void test_serialize(void) {
+     BNC_SUBTREE_ESTIMATES(&sn, 1).nkeys = random() + (((long long)random())<<32);
+     BNC_SUBTREE_ESTIMATES(&sn, 0).dsize = random() + (((long long)random())<<32);
+     BNC_SUBTREE_ESTIMATES(&sn, 1).dsize = random() + (((long long)random())<<32);
+-    BNC_SUBTREE_ESTIMATES(&sn, 0).exact = random()%2;
+-    BNC_SUBTREE_ESTIMATES(&sn, 1).exact = random()%2;
++    BNC_SUBTREE_ESTIMATES(&sn, 0).exact = (BOOL)(random()%2 != 0);
++    BNC_SUBTREE_ESTIMATES(&sn, 1).exact = (BOOL)(random()%2 != 0);
+     r = toku_fifo_create(&BNC_BUFFER(&sn,0)); assert(r==0);
+     r = toku_fifo_create(&BNC_BUFFER(&sn,1)); assert(r==0);
+     r = toku_fifo_enq(BNC_BUFFER(&sn,0), "a", 2, "aval", 5, BRT_NONE, (TXNID)0);   assert(r==0);    sn.local_fingerprint += randval*toku_calc_fingerprint_cmd(BRT_NONE, (TXNID)0, "a", 2, "aval", 5);
+

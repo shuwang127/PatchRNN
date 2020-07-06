@@ -1,0 +1,162 @@
+commit 71f602c4e97a67097ede995642a5cb09c0ceca07
+Author: Rainer Gerhards <rgerhards@adiscon.com>
+Date:   Mon Sep 17 08:00:34 2012 +0200
+
+    new ruleengine: Implent "unset" statement
+
+diff --git a/runtime/msg.c b/runtime/msg.c
+index 15eb7abb1..0cb60436b 100644
+--- a/runtime/msg.c
++++ b/runtime/msg.c
+@@ -3778,6 +3778,48 @@ finalize_it:
+ 	RETiRet;
+ }
+ 
++rsRetVal
++msgDelJSON(msg_t *pM, uchar *name)
++{
++	struct json_object *parent, *leafnode;
++	uchar *leaf;
++	DEFiRet;
++
++dbgprintf("AAAA: unset variable '%s'\n", name);
++	MsgLock(pM);
++	if(name[0] == '!' && name[1] == '\0') {
++		/* strange, but I think we should permit this. After all,
++		 * we trust rsyslog.conf to be written by the admin.
++		 */
++		DBGPRINTF("unsetting JSON root object\n");
++		json_object_put(pM->json);
++		pM->json = NULL;
++	} else {
++		if(pM->json == NULL) {
++			/* now we need a root obj */
++			pM->json = json_object_new_object();
++		}
++		leaf = jsonPathGetLeaf(name, ustrlen(name));
++		CHKiRet(jsonPathFindParent(pM, name, leaf, &parent, 1));
++		leafnode = json_object_object_get(parent, (char*)leaf);
++DBGPRINTF("AAAA: unset found JSON value path '%s', " "leaf '%s', leafnode %p\n", name, leaf, leafnode);
++		if(leafnode == NULL) {
++			DBGPRINTF("unset JSON: could not find '%s'\n", name);
++			ABORT_FINALIZE(RS_RET_JNAME_NOTFOUND);
++		} else {
++			DBGPRINTF("deleting JSON value path '%s', "
++				  "leaf '%s', type %d\n",
++				  name, leaf, json_object_get_type(leafnode));
++			json_object_put(leafnode);
++			json_object_object_del(parent, (char*)leaf);
++		}
++	}
++
++finalize_it:
++	MsgUnlock(pM);
++	RETiRet;
++}
++
+ rsRetVal
+ msgSetJSONFromVar(msg_t *pMsg, uchar *varname, struct var *var)
+ {
+diff --git a/runtime/msg.h b/runtime/msg.h
+index 857eb6731..477d1f1ac 100644
+--- a/runtime/msg.h
++++ b/runtime/msg.h
+@@ -202,6 +202,13 @@ uchar *getRcvFrom(msg_t *pM);
+ rsRetVal propNameToID(cstr_t *pCSPropName, propid_t *pPropID);
+ uchar *propIDToName(propid_t propID);
+ rsRetVal msgGetCEEPropJSON(msg_t *pM, es_str_t *propName, struct json_object **pjson);
++rsRetVal msgSetJSONFromVar(msg_t *pMsg, uchar *varname, struct var *var);
++rsRetVal msgDelJSON(msg_t *pMsg, uchar *varname);
++
++static inline rsRetVal
++msgUnsetJSON(msg_t *pMsg, uchar *varname) {
++	return msgDelJSON(pMsg, varname+1);
++}
+ 
+ 
+ /* The MsgPrepareEnqueue() function is a macro for performance reasons.
+diff --git a/runtime/rsyslog.h b/runtime/rsyslog.h
+index 2977f6f38..ceb277d0c 100644
+--- a/runtime/rsyslog.h
++++ b/runtime/rsyslog.h
+@@ -387,6 +387,7 @@ enum rsRetVal_				/** return value. All methods return this if not specified oth
+ 	RS_RET_JNAME_INVALID = -2302, /**< JSON path is invalid */
+ 	RS_RET_JSON_PARSE_ERR = -2303, /**< we had a problem parsing JSON (or extra data) */
+ 	RS_RET_BSD_BLOCKS_UNSUPPORTED = -2304, /**< BSD-style config blocks are no longer supported */
++	RS_RET_JNAME_NOTFOUND = -2305, /**< JSON name not found (does not exist) */
+ 	RS_RET_INVLD_SETOP = -2305, /**< invalid variable set operation, incompatible type */
+ 
+ 	/* RainerScript error messages (range 1000.. 1999) */
+diff --git a/runtime/ruleset.c b/runtime/ruleset.c
+index 392473e95..a40e2ed1b 100644
+--- a/runtime/ruleset.c
++++ b/runtime/ruleset.c
+@@ -219,7 +219,6 @@ dbgprintf("RRRR: execAct: batch of %d elements, active %p\n", batchNumMsgs(pBatc
+ 	RETiRet;
+ }
+ 
+-/* for details, see scriptExec() header comment! */
+ static rsRetVal
+ execSet(struct cnfstmt *stmt, batch_t *pBatch, sbool *active)
+ {
+@@ -230,8 +229,23 @@ execSet(struct cnfstmt *stmt, batch_t *pBatch, sbool *active)
+ 		if(   pBatch->pElem[i].state != BATCH_STATE_DISC
+ 		   && (active == NULL || active[i])) {
+ 			cnfexprEval(stmt->d.s_set.expr, &result, pBatch->pElem[i].pUsrp);
+-			msgSetJSONFromVar(pBatch->pElem[i].pUsrp, stmt->d.s_set.varname,
++			msgSetJSONFromVar((msg_t*)pBatch->pElem[i].pUsrp, stmt->d.s_set.varname,
+ 					  &result);
++			varDelete(&result);
++		}
++	}
++	RETiRet;
++}
++
++static rsRetVal
++execUnset(struct cnfstmt *stmt, batch_t *pBatch, sbool *active)
++{
++	int i;
++	DEFiRet;
++	for(i = 0 ; i < batchNumMsgs(pBatch) && !*(pBatch->pbShutdownImmediate) ; ++i) {
++		if(   pBatch->pElem[i].state != BATCH_STATE_DISC
++		   && (active == NULL || active[i])) {
++			msgUnsetJSON((msg_t*)pBatch->pElem[i].pUsrp, stmt->d.s_unset.varname);
+ 		}
+ 	}
+ 	RETiRet;
+@@ -321,7 +335,6 @@ execPRIFILT(struct cnfstmt *stmt, batch_t *pBatch, sbool *active)
+ 		DBGPRINTF("batch: item %d PRIFILT %d\n", i, thenAct[i]);
+ 	}
+ 
+-dbgprintf("RRRR: PRIFILT calling %p\n", stmt->d.s_prifilt.t_then);
+ 	scriptExec(stmt->d.s_prifilt.t_then, pBatch, thenAct);
+ 	freeActive(thenAct);
+ }
+@@ -436,7 +449,6 @@ execPROPFILT(struct cnfstmt *stmt, batch_t *pBatch, sbool *active)
+ 		DBGPRINTF("batch: item %d PROPFILT %d\n", i, thenAct[i]);
+ 	}
+ 
+-dbgprintf("RRRR: PROPFILT calling %p\n", stmt->d.s_propfilt.t_then);
+ 	scriptExec(stmt->d.s_propfilt.t_then, pBatch, thenAct);
+ 	freeActive(thenAct);
+ }
+@@ -468,12 +480,15 @@ dbgprintf("RRRR: scriptExec: batch of %d elements, active %p, stmt %p, nodetype
+ 		case S_ACT:
+ 			execAct(stmt, pBatch, active);
+ 			break;
+-		case S_IF:
+-			execIf(stmt, pBatch, active);
+-			break;
+ 		case S_SET:
+ 			execSet(stmt, pBatch, active);
+ 			break;
++		case S_UNSET:
++			execUnset(stmt, pBatch, active);
++			break;
++		case S_IF:
++			execIf(stmt, pBatch, active);
++			break;
+ 		case S_PRIFILT:
+ 			execPRIFILT(stmt, pBatch, active);
+ 			break;
+

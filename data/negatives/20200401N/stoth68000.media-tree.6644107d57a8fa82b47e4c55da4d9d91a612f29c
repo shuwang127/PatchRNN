@@ -1,0 +1,52 @@
+commit 6644107d57a8fa82b47e4c55da4d9d91a612f29c
+Author: Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>
+Date:   Tue Feb 24 17:35:11 2009 -0800
+
+    gpu/drm, x86, PAT: Handle io_mapping_create_wc() errors in a clean way
+    
+    io_mapping_create_wc can return NULL on error and io_mapping_free() should be
+    called on one of the error-cleanup path.
+    
+    Signed-off-by: Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>
+    Signed-off-by: Suresh Siddha <suresh.b.siddha@intel.com>
+    Cc: Dave Airlie <airlied@redhat.com>
+    Cc: Jesse Barnes <jbarnes@virtuousgeek.org>
+    Cc: Eric Anholt <eric@anholt.net>
+    Cc: Keith Packard <keithp@keithp.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
+index 2d797ffe8137..6949c2d58f1d 100644
+--- a/drivers/gpu/drm/i915/i915_dma.c
++++ b/drivers/gpu/drm/i915/i915_dma.c
+@@ -1090,6 +1090,11 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
+         dev_priv->mm.gtt_mapping =
+ 		io_mapping_create_wc(dev->agp->base,
+ 				     dev->agp->agp_info.aper_size * 1024*1024);
++	if (dev_priv->mm.gtt_mapping == NULL) {
++		ret = -EIO;
++		goto out_rmmap;
++	}
++
+ 	/* Set up a WC MTRR for non-PAT systems.  This is more common than
+ 	 * one would think, because the kernel disables PAT on first
+ 	 * generation Core chips because WC PAT gets overridden by a UC
+@@ -1122,7 +1127,7 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
+ 	if (!I915_NEED_GFX_HWS(dev)) {
+ 		ret = i915_init_phys_hws(dev);
+ 		if (ret != 0)
+-			goto out_rmmap;
++			goto out_iomapfree;
+ 	}
+ 
+ 	/* On the 945G/GM, the chipset reports the MSI capability on the
+@@ -1161,6 +1166,8 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
+ 
+ 	return 0;
+ 
++out_iomapfree:
++	io_mapping_free(dev_priv->mm.gtt_mapping);
+ out_rmmap:
+ 	iounmap(dev_priv->regs);
+ free_priv:
+

@@ -1,0 +1,62 @@
+commit afc85b9d9e617e602006d8766d04e0b8ac9c1b74
+Author: Jesse Barnes <jbarnes@virtuousgeek.org>
+Date:   Wed Sep 25 14:04:32 2013 -0700
+
+    drm/i915/vlv: hack to init backlight regs if BIOS fails to do so v2
+    
+    Still digging up the actual VBT info for this, but wanted to get this
+    out there for testing, or in case others are also bugged by this.
+    
+    This can happen if you boot with an external display connected.  In that
+    case, the attached eDP backlight modulation frequency may not be
+    programmed, so we need to use something (in this case the value my BIOS
+    normally programs with just the internal display enabled).
+    
+    v2: fix masking and magic value in read_blc_pwm_ctl (Jani)
+    
+    Signed-off-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+    Bugzilla: https://bugs.freedesktop.org/show_bug.cgi?id=67732
+    Tested-by: shui yangwei <yangweix.shui@intel.com> (v1)
+    Reviewed-by: Jani Nikula <jani.nikula@linux.intel.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/i915/intel_panel.c b/drivers/gpu/drm/i915/intel_panel.c
+index 8f025c694733..54684168de1e 100644
+--- a/drivers/gpu/drm/i915/intel_panel.c
++++ b/drivers/gpu/drm/i915/intel_panel.c
+@@ -372,6 +372,9 @@ static u32 i915_read_blc_pwm_ctl(struct drm_device *dev)
+ 				I915_WRITE(BLC_PWM_CTL2,
+ 					   dev_priv->regfile.saveBLC_PWM_CTL2);
+ 		}
++
++		if (IS_VALLEYVIEW(dev) && !val)
++			val = 0x0f42ffff;
+ 	}
+ 
+ 	return val;
+@@ -629,10 +632,24 @@ set_level:
+ 	spin_unlock_irqrestore(&dev_priv->backlight.lock, flags);
+ }
+ 
++/* FIXME: use VBT vals to init PWM_CTL and PWM_CTL2 correctly */
++static void intel_panel_init_backlight_regs(struct drm_device *dev)
++{
++	struct drm_i915_private *dev_priv = dev->dev_private;
++
++	if (IS_VALLEYVIEW(dev)) {
++		u32 cur_val = I915_READ(BLC_PWM_CTL) &
++			BACKLIGHT_DUTY_CYCLE_MASK;
++		I915_WRITE(BLC_PWM_CTL, (0xf42 << 16) | cur_val);
++	}
++}
++
+ static void intel_panel_init_backlight(struct drm_device *dev)
+ {
+ 	struct drm_i915_private *dev_priv = dev->dev_private;
+ 
++	intel_panel_init_backlight_regs(dev);
++
+ 	dev_priv->backlight.level = intel_panel_get_backlight(dev);
+ 	dev_priv->backlight.enabled = dev_priv->backlight.level != 0;
+ }
+

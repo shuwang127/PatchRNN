@@ -1,0 +1,86 @@
+commit ba9e780246a15a35f8ebe5b60f4a11bb58e85bda
+Author: Darrick J. Wong <darrick.wong@oracle.com>
+Date:   Wed Aug 3 11:26:33 2016 +1000
+
+    xfs: add tracepoints and error injection for deferred extent freeing
+    
+    Add a couple of tracepoints for the deferred extent free operation and
+    a site for injecting errors while finishing the operation.  This makes
+    it easier to debug deferred ops and test log redo.
+    
+    Signed-off-by: Darrick J. Wong <darrick.wong@oracle.com>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+    Signed-off-by: Dave Chinner <david@fromorbit.com>
+
+diff --git a/fs/xfs/libxfs/xfs_alloc.c b/fs/xfs/libxfs/xfs_alloc.c
+index 5993f87eee3e..22ac3f136f21 100644
+--- a/fs/xfs/libxfs/xfs_alloc.c
++++ b/fs/xfs/libxfs/xfs_alloc.c
+@@ -2702,6 +2702,13 @@ xfs_free_extent(
+ 
+ 	ASSERT(len != 0);
+ 
++	trace_xfs_bmap_free_deferred(mp, agno, 0, agbno, len);
++
++	if (XFS_TEST_ERROR(false, mp,
++			XFS_ERRTAG_FREE_EXTENT,
++			XFS_RANDOM_FREE_EXTENT))
++		return -EIO;
++
+ 	error = xfs_free_extent_fix_freelist(tp, agno, &agbp);
+ 	if (error)
+ 		return error;
+diff --git a/fs/xfs/libxfs/xfs_bmap.c b/fs/xfs/libxfs/xfs_bmap.c
+index 540a6b7928af..8e14ff45c73a 100644
+--- a/fs/xfs/libxfs/xfs_bmap.c
++++ b/fs/xfs/libxfs/xfs_bmap.c
+@@ -596,6 +596,8 @@ xfs_bmap_add_free(
+ 	new = kmem_zone_alloc(xfs_bmap_free_item_zone, KM_SLEEP);
+ 	new->xefi_startblock = bno;
+ 	new->xefi_blockcount = (xfs_extlen_t)len;
++	trace_xfs_bmap_free_defer(mp, XFS_FSB_TO_AGNO(mp, bno), 0,
++			XFS_FSB_TO_AGBNO(mp, bno), len);
+ 	xfs_defer_add(dfops, XFS_DEFER_OPS_TYPE_FREE, &new->xefi_list);
+ }
+ 
+diff --git a/fs/xfs/xfs_error.h b/fs/xfs/xfs_error.h
+index 2e4f67f68856..da6f951435c9 100644
+--- a/fs/xfs/xfs_error.h
++++ b/fs/xfs/xfs_error.h
+@@ -90,7 +90,8 @@ extern void xfs_verifier_error(struct xfs_buf *bp);
+ #define XFS_ERRTAG_STRATCMPL_IOERR			19
+ #define XFS_ERRTAG_DIOWRITE_IOERR			20
+ #define XFS_ERRTAG_BMAPIFORMAT				21
+-#define XFS_ERRTAG_MAX					22
++#define XFS_ERRTAG_FREE_EXTENT				22
++#define XFS_ERRTAG_MAX					23
+ 
+ /*
+  * Random factors for above tags, 1 means always, 2 means 1/2 time, etc.
+@@ -117,6 +118,7 @@ extern void xfs_verifier_error(struct xfs_buf *bp);
+ #define XFS_RANDOM_STRATCMPL_IOERR			(XFS_RANDOM_DEFAULT/10)
+ #define XFS_RANDOM_DIOWRITE_IOERR			(XFS_RANDOM_DEFAULT/10)
+ #define	XFS_RANDOM_BMAPIFORMAT				XFS_RANDOM_DEFAULT
++#define XFS_RANDOM_FREE_EXTENT				1
+ 
+ #ifdef DEBUG
+ extern int xfs_error_test_active;
+diff --git a/fs/xfs/xfs_trace.h b/fs/xfs/xfs_trace.h
+index a45b030d4592..939caf5f5a45 100644
+--- a/fs/xfs/xfs_trace.h
++++ b/fs/xfs/xfs_trace.h
+@@ -2417,9 +2417,12 @@ DEFINE_DEFER_PENDING_EVENT(xfs_defer_pending_cancel);
+ DEFINE_DEFER_PENDING_EVENT(xfs_defer_pending_finish);
+ DEFINE_DEFER_PENDING_EVENT(xfs_defer_pending_abort);
+ 
+-DEFINE_PHYS_EXTENT_DEFERRED_EVENT(xfs_defer_phys_extent);
+ DEFINE_MAP_EXTENT_DEFERRED_EVENT(xfs_defer_map_extent);
+ 
++#define DEFINE_BMAP_FREE_DEFERRED_EVENT DEFINE_PHYS_EXTENT_DEFERRED_EVENT
++DEFINE_BMAP_FREE_DEFERRED_EVENT(xfs_bmap_free_defer);
++DEFINE_BMAP_FREE_DEFERRED_EVENT(xfs_bmap_free_deferred);
++
+ #endif /* _TRACE_XFS_H */
+ 
+ #undef TRACE_INCLUDE_PATH
+

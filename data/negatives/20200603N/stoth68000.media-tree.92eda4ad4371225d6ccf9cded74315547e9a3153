@@ -1,0 +1,58 @@
+commit 92eda4ad4371225d6ccf9cded74315547e9a3153
+Author: Marc Zyngier <marc.zyngier@arm.com>
+Date:   Mon Nov 16 19:13:27 2015 +0000
+
+    irqchip/gic: Clear enable bits before restoring them
+    
+    When restoring the GIC state (after a suspend/resume cycle,
+    for example), the driver directly writes the 'enabled' state
+    it has saved by accessing GICD_ISENABLERn, which performs
+    an OR operation between the value present in the register
+    and the value we write.
+    
+    If whatever code that has run before we reentered the kernel
+    has enabled an interrupt that was previously disabled, we won't
+    restore that disabled state.
+    
+    Making sure we first clear the register (by writting to
+    GICD_ICENABLERn) before restoring the enabled state.
+    
+    Signed-off-by: Marc Zyngier <marc.zyngier@arm.com>
+    Cc: <linux-arm-kernel@lists.infradead.org>
+    Cc: Jason Cooper <jason@lakedaemon.net>
+    Cc: Russell King <linux@arm.linux.org.uk>
+    Link: http://lkml.kernel.org/r/1447701208-18150-4-git-send-email-marc.zyngier@arm.com
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/drivers/irqchip/irq-gic.c b/drivers/irqchip/irq-gic.c
+index 515c823c1c95..bc846e7fec44 100644
+--- a/drivers/irqchip/irq-gic.c
++++ b/drivers/irqchip/irq-gic.c
+@@ -604,9 +604,12 @@ static void gic_dist_restore(unsigned int gic_nr)
+ 		writel_relaxed(gic_data[gic_nr].saved_spi_target[i],
+ 			dist_base + GIC_DIST_TARGET + i * 4);
+ 
+-	for (i = 0; i < DIV_ROUND_UP(gic_irqs, 32); i++)
++	for (i = 0; i < DIV_ROUND_UP(gic_irqs, 32); i++) {
++		writel_relaxed(GICD_INT_EN_CLR_X32,
++			dist_base + GIC_DIST_ENABLE_CLEAR + i * 4);
+ 		writel_relaxed(gic_data[gic_nr].saved_spi_enable[i],
+ 			dist_base + GIC_DIST_ENABLE_SET + i * 4);
++	}
+ 
+ 	writel_relaxed(GICD_ENABLE, dist_base + GIC_DIST_CTRL);
+ }
+@@ -654,8 +657,11 @@ static void gic_cpu_restore(unsigned int gic_nr)
+ 		return;
+ 
+ 	ptr = raw_cpu_ptr(gic_data[gic_nr].saved_ppi_enable);
+-	for (i = 0; i < DIV_ROUND_UP(32, 32); i++)
++	for (i = 0; i < DIV_ROUND_UP(32, 32); i++) {
++		writel_relaxed(GICD_INT_EN_CLR_X32,
++			       dist_base + GIC_DIST_ENABLE_CLEAR + i * 4);
+ 		writel_relaxed(ptr[i], dist_base + GIC_DIST_ENABLE_SET + i * 4);
++	}
+ 
+ 	ptr = raw_cpu_ptr(gic_data[gic_nr].saved_ppi_conf);
+ 	for (i = 0; i < DIV_ROUND_UP(32, 16); i++)
+

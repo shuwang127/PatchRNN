@@ -1,0 +1,68 @@
+commit daf4f4786e8af371048e72cb37ac05190e89198a
+Author: Namhyung Kim <namhyung@kernel.org>
+Date:   Fri May 13 15:01:02 2016 +0900
+
+    perf stat: Update runtime using cpu-clock event
+    
+    Currently only the task-clock event updates the runtime_nsec so it
+    cannot show the metric when using cpu-clock events.  However cpu clock
+    works basically same as task-clock, so no need to not update the runtime
+    IMHO.
+    
+    Before:
+    
+      # perf stat -a -e cpu-clock,context-switches,page-faults,cycles sleep 0.1
+    
+        Performance counter stats for 'system wide':
+    
+             1217.759506      cpu-clock (msec)
+                      93      context-switches
+                      61      page-faults
+              18,958,022      cycles
+    
+             0.101393794 seconds time elapsed
+    
+    After:
+    
+       Performance counter stats for 'system wide':
+    
+             1220.471884      cpu-clock (msec)          #   12.013 CPUs utilized
+                     118      context-switches          #    0.097 K/sec
+                      59      page-faults               #    0.048 K/sec
+              17,941,247      cycles                    #    0.015 GHz
+    
+             0.101594777 seconds time elapsed
+    
+    Signed-off-by: Namhyung Kim <namhyung@kernel.org>
+    Tested-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+    Cc: Andi Kleen <andi@firstfloor.org>
+    Cc: Jiri Olsa <jolsa@kernel.org>
+    Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Link: http://lkml.kernel.org/r/1463119263-5569-2-git-send-email-namhyung@kernel.org
+    Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+
+diff --git a/tools/perf/util/stat-shadow.c b/tools/perf/util/stat-shadow.c
+index 61200fcac5ef..aa9efe08762b 100644
+--- a/tools/perf/util/stat-shadow.c
++++ b/tools/perf/util/stat-shadow.c
+@@ -94,7 +94,8 @@ void perf_stat__update_shadow_stats(struct perf_evsel *counter, u64 *count,
+ {
+ 	int ctx = evsel_context(counter);
+ 
+-	if (perf_evsel__match(counter, SOFTWARE, SW_TASK_CLOCK))
++	if (perf_evsel__match(counter, SOFTWARE, SW_TASK_CLOCK) ||
++	    perf_evsel__match(counter, SOFTWARE, SW_CPU_CLOCK))
+ 		update_stats(&runtime_nsecs_stats[cpu], count[0]);
+ 	else if (perf_evsel__match(counter, HARDWARE, HW_CPU_CYCLES))
+ 		update_stats(&runtime_cycles_stats[ctx][cpu], count[0]);
+@@ -444,7 +445,8 @@ void perf_stat__print_shadow_stats(struct perf_evsel *evsel,
+ 			ratio = total / avg;
+ 
+ 		print_metric(ctxp, NULL, "%8.0f", "cycles / elision", ratio);
+-	} else if (perf_evsel__match(evsel, SOFTWARE, SW_TASK_CLOCK)) {
++	} else if (perf_evsel__match(evsel, SOFTWARE, SW_TASK_CLOCK) ||
++		   perf_evsel__match(evsel, SOFTWARE, SW_CPU_CLOCK)) {
+ 		if ((ratio = avg_stats(&walltime_nsecs_stats)) != 0)
+ 			print_metric(ctxp, NULL, "%8.3f", "CPUs utilized",
+ 				     avg / ratio);
+

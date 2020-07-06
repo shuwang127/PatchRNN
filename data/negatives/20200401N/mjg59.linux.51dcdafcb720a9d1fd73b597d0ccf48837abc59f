@@ -1,0 +1,86 @@
+commit 51dcdafcb720a9d1fd73b597d0ccf48837abc59f
+Author: Axel Lin <axel.lin@ingics.com>
+Date:   Tue Mar 5 14:16:00 2013 +0800
+
+    regulator: core: Add enable_is_inverted flag to indicate set enable_mask bits to disable
+    
+    Add enable_is_inverted flag to indicate set enable_mask bits to disable
+    when using regulator_enable_regmap and friends APIs.
+    
+    Signed-off-by: Axel Lin <axel.lin@ingics.com>
+    Reviewed-by: Haojian Zhuang <haojian.zhuang@gmail.com>
+    Signed-off-by: Mark Brown <broonie@opensource.wolfsonmicro.com>
+
+diff --git a/drivers/regulator/core.c b/drivers/regulator/core.c
+index 154bc8f0c1a0..d887b9f5b213 100644
+--- a/drivers/regulator/core.c
++++ b/drivers/regulator/core.c
+@@ -1794,7 +1794,10 @@ int regulator_is_enabled_regmap(struct regulator_dev *rdev)
+ 	if (ret != 0)
+ 		return ret;
+ 
+-	return (val & rdev->desc->enable_mask) != 0;
++	if (rdev->desc->enable_is_inverted)
++		return (val & rdev->desc->enable_mask) == 0;
++	else
++		return (val & rdev->desc->enable_mask) != 0;
+ }
+ EXPORT_SYMBOL_GPL(regulator_is_enabled_regmap);
+ 
+@@ -1809,9 +1812,15 @@ EXPORT_SYMBOL_GPL(regulator_is_enabled_regmap);
+  */
+ int regulator_enable_regmap(struct regulator_dev *rdev)
+ {
++	unsigned int val;
++
++	if (rdev->desc->enable_is_inverted)
++		val = 0;
++	else
++		val = rdev->desc->enable_mask;
++
+ 	return regmap_update_bits(rdev->regmap, rdev->desc->enable_reg,
+-				  rdev->desc->enable_mask,
+-				  rdev->desc->enable_mask);
++				  rdev->desc->enable_mask, val);
+ }
+ EXPORT_SYMBOL_GPL(regulator_enable_regmap);
+ 
+@@ -1826,8 +1835,15 @@ EXPORT_SYMBOL_GPL(regulator_enable_regmap);
+  */
+ int regulator_disable_regmap(struct regulator_dev *rdev)
+ {
++	unsigned int val;
++
++	if (rdev->desc->enable_is_inverted)
++		val = rdev->desc->enable_mask;
++	else
++		val = 0;
++
+ 	return regmap_update_bits(rdev->regmap, rdev->desc->enable_reg,
+-				  rdev->desc->enable_mask, 0);
++				  rdev->desc->enable_mask, val);
+ }
+ EXPORT_SYMBOL_GPL(regulator_disable_regmap);
+ 
+diff --git a/include/linux/regulator/driver.h b/include/linux/regulator/driver.h
+index 7df93f52db08..07ea8f1a127e 100644
+--- a/include/linux/regulator/driver.h
++++ b/include/linux/regulator/driver.h
+@@ -199,6 +199,8 @@ enum regulator_type {
+  *                output when using regulator_set_voltage_sel_regmap
+  * @enable_reg: Register for control when using regmap enable/disable ops
+  * @enable_mask: Mask for control when using regmap enable/disable ops
++ * @enable_is_inverted: A flag to indicate set enable_mask bits to disable
++ *                      when using regulator_enable_regmap and friends APIs.
+  * @bypass_reg: Register for control when using regmap set_bypass
+  * @bypass_mask: Mask for control when using regmap set_bypass
+  *
+@@ -228,6 +230,7 @@ struct regulator_desc {
+ 	unsigned int apply_bit;
+ 	unsigned int enable_reg;
+ 	unsigned int enable_mask;
++	bool enable_is_inverted;
+ 	unsigned int bypass_reg;
+ 	unsigned int bypass_mask;
+ 
+

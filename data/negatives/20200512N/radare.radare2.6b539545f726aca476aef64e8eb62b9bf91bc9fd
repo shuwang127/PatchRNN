@@ -1,0 +1,156 @@
+commit 6b539545f726aca476aef64e8eb62b9bf91bc9fd
+Author: pancake <pancake@nopcode.org>
+Date:   Sun Dec 3 18:22:47 2017 +0100
+
+    Implement asm.emustack
+
+diff --git a/libr/core/cconfig.c b/libr/core/cconfig.c
+index f9cb00a90..65b3b9cac 100644
+--- a/libr/core/cconfig.c
++++ b/libr/core/cconfig.c
+@@ -2225,6 +2225,7 @@ R_API int r_core_config_init(RCore *core) {
+ 	SETPREF ("asm.esil", "false", "Show ESIL instead of mnemonic");
+ 	SETPREF ("asm.nodup", "false", "Do not show dupped instructions (collapse disasm)");
+ 	SETPREF ("asm.emu", "false", "Run ESIL emulation analysis on disasm");
++	SETPREF ("asm.emustack", "false", "Create a temporary fake stack when emulating in disasm (asm.emu)");
+ 	SETCB ("asm.emustr", "false", &cb_emustr, "Show only strings if any in the asm.emu output");
+ 	SETPREF ("asm.emuwrite", "false", "Allow asm.emu to modify memory (WARNING)");
+ 	n = NODECB ("asm.emuskip", "ds", &cb_emuskip);
+diff --git a/libr/core/disasm.c b/libr/core/disasm.c
+index 57151ea5e..a578ffb4e 100644
+--- a/libr/core/disasm.c
++++ b/libr/core/disasm.c
+@@ -15,6 +15,10 @@
+ #define COLOR_CONST(ds, color) (ds->show_color ? Color_ ## color : "")
+ #define COLOR_RESET(ds) COLOR_CONST(ds, RESET)
+ 
++// ugly globals but meh
++static ut64 emustack_min = 0LL;
++static ut64 emustack_max = 0LL;
++
+ static const char* r_vline_a[] = {
+ 	"|",  // LINE_VERT
+ 	"|-", // LINE_CROSS
+@@ -102,6 +106,7 @@ typedef struct {
+ 	bool show_bbline;
+ 	bool show_emu;
+ 	bool show_emu_str;
++	bool show_emu_stack;
+ 	bool show_emu_write;
+ 	bool show_section;
+ 	int show_section_col;
+@@ -123,6 +128,7 @@ typedef struct {
+ 	bool show_cmtflgrefs;
+ 	bool show_cycles;
+ 	bool show_stackptr;
++	int stackFd;
+ 	bool show_xrefs;
+ 	bool show_cmtrefs;
+ 	const char *show_cmtoff;
+@@ -529,6 +535,26 @@ static RDisasmState * ds_init(RCore *core) {
+ 	ds->show_emu = r_config_get_i (core->config, "asm.emu");
+ 	ds->show_emu_str = r_config_get_i (core->config, "asm.emustr");
+ 	ds->show_emu_write = r_config_get_i (core->config, "asm.emuwrite");
++	ds->show_emu_stack = r_config_get_i (core->config, "asm.emustack");
++	ds->stackFd = -1;
++	if (ds->show_emu_stack) {
++		// TODO: initialize fake stack in here
++		const char *uri = "malloc://32K";
++		ut64 size = r_num_get (core->num, "32K");
++		ut64 addr = r_reg_getv (core->anal->reg, "SP") - (size / 2);
++		emustack_min = addr;
++		emustack_max = addr + size;
++		ds->stackFd = r_io_fd_open (core->io, uri, R_IO_RW, 0);
++		RIOMap *map = r_io_map_add (core->io, ds->stackFd, R_IO_RW, 0LL, addr, size, true);
++		if (!map) {
++			r_io_fd_close (core->io, ds->stackFd);
++			eprintf ("Cannot create map for tha stack, fd %d got closed again\n", ds->stackFd);
++			ds->stackFd = -1;
++		} else {
++			r_io_map_set_name (map, "fake.stack");
++		}
++eprintf ("Make fake stack\n");
++	}
+ 	ds->show_offseg = r_config_get_i (core->config, "asm.segoff");
+ 	ds->show_flags = r_config_get_i (core->config, "asm.flags");
+ 	ds->show_bytes = r_config_get_i (core->config, "asm.bytes");
+@@ -691,6 +717,13 @@ static void ds_free(RDisasmState *ds) {
+ 	if (!ds) {
+ 		return;
+ 	}
++	if (ds->show_emu_stack) {
++		// TODO: destroy fake stack in here
++		eprintf ("Free fake stack\n");
++		if (ds->stackFd != -1) {
++			r_io_fd_close (ds->core->io, ds->stackFd);
++		}
++	}
+ 	r_anal_op_fini (&ds->analop);
+ 	r_anal_hint_free (ds->hint);
+ 	free (ds->comment);
+@@ -3210,6 +3243,10 @@ static int mymemwrite1(RAnalEsil *esil, ut64 addr, const ut8 *buf, int len) {
+ 	return 1;
+ }
+ 
++static int mymemwrite2(RAnalEsil *esil, ut64 addr, const ut8 *buf, int len) {
++	return (addr >= emustack_min && addr < emustack_max);
++}
++
+ #define R_DISASM_MAX_STR 512
+ static int myregwrite(RAnalEsil *esil, const char *name, ut64 *val) {
+ 	char str[64], *msg = NULL;
+@@ -3465,10 +3502,14 @@ static void ds_print_esil_anal(RDisasmState *ds) {
+ 	esil->cb.user = ds;
+ 	esil->cb.hook_reg_write = myregwrite;
+ 	hook_mem_write = esil->cb.hook_mem_write;
+-	if (ds->show_emu_write) {
+-		esil->cb.hook_mem_write = mymemwrite0;
++	if (ds->show_emu_stack) {
++		esil->cb.hook_mem_write = mymemwrite2;
+ 	} else {
+-		esil->cb.hook_mem_write = mymemwrite1;
++		if (ds->show_emu_write) {
++			esil->cb.hook_mem_write = mymemwrite0;
++		} else {
++			esil->cb.hook_mem_write = mymemwrite1;
++		}
+ 	}
+ 	ds->esil_likely = 0;
+ 	r_anal_esil_set_pc (esil, at);
+diff --git a/libr/util/json_indent.c b/libr/util/json_indent.c
+index 6554fa6ee..4f9857284 100644
+--- a/libr/util/json_indent.c
++++ b/libr/util/json_indent.c
+@@ -127,7 +127,7 @@ R_API char* r_print_json_path(const char* s, int pos) {
+ 	int i;
+ 	ut64 opos = 0;
+ 	for (i = 0; i < DSZ && i < indent; i++) {
+-		if ((int)words[i] < DSZ) {
++		if ((int)(size_t)words[i] < DSZ) {
+ 			ut64 cur = lengths[i];
+ 			if (cur < opos) {
+ 				continue;
+diff --git a/libr/util/print.c b/libr/util/print.c
+index 962ae6dee..7cc62e87e 100644
+--- a/libr/util/print.c
++++ b/libr/util/print.c
+@@ -1870,6 +1870,7 @@ R_API int r_print_jsondump(RPrint *p, const ut8 *buf, int len, int wordsize) {
+ 
+ R_API void r_print_hex_from_bin (RPrint *p, char *bin_str) {
+ 	int i, j, index;
++	RPrint myp = {.cb_printf = libc_printf};
+ 	const int len = strlen (bin_str);
+ 	ut64 n, *buf = malloc (sizeof (ut64) * ((len + 63) / 64));
+ 	if (buf == NULL) {
+@@ -1877,9 +1878,7 @@ R_API void r_print_hex_from_bin (RPrint *p, char *bin_str) {
+ 		return;
+ 	}
+ 	if (!p) {
+-		p = &(RPrint){
+-			.cb_printf = libc_printf,
+-		};
++		p = &myp;
+ 	}
+ 	for (i = len - 1, index = 0; i >= 0; i -= 64, index++) {
+ 		n = 0;
+

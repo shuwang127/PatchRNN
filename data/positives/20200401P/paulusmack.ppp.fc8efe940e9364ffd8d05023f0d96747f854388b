@@ -1,0 +1,81 @@
+commit fc8efe940e9364ffd8d05023f0d96747f854388b
+Author: Paul Mackerras <paulus@samba.org>
+Date:   Fri Dec 6 12:06:45 2002 +0000
+
+    Make sure we don't do FD_SET(fd, set) with fd >= FD_SETSIZE since
+    that could corrupt memory, and maybe could form the basis of an
+    attack on pppd.  The problem was pointed out by Jun-ichiro itojun
+    Hagino.
+
+diff --git a/pppd/sys-bsd.c b/pppd/sys-bsd.c
+index 2ae843a..0cccbae 100644
+--- a/pppd/sys-bsd.c
++++ b/pppd/sys-bsd.c
+@@ -74,7 +74,7 @@
+  * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+  */
+ 
+-#define RCSID	"$Id: sys-bsd.c,v 1.48 2002/12/04 23:03:32 paulus Exp $"
++#define RCSID	"$Id: sys-bsd.c,v 1.49 2002/12/06 12:06:45 paulus Exp $"
+ /*	$NetBSD: sys-bsd.c,v 1.1.1.3 1997/09/26 18:53:04 christos Exp $	*/
+ 
+ /*
+@@ -646,6 +646,8 @@ wait_input(timo)
+ void add_fd(fd)
+     int fd;
+ {
++    if (fd >= FD_SETSIZE)
++	fatal("internal error: file descriptor too large (%d)", fd);
+     FD_SET(fd, &in_fds);
+     if (fd > max_in_fd)
+ 	max_in_fd = fd;
+@@ -674,6 +676,8 @@ wait_loop_output(timo)
+     int n;
+ 
+     FD_ZERO(&ready);
++    if (loop_master >= FD_SETSIZE)
++	fatal("internal error: file descriptor too large (%d)", loop_master);
+     FD_SET(loop_master, &ready);
+     n = select(loop_master + 1, &ready, NULL, &ready, timo);
+     if (n < 0 && errno != EINTR)
+diff --git a/pppd/sys-linux.c b/pppd/sys-linux.c
+index bf6db32..4a27cd5 100644
+--- a/pppd/sys-linux.c
++++ b/pppd/sys-linux.c
+@@ -1050,6 +1050,8 @@ void wait_input(struct timeval *timo)
+  */
+ void add_fd(int fd)
+ {
++    if (fd >= FD_SETSIZE)
++	fatal("internal error: file descriptor too large (%d)", fd);
+     FD_SET(fd, &in_fds);
+     if (fd > max_in_fd)
+ 	max_in_fd = fd;
+diff --git a/pppd/tty.c b/pppd/tty.c
+index 803d8ba..efc92ec 100644
+--- a/pppd/tty.c
++++ b/pppd/tty.c
+@@ -73,7 +73,7 @@
+  * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+  */
+ 
+-#define RCSID	"$Id: tty.c,v 1.8 2002/12/04 23:03:33 paulus Exp $"
++#define RCSID	"$Id: tty.c,v 1.9 2002/12/06 12:06:45 paulus Exp $"
+ 
+ #include <stdio.h>
+ #include <ctype.h>
+@@ -992,6 +992,13 @@ charshunt(ifd, ofd, record_file)
+     signal(SIGXFSZ, SIG_DFL);
+ #endif
+ 
++    /*
++     * Check that the fds won't overrun the fd_sets
++     */
++    if (ifd >= FD_SETSIZE || ofd >= FD_SETSIZE || pty_master >= FD_SETSIZE)
++	fatal("internal error: file descriptor too large (%d, %d, %d)",
++	      ifd, ofd, pty_master);
++
+     /*
+      * Open the record file if required.
+      */
+

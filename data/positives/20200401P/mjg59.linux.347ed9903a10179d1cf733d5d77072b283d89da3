@@ -1,0 +1,53 @@
+commit 347ed9903a10179d1cf733d5d77072b283d89da3
+Author: David Ahern <dsahern@gmail.com>
+Date:   Sun Jul 29 20:54:35 2012 -0600
+
+    perf kvm: Use strtol for walking guestmount directory
+    
+    Only want to process directories under the guestmnount directory that
+    have a pid as a name (ie, all digits). Other entries in the guestmount
+    directory should be ignored.  There is already a check that requires the
+    first character of each entry to be a digit, but atoi is used to convert
+    the directory name to a pid. For example if guestmount contains a
+    directory with the name 1foo, atoi converts it to a pid of 1 and a
+    machine is created with a pid of 1. This is wrong; this directory really
+    should be ignored. Use strtol to do that.
+    
+    Signed-off-by: David Ahern <dsahern@gmail.com>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Ingo Molnar <mingo@kernel.org>
+    Cc: Jiri Olsa <jolsa@redhat.com>
+    Cc: Namhyung Kim <namhyung@kernel.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Link: http://lkml.kernel.org/r/1343616875-6455-1-git-send-email-dsahern@gmail.com
+    Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+
+diff --git a/tools/perf/util/symbol.c b/tools/perf/util/symbol.c
+index fe86612afadc..8b63b678e127 100644
+--- a/tools/perf/util/symbol.c
++++ b/tools/perf/util/symbol.c
+@@ -2875,6 +2875,7 @@ int machines__create_guest_kernel_maps(struct rb_root *machines)
+ 	int i, items = 0;
+ 	char path[PATH_MAX];
+ 	pid_t pid;
++	char *endp;
+ 
+ 	if (symbol_conf.default_guest_vmlinux_name ||
+ 	    symbol_conf.default_guest_modules ||
+@@ -2891,7 +2892,14 @@ int machines__create_guest_kernel_maps(struct rb_root *machines)
+ 				/* Filter out . and .. */
+ 				continue;
+ 			}
+-			pid = atoi(namelist[i]->d_name);
++			pid = (pid_t)strtol(namelist[i]->d_name, &endp, 10);
++			if ((*endp != '\0') ||
++			    (endp == namelist[i]->d_name) ||
++			    (errno == ERANGE)) {
++				pr_debug("invalid directory (%s). Skipping.\n",
++					 namelist[i]->d_name);
++				continue;
++			}
+ 			sprintf(path, "%s/%s/proc/kallsyms",
+ 				symbol_conf.guestmount,
+ 				namelist[i]->d_name);
+

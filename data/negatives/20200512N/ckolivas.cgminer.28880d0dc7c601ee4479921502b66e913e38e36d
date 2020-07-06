@@ -1,0 +1,274 @@
+commit 28880d0dc7c601ee4479921502b66e913e38e36d
+Author: Con Kolivas <kernel@kolivas.org>
+Date:   Sat Aug 13 20:54:20 2011 +1000
+
+    Move the non cl_ variables into the cgpu info struct to allow creating a new cl state on reinit, preserving known GPU variables.
+    
+    Create a new context from scratch in initCQ in case something was corrupted to maximise our chance of succesfully creating a new worker thread.
+
+diff --git a/main.c b/main.c
+index 07458b8f..ce62b289 100644
+--- a/main.c
++++ b/main.c
+@@ -2952,6 +2952,7 @@ static void *gpuminer_thread(void *userdata)
+ 	uint32_t *res, *blank_res;
+ 	double gpu_ms_average = 7;
+ 	int gpu = dev_from_id(thr_id);
++	struct cgpu_info *cgpu = mythr->cgpu;
+ 
+ 	size_t globalThreads[1];
+ 	size_t localThreads[1];
+@@ -2963,7 +2964,7 @@ static void *gpuminer_thread(void *userdata)
+ 
+ 	struct work *work = make_work();
+ 	unsigned int threads;
+-	unsigned const int vectors = clState->preferred_vwidth;
++	unsigned const int vectors = cgpu->vwidth;
+ 	unsigned int hashes;
+ 	unsigned int hashes_done = 0;
+ 
+@@ -3000,7 +3001,7 @@ static void *gpuminer_thread(void *userdata)
+ 	}
+ 
+ 	gettimeofday(&tv_start, NULL);
+-	localThreads[0] = clState->work_size;
++	localThreads[0] = cgpu->work_size;
+ 	set_threads_hashes(vectors, &threads, &hashes, &globalThreads[0],
+ 			   localThreads[0]);
+ 
+@@ -3014,7 +3015,7 @@ static void *gpuminer_thread(void *userdata)
+ 	if (unlikely(status != CL_SUCCESS))
+ 		{ applog(LOG_ERR, "Error: clEnqueueWriteBuffer failed."); goto out; }
+ 
+-	mythr->cgpu->status = LIFE_WELL;
++	cgpu->status = LIFE_WELL;
+ 	if (opt_debug)
+ 		applog(LOG_DEBUG, "Popping ping in gpuminer thread");
+ 
+@@ -3141,7 +3142,7 @@ static void *gpuminer_thread(void *userdata)
+ 		}
+ 		if (unlikely(!gpu_devices[gpu])) {
+ 			applog(LOG_WARNING, "Thread %d being disabled", thr_id);
+-			mythr->rolling = mythr->cgpu->rolling = 0;
++			mythr->rolling = cgpu->rolling = 0;
+ 			if (opt_debug)
+ 				applog(LOG_DEBUG, "Popping wakeup ping in gpuminer thread");
+ 
+@@ -4029,13 +4030,15 @@ int main (int argc, char *argv[])
+ 	/* start GPU mining threads */
+ 	for (j = 0; j < nDevs * opt_g_threads; j++) {
+ 		int gpu = j % nDevs;
++		struct cgpu_info *cgpu;
+ 
+ 		gpus[gpu].is_gpu = 1;
+ 		gpus[gpu].cpu_gpu = gpu;
+ 
+ 		thr = &thr_info[i];
+ 		thr->id = i;
+-		thr->cgpu = &gpus[gpu];
++		cgpu = &gpus[gpu];
++		thr->cgpu = cgpu;
+ 
+ 		thr->q = tq_new();
+ 		if (!thr->q)
+@@ -4051,7 +4054,7 @@ int main (int argc, char *argv[])
+ 		}
+ 
+ 		applog(LOG_INFO, "Init GPU thread %i", i);
+-		clStates[i] = initCl(gpu, name, sizeof(name));
++		clStates[i] = initCl(cgpu, name, sizeof(name));
+ 		if (!clStates[i]) {
+ 			applog(LOG_ERR, "Failed to init GPU thread %d", i);
+ 			gpu_devices[i] = false;
+diff --git a/miner.h b/miner.h
+index b5c95250..1bf14340 100644
+--- a/miner.h
++++ b/miner.h
+@@ -152,6 +152,11 @@ struct cgpu_info {
+ 	double efficiency;
+ 	double utility;
+ 	enum alive status;
++
++	int hasBitAlign;
++	unsigned int vwidth;
++	size_t max_work_size;
++	size_t work_size;
+ };
+ 
+ struct thr_info {
+diff --git a/ocl.c b/ocl.c
+index 873bfa4c..21f6bd90 100644
+--- a/ocl.c
++++ b/ocl.c
+@@ -267,8 +267,16 @@ void patch_opcodes(char *w, unsigned remaining)
+ _clState *initCQ(_clState *clState, unsigned int gpu)
+ {
+ 	cl_int status = 0;
++	cl_context_properties cps[3] = { CL_CONTEXT_PLATFORM, (cl_context_properties)platform, 0 };
+ 
+-	/* create a cl program executable for all the devices specified */
++	clState->context = clCreateContextFromType(cps, CL_DEVICE_TYPE_GPU, NULL, NULL, &status);
++	if (status != CL_SUCCESS)
++	{
++		applog(LOG_ERR, "Error: Creating Context. (clCreateContextFromType)");
++		return NULL;
++	}
++
++	/* create a cl program executable for the device specified */
+ 	status = clBuildProgram(clState->program, 1, &devices[gpu], NULL, NULL, NULL);
+ 	if (status != CL_SUCCESS)
+ 	{
+@@ -312,8 +320,9 @@ _clState *initCQ(_clState *clState, unsigned int gpu)
+ 	return clState;
+ }
+ 
+-_clState *initCl(unsigned int gpu, char *name, size_t nameSize)
++_clState *initCl(struct cgpu_info *cgpu, char *name, size_t nameSize)
+ {
++	unsigned int gpu = cgpu->cpu_gpu;
+ 	int patchbfi = 0;
+ 	cl_int status = 0;
+ 	size_t nDevices;
+@@ -358,7 +367,7 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize)
+ 	}
+ 	find = strstr(extensions, camo);
+ 	if (find)
+-		clState->hasBitAlign = patchbfi = 1;
++		cgpu->hasBitAlign = patchbfi = 1;
+ 
+ 	status = clGetDeviceInfo(devices[gpu], CL_DEVICE_PREFERRED_VECTOR_WIDTH_INT, sizeof(cl_uint), (void *)&clState->preferred_vwidth, NULL);
+ 	if (status != CL_SUCCESS) {
+@@ -368,26 +377,27 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize)
+ 	if (opt_debug)
+ 		applog(LOG_DEBUG, "Preferred vector width reported %d", clState->preferred_vwidth);
+ 
+-	status = clGetDeviceInfo(devices[gpu], CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), (void *)&clState->max_work_size, NULL);
++	status = clGetDeviceInfo(devices[gpu], CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), (void *)&cgpu->max_work_size, NULL);
+ 	if (status != CL_SUCCESS) {
+ 		applog(LOG_ERR, "Error: Failed to clGetDeviceInfo when trying to get CL_DEVICE_MAX_WORK_GROUP_SIZE");
+ 		return NULL;
+ 	}
+ 	if (opt_debug)
+-		applog(LOG_DEBUG, "Max work group size reported %d", clState->max_work_size);
++		applog(LOG_DEBUG, "Max work group size reported %d", cgpu->max_work_size);
+ 
+ 	/* For some reason 2 vectors is still better even if the card says
+ 	 * otherwise, and many cards lie about their max so use 256 as max
+ 	 * unless explicitly set on the command line */
++	cgpu->vwidth = clState->preferred_vwidth;
+ 	if (clState->preferred_vwidth > 1)
+-		clState->preferred_vwidth = 2;
++		cgpu->vwidth = 2;
+ 	if (opt_vectors)
+-		clState->preferred_vwidth = opt_vectors;
+-	if (opt_worksize && opt_worksize <= clState->max_work_size)
+-		clState->work_size = opt_worksize;
++		cgpu->vwidth = opt_vectors;
++	if (opt_worksize && opt_worksize <= cgpu->max_work_size)
++		cgpu->work_size = opt_worksize;
+ 	else
+-		clState->work_size = (clState->max_work_size <= 256 ? clState->max_work_size : 256) /
+-				clState->preferred_vwidth;
++		cgpu->work_size = (cgpu->max_work_size <= 256 ? cgpu->max_work_size : 256) /
++				cgpu->vwidth;
+ 
+ 	/* Create binary filename based on parameters passed to opencl
+ 	 * compiler to ensure we only load a binary that matches what would
+@@ -399,7 +409,7 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize)
+ 	char filename[16];
+ 
+ 	if (chosen_kernel == KL_NONE) {
+-		if (clState->hasBitAlign)
++		if (cgpu->hasBitAlign)
+ 			chosen_kernel = KL_PHATK;
+ 		else
+ 			chosen_kernel = KL_POCLBM;
+@@ -442,14 +452,14 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize)
+ 	}
+ 
+ 	strcat(binaryfilename, name);
+-	if (clState->hasBitAlign)
++	if (cgpu->hasBitAlign)
+ 		strcat(binaryfilename, "bitalign");
+ 
+ 	strcat(binaryfilename, "v");
+-	sprintf(numbuf, "%d", clState->preferred_vwidth);
++	sprintf(numbuf, "%d", cgpu->vwidth);
+ 	strcat(binaryfilename, numbuf);
+ 	strcat(binaryfilename, "w");
+-	sprintf(numbuf, "%d", (int)clState->work_size);
++	sprintf(numbuf, "%d", (int)cgpu->work_size);
+ 	strcat(binaryfilename, numbuf);
+ 	strcat(binaryfilename, "long");
+ 	sprintf(numbuf, "%d", (int)sizeof(long));
+@@ -505,7 +515,7 @@ build:
+ 	memcpy(source, rawsource, pl);
+ 
+ 	/* Patch the source file with the preferred_vwidth */
+-	if (clState->preferred_vwidth > 1) {
++	if (cgpu->vwidth > 1) {
+ 		char *find = strstr(source, "VECTORSX");
+ 
+ 		if (unlikely(!find)) {
+@@ -513,7 +523,7 @@ build:
+ 			return NULL;
+ 		}
+ 		find += 7; // "VECTORS"
+-		if (clState->preferred_vwidth == 2)
++		if (cgpu->vwidth == 2)
+ 			strncpy(find, "2", 1);
+ 		else
+ 			strncpy(find, "4", 1);
+@@ -522,7 +532,7 @@ build:
+ 	}
+ 
+ 	/* Patch the source file defining BITALIGN */
+-	if (clState->hasBitAlign) {
++	if (cgpu->hasBitAlign) {
+ 		char *find = strstr(source, "BITALIGNX");
+ 
+ 		if (unlikely(!find)) {
+@@ -680,8 +690,11 @@ built:
+ 	free(binaries);
+ 	free(binary_sizes);
+ 
++	/* We throw everything out now and create the real context we're using in initCQ */
++	clReleaseContext(clState->context);
++
+ 	applog(LOG_INFO, "Initialising kernel %s with%s BFI_INT patching, %d vectors and worksize %d",
+-	       filename, patchbfi ? "" : "out", clState->preferred_vwidth, clState->work_size);
++	       filename, patchbfi ? "" : "out", cgpu->vwidth, cgpu->work_size);
+ 
+ 	return initCQ(clState, gpu);
+ }
+diff --git a/ocl.h b/ocl.h
+index a95f9726..2189fd46 100644
+--- a/ocl.h
++++ b/ocl.h
+@@ -7,6 +7,7 @@
+ #else
+ #include <CL/cl.h>
+ #endif
++#include "miner.h"
+ 
+ typedef struct {
+ 	cl_context context;
+@@ -14,16 +15,13 @@ typedef struct {
+ 	cl_command_queue commandQueue;
+ 	cl_program program;
+ 	cl_mem outputBuffer;
+-	int hasBitAlign;
+ 	cl_uint preferred_vwidth;
+-	size_t max_work_size;
+-	size_t work_size;
+ } _clState;
+ 
+ extern char *file_contents(const char *filename, int *length);
+ extern int clDevicesNum();
+ extern int preinit_devices(void);
+ extern _clState *initCQ(_clState *clState, unsigned int gpu);
+-extern _clState *initCl(unsigned int gpu, char *name, size_t nameSize);
++extern _clState *initCl(struct cgpu_info *cgpu, char *name, size_t nameSize);
+ #endif /* HAVE_OPENCL */
+ #endif /* __OCL_H__ */
+

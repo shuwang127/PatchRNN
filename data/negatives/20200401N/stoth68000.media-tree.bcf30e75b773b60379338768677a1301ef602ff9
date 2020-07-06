@@ -1,0 +1,64 @@
+commit bcf30e75b773b60379338768677a1301ef602ff9
+Author: Shaohua Li <shaohua.li@intel.com>
+Date:   Thu Aug 11 10:39:04 2011 +0200
+
+    block: improve rq_affinity placement
+    
+    This patch reverts commit 35ae66e0a09ab70ed(block: Make rq_affinity = 1
+    work as expected). The purpose is to avoid an unnecessary IPI.
+    Let's take an example. My test box has cpu 0-7, one socket. Say request is
+    added from CPU 1, blk_complete_request() occurs at CPU 7. Without the reverted
+    patch, softirq will be done at CPU 7. With it, an IPI will be directed to CPU
+    0, and softirq will be done at CPU 0. In this case, doing softirq at CPU 0 and
+    CPU 7 have no difference from cache sharing point view and we can avoid an
+    ipi if doing it in CPU 7.
+    An immediate concern is this is just like QUEUE_FLAG_SAME_FORCE, but actually
+    not. blk_complete_request() is running in interrupt handler, and currently
+    I/O controller doesn't support multiple interrupts (I checked several LSI
+    cards and AHCI), so only one CPU can run blk_complete_request(). This is
+    still quite different as QUEUE_FLAG_SAME_FORCE.
+    Since only one CPU runs softirq, the only difference with below patch is
+    softirq not always runs at the first CPU of a group.
+    
+    Signed-off-by: Shaohua Li <shaohua.li@intel.com>
+    Signed-off-by: Jens Axboe <jaxboe@fusionio.com>
+
+diff --git a/block/blk-softirq.c b/block/blk-softirq.c
+index 487addc85bb5..58340d0cb23a 100644
+--- a/block/blk-softirq.c
++++ b/block/blk-softirq.c
+@@ -103,7 +103,7 @@ static struct notifier_block __cpuinitdata blk_cpu_notifier = {
+ 
+ void __blk_complete_request(struct request *req)
+ {
+-	int ccpu, cpu;
++	int ccpu, cpu, group_cpu = NR_CPUS;
+ 	struct request_queue *q = req->q;
+ 	unsigned long flags;
+ 
+@@ -117,12 +117,22 @@ void __blk_complete_request(struct request *req)
+ 	 */
+ 	if (test_bit(QUEUE_FLAG_SAME_COMP, &q->queue_flags) && req->cpu != -1) {
+ 		ccpu = req->cpu;
+-		if (!test_bit(QUEUE_FLAG_SAME_FORCE, &q->queue_flags))
++		if (!test_bit(QUEUE_FLAG_SAME_FORCE, &q->queue_flags)) {
+ 			ccpu = blk_cpu_to_group(ccpu);
++			group_cpu = blk_cpu_to_group(cpu);
++		}
+ 	} else
+ 		ccpu = cpu;
+ 
+-	if (ccpu == cpu) {
++	/*
++	 * If current CPU and requested CPU are in the same group, running
++	 * softirq in current CPU. One might concern this is just like
++	 * QUEUE_FLAG_SAME_FORCE, but actually not. blk_complete_request() is
++	 * running in interrupt handler, and currently I/O controller doesn't
++	 * support multiple interrupts, so current CPU is unique actually. This
++	 * avoids IPI sending from current CPU to the first CPU of a group.
++	 */
++	if (ccpu == cpu || ccpu == group_cpu) {
+ 		struct list_head *list;
+ do_local:
+ 		list = &__get_cpu_var(blk_cpu_done);
+

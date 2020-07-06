@@ -1,0 +1,80 @@
+commit 8edc59d939ad233c24385fb67a62bd39db532901
+Author: Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>
+Date:   Tue Dec 19 12:58:55 2006 -0800
+
+    [CPUFREQ] Bug fix for acpi-cpufreq and cpufreq_stats oops on frequency change notification
+    
+    Fixes the oops in cpufreq_stats with acpi_cpufreq driver.  The issue was
+    that the frequency was reported as 0 in acpi-cpufreq.c.  The bug is due to
+    different indicies for freq_table and ACPI perf table.
+    
+    Also adds a check in cpufreq_stats to check for error return from
+    freq_table_get_index() and avoid using the error return value.
+    
+    Patch fixes the issue reported at
+    http://www.ussg.iu.edu/hypermail/linux/kernel/0611.2/0629.html
+    and also other similar issue here
+    http://bugme.osdl.org/show_bug.cgi?id=7383 comment 53
+    
+    Signed-off-by: Dhaval Giani <dhaval.giani@gmail.com>
+    Signed-off-by: Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Dave Jones <davej@redhat.com>
+
+diff --git a/arch/i386/kernel/cpu/cpufreq/acpi-cpufreq.c b/arch/i386/kernel/cpu/cpufreq/acpi-cpufreq.c
+index b735458c6e3a..563dcc82b902 100644
+--- a/arch/i386/kernel/cpu/cpufreq/acpi-cpufreq.c
++++ b/arch/i386/kernel/cpu/cpufreq/acpi-cpufreq.c
+@@ -373,8 +373,8 @@ static int acpi_cpufreq_target(struct cpufreq_policy *policy,
+ 	cpumask_t online_policy_cpus;
+ 	struct drv_cmd cmd;
+ 	unsigned int msr;
+-	unsigned int next_state = 0;
+-	unsigned int next_perf_state = 0;
++	unsigned int next_state = 0; /* Index into freq_table */
++	unsigned int next_perf_state = 0; /* Index into perf table */
+ 	unsigned int i;
+ 	int result = 0;
+ 
+@@ -439,8 +439,8 @@ static int acpi_cpufreq_target(struct cpufreq_policy *policy,
+ 	else
+ 		cpu_set(policy->cpu, cmd.mask);
+ 
+-	freqs.old = data->freq_table[perf->state].frequency;
+-	freqs.new = data->freq_table[next_perf_state].frequency;
++	freqs.old = perf->states[perf->state].core_frequency * 1000;
++	freqs.new = data->freq_table[next_state].frequency;
+ 	for_each_cpu_mask(i, cmd.mask) {
+ 		freqs.cpu = i;
+ 		cpufreq_notify_transition(&freqs, CPUFREQ_PRECHANGE);
+@@ -677,6 +677,7 @@ static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
+ 		valid_states++;
+ 	}
+ 	data->freq_table[valid_states].frequency = CPUFREQ_TABLE_END;
++	perf->state = 0;
+ 
+ 	result = cpufreq_frequency_table_cpuinfo(policy, data->freq_table);
+ 	if (result)
+diff --git a/drivers/cpufreq/cpufreq_stats.c b/drivers/cpufreq/cpufreq_stats.c
+index 6742b1adf2c8..91ad342a6051 100644
+--- a/drivers/cpufreq/cpufreq_stats.c
++++ b/drivers/cpufreq/cpufreq_stats.c
+@@ -285,6 +285,7 @@ cpufreq_stat_notifier_trans (struct notifier_block *nb, unsigned long val,
+ 	stat = cpufreq_stats_table[freq->cpu];
+ 	if (!stat)
+ 		return 0;
++
+ 	old_index = freq_table_get_index(stat, freq->old);
+ 	new_index = freq_table_get_index(stat, freq->new);
+ 
+@@ -292,6 +293,9 @@ cpufreq_stat_notifier_trans (struct notifier_block *nb, unsigned long val,
+ 	if (old_index == new_index)
+ 		return 0;
+ 
++	if (old_index == -1 || new_index == -1)
++		return 0;
++
+ 	spin_lock(&cpufreq_stats_lock);
+ 	stat->last_index = new_index;
+ #ifdef CONFIG_CPU_FREQ_STAT_DETAILS
+

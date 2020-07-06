@@ -1,0 +1,166 @@
+commit d5884afcf36c567a713fc0ee33e905e5361f6eaf
+Author: Mickael Savinaud <savmickael@users.noreply.github.com>
+Date:   Sat Feb 16 17:20:55 2013 +0000
+
+    [trunk] add functions to avoid to use FILE* into the API (thanks winfried).
+    Update issue 120 and update issue 198
+
+diff --git a/src/lib/openjp2/cio.c b/src/lib/openjp2/cio.c
+index e6ba8362..8fce9812 100644
+--- a/src/lib/openjp2/cio.c
++++ b/src/lib/openjp2/cio.c
+@@ -195,6 +195,21 @@ void OPJ_CALLCONV opj_stream_destroy(opj_stream_t* p_stream)
+ 	}
+ }
+ 
++void OPJ_CALLCONV opj_stream_destroy_v3(opj_stream_t* p_stream)
++{
++    opj_stream_private_t* l_stream = (opj_stream_private_t*) p_stream;
++    
++    if (l_stream) {
++        FILE *fp = (FILE*)l_stream->m_user_data;
++        if(fp) 
++            fclose(fp);
++        
++        opj_free(l_stream->m_stored_data);
++        l_stream->m_stored_data = 00;
++        opj_free(l_stream);
++    }
++}
++
+ void OPJ_CALLCONV opj_stream_set_read_function(opj_stream_t* p_stream, opj_stream_read_fn p_function)
+ {
+ 	opj_stream_private_t* l_stream = (opj_stream_private_t*) p_stream;
+diff --git a/src/lib/openjp2/openjpeg.c b/src/lib/openjp2/openjpeg.c
+index 0ed7e67a..ec9746f7 100644
+--- a/src/lib/openjp2/openjpeg.c
++++ b/src/lib/openjp2/openjpeg.c
+@@ -1037,6 +1037,11 @@ opj_stream_t* OPJ_CALLCONV opj_stream_create_default_file_stream (FILE * p_file,
+ 	return opj_stream_create_file_stream(p_file,OPJ_J2K_STREAM_CHUNK_SIZE,p_is_read_stream);
+ }
+ 
++opj_stream_t* OPJ_CALLCONV opj_stream_create_default_file_stream_v3 (const char *fname, OPJ_BOOL p_is_read_stream)
++{
++    return opj_stream_create_file_stream_v3(fname, OPJ_J2K_STREAM_CHUNK_SIZE, p_is_read_stream);
++}
++
+ opj_stream_t* OPJ_CALLCONV opj_stream_create_file_stream (	FILE * p_file, 
+ 															OPJ_SIZE_T p_size, 
+ 															OPJ_BOOL p_is_read_stream)
+@@ -1052,12 +1057,49 @@ opj_stream_t* OPJ_CALLCONV opj_stream_create_file_stream (	FILE * p_file,
+ 		return NULL;
+ 	}
+ 
+-	opj_stream_set_user_data(l_stream, p_file);
+-	opj_stream_set_user_data_length(l_stream, opj_get_data_length_from_file(p_file));
+-	opj_stream_set_read_function(l_stream, (opj_stream_read_fn) opj_read_from_file);
+-	opj_stream_set_write_function(l_stream, (opj_stream_write_fn) opj_write_from_file);
+-	opj_stream_set_skip_function(l_stream, (opj_stream_skip_fn) opj_skip_from_file);
+-	opj_stream_set_seek_function(l_stream, (opj_stream_seek_fn) opj_seek_from_file);
++    opj_stream_set_user_data(l_stream, p_file);
++    opj_stream_set_user_data_length(l_stream, opj_get_data_length_from_file(p_file));
++    opj_stream_set_read_function(l_stream, (opj_stream_read_fn) opj_read_from_file);
++    opj_stream_set_write_function(l_stream, (opj_stream_write_fn) opj_write_from_file);
++    opj_stream_set_skip_function(l_stream, (opj_stream_skip_fn) opj_skip_from_file);
++    opj_stream_set_seek_function(l_stream, (opj_stream_seek_fn) opj_seek_from_file);
++    
++    return l_stream;
++}
++
++opj_stream_t* OPJ_CALLCONV opj_stream_create_file_stream_v3 (
++        const char *fname, 
++		OPJ_SIZE_T p_size, 
++        OPJ_BOOL p_is_read_stream)
++{
++    opj_stream_t* l_stream = 00;
++    FILE *p_file;
++    const char *mode;
++
++    if (! fname) {
++        return NULL;
++    }
++    
++    if(p_is_read_stream) mode = "rb"; else mode = "wb";
++
++    p_file = fopen(fname, mode);
++
++    if (! p_file) {
++	    return NULL;
++    }
++
++    l_stream = opj_stream_create(p_size,p_is_read_stream);
++    if (! l_stream) {
++        fclose(p_file);
++        return NULL;
++    }
++
++    opj_stream_set_user_data(l_stream, p_file);
++    opj_stream_set_user_data_length(l_stream, opj_get_data_length_from_file(p_file));
++    opj_stream_set_read_function(l_stream, (opj_stream_read_fn) opj_read_from_file);
++    opj_stream_set_write_function(l_stream, (opj_stream_write_fn) opj_write_from_file);
++    opj_stream_set_skip_function(l_stream, (opj_stream_skip_fn) opj_skip_from_file);
++    opj_stream_set_seek_function(l_stream, (opj_stream_seek_fn) opj_seek_from_file);
+ 
+-	return l_stream;
++    return l_stream;
+ }
+diff --git a/src/lib/openjp2/openjpeg.h b/src/lib/openjp2/openjpeg.h
+index 9a2f1073..e2657ae4 100644
+--- a/src/lib/openjp2/openjpeg.h
++++ b/src/lib/openjp2/openjpeg.h
+@@ -387,7 +387,8 @@ typedef struct opj_cparameters {
+ 	char tcp_mct;
+ 	/** Enable JPIP indexing*/
+ 	OPJ_BOOL jpip_on;
+-	/** Naive implementation of MCT restricted to a single reversible array based encoding without offset concerning all the components. */
++	/** Naive implementation of MCT restricted to a single reversible array based 
++        encoding without offset concerning all the components. */
+ 	void * mct_data;
+ } opj_cparameters_t;  
+ 
+@@ -1004,7 +1005,8 @@ OPJ_API opj_stream_t* OPJ_CALLCONV opj_stream_create(OPJ_SIZE_T p_buffer_size, O
+  * @param	p_stream	the stream to destroy.
+  */
+ OPJ_API void OPJ_CALLCONV opj_stream_destroy(opj_stream_t* p_stream);
+-
++OPJ_API void OPJ_CALLCONV opj_stream_destroy_v3(opj_stream_t* p_stream);
++ 
+ /**
+  * Sets the given function to be used as a read function.
+  * @param		p_stream	the stream to modify
+@@ -1055,15 +1057,21 @@ OPJ_API void OPJ_CALLCONV opj_stream_set_user_data_length(opj_stream_t* p_stream
+  * @param p_is_read_stream  whether the stream is a read stream (true) or not (false)
+ */
+ OPJ_API opj_stream_t* OPJ_CALLCONV opj_stream_create_default_file_stream (FILE * p_file, OPJ_BOOL p_is_read_stream);
+-
++OPJ_API opj_stream_t* OPJ_CALLCONV opj_stream_create_default_file_stream_v3 (const char *fname, OPJ_BOOL p_is_read_stream);
++ 
+ /**
+  * FIXME DOC
+  * @param p_file            the file stream to operate on
+  * @param p_buffer_size     size of the chunk used to stream
+  * @param p_is_read_stream  whether the stream is a read stream (true) or not (false)
+ */
+-OPJ_API opj_stream_t* OPJ_CALLCONV opj_stream_create_file_stream (FILE * p_file, OPJ_SIZE_T p_buffer_size, OPJ_BOOL p_is_read_stream);
+-
++OPJ_API opj_stream_t* OPJ_CALLCONV opj_stream_create_file_stream (FILE * p_file, 
++                                                                  OPJ_SIZE_T p_buffer_size,
++                                                                  OPJ_BOOL p_is_read_stream);
++OPJ_API opj_stream_t* OPJ_CALLCONV opj_stream_create_file_stream_v3 (const char *fname, 
++                                                                     OPJ_SIZE_T p_buffer_size,
++                                                                     OPJ_BOOL p_is_read_stream);
++ 
+ /* 
+ ==========================================================
+    event manager functions definitions
+@@ -1217,7 +1225,8 @@ OPJ_API OPJ_BOOL OPJ_CALLCONV opj_set_decoded_resolution_factor(opj_codec_t *p_c
+  * @param	p_codec		        the jpeg2000 codec.
+  * @param	p_tile_index		the index of the tile to write. At the moment, the tiles must be written from 0 to n-1 in sequence.
+  * @param	p_data				pointer to the data to write. Data is arranged in sequence, data_comp0, then data_comp1, then ... NO INTERLEAVING should be set.
+- * @param	p_data_size			this value os used to make sure the data being written is correct. The size must be equal to the sum for each component of tile_width * tile_height * component_size. component_size can be 1,2 or 4 bytes, depending on the precision of the given component.
++ * @param	p_data_size			this value os used to make sure the data being written is correct. The size must be equal to the sum for each component of 
++ *                              tile_width * tile_height * component_size. component_size can be 1,2 or 4 bytes, depending on the precision of the given component.
+  * @param	p_stream			the stream to write data to.
+  *
+  * @return	true if the data could be written.
+

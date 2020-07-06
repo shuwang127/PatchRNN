@@ -1,0 +1,54 @@
+commit 8b8a6e1881be8d73b7a98f84ccec61e624ec5cac
+Author: Peter Jones <pjones@redhat.com>
+Date:   Wed Feb 27 17:05:17 2013 -0800
+
+    block/partitions/efi.c: ensure that the GPT header is at least the size of the structure.
+    
+    UEFI 2.3.1D will include a change to the spec language mandating that a
+    GPT header must be greater than *or equal to* the size of the defined
+    structure.  While verifying that this would work on Linux, I discovered
+    that we're not actually checking the minimum bound at all.
+    
+    The result of this is that when we verify the checksum, it's possible that
+    on a malformed header (with header_size of 0), we won't actually verify
+    any data.
+    
+    [akpm@linux-foundation.org: fix printk warning]
+    Signed-off-by: Peter Jones <pjones@redhat.com>
+    Acked-by: Matt Fleming <matt.fleming@intel.com>
+    Cc: Jens Axboe <axboe@kernel.dk>
+    Cc: Stephen Warren <swarren@nvidia.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/block/partitions/efi.c b/block/partitions/efi.c
+index b62fb88b8711..ff5804e2f1d2 100644
+--- a/block/partitions/efi.c
++++ b/block/partitions/efi.c
+@@ -310,15 +310,23 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
+ 		goto fail;
+ 	}
+ 
+-	/* Check the GUID Partition Table header size */
++	/* Check the GUID Partition Table header size is too big */
+ 	if (le32_to_cpu((*gpt)->header_size) >
+ 			bdev_logical_block_size(state->bdev)) {
+-		pr_debug("GUID Partition Table Header size is wrong: %u > %u\n",
++		pr_debug("GUID Partition Table Header size is too large: %u > %u\n",
+ 			le32_to_cpu((*gpt)->header_size),
+ 			bdev_logical_block_size(state->bdev));
+ 		goto fail;
+ 	}
+ 
++	/* Check the GUID Partition Table header size is too small */
++	if (le32_to_cpu((*gpt)->header_size) < sizeof(gpt_header)) {
++		pr_debug("GUID Partition Table Header size is too small: %u < %zu\n",
++			le32_to_cpu((*gpt)->header_size),
++			sizeof(gpt_header));
++		goto fail;
++	}
++
+ 	/* Check the GUID Partition Table CRC */
+ 	origcrc = le32_to_cpu((*gpt)->header_crc32);
+ 	(*gpt)->header_crc32 = 0;
+

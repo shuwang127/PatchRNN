@@ -1,0 +1,115 @@
+commit 6a35c45f890dc18c5527ac501b308058118f20e7
+Author: Philipp Reisner <philipp.reisner@linbit.com>
+Date:   Mon Jan 17 20:27:30 2011 +0100
+
+    drbd: Ensure that an epoch contains only requests of one kind
+    
+    The assert in drbd_req.c:755 forces us to have only requests of
+    one kind in an epoch. The two kinds we distinguish here are:
+    local-only or mirrored.
+    
+    Signed-off-by: Philipp Reisner <philipp.reisner@linbit.com>
+    Signed-off-by: Lars Ellenberg <lars.ellenberg@linbit.com>
+
+diff --git a/drivers/block/drbd/drbd_main.c b/drivers/block/drbd/drbd_main.c
+index 1061b9fff2b0..34ee8e44a751 100644
+--- a/drivers/block/drbd/drbd_main.c
++++ b/drivers/block/drbd/drbd_main.c
+@@ -1261,9 +1261,14 @@ __drbd_set_state(struct drbd_conf *mdev, union drbd_state ns,
+ 	if (os.conn < C_CONNECTED && ns.conn >= C_CONNECTED)
+ 		drbd_resume_al(mdev);
+ 
+-	if (os.conn == C_AHEAD && ns.conn != C_AHEAD)
++	/* Start a new epoch in case we start to mirror write requests */
++	if (!drbd_should_do_remote(os) && drbd_should_do_remote(ns))
+ 		tl_forget(mdev);
+ 
++	/* Do not add local-only requests to an epoch with mirrored requests */
++	if (drbd_should_do_remote(os) && !drbd_should_do_remote(ns))
++		set_bit(CREATE_BARRIER, &mdev->flags);
++
+ 	ascw = kmalloc(sizeof(*ascw), GFP_ATOMIC);
+ 	if (ascw) {
+ 		ascw->os = os;
+diff --git a/drivers/block/drbd/drbd_req.c b/drivers/block/drbd/drbd_req.c
+index 6f9d1bfcca58..336937a14d3f 100644
+--- a/drivers/block/drbd/drbd_req.c
++++ b/drivers/block/drbd/drbd_req.c
+@@ -762,27 +762,6 @@ static int drbd_may_do_local_read(struct drbd_conf *mdev, sector_t sector, int s
+ 	return 0 == drbd_bm_count_bits(mdev, sbnr, ebnr);
+ }
+ 
+-static bool drbd_should_do_remote(struct drbd_conf *mdev)
+-{
+-	union drbd_state s = mdev->state;
+-
+-	return s.pdsk == D_UP_TO_DATE ||
+-		(s.pdsk >= D_INCONSISTENT &&
+-		 s.conn >= C_WF_BITMAP_T &&
+-		 s.conn < C_AHEAD);
+-	/* Before proto 96 that was >= CONNECTED instead of >= C_WF_BITMAP_T.
+-	   That is equivalent since before 96 IO was frozen in the C_WF_BITMAP*
+-	   states. */
+-}
+-static bool drbd_should_send_oos(struct drbd_conf *mdev)
+-{
+-	union drbd_state s = mdev->state;
+-
+-	return s.conn == C_AHEAD || s.conn == C_WF_BITMAP_S;
+-	/* pdsk = D_INCONSISTENT as a consequence. Protocol 96 check not necessary
+-	   since we enter state C_AHEAD only if proto >= 96 */
+-}
+-
+ static int drbd_make_request_common(struct drbd_conf *mdev, struct bio *bio, unsigned long start_time)
+ {
+ 	const int rw = bio_rw(bio);
+@@ -854,8 +833,8 @@ static int drbd_make_request_common(struct drbd_conf *mdev, struct bio *bio, uns
+ 		drbd_al_begin_io(mdev, sector);
+ 	}
+ 
+-	remote = remote && drbd_should_do_remote(mdev);
+-	send_oos = rw == WRITE && drbd_should_send_oos(mdev);
++	remote = remote && drbd_should_do_remote(mdev->state);
++	send_oos = rw == WRITE && drbd_should_send_oos(mdev->state);
+ 	D_ASSERT(!(remote && send_oos));
+ 
+ 	if (!(local || remote) && !is_susp(mdev->state)) {
+@@ -896,8 +875,8 @@ static int drbd_make_request_common(struct drbd_conf *mdev, struct bio *bio, uns
+ 	}
+ 
+ 	if (remote || send_oos) {
+-		remote = drbd_should_do_remote(mdev);
+-		send_oos = rw == WRITE && drbd_should_send_oos(mdev);
++		remote = drbd_should_do_remote(mdev->state);
++		send_oos = rw == WRITE && drbd_should_send_oos(mdev->state);
+ 		D_ASSERT(!(remote && send_oos));
+ 
+ 		if (!(remote || send_oos))
+diff --git a/drivers/block/drbd/drbd_req.h b/drivers/block/drbd/drbd_req.h
+index 077c47b1e9d7..32c1f2a31266 100644
+--- a/drivers/block/drbd/drbd_req.h
++++ b/drivers/block/drbd/drbd_req.h
+@@ -360,4 +360,22 @@ static inline int req_mod(struct drbd_request *req,
+ 
+ 	return rv;
+ }
++
++static inline bool drbd_should_do_remote(union drbd_state s)
++{
++	return s.pdsk == D_UP_TO_DATE ||
++		(s.pdsk >= D_INCONSISTENT &&
++		 s.conn >= C_WF_BITMAP_T &&
++		 s.conn < C_AHEAD);
++	/* Before proto 96 that was >= CONNECTED instead of >= C_WF_BITMAP_T.
++	   That is equivalent since before 96 IO was frozen in the C_WF_BITMAP*
++	   states. */
++}
++static inline bool drbd_should_send_oos(union drbd_state s)
++{
++	return s.conn == C_AHEAD || s.conn == C_WF_BITMAP_S;
++	/* pdsk = D_INCONSISTENT as a consequence. Protocol 96 check not necessary
++	   since we enter state C_AHEAD only if proto >= 96 */
++}
++
+ #endif
+

@@ -1,0 +1,140 @@
+commit 4a142059750e1767f19f6d42da7c1ce4316107eb
+Author: Jeremy Harris <jgh146exb@wizmail.org>
+Date:   Sat Nov 29 16:28:15 2014 +0000
+
+    Compiler quietening
+
+diff --git a/src/src/dns.c b/src/src/dns.c
+index 56f81de7..f492613c 100644
+--- a/src/src/dns.c
++++ b/src/src/dns.c
+@@ -443,7 +443,7 @@ Returns:    bool indicating presence of AD bit
+ */
+ 
+ BOOL
+-dns_is_secure(const dns_answer *dnsa)
++dns_is_secure(const dns_answer * dnsa)
+ {
+ #ifdef DISABLE_DNSSEC
+ DEBUG(D_dns)
+@@ -455,6 +455,13 @@ return h->ad ? TRUE : FALSE;
+ #endif
+ }
+ 
++static void
++dns_set_insecure(dns_answer * dnsa)
++{
++HEADER * h = (HEADER *)dnsa->answer;
++h->ad = 0;
++}
++
+ 
+ 
+ 
+@@ -812,7 +819,7 @@ for (i = 0; i < 10; i++)
+   if (type_rr.data != NULL)
+     {
+     if (!secure_so_far)	/* mark insecure if any element of CNAME chain was */
+-      ((HEADER *)dnsa->answer)->ad = 0;
++      dns_set_insecure(dnsa);
+     return DNS_SUCCEED;
+     }
+ 
+@@ -1023,7 +1030,7 @@ if (type == T_CSA)
+       /* Extract the numerical SRV fields (p is incremented) */
+       p = rr->data;
+       GETSHORT(priority, p);
+-      GETSHORT(weight, p);
++      GETSHORT(weight, p);	weight = weight; /* compiler quietening */
+       GETSHORT(port, p);
+ 
+       /* Check the CSA version number */
+diff --git a/src/src/expand.c b/src/src/expand.c
+index ae901d63..a77363c6 100644
+--- a/src/src/expand.c
++++ b/src/src/expand.c
+@@ -2014,7 +2014,7 @@ static int
+ eval_acl(uschar ** sub, int nsub, uschar ** user_msgp)
+ {
+ int i;
+-uschar *tmp;
++uschar * tmp = NULL;
+ int sav_narg = acl_narg;
+ int ret;
+ extern int acl_where;
+diff --git a/src/src/receive.c b/src/src/receive.c
+index f27dc425..df5441b6 100644
+--- a/src/src/receive.c
++++ b/src/src/receive.c
+@@ -1011,29 +1011,19 @@ if (acl_removed_headers != NULL)
+   {
+   DEBUG(D_receive|D_acl) debug_printf(">>Headers removed by %s ACL:\n", acl_name);
+ 
+-  for (h = header_list; h != NULL; h = h->next)
++  for (h = header_list; h != NULL; h = h->next) if (h->type != htype_old)
+     {
+-    uschar *list;
+-    BOOL include_header;
+-
+-    if (h->type == htype_old) continue;
+-
+-    include_header = TRUE;
+-    list = acl_removed_headers;
+-
++    uschar * list = acl_removed_headers;
+     int sep = ':';         /* This is specified as a colon-separated list */
+     uschar *s;
+     uschar buffer[128];
+-    while ((s = string_nextinlist(&list, &sep, buffer, sizeof(buffer)))
+-            != NULL)
+-      {
+-      int len = Ustrlen(s);
+-      if (header_testname(h, s, len, FALSE))
++
++    while ((s = string_nextinlist(&list, &sep, buffer, sizeof(buffer))))
++      if (header_testname(h, s, Ustrlen(s), FALSE))
+ 	{
+ 	h->type = htype_old;
+         DEBUG(D_receive|D_acl) debug_printf("  %s", h->text);
+ 	}
+-      }
+     }
+   acl_removed_headers = NULL;
+   DEBUG(D_receive|D_acl) debug_printf(">>\n");
+@@ -1242,7 +1232,6 @@ if (Ustrlen(rfc822_file_path) > 0)
+ if (rc == OK)
+   {
+   uschar temp_path[1024];
+-  int n;
+   struct dirent *entry;
+   DIR *tempdir;
+ 
+@@ -1250,7 +1239,6 @@ if (rc == OK)
+     message_id);
+ 
+   tempdir = opendir(CS temp_path);
+-  n = 0;
+   do
+     {
+     entry = readdir(tempdir);
+diff --git a/src/src/sieve.c b/src/src/sieve.c
+index 1303646a..9261b46a 100644
+--- a/src/src/sieve.c
++++ b/src/src/sieve.c
+@@ -2970,7 +2970,6 @@ while (*filter->pc)
+     int m;
+     struct String from;
+     struct String importance;
+-    struct String *options;
+     struct String message;
+     struct String method;
+     struct Notification *already;
+@@ -2991,7 +2990,6 @@ while (*filter->pc)
+     from.length=-1;
+     importance.character=(uschar*)0;
+     importance.length=-1;
+-    options=(struct String*)0;
+     message.character=(uschar*)0;
+     message.length=-1;
+     recipient=NULL;
+

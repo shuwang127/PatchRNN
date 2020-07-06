@@ -1,0 +1,119 @@
+commit 41ef56e61153d7bd27d34a634633bb51b1c5988d
+Author: Anthony Liguori <aliguori@us.ibm.com>
+Date:   Wed Jun 2 14:55:25 2010 -0500
+
+    migration: respect exit status with exec:
+    
+    This patch makes sure that if the exec: process exits with a non-zero return
+    status, we treat the migration as failed.
+    
+    This fixes https://bugs.launchpad.net/qemu/+bug/391879
+    
+    Signed-off-by: Anthony Liguori <aliguori@us.ibm.com>
+
+diff --git a/migration-exec.c b/migration-exec.c
+index 54358271c5..93bde62cd1 100644
+--- a/migration-exec.c
++++ b/migration-exec.c
+@@ -43,13 +43,21 @@ static int file_write(FdMigrationState *s, const void * buf, size_t size)
+ 
+ static int exec_close(FdMigrationState *s)
+ {
++    int ret = 0;
+     DPRINTF("exec_close\n");
+     if (s->opaque) {
+-        qemu_fclose(s->opaque);
++        ret = qemu_fclose(s->opaque);
+         s->opaque = NULL;
+         s->fd = -1;
++        if (ret != -1 &&
++            WIFEXITED(ret)
++            && WEXITSTATUS(ret) == 0) {
++            ret = 0;
++        } else {
++            ret = -1;
++        }
+     }
+-    return 0;
++    return ret;
+ }
+ 
+ MigrationState *exec_start_outgoing_migration(Monitor *mon,
+diff --git a/migration.c b/migration.c
+index 706fe55767..fbf23399e5 100644
+--- a/migration.c
++++ b/migration.c
+@@ -252,13 +252,17 @@ void migrate_fd_error(FdMigrationState *s)
+     migrate_fd_cleanup(s);
+ }
+ 
+-void migrate_fd_cleanup(FdMigrationState *s)
++int migrate_fd_cleanup(FdMigrationState *s)
+ {
++    int ret = 0;
++
+     qemu_set_fd_handler2(s->fd, NULL, NULL, NULL, NULL);
+ 
+     if (s->file) {
+         DPRINTF("closing file\n");
+-        qemu_fclose(s->file);
++        if (qemu_fclose(s->file) != 0) {
++            ret = -1;
++        }
+         s->file = NULL;
+     }
+ 
+@@ -271,6 +275,8 @@ void migrate_fd_cleanup(FdMigrationState *s)
+     }
+ 
+     s->fd = -1;
++
++    return ret;
+ }
+ 
+ void migrate_fd_put_notify(void *opaque)
+@@ -349,7 +355,12 @@ void migrate_fd_put_ready(void *opaque)
+         } else {
+             state = MIG_STATE_COMPLETED;
+         }
+-        migrate_fd_cleanup(s);
++        if (migrate_fd_cleanup(s) < 0) {
++            if (old_vm_running) {
++                vm_start();
++            }
++            state = MIG_STATE_ERROR;
++        }
+         s->state = state;
+     }
+ }
+diff --git a/migration.h b/migration.h
+index 385423f11d..97eef4a0e5 100644
+--- a/migration.h
++++ b/migration.h
+@@ -107,7 +107,7 @@ void migrate_fd_monitor_suspend(FdMigrationState *s, Monitor *mon);
+ 
+ void migrate_fd_error(FdMigrationState *s);
+ 
+-void migrate_fd_cleanup(FdMigrationState *s);
++int migrate_fd_cleanup(FdMigrationState *s);
+ 
+ void migrate_fd_put_notify(void *opaque);
+ 
+diff --git a/savevm.c b/savevm.c
+index dc20390b8f..af92ba2982 100644
+--- a/savevm.c
++++ b/savevm.c
+@@ -235,9 +235,10 @@ static int stdio_get_buffer(void *opaque, uint8_t *buf, int64_t pos, int size)
+ static int stdio_pclose(void *opaque)
+ {
+     QEMUFileStdio *s = opaque;
+-    pclose(s->stdio_file);
++    int ret;
++    ret = pclose(s->stdio_file);
+     qemu_free(s);
+-    return 0;
++    return ret;
+ }
+ 
+ static int stdio_fclose(void *opaque)
+

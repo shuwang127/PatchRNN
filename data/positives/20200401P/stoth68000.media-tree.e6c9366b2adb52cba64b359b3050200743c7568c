@@ -1,0 +1,45 @@
+commit e6c9366b2adb52cba64b359b3050200743c7568c
+Author: Hugh Dickins <hughd@google.com>
+Date:   Fri May 20 15:47:33 2011 -0700
+
+    tmpfs: fix highmem swapoff crash regression
+    
+    Commit 778dd893ae78 ("tmpfs: fix race between umount and swapoff")
+    forgot the new rules for strict atomic kmap nesting, causing
+    
+      WARNING: at arch/x86/mm/highmem_32.c:81
+    
+    from __kunmap_atomic(), then
+    
+      BUG: unable to handle kernel paging request at fffb9000
+    
+    from shmem_swp_set() when shmem_unuse_inode() is handling swapoff with
+    highmem in use.  My disgrace again.
+    
+    See
+      https://bugzilla.kernel.org/show_bug.cgi?id=35352
+    
+    Reported-by: Witold Baryluk <baryluk@smp.if.uj.edu.pl>
+    Signed-off-by: Hugh Dickins <hughd@google.com>
+    Cc: stable@kernel.org
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/shmem.c b/mm/shmem.c
+index dfc7069102ee..ba4ad28b7db6 100644
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -916,11 +916,12 @@ static int shmem_unuse_inode(struct shmem_inode_info *info, swp_entry_t entry, s
+ 			if (size > ENTRIES_PER_PAGE)
+ 				size = ENTRIES_PER_PAGE;
+ 			offset = shmem_find_swp(entry, ptr, ptr+size);
++			shmem_swp_unmap(ptr);
+ 			if (offset >= 0) {
+ 				shmem_dir_unmap(dir);
++				ptr = shmem_swp_map(subdir);
+ 				goto found;
+ 			}
+-			shmem_swp_unmap(ptr);
+ 		}
+ 	}
+ lost1:
+

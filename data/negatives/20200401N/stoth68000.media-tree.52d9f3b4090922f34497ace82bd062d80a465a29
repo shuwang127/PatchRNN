@@ -1,0 +1,112 @@
+commit 52d9f3b4090922f34497ace82bd062d80a465a29
+Author: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date:   Tue Oct 16 23:25:44 2007 -0700
+
+    lib: percpu_counter_sum_positive
+    
+     s/percpu_counter_sum/&_positive/
+    
+    Because its consitent with percpu_counter_read*
+    
+    Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/ext3/super.c b/fs/ext3/super.c
+index 9537316a0714..c5a52c9775a0 100644
+--- a/fs/ext3/super.c
++++ b/fs/ext3/super.c
+@@ -2472,13 +2472,13 @@ static int ext3_statfs (struct dentry * dentry, struct kstatfs * buf)
+ 	buf->f_type = EXT3_SUPER_MAGIC;
+ 	buf->f_bsize = sb->s_blocksize;
+ 	buf->f_blocks = le32_to_cpu(es->s_blocks_count) - sbi->s_overhead_last;
+-	buf->f_bfree = percpu_counter_sum(&sbi->s_freeblocks_counter);
++	buf->f_bfree = percpu_counter_sum_positive(&sbi->s_freeblocks_counter);
+ 	es->s_free_blocks_count = cpu_to_le32(buf->f_bfree);
+ 	buf->f_bavail = buf->f_bfree - le32_to_cpu(es->s_r_blocks_count);
+ 	if (buf->f_bfree < le32_to_cpu(es->s_r_blocks_count))
+ 		buf->f_bavail = 0;
+ 	buf->f_files = le32_to_cpu(es->s_inodes_count);
+-	buf->f_ffree = percpu_counter_sum(&sbi->s_freeinodes_counter);
++	buf->f_ffree = percpu_counter_sum_positive(&sbi->s_freeinodes_counter);
+ 	es->s_free_inodes_count = cpu_to_le32(buf->f_ffree);
+ 	buf->f_namelen = EXT3_NAME_LEN;
+ 	fsid = le64_to_cpup((void *)es->s_uuid) ^
+diff --git a/fs/ext4/super.c b/fs/ext4/super.c
+index 3c1397fa83df..1814d4b8ff1f 100644
+--- a/fs/ext4/super.c
++++ b/fs/ext4/super.c
+@@ -2592,13 +2592,13 @@ static int ext4_statfs (struct dentry * dentry, struct kstatfs * buf)
+ 	buf->f_type = EXT4_SUPER_MAGIC;
+ 	buf->f_bsize = sb->s_blocksize;
+ 	buf->f_blocks = ext4_blocks_count(es) - sbi->s_overhead_last;
+-	buf->f_bfree = percpu_counter_sum(&sbi->s_freeblocks_counter);
++	buf->f_bfree = percpu_counter_sum_positive(&sbi->s_freeblocks_counter);
+ 	es->s_free_blocks_count = cpu_to_le32(buf->f_bfree);
+ 	buf->f_bavail = buf->f_bfree - ext4_r_blocks_count(es);
+ 	if (buf->f_bfree < ext4_r_blocks_count(es))
+ 		buf->f_bavail = 0;
+ 	buf->f_files = le32_to_cpu(es->s_inodes_count);
+-	buf->f_ffree = percpu_counter_sum(&sbi->s_freeinodes_counter);
++	buf->f_ffree = percpu_counter_sum_positive(&sbi->s_freeinodes_counter);
+ 	es->s_free_inodes_count = cpu_to_le32(buf->f_ffree);
+ 	buf->f_namelen = EXT4_NAME_LEN;
+ 	fsid = le64_to_cpup((void *)es->s_uuid) ^
+diff --git a/fs/file_table.c b/fs/file_table.c
+index d17fd691b832..287fdce7f767 100644
+--- a/fs/file_table.c
++++ b/fs/file_table.c
+@@ -98,7 +98,7 @@ struct file *get_empty_filp(void)
+ 		 * percpu_counters are inaccurate.  Do an expensive check before
+ 		 * we go and fail.
+ 		 */
+-		if (percpu_counter_sum(&nr_files) >= files_stat.max_files)
++		if (percpu_counter_sum_positive(&nr_files) >= files_stat.max_files)
+ 			goto over;
+ 	}
+ 
+diff --git a/include/linux/percpu_counter.h b/include/linux/percpu_counter.h
+index 2da92e8ce3dd..dd89eb978393 100644
+--- a/include/linux/percpu_counter.h
++++ b/include/linux/percpu_counter.h
+@@ -34,7 +34,7 @@ void percpu_counter_init(struct percpu_counter *fbc, s64 amount);
+ void percpu_counter_destroy(struct percpu_counter *fbc);
+ void percpu_counter_set(struct percpu_counter *fbc, s64 amount);
+ void __percpu_counter_add(struct percpu_counter *fbc, s64 amount, s32 batch);
+-s64 percpu_counter_sum(struct percpu_counter *fbc);
++s64 percpu_counter_sum_positive(struct percpu_counter *fbc);
+ 
+ static inline void percpu_counter_add(struct percpu_counter *fbc, s64 amount)
+ {
+@@ -102,7 +102,7 @@ static inline s64 percpu_counter_read_positive(struct percpu_counter *fbc)
+ 	return fbc->count;
+ }
+ 
+-static inline s64 percpu_counter_sum(struct percpu_counter *fbc)
++static inline s64 percpu_counter_sum_positive(struct percpu_counter *fbc)
+ {
+ 	return percpu_counter_read_positive(fbc);
+ }
+diff --git a/lib/percpu_counter.c b/lib/percpu_counter.c
+index c9708db9b8d3..b0d80ea22a33 100644
+--- a/lib/percpu_counter.c
++++ b/lib/percpu_counter.c
+@@ -52,7 +52,7 @@ EXPORT_SYMBOL(__percpu_counter_add);
+  * Add up all the per-cpu counts, return the result.  This is a more accurate
+  * but much slower version of percpu_counter_read_positive()
+  */
+-s64 percpu_counter_sum(struct percpu_counter *fbc)
++s64 percpu_counter_sum_positive(struct percpu_counter *fbc)
+ {
+ 	s64 ret;
+ 	int cpu;
+@@ -66,7 +66,7 @@ s64 percpu_counter_sum(struct percpu_counter *fbc)
+ 	spin_unlock(&fbc->lock);
+ 	return ret < 0 ? 0 : ret;
+ }
+-EXPORT_SYMBOL(percpu_counter_sum);
++EXPORT_SYMBOL(percpu_counter_sum_positive);
+ 
+ void percpu_counter_init(struct percpu_counter *fbc, s64 amount)
+ {
+

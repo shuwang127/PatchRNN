@@ -1,0 +1,49 @@
+commit 2f388b93a147258f9dbc83ebe63365edac4aa7a2
+Author: Alberto Garcia <berto@igalia.com>
+Date:   Mon Jun 15 18:41:15 2015 +0300
+
+    throttle: Check current timers before updating any_timer_armed[]
+    
+    Calling throttle_group_config() cancels all timers from a particular
+    BlockDriverState, so any_timer_armed[] should be updated accordingly.
+    
+    However, with the current code it may happen that a timer is armed in
+    a different BlockDriverState from the same group, so any_timer_armed[]
+    would be set to false in a situation where there is still a timer
+    armed.
+    
+    The consequence is that we might end up with two timers armed. This
+    should not have any noticeable impact however, since all accesses to
+    the ThrottleGroup are protected by a lock, and the situation would
+    become normal again shortly thereafter as soon as all timers have been
+    fired.
+    
+    The correct way to solve this is to check that we're actually
+    cancelling a timer before updating any_timer_armed[].
+    
+    Signed-off-by: Alberto Garcia <berto@igalia.com>
+    Message-id: 1434382875-3998-1-git-send-email-berto@igalia.com
+    Signed-off-by: Stefan Hajnoczi <stefanha@redhat.com>
+
+diff --git a/block/throttle-groups.c b/block/throttle-groups.c
+index efc462fbc5..1abc6fcaea 100644
+--- a/block/throttle-groups.c
++++ b/block/throttle-groups.c
+@@ -324,9 +324,14 @@ void throttle_group_config(BlockDriverState *bs, ThrottleConfig *cfg)
+     ThrottleState *ts = bs->throttle_state;
+     ThrottleGroup *tg = container_of(ts, ThrottleGroup, ts);
+     qemu_mutex_lock(&tg->lock);
+-    throttle_config(ts, tt, cfg);
+     /* throttle_config() cancels the timers */
+-    tg->any_timer_armed[0] = tg->any_timer_armed[1] = false;
++    if (timer_pending(tt->timers[0])) {
++        tg->any_timer_armed[0] = false;
++    }
++    if (timer_pending(tt->timers[1])) {
++        tg->any_timer_armed[1] = false;
++    }
++    throttle_config(ts, tt, cfg);
+     qemu_mutex_unlock(&tg->lock);
+ }
+ 
+

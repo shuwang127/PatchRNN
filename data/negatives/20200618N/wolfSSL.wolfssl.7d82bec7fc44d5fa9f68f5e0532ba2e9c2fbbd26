@@ -1,0 +1,249 @@
+commit 7d82bec7fc44d5fa9f68f5e0532ba2e9c2fbbd26
+Author: toddouska <todd@wolfssl.com>
+Date:   Tue Mar 26 18:16:15 2013 -0700
+
+    do rabbit/hc128 alignment at crypto layer for non intel
+
+diff --git a/ctaocrypt/src/hc128.c b/ctaocrypt/src/hc128.c
+index 305f5c3c..cb13f708 100644
+--- a/ctaocrypt/src/hc128.c
++++ b/ctaocrypt/src/hc128.c
+@@ -26,6 +26,8 @@
+ #ifdef HAVE_HC128
+ 
+ #include <cyassl/ctaocrypt/hc128.h>
++#include <cyassl/ctaocrypt/error.h>
++#include <cyassl/ctaocrypt/logging.h>
+ #ifdef NO_INLINE
+     #include <cyassl/ctaocrypt/hc128.h>
+ #else
+@@ -259,7 +261,7 @@ static void Hc128_SetIV(HC128* ctx, const byte* iv)
+ }
+ 
+ 
+-int Hc128_SetKey(HC128* ctx, const byte* key, const byte* iv)
++static INLINE int DoKey(HC128* ctx, const byte* key, const byte* iv)
+ { 
+   word32 i;  
+ 
+@@ -275,8 +277,31 @@ int Hc128_SetKey(HC128* ctx, const byte* key, const byte* iv)
+ }
+ 
+ 
++/* Key setup */
++int Hc128_SetKey(HC128* ctx, const byte* key, const byte* iv)
++{
++#ifdef XSTREAM_ALIGN
++    if ((word)key % 4 || (word)iv % 4) {
++        int alignKey[4];
++        int alignIv[4];
++
++        CYASSL_MSG("Hc128SetKey unaligned key/iv");
++
++        XMEMCPY(alignKey, key, sizeof(alignKey));
++        XMEMCPY(alignIv,  iv,  sizeof(alignIv));
++
++        return DoKey(ctx, (const byte*)alignKey, (const byte*)alignIv);
++    }
++#endif /* XSTREAM_ALIGN */
++
++    return DoKey(ctx, key, iv);
++}
++
++
++
+ /* The following defines the encryption of data stream */
+-int Hc128_Process(HC128* ctx, byte* output, const byte* input, word32 msglen)
++static INLINE int DoProcess(HC128* ctx, byte* output, const byte* input,
++                            word32 msglen)
+ {
+   word32 i, keystream[16];
+ 
+@@ -324,6 +349,35 @@ int Hc128_Process(HC128* ctx, byte* output, const byte* input, word32 msglen)
+ }
+ 
+ 
++/* Encrypt/decrypt a message of any size */
++int Hc128_Process(HC128* ctx, byte* output, const byte* input, word32 msglen)
++{
++#ifdef XSTREAM_ALIGN
++    if ((word)input % 4 || (word)output % 4) {
++        #ifndef NO_CYASSL_ALLOC_ALIGN
++            byte* tmp;
++            CYASSL_MSG("Hc128Process unaligned");
++
++            tmp = (byte*)XMALLOC(msglen, NULL, DYNAMIC_TYPE_TMP_BUFFER);
++            if (tmp == NULL) return MEMORY_E;
++
++            XMEMCPY(tmp, input, msglen);
++            DoProcess(ctx, tmp, tmp, msglen);
++            XMEMCPY(output, tmp, msglen);
++
++            XFREE(tmp, NULL, DYNAMIC_TYPE_TMP_BUFFER);
++
++            return 0;
++        #else
++            return BAD_ALIGN_E;
++        #endif
++    }
++#endif /* XSTREAM_ALIGN */
++
++    return DoProcess(ctx, output, input, msglen);
++}
++
++
+ #else  /* HAVE_HC128 */
+ 
+ 
+diff --git a/ctaocrypt/src/rabbit.c b/ctaocrypt/src/rabbit.c
+index e36ae6be..e0f26586 100644
+--- a/ctaocrypt/src/rabbit.c
++++ b/ctaocrypt/src/rabbit.c
+@@ -26,6 +26,8 @@
+ #ifndef NO_RABBIT
+ 
+ #include <cyassl/ctaocrypt/rabbit.h>
++#include <cyassl/ctaocrypt/error.h>
++#include <cyassl/ctaocrypt/logging.h>
+ #ifdef NO_INLINE
+     #include <cyassl/ctaocrypt/misc.h>
+ #else
+@@ -133,7 +135,7 @@ static void RabbitSetIV(Rabbit* ctx, const byte* iv)
+ 
+ 
+ /* Key setup */
+-int RabbitSetKey(Rabbit* ctx, const byte* key, const byte* iv)
++static INLINE int DoKey(Rabbit* ctx, const byte* key, const byte* iv)
+ {
+     /* Temporary variables */
+     word32 k0, k1, k2, k3, i;
+@@ -188,10 +190,34 @@ int RabbitSetKey(Rabbit* ctx, const byte* key, const byte* iv)
+ }
+ 
+ 
+-/* Encrypt/decrypt a message of any size */
+-int RabbitProcess(Rabbit* ctx, byte* output, const byte* input, word32 msglen)
++/* Key setup */
++int RabbitSetKey(Rabbit* ctx, const byte* key, const byte* iv)
+ {
++#ifdef XSTREAM_ALIGN
++    if ((word)key % 4 || (iv && (word)iv % 4)) {
++        int alignKey[4];
++        int alignIv[2];
++
++        CYASSL_MSG("RabbitSetKey unaligned key/iv");
++
++        XMEMCPY(alignKey, key, sizeof(alignKey));
++        if (iv) {
++            XMEMCPY(alignIv,  iv,  sizeof(alignIv));
++            iv = (const byte*)alignIv;
++        }
+ 
++        return DoKey(ctx, (const byte*)alignKey, iv);
++    }
++#endif /* XSTREAM_ALIGN */
++
++    return DoKey(ctx, key, iv);
++}
++
++
++/* Encrypt/decrypt a message of any size */
++static INLINE int DoProcess(Rabbit* ctx, byte* output, const byte* input,
++                            word32 msglen)
++{
+     /* Encrypt/decrypt all full blocks */
+     while (msglen >= 16) {
+         /* Iterate the system */
+@@ -246,5 +272,33 @@ int RabbitProcess(Rabbit* ctx, byte* output, const byte* input, word32 msglen)
+ }
+ 
+ 
++/* Encrypt/decrypt a message of any size */
++int RabbitProcess(Rabbit* ctx, byte* output, const byte* input, word32 msglen)
++{
++#ifdef XSTREAM_ALIGN
++    if ((word)input % 4 || (word)output % 4) {
++        #ifndef NO_CYASSL_ALLOC_ALIGN
++            byte* tmp;
++            CYASSL_MSG("RabbitProcess unaligned");
++
++            tmp = (byte*)XMALLOC(msglen, NULL, DYNAMIC_TYPE_TMP_BUFFER);
++            if (tmp == NULL) return MEMORY_E;
++
++            XMEMCPY(tmp, input, msglen);
++            DoProcess(ctx, tmp, tmp, msglen);
++            XMEMCPY(output, tmp, msglen);
++
++            XFREE(tmp, NULL, DYNAMIC_TYPE_TMP_BUFFER);
++
++            return 0;
++        #else
++            return BAD_ALIGN_E;
++        #endif
++    }
++#endif /* XSTREAM_ALIGN */
++
++    return DoProcess(ctx, output, input, msglen);
++}
++
+ 
+ #endif /* NO_RABBIT */
+diff --git a/src/internal.c b/src/internal.c
+index 5df662ca..7bb00284 100644
+--- a/src/internal.c
++++ b/src/internal.c
+@@ -3520,43 +3520,13 @@ static INLINE int Encrypt(CYASSL* ssl, byte* out, const byte* input, word32 sz)
+ 
+         #ifdef HAVE_HC128
+             case hc128:
+-                #ifdef XSTREAM_ALIGNMENT
+-                if ((word)input % 4) {
+-                    int   hcRet;
+-                    byte* tmp = (byte*)XMALLOC(sz, ssl->heap,
+-                                               DYNAMIC_TYPE_TMP_BUFFER);
+-                    if (tmp == NULL) return MEMORY_E;
+-                    XMEMCPY(tmp, input, sz);
+-                    ret = Hc128_Process(ssl->encrypt.hc128, tmp, tmp, sz);
+-                    XMEMCPY(out, tmp, sz);
+-                    XFREE(tmp, ssl->heap, DYNAMIC_TYPE_TMP_BUFFER);
+-
+-                    return ret;
+-                    break;
+-                }
+-                #endif
+                 return Hc128_Process(ssl->encrypt.hc128, out, input, sz);
+                 break;
+         #endif
+ 
+         #ifdef BUILD_RABBIT
+             case rabbit:
+-                #ifdef XSTREAM_ALIGNMENT
+-                if ((word)input % 4) {
+-                    int rabRet;
+-                    byte* tmp = (byte*)XMALLOC(sz, ssl->heap,
+-                                               DYNAMIC_TYPE_TMP_BUFFER);
+-                    if (tmp == NULL) return MEMORY_E;
+-                    XMEMCPY(tmp, input, sz);
+-                    rabRet = RabbitProcess(ssl->encrypt.rabbit, tmp, tmp, sz);
+-                    XMEMCPY(out, tmp, sz);
+-                    XFREE(tmp, ssl->heap, DYNAMIC_TYPE_TMP_BUFFER);
+-
+-                    return ret;
+-                    break;
+-                }
+-                #endif
+-                RabbitProcess(ssl->encrypt.rabbit, out, input, sz);
++                return RabbitProcess(ssl->encrypt.rabbit, out, input, sz);
+                 break;
+         #endif
+ 
+@@ -3694,7 +3664,7 @@ static INLINE int Decrypt(CYASSL* ssl, byte* plain, const byte* input,
+ 
+         #ifdef BUILD_RABBIT
+             case rabbit:
+-                RabbitProcess(ssl->decrypt.rabbit, plain, input, sz);
++                return RabbitProcess(ssl->decrypt.rabbit, plain, input, sz);
+                 break;
+         #endif
+ 
+

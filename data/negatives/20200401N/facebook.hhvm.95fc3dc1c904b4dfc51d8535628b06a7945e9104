@@ -1,0 +1,32 @@
+commit 95fc3dc1c904b4dfc51d8535628b06a7945e9104
+Author: jan <jan@fb.com>
+Date:   Tue Mar 5 16:49:56 2013 -0800
+
+    Use guard to make sure state is restored correctly
+    
+    If an internal HPHP exception is thrown in a continuation executed by
+    ext_asio, m_current pointer was not reset and resources were not cleaned
+    up. This doesn't matter that much in prod, but when used in debug mode,
+    an assertion was hit.
+
+diff --git a/hphp/runtime/ext/asio/asio_context.cpp b/hphp/runtime/ext/asio/asio_context.cpp
+index cb3817a19d..efe1ca8d4a 100644
+--- a/hphp/runtime/ext/asio/asio_context.cpp
++++ b/hphp/runtime/ext/asio/asio_context.cpp
+@@ -79,9 +79,13 @@ void AsioContext::runUntil(c_WaitableWaitHandle* wait_handle) {
+       auto current = m_queue_ready.front();
+       m_queue_ready.pop();
+       m_current = current;
++
++      auto run_finished_guard = folly::makeGuard([&] {
++        m_current = nullptr;
++        decRefObj(current);
++      });
++
+       m_current->run();
+-      m_current = nullptr;
+-      decRefObj(current);
+ 
+       if (wait_handle->isFinished()) {
+         return;
+

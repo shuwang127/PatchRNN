@@ -1,0 +1,72 @@
+commit e77e6f3be93763ef88ccbaa9e0ebda5360d92f7c
+Author: Steve French <sfrench@us.ibm.com>
+Date:   Sun Mar 5 03:39:55 2006 +0000
+
+    [CIFS] Always match oplock break (cache notification) to the right tcp
+    session when multiply mounted.
+    
+    Fixes slow response when cifs client is mounted to shares on multiple
+    servers and oplock break occurs (usually due to attempt to multiply open a
+    file).  When treeids on mutiple mounted shares match and we find the wrong
+    match first, we searched for the wrong cached files to send oplock break
+    response for which usually meant that no matching file was found and thus
+    the server would have to timeout the notification.  Oplock break timeout is
+    about 20 seconds on some servers so this could cause significantly slower
+    performance on file open calls in a few cases (in particular when multiple
+    shares are mounted from multiple servers, tree ids match, and we have a
+    cached file which is later opened multiple times).  This was the most
+    important of the bugs that was found and fixed at Connectathon
+    (interoperability testing event) this week.
+    
+    Acked-by:  Shaggy (shaggy@austin.ibm.com)
+    Signed-off-by: Steve French (sfrench@us.ibm.com)
+
+diff --git a/fs/cifs/cifsproto.h b/fs/cifs/cifsproto.h
+index 3c03aadaff0c..7b25463d3c14 100644
+--- a/fs/cifs/cifsproto.h
++++ b/fs/cifs/cifsproto.h
+@@ -52,7 +52,7 @@ extern int SendReceive2(const unsigned int /* xid */ , struct cifsSesInfo *,
+ 			int * /* type of buf returned */ , const int long_op);
+ extern int checkSMBhdr(struct smb_hdr *smb, __u16 mid);
+ extern int checkSMB(struct smb_hdr *smb, __u16 mid, int length);
+-extern int is_valid_oplock_break(struct smb_hdr *smb);
++extern int is_valid_oplock_break(struct smb_hdr *smb, struct TCP_Server_Info *);
+ extern int is_size_safe_to_change(struct cifsInodeInfo *);
+ extern struct cifsFileInfo *find_writable_file(struct cifsInodeInfo *);
+ extern unsigned int smbCalcSize(struct smb_hdr *ptr);
+diff --git a/fs/cifs/connect.c b/fs/cifs/connect.c
+index ef5ae6f93c75..2a0c1f4ca0ae 100644
+--- a/fs/cifs/connect.c
++++ b/fs/cifs/connect.c
+@@ -630,7 +630,7 @@ multi_t2_fnd:
+ 					smallbuf = NULL;
+ 			}
+ 			wake_up_process(task_to_wake);
+-		} else if ((is_valid_oplock_break(smb_buffer) == FALSE)
++		} else if ((is_valid_oplock_break(smb_buffer, server) == FALSE)
+ 		    && (isMultiRsp == FALSE)) {                          
+ 			cERROR(1, ("No task to wake, unknown frame rcvd!"));
+ 			cifs_dump_mem("Received Data is: ",(char *)smb_buffer,
+diff --git a/fs/cifs/misc.c b/fs/cifs/misc.c
+index 812c6bb0fe38..432ba15e2c2d 100644
+--- a/fs/cifs/misc.c
++++ b/fs/cifs/misc.c
+@@ -475,7 +475,7 @@ checkSMB(struct smb_hdr *smb, __u16 mid, int length)
+ 	return 0;
+ }
+ int
+-is_valid_oplock_break(struct smb_hdr *buf)
++is_valid_oplock_break(struct smb_hdr *buf, struct TCP_Server_Info *srv)
+ {    
+ 	struct smb_com_lock_req * pSMB = (struct smb_com_lock_req *)buf;
+ 	struct list_head *tmp;
+@@ -535,7 +535,7 @@ is_valid_oplock_break(struct smb_hdr *buf)
+ 	read_lock(&GlobalSMBSeslock);
+ 	list_for_each(tmp, &GlobalTreeConnectionList) {
+ 		tcon = list_entry(tmp, struct cifsTconInfo, cifsConnectionList);
+-		if (tcon->tid == buf->Tid) {
++		if ((tcon->tid == buf->Tid) && (srv == tcon->ses->server)) {
+ 			cifs_stats_inc(&tcon->num_oplock_brks);
+ 			list_for_each(tmp1,&tcon->openFileList){
+ 				netfile = list_entry(tmp1,struct cifsFileInfo,
+

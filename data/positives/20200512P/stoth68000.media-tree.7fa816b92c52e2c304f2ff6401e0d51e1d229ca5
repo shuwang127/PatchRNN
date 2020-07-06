@@ -1,0 +1,42 @@
+commit 7fa816b92c52e2c304f2ff6401e0d51e1d229ca5
+Author: Geert Uytterhoeven <geert+renesas@glider.be>
+Date:   Sat May 7 13:17:11 2016 +0200
+
+    ravb: Add missing free_irq() call to ravb_close()
+    
+    When reopening the network device on ra7795/salvator-x, e.g. after a
+    DHCP timeout:
+    
+        IP-Config: Reopening network devices...
+        genirq: Flags mismatch irq 139. 00000000 (eth0:ch24:emac) vs. 00000000 (eth0:ch24:emac)
+        ravb e6800000.ethernet eth0: cannot request IRQ eth0:ch24:emac
+        IP-Config: Failed to open eth0
+        IP-Config: No network devices available
+    
+    The "mismatch" is due to requesting an IRQ that is already in use,
+    while IRQF_PROBE_SHARED wasn't set.
+    
+    However, the real cause is that ravb_close() doesn't release the R-Car
+    Gen3-specific secondary IRQ.
+    
+    Add the missing free_irq() call to fix this.
+    
+    Fixes: 22d4df8ff3a3cc72 ("ravb: Add support for r8a7795 SoC")
+    Signed-off-by: Geert Uytterhoeven <geert+renesas@glider.be>
+    Acked-by: Sergei Shtylyov <sergei.shtylyov@cogentembedded.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/renesas/ravb_main.c b/drivers/net/ethernet/renesas/ravb_main.c
+index 9e2a0bd8f5a8..4277d0c12101 100644
+--- a/drivers/net/ethernet/renesas/ravb_main.c
++++ b/drivers/net/ethernet/renesas/ravb_main.c
+@@ -1506,6 +1506,8 @@ static int ravb_close(struct net_device *ndev)
+ 		priv->phydev = NULL;
+ 	}
+ 
++	if (priv->chip_id == RCAR_GEN3)
++		free_irq(priv->emac_irq, ndev);
+ 	free_irq(ndev->irq, ndev);
+ 
+ 	napi_disable(&priv->napi[RAVB_NC]);
+

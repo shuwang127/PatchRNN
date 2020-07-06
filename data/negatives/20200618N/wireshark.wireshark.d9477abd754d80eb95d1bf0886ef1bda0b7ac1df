@@ -1,0 +1,77 @@
+commit d9477abd754d80eb95d1bf0886ef1bda0b7ac1df
+Author: Michael Mann <mmann78@netscape.net>
+Date:   Wed Sep 6 14:45:54 2017 -0400
+
+    Bugfix NetMon System Trace dissection
+    
+    Use opcode, not event id for dissection
+    
+    Change-Id: I1df6067e8e7e6efb201f9131fc71113cb5a174d3
+    Reviewed-on: https://code.wireshark.org/review/23417
+    Reviewed-by: Michael Mann <mmann78@netscape.net>
+
+diff --git a/epan/dissectors/packet-netmon.c b/epan/dissectors/packet-netmon.c
+index 7af5ae3c55..4f6810df04 100644
+--- a/epan/dissectors/packet-netmon.c
++++ b/epan/dissectors/packet-netmon.c
+@@ -372,6 +372,7 @@ dissect_netmon_event(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void*
+ 	offset += 1;
+ 	proto_tree_add_item(event_desc_tree, hf_netmon_event_event_desc_level, tvb, offset, 1, ENC_LITTLE_ENDIAN);
+ 	offset += 1;
++    provider_id_data.opcode = tvb_get_guint8(tvb, offset);
+ 	proto_tree_add_item(event_desc_tree, hf_netmon_event_event_desc_opcode, tvb, offset, 1, ENC_LITTLE_ENDIAN);
+ 	offset += 1;
+ 	proto_tree_add_item(event_desc_tree, hf_netmon_event_event_desc_task, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+@@ -616,6 +617,7 @@ dissect_netmon_system_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
+ 	struct netmon_provider_id_data *provider_id_data = (struct netmon_provider_id_data*)data;
+ 	guint length;
+ 	nstime_t timestamp;
++    guint64 raw_timestamp;
+ 
+ 	DISSECTOR_ASSERT(provider_id_data != NULL);
+ 
+@@ -625,7 +627,7 @@ dissect_netmon_system_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
+ 	ti = proto_tree_add_item(tree, proto_netmon_system_trace, tvb, 0, -1, ENC_NA);
+ 	system_tree = proto_item_add_subtree(ti, ett_netmon_system_trace);
+ 
+-	switch (provider_id_data->event_id)
++	switch (provider_id_data->opcode)
+ 	{
+ 	case 0:
+ 		proto_tree_add_item(system_tree, hf_netmon_system_trace_buffer_size, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+@@ -637,10 +639,18 @@ dissect_netmon_system_trace(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
+ 		proto_tree_add_item(system_tree, hf_netmon_system_trace_num_processors, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+ 		offset += 4;
+ 
+-		timestamp.secs = 0;
+-		timestamp.nsecs = 0;
+-		filetime_to_nstime(&timestamp, tvb_get_letoh64(tvb, offset));
+-		proto_tree_add_time(system_tree, hf_netmon_system_trace_end_time, tvb, offset, 8, &timestamp);
++        raw_timestamp = tvb_get_letoh64(tvb, offset);
++        if (raw_timestamp != 0)
++        {
++		    timestamp.secs = 0;
++		    timestamp.nsecs = 0;
++		    filetime_to_nstime(&timestamp, raw_timestamp);
++		    proto_tree_add_time(system_tree, hf_netmon_system_trace_end_time, tvb, offset, 8, &timestamp);
++        }
++        else
++        {
++		    proto_tree_add_time_format_value(system_tree, hf_netmon_system_trace_end_time, tvb, offset, 8, &timestamp, "(None)");
++        }
+ 		offset += 8;
+ 
+ 		proto_tree_add_item(system_tree, hf_netmon_system_trace_timer_resolution, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+diff --git a/epan/dissectors/packet-netmon.h b/epan/dissectors/packet-netmon.h
+index 81e7be2884..25c6c16bbd 100644
+--- a/epan/dissectors/packet-netmon.h
++++ b/epan/dissectors/packet-netmon.h
+@@ -37,6 +37,7 @@ struct netmon_provider_id_data
+     guint32 event_id;
+     guint16 event_flags;
+     guint64 keyword;
++    guint8 opcode;
+ };
+ 
+ 
+

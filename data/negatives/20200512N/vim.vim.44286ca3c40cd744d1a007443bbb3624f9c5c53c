@@ -1,0 +1,135 @@
+commit 44286ca3c40cd744d1a007443bbb3624f9c5c53c
+Author: Bram Moolenaar <Bram@vim.org>
+Date:   Fri Jul 15 17:51:34 2011 +0200
+
+    updated for version 7.3.251
+    Problem:    "gH<Del>" deletes the current line, except when it's the last
+                line.
+    Solution:   Set the "include" flag to indicate the last line is to be deleted.
+
+diff --git a/src/normal.c b/src/normal.c
+index 522480fc4..c028feaaa 100644
+--- a/src/normal.c
++++ b/src/normal.c
+@@ -1795,17 +1795,25 @@ do_pending_operator(cap, old_col, gui_yank)
+ 		{
+ 		    oap->inclusive = FALSE;
+ 		    /* Try to include the newline, unless it's an operator
+-		     * that works on lines only */
+-		    if (*p_sel != 'o'
+-			    && !op_on_lines(oap->op_type)
+-			    && oap->end.lnum < curbuf->b_ml.ml_line_count)
++		     * that works on lines only. */
++		    if (*p_sel != 'o' && !op_on_lines(oap->op_type))
+ 		    {
+-			++oap->end.lnum;
+-			oap->end.col = 0;
++			if (oap->end.lnum < curbuf->b_ml.ml_line_count)
++			{
++			    ++oap->end.lnum;
++			    oap->end.col = 0;
+ # ifdef FEAT_VIRTUALEDIT
+-			oap->end.coladd = 0;
++			    oap->end.coladd = 0;
+ # endif
+-			++oap->line_count;
++			    ++oap->line_count;
++			}
++			else
++			{
++			    /* Cannot move below the last line, make the op
++			     * inclusive to tell the operation to include the
++			     * line break. */
++			    oap->inclusive = TRUE;
++			}
+ 		    }
+ 		}
+ 	    }
+diff --git a/src/ops.c b/src/ops.c
+index 8c235220e..bdc53de33 100644
+--- a/src/ops.c
++++ b/src/ops.c
+@@ -1650,7 +1650,9 @@ op_delete(oap)
+ 	    && oap->line_count > 1
+ 	    && oap->op_type == OP_DELETE)
+     {
+-	ptr = ml_get(oap->end.lnum) + oap->end.col + oap->inclusive;
++	ptr = ml_get(oap->end.lnum) + oap->end.col;
++	if (*ptr != NUL)
++	    ptr += oap->inclusive;
+ 	ptr = skipwhite(ptr);
+ 	if (*ptr == NUL && inindent(0))
+ 	    oap->motion_type = MLINE;
+@@ -1920,11 +1922,20 @@ op_delete(oap)
+ 		    curwin->w_cursor.coladd = 0;
+ 	    }
+ #endif
+-	    (void)del_bytes((long)n, !virtual_op, oap->op_type == OP_DELETE
++	    if (oap->inclusive && oap->end.lnum == curbuf->b_ml.ml_line_count
++		    && n > (int)STRLEN(ml_get(oap->end.lnum)))
++	    {
++		/* Special case: gH<Del> deletes the last line. */
++		del_lines(1L, FALSE);
++	    }
++	    else
++	    {
++		(void)del_bytes((long)n, !virtual_op, oap->op_type == OP_DELETE
+ #ifdef FEAT_VISUAL
+ 				    && !oap->is_VIsual
+ #endif
+ 							);
++	    }
+ 	}
+ 	else				/* delete characters between lines */
+ 	{
+@@ -1941,17 +1952,29 @@ op_delete(oap)
+ 	    ++curwin->w_cursor.lnum;
+ 	    del_lines((long)(oap->line_count - 2), FALSE);
+ 
+-	    /* delete from start of line until op_end */
+-	    curwin->w_cursor.col = 0;
+-	    (void)del_bytes((long)(oap->end.col + 1 - !oap->inclusive),
+-					!virtual_op, oap->op_type == OP_DELETE
++	    n = (oap->end.col + 1 - !oap->inclusive);
++	    if (oap->inclusive && oap->end.lnum == curbuf->b_ml.ml_line_count
++		    && n > (int)STRLEN(ml_get(oap->end.lnum)))
++	    {
++		/* Special case: gH<Del> deletes the last line. */
++		del_lines(1L, FALSE);
++		curwin->w_cursor = curpos;	/* restore curwin->w_cursor */
++		if (curwin->w_cursor.lnum > 1)
++		    --curwin->w_cursor.lnum;
++	    }
++	    else
++	    {
++		/* delete from start of line until op_end */
++		curwin->w_cursor.col = 0;
++		(void)del_bytes((long)n, !virtual_op, oap->op_type == OP_DELETE
+ #ifdef FEAT_VISUAL
+ 					&& !oap->is_VIsual
+ #endif
+ 							    );
+-	    curwin->w_cursor = curpos;		/* restore curwin->w_cursor */
+-
+-	    (void)do_join(2, FALSE, FALSE);
++		curwin->w_cursor = curpos;	/* restore curwin->w_cursor */
++	    }
++	    if (curwin->w_cursor.lnum < curbuf->b_ml.ml_line_count)
++		(void)do_join(2, FALSE, FALSE);
+ 	}
+     }
+ 
+diff --git a/src/version.c b/src/version.c
+index ffed791cf..170e2fecf 100644
+--- a/src/version.c
++++ b/src/version.c
+@@ -709,6 +709,8 @@ static char *(features[]) =
+ 
+ static int included_patches[] =
+ {   /* Add new patch number below this line */
++/**/
++    251,
+ /**/
+     250,
+ /**/
+

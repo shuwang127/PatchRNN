@@ -1,0 +1,55 @@
+commit 3fab70c165795431f00ddf9be8b84ddd07bd1f8f
+Author: Lingzhu Xiang <lxiang@redhat.com>
+Date:   Fri May 10 18:29:21 2013 +0800
+
+    efivarfs: Never return ENOENT from firmware again
+    
+    Previously in 1fa7e69 efi_status_to_err() translated firmware status
+    EFI_NOT_FOUND to -EIO instead of -ENOENT for efivarfs operations to
+    avoid confusion. After refactoring in e14ab23, it is also used in other
+    places where the translation may be unnecessary.
+    
+    So move the translation to efivarfs specific code. Also return EOF
+    for reading zero-length files, which is what users would expect.
+    
+    Cc: Josh Boyer <jwboyer@redhat.com>
+    Cc: Jeremy Kerr <jk@ozlabs.org>
+    Cc: Lee, Chun-Yi <jlee@suse.com>
+    Cc: Andy Whitcroft <apw@canonical.com>
+    Signed-off-by: Lingzhu Xiang <lxiang@redhat.com>
+    Signed-off-by: Matt Fleming <matt.fleming@intel.com>
+
+diff --git a/fs/efivarfs/file.c b/fs/efivarfs/file.c
+index bfb531564319..8dd524f32284 100644
+--- a/fs/efivarfs/file.c
++++ b/fs/efivarfs/file.c
+@@ -44,8 +44,11 @@ static ssize_t efivarfs_file_write(struct file *file,
+ 
+ 	bytes = efivar_entry_set_get_size(var, attributes, &datasize,
+ 					  data, &set);
+-	if (!set && bytes)
++	if (!set && bytes) {
++		if (bytes == -ENOENT)
++			bytes = -EIO;
+ 		goto out;
++	}
+ 
+ 	if (bytes == -ENOENT) {
+ 		drop_nlink(inode);
+@@ -76,7 +79,14 @@ static ssize_t efivarfs_file_read(struct file *file, char __user *userbuf,
+ 	int err;
+ 
+ 	err = efivar_entry_size(var, &datasize);
+-	if (err)
++
++	/*
++	 * efivarfs represents uncommitted variables with
++	 * zero-length files. Reading them should return EOF.
++	 */
++	if (err == -ENOENT)
++		return 0;
++	else if (err)
+ 		return err;
+ 
+ 	data = kmalloc(datasize + sizeof(attributes), GFP_KERNEL);
+

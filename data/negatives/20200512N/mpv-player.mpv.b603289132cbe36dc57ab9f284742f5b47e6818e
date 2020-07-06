@@ -1,0 +1,243 @@
+commit b603289132cbe36dc57ab9f284742f5b47e6818e
+Author: attila <attila@b3059339-0415-0410-9bf9-f77b7e298cf2>
+Date:   Tue Feb 17 12:30:45 2004 +0000
+
+    enable seeking in http streams
+    patch by Valentine Zaretsky <valik+mplayerdev@email.dp.ua>
+    
+    
+    git-svn-id: svn://svn.mplayerhq.hu/mplayer/trunk@11966 b3059339-0415-0410-9bf9-f77b7e298cf2
+
+diff --git a/libmpdemux/cddb.c b/libmpdemux/cddb.c
+index 1b18f6c5ac..5af6735dd2 100644
+--- a/libmpdemux/cddb.c
++++ b/libmpdemux/cddb.c
+@@ -204,7 +204,7 @@ cddb_http_request(char *command, int (*reply_parser)(HTTP_header_t*,cddb_data_t*
+ 		return -1;
+ 	}
+ 	
+-	fd = http_send_request(url);
++	fd = http_send_request(url,0);
+ 	if( fd<0 ) {
+ 		printf("failed to send the http request\n");
+ 		return -1;
+diff --git a/libmpdemux/demux_avi.c b/libmpdemux/demux_avi.c
+index 9f0be39285..c209e6a37c 100644
+--- a/libmpdemux/demux_avi.c
++++ b/libmpdemux/demux_avi.c
+@@ -214,7 +214,7 @@ do{
+     }
+ 
+     pos = priv->idx_offset + (unsigned long)idx->dwChunkOffset;
+-    if((pos<demux->movi_start || pos>=demux->movi_end) && (demux->movi_end>demux->movi_start) && (demux->stream->type!=STREAMTYPE_STREAM)){
++    if((pos<demux->movi_start || pos>=demux->movi_end) && (demux->movi_end>demux->movi_start) && (demux->stream->flags & STREAM_SEEK)){
+       mp_msg(MSGT_DEMUX,MSGL_V,"ChunkOffset out of range!   idx=0x%X  \n",pos);
+       continue;
+     }
+@@ -246,7 +246,7 @@ do{
+     if(!(idx->dwFlags&AVIIF_KEYFRAME)) flags=0;
+   } else {
+     demux->filepos=stream_tell(demux->stream);
+-    if(demux->filepos>=demux->movi_end && demux->movi_end>demux->movi_start && (demux->stream->type!=STREAMTYPE_STREAM)){
++    if(demux->filepos>=demux->movi_end && demux->movi_end>demux->movi_start && (demux->stream->flags & STREAM_SEEK)){
+           demux->stream->eof=1;
+           return 0;
+     }
+@@ -449,7 +449,7 @@ demuxer_t* demux_open_avi(demuxer_t* demuxer){
+   demuxer->priv=(void*)priv;
+ 
+   //---- AVI header:
+-  read_avi_header(demuxer,(demuxer->stream->type!=STREAMTYPE_STREAM)?index_mode:-2);
++  read_avi_header(demuxer,(demuxer->stream->flags & STREAM_SEEK)?index_mode:-2);
+   
+   if(demuxer->audio->id>=0 && !demuxer->a_streams[demuxer->audio->id]){
+       mp_msg(MSGT_DEMUX,MSGL_WARN,"AVI: invalid audio stream ID: %d - ignoring (nosound)\n",demuxer->audio->id);
+diff --git a/libmpdemux/network.c b/libmpdemux/network.c
+index d31c891870..455130dd83 100644
+--- a/libmpdemux/network.c
++++ b/libmpdemux/network.c
+@@ -428,7 +428,7 @@ check4proxies( URL_t *url ) {
+ }
+ 
+ int
+-http_send_request( URL_t *url ) {
++http_send_request( URL_t *url, off_t pos ) {
+ 	HTTP_header_t *http_hdr;
+ 	URL_t *server_url;
+ 	char str[256];
+@@ -455,6 +455,12 @@ http_send_request( URL_t *url ) {
+ 	}
+ 	else
+ 	    http_set_field( http_hdr, "User-Agent: MPlayer/"VERSION);
++
++	if(pos>0) { 
++	// Extend http_send_request with possibility to do partial content retrieval
++	    snprintf(str, 256, "Range: bytes=%d-", pos);
++	    http_set_field(http_hdr, str);
++	}
+ 	    
+ 	if (network_cookies_enabled) cookies_set( http_hdr, server_url->hostname, server_url->url );
+ 	
+@@ -572,6 +578,50 @@ http_authenticate(HTTP_header_t *http_hdr, URL_t *url, int *auth_retry) {
+ 	return 0;
+ }
+ 
++int
++http_seek( stream_t *stream, off_t pos ) {
++	HTTP_header_t *http_hdr = NULL;
++	int fd;
++	if( stream==NULL ) return 0;
++
++	if( stream->fd>0 ) closesocket(stream->fd); // need to reconnect to seek in http-stream
++	fd = http_send_request( stream->streaming_ctrl->url, pos ); 
++	if( fd<0 ) return 0;
++
++	http_hdr = http_read_response( fd );
++
++	if( http_hdr==NULL ) return 0;
++
++	switch( http_hdr->status_code ) {
++		case 200:
++		case 206: // OK
++			mp_msg(MSGT_NETWORK,MSGL_V,"Content-Type: [%s]\n", http_get_field(http_hdr, "Content-Type") );
++			mp_msg(MSGT_NETWORK,MSGL_V,"Content-Length: [%s]\n", http_get_field(http_hdr, "Content-Length") );
++			if( http_hdr->body_size>0 ) {
++				if( streaming_bufferize( stream->streaming_ctrl, http_hdr->body, http_hdr->body_size )<0 ) {
++					http_free( http_hdr );
++					return -1;
++				}
++			}
++			break;
++		default:
++			mp_msg(MSGT_NETWORK,MSGL_ERR,"Server return %d: %s\n", http_hdr->status_code, http_hdr->reason_phrase );
++			close( fd );
++			fd = -1;
++	}
++	stream->fd = fd;
++
++	if( http_hdr ) {
++		http_free( http_hdr );
++		stream->streaming_ctrl->data = NULL;
++	}
++
++	stream->pos=pos;
++
++	return 1;
++}
++
++
+ // By using the protocol, the extension of the file or the content-type
+ // we might be able to guess the streaming type.
+ int
+@@ -581,6 +631,7 @@ autodetectProtocol(streaming_ctrl_t *streaming_ctrl, int *fd_out, int *file_form
+ 	int fd=-1;
+ 	int redirect;
+ 	int auth_retry=0;
++	int seekable=0;
+ 	char *extension;
+ 	char *content_type;
+ 	char *next_url;
+@@ -683,7 +734,7 @@ extension=NULL;
+ 
+ 		// HTTP based protocol
+ 		if( !strcasecmp(url->protocol, "http") || !strcasecmp(url->protocol, "http_proxy") ) {
+-			fd = http_send_request( url );
++			fd = http_send_request( url, 0 );
+ 			if( fd<0 ) {
+ 				return -1;
+ 			}
+@@ -701,7 +752,10 @@ extension=NULL;
+ 			}
+ 			
+ 			streaming_ctrl->data = (void*)http_hdr;
+-			
++
++			// Check if we can make partial content requests and thus seek in http-streams
++		        seekable=(http_hdr!=NULL && http_hdr->status_code==200 && strncmp(http_get_field(http_hdr,"Accept-Ranges"),"bytes",5)==0);
++
+ 			// Check if the response is an ICY status_code reason_phrase
+ 			if( !strcasecmp(http_hdr->protocol, "ICY") ) {
+ 				switch( http_hdr->status_code ) {
+@@ -756,13 +810,13 @@ extension=NULL;
+ 						for( i=0 ; i<(sizeof(mime_type_table)/sizeof(mime_type_table[0])) ; i++ ) {
+ 							if( !strcasecmp( content_type, mime_type_table[i].mime_type ) ) {
+ 								*file_format = mime_type_table[i].demuxer_type;
+-								return 0; 
++								return seekable; // for streaming_start
+ 							}
+ 						}
+ 					}
+ 					// Not found in the mime type table, don't fail,
+ 					// we should try raw HTTP
+-					return 0;
++					return seekable; // for streaming_start
+ 				// Redirect
+ 				case 301: // Permanently
+ 				case 302: // Temporarily
+@@ -857,7 +911,7 @@ nop_streaming_start( stream_t *stream ) {
+ 
+ 	fd = stream->fd;
+ 	if( fd<0 ) {
+-		fd = http_send_request( stream->streaming_ctrl->url ); 
++		fd = http_send_request( stream->streaming_ctrl->url, 0 ); 
+ 		if( fd<0 ) return -1;
+ 		http_hdr = http_read_response( fd );
+ 		if( http_hdr==NULL ) return -1;
+@@ -1121,6 +1175,11 @@ streaming_start(stream_t *stream, int *demuxer_type, URL_t *url) {
+ 	if( ret<0 ) {
+ 		return -1;
+ 	}
++	if( ret==1 ) {
++		stream->flags |= STREAM_SEEK;
++		stream->seek = http_seek;
++	}
++
+ 	ret = -1;
+ 	
+ 	// Get the bandwidth available
+diff --git a/libmpdemux/network.h b/libmpdemux/network.h
+index 49675f2f8c..1d52ed652f 100644
+--- a/libmpdemux/network.h
++++ b/libmpdemux/network.h
+@@ -53,7 +53,7 @@ int nop_streaming_seek( int fd, off_t pos, streaming_ctrl_t *stream_ctrl );
+ 
+ int connect2Server(char *host, int port,int verb);
+ 
+-int http_send_request(URL_t *url);
++int http_send_request(URL_t *url, off_t pos);
+ HTTP_header_t *http_read_response(int fd);
+ 
+ int http_authenticate(HTTP_header_t *http_hdr, URL_t *url, int *auth_retry);
+diff --git a/libmpdemux/stream.c b/libmpdemux/stream.c
+index 840d70badf..96e8bc1122 100644
+--- a/libmpdemux/stream.c
++++ b/libmpdemux/stream.c
+@@ -314,6 +314,14 @@ if(newpos==0 || newpos!=s->pos){
+     // A function call that return -1 can tell that the protocol
+     // doesn't support seeking.
+ #ifdef MPLAYER_NETWORK
++    if(s->seek) { // new stream seek is much cleaner than streaming_ctrl one
++      if(!s->seek(s,newpos)) {
++      	mp_msg(MSGT_STREAM,MSGL_ERR, "Seek failed\n");
++      	return 1;
++      }
++      break;
++    }
++	
+     if( s->streaming_ctrl!=NULL && s->streaming_ctrl->streaming_seek ) {
+       if( s->streaming_ctrl->streaming_seek( s->fd, pos, s->streaming_ctrl )<0 ) {
+         mp_msg(MSGT_STREAM,MSGL_INFO,"Stream not seekable!\n");
+diff --git a/libmpdemux/stream.h b/libmpdemux/stream.h
+index bfed571b47..07ba4d93a4 100644
+--- a/libmpdemux/stream.h
++++ b/libmpdemux/stream.h
+@@ -229,7 +229,7 @@ inline static int stream_seek(stream_t *s,off_t pos){
+ }
+ 
+ inline static int stream_skip(stream_t *s,off_t len){
+-  if(len<0 || (len>2*STREAM_BUFFER_SIZE && s->type!=STREAMTYPE_STREAM)){
++  if(len<0 || (len>2*STREAM_BUFFER_SIZE && (s->flags & STREAM_SEEK))) {
+     // negative or big skip!
+     return stream_seek(s,stream_tell(s)+len);
+   }
+

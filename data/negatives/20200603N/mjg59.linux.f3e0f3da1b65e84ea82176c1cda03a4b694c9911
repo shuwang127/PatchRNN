@@ -1,0 +1,85 @@
+commit f3e0f3da1b65e84ea82176c1cda03a4b694c9911
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Tue Jun 16 02:35:14 2015 -0400
+
+    ufs: kill more lock_ufs() calls
+    
+    a) move it inside ufs_truncate()
+    b) ufs_free_inode() doesn't need it - it's serialized on ->s_lock
+    c) ufs_write_inode() doesn't need it either (and can be called without
+    it anyway).
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/ufs/inode.c b/fs/ufs/inode.c
+index f913a6924b23..0e4d88e0e709 100644
+--- a/fs/ufs/inode.c
++++ b/fs/ufs/inode.c
+@@ -867,11 +867,7 @@ static int ufs_update_inode(struct inode * inode, int do_sync)
+ 
+ int ufs_write_inode(struct inode *inode, struct writeback_control *wbc)
+ {
+-	int ret;
+-	lock_ufs(inode->i_sb);
+-	ret = ufs_update_inode(inode, wbc->sync_mode == WB_SYNC_ALL);
+-	unlock_ufs(inode->i_sb);
+-	return ret;
++	return ufs_update_inode(inode, wbc->sync_mode == WB_SYNC_ALL);
+ }
+ 
+ int ufs_sync_inode (struct inode *inode)
+@@ -890,22 +886,17 @@ void ufs_evict_inode(struct inode * inode)
+ 	if (want_delete) {
+ 		loff_t old_i_size;
+ 		/*UFS_I(inode)->i_dtime = CURRENT_TIME;*/
+-		lock_ufs(inode->i_sb);
+ 		mark_inode_dirty(inode);
+ 		ufs_update_inode(inode, IS_SYNC(inode));
+ 		old_i_size = inode->i_size;
+ 		inode->i_size = 0;
+ 		if (inode->i_blocks && ufs_truncate(inode, old_i_size))
+ 			ufs_warning(inode->i_sb, __func__, "ufs_truncate failed\n");
+-		unlock_ufs(inode->i_sb);
+ 	}
+ 
+ 	invalidate_inode_buffers(inode);
+ 	clear_inode(inode);
+ 
+-	if (want_delete) {
+-		lock_ufs(inode->i_sb);
++	if (want_delete)
+ 		ufs_free_inode(inode);
+-		unlock_ufs(inode->i_sb);
+-	}
+ }
+diff --git a/fs/ufs/truncate.c b/fs/ufs/truncate.c
+index 21154704c168..90cf3a76c500 100644
+--- a/fs/ufs/truncate.c
++++ b/fs/ufs/truncate.c
+@@ -457,6 +457,7 @@ int ufs_truncate(struct inode *inode, loff_t old_i_size)
+ 	if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
+ 		return -EPERM;
+ 
++	lock_ufs(sb);
+ 	err = ufs_alloc_lastblock(inode);
+ 
+ 	if (err) {
+@@ -486,6 +487,7 @@ int ufs_truncate(struct inode *inode, loff_t old_i_size)
+ 	ufsi->i_lastfrag = DIRECT_FRAGMENT;
+ 	mark_inode_dirty(inode);
+ out:
++	unlock_ufs(sb);
+ 	UFSD("EXIT: err %d\n", err);
+ 	return err;
+ }
+@@ -506,9 +508,7 @@ int ufs_setattr(struct dentry *dentry, struct iattr *attr)
+ 		/* XXX(truncate): truncate_setsize should be called last */
+ 		truncate_setsize(inode, attr->ia_size);
+ 
+-		lock_ufs(inode->i_sb);
+ 		error = ufs_truncate(inode, old_i_size);
+-		unlock_ufs(inode->i_sb);
+ 		if (error)
+ 			return error;
+ 	}
+

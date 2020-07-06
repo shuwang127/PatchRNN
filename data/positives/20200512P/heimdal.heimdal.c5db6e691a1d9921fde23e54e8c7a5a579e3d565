@@ -1,0 +1,56 @@
+commit c5db6e691a1d9921fde23e54e8c7a5a579e3d565
+Author: Luke Howard <lukeh@padl.com>
+Date:   Sun May 13 21:15:21 2018 +1000
+
+    IPC: Solaris doors backend: fix uninitialized variables
+    
+    When replying to a door call, if allocating the buffer using malloc()
+    fails, we return EAGAIN to the client to avoid it hanging, using a
+    variable on the stack. However in this case the code did not reset the
+    reply length, which would result in it reading past the end of the stack.
+    At the expense of a goto, this patch uses the same path for returning an
+    error as if it was generating by the application.
+    
+    Also, ensure that reply->length is set to zero when returning an error;
+    it shouldn't affect the client as it will not read this in the event of
+    a non-zero return code, but it avoids leaking uninitialized memory.
+
+diff --git a/lib/ipc/server.c b/lib/ipc/server.c
+index fc1f5c04c..d045deffc 100644
+--- a/lib/ipc/server.c
++++ b/lib/ipc/server.c
+@@ -1198,6 +1198,7 @@ door_complete(heim_sipc_call ctx, int returnvalue, heim_idata *reply)
+     /* free previously saved reply, if any */
+     free(HEIMDAL_getspecific(door_key));
+ 
++error_reply:
+     rlen = offsetof(struct door_reply, data);
+     if (returnvalue == 0)
+         rlen += reply->length;
+@@ -1205,17 +1206,20 @@ door_complete(heim_sipc_call ctx, int returnvalue, heim_idata *reply)
+     /* long replies (> BUFSIZ) are allocated from the heap */
+     if (rlen > BUFSIZ) {
+         r = malloc(rlen);
+-        if (r == NULL)
+-            returnvalue = EAGAIN;
+-    }
+-
+-    if (r == NULL)
++        if (r == NULL) {
++            returnvalue = EAGAIN; /* don't leak ENOMEM to caller */
++            goto error_reply;
++        }
++    } else {
+         r = &replyBuf.reply;
++    }
+ 
+     r->returnvalue = returnvalue;
+     if (r->returnvalue == 0) {
+         r->length = reply->length;
+         memcpy(r->data, reply->data, reply->length);
++    } else {
++        r->length = 0;
+     }
+ 
+     /* door_return() doesn't return; don't leak cred */
+

@@ -1,0 +1,72 @@
+commit 0d1aca12896b6459d0a1c41fcac5b67bf5351817
+Author: wm4 <wm4@nowhere>
+Date:   Mon Nov 5 23:57:02 2012 +0100
+
+    vd_lavc: do not mutate global threads option
+    
+    This mutated the variable for the thread count option
+    (lavc_param->threads) on decoder initialization. This didn't have any
+    practical relevance, unless formats supporting hardware video decoding
+    and other formats were played in the same mpv instance. In this case,
+    hardware decoding would set threads to 1, and all files played after
+    that would use only one thread as well even with software decoding.
+    
+    Remove XvMC leftover (CODEC_CAP_HWACCEL).
+
+diff --git a/video/decode/vd_lavc.c b/video/decode/vd_lavc.c
+index 0819a7f861..24f797beea 100644
+--- a/video/decode/vd_lavc.c
++++ b/video/decode/vd_lavc.c
+@@ -262,10 +262,11 @@ static int init(sh_video_t *sh)
+     avctx->codec_type = AVMEDIA_TYPE_VIDEO;
+     avctx->codec_id = lavc_codec->id;
+ 
+-    if (lavc_codec->capabilities & CODEC_CAP_HWACCEL   // XvMC
+-        || lavc_codec->capabilities & CODEC_CAP_HWACCEL_VDPAU) {
+-        ctx->do_dr1    = true;
+-        lavc_param->threads    = 1;
++    avctx->thread_count = lavc_param->threads;
++
++    if (lavc_codec->capabilities & CODEC_CAP_HWACCEL_VDPAU) {
++        ctx->do_dr1            = true;
++        avctx->thread_count    = 1;
+         avctx->get_format      = get_format;
+         avctx->get_buffer      = get_buffer;
+         avctx->release_buffer  = release_buffer;
+@@ -277,7 +278,7 @@ static int init(sh_video_t *sh)
+         avctx->slice_flags = SLICE_FLAG_CODED_ORDER | SLICE_FLAG_ALLOW_FIELD;
+     }
+ 
+-    if (lavc_param->threads == 0) {
++    if (avctx->thread_count == 0) {
+         int threads = default_thread_count();
+         if (threads < 1) {
+             mp_msg(MSGT_DECVIDEO, MSGL_WARN, "[VD_FFMPEG] Could not determine "
+@@ -285,14 +286,14 @@ static int init(sh_video_t *sh)
+             threads = 1;
+         }
+         threads = FFMIN(threads, 16);
+-        lavc_param->threads = threads;
++        avctx->thread_count = threads;
+     }
+     /* Our get_buffer and draw_horiz_band callbacks are not safe to call
+      * from other threads. */
+-    if (lavc_param->threads > 1) {
++    if (avctx->thread_count > 1) {
+         ctx->do_dr1 = false;
+         mp_tmsg(MSGT_DECVIDEO, MSGL_V, "Asking decoder to use "
+-                "%d threads if supported.\n", lavc_param->threads);
++                "%d threads if supported.\n", avctx->thread_count);
+     }
+ 
+     if (ctx->do_dr1) {
+@@ -405,8 +406,6 @@ static int init(sh_video_t *sh)
+     if (sh->bih)
+         avctx->bits_per_coded_sample = sh->bih->biBitCount;
+ 
+-    avctx->thread_count = lavc_param->threads;
+-
+     /* open it */
+     if (avcodec_open2(avctx, lavc_codec, NULL) < 0) {
+         mp_tmsg(MSGT_DECVIDEO, MSGL_ERR, "Could not open codec.\n");
+

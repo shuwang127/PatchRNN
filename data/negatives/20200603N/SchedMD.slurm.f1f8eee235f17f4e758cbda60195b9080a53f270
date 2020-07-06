@@ -1,0 +1,58 @@
+commit f1f8eee235f17f4e758cbda60195b9080a53f270
+Author: Moe Jette <jette1@llnl.gov>
+Date:   Fri May 20 00:23:00 2005 +0000
+
+    Fix slurmd shutdown signal synchronization bug (not consistently
+        terminating).
+
+diff --git a/src/slurmd/req.c b/src/slurmd/req.c
+index 8bfa43d1ab..81d10b34e6 100644
+--- a/src/slurmd/req.c
++++ b/src/slurmd/req.c
+@@ -617,8 +617,10 @@ _rpc_shutdown(slurm_msg_t *msg, slurm_addr *cli_addr)
+ 	if (!_slurm_authorized_user(req_uid))
+ 		error("Security violation, shutdown RPC from uid %u",
+ 		      (unsigned int) req_uid);
+-	else
+-		kill(conf->pid, SIGTERM);
++	else {
++		if (kill(conf->pid, SIGTERM) != 0)
++			error("kill(%u,SIGTERM): %m", conf->pid);
++	}
+ 
+ 	/* Never return a message, slurmctld does not expect one */
+ }
+diff --git a/src/slurmd/slurmd.c b/src/slurmd/slurmd.c
+index 304aec01ae..c3cfb502ba 100644
+--- a/src/slurmd/slurmd.c
++++ b/src/slurmd/slurmd.c
+@@ -94,6 +94,7 @@ static pthread_mutex_t fork_mutex     = PTHREAD_MUTEX_INITIALIZER;
+  */
+ static sig_atomic_t _shutdown = 0;
+ static sig_atomic_t _reconfig = 0;
++static pthread_t msg_pthread = (pthread_t) 0;
+ 
+ static void      _term_handler(int);
+ static void      _hup_handler(int);
+@@ -232,6 +233,7 @@ _msg_engine()
+ {
+ 	slurm_fd sock;
+ 
++	msg_pthread = pthread_self();
+ 	while (!_shutdown) {
+ 		slurm_addr *cli = xmalloc (sizeof (*cli));
+ 		if ((sock = slurm_accept_msg_conn(conf->lfd, cli)) >= 0) {
+@@ -821,8 +823,11 @@ int save_cred_state(slurm_cred_ctx_t ctx)
+ static void
+ _term_handler(int signum)
+ {
+-	if (signum == SIGTERM || signum == SIGINT) 
++	if (signum == SIGTERM || signum == SIGINT) { 
+ 		_shutdown = 1;
++		if (msg_pthread && (pthread_self() != msg_pthread))
++			pthread_kill(msg_pthread, SIGTERM);
++	}
+ }
+ 
+ static void 
+

@@ -1,0 +1,53 @@
+commit 4125bf761cd0786e1163e024c7c809ce2cc625bc
+Author: Chris Mason <chris.mason@oracle.com>
+Date:   Wed Feb 3 18:18:45 2010 +0000
+
+    Btrfs: finish read pages in the order they are submitted
+    
+    The endio is done at reverse order of bio vectors.
+    
+    That means for a sequential read, the page first submitted will finish
+    last in a bio. Considering we will do checksum (making cache hot) for
+    every page, this does introduce delay (and chance to squeeze cache used
+    soon) for pages submitted at the begining.
+    
+    I don't observe obvious performance difference with below patch at my
+    simple test, but seems more natural to finish read in the order they are
+    submitted.
+    
+    Signed-off-by: Shaohua Li <shaohua.li@intel.com>
+    Signed-off-by: Chris Mason <chris.mason@oracle.com>
+
+diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
+index 7073cbb1b2d4..355a973719a0 100644
+--- a/fs/btrfs/extent_io.c
++++ b/fs/btrfs/extent_io.c
+@@ -1750,7 +1750,8 @@ static void end_bio_extent_writepage(struct bio *bio, int err)
+ static void end_bio_extent_readpage(struct bio *bio, int err)
+ {
+ 	int uptodate = test_bit(BIO_UPTODATE, &bio->bi_flags);
+-	struct bio_vec *bvec = bio->bi_io_vec + bio->bi_vcnt - 1;
++	struct bio_vec *bvec_end = bio->bi_io_vec + bio->bi_vcnt - 1;
++	struct bio_vec *bvec = bio->bi_io_vec;
+ 	struct extent_io_tree *tree;
+ 	u64 start;
+ 	u64 end;
+@@ -1773,7 +1774,7 @@ static void end_bio_extent_readpage(struct bio *bio, int err)
+ 		else
+ 			whole_page = 0;
+ 
+-		if (--bvec >= bio->bi_io_vec)
++		if (++bvec <= bvec_end)
+ 			prefetchw(&bvec->bv_page->flags);
+ 
+ 		if (uptodate && tree->ops && tree->ops->readpage_end_io_hook) {
+@@ -1818,7 +1819,7 @@ static void end_bio_extent_readpage(struct bio *bio, int err)
+ 			}
+ 			check_page_locked(tree, page);
+ 		}
+-	} while (bvec >= bio->bi_io_vec);
++	} while (bvec <= bvec_end);
+ 
+ 	bio_put(bio);
+ }
+

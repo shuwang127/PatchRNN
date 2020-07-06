@@ -1,0 +1,60 @@
+commit bfaa1deeb982c985d8e0435e835baeaae63b57fd
+Author: john stultz <johnstul@us.ibm.com>
+Date:   Wed Feb 1 03:05:19 2006 -0800
+
+    [PATCH] disable lost tick compensation before TSCs are synced
+    
+    Avoid lost tick compensation early in boot before the TSCs are
+    synchronized.  Currently timekeeping is enabled before the TSCs are
+    synchronized, thus when the TSCs are synched (reset to zero), it appears
+    that a number of lost ticks have occurred.  This can cause premature expiry
+    of timers and in extreme cases can cause the soft lockup detection to fire.
+    
+    This resolves issues reported by Andy Whitcroft as well as bug #5366
+    reported by Tim Mann.
+    
+    Signed-off-by: John Stultz <johnstul@us.ibm.com>
+    Acked-by: Andy Whitcroft <apw@shadowen.org>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/arch/i386/kernel/timers/timer_tsc.c b/arch/i386/kernel/timers/timer_tsc.c
+index 47675bbbb316..7c86e3c5f1c1 100644
+--- a/arch/i386/kernel/timers/timer_tsc.c
++++ b/arch/i386/kernel/timers/timer_tsc.c
+@@ -45,6 +45,15 @@ static unsigned long last_tsc_high; /* msb 32 bits of Time Stamp Counter */
+ static unsigned long long monotonic_base;
+ static seqlock_t monotonic_lock = SEQLOCK_UNLOCKED;
+ 
++/* Avoid compensating for lost ticks before TSCs are synched */
++static int detect_lost_ticks;
++static int __init start_lost_tick_compensation(void)
++{
++	detect_lost_ticks = 1;
++	return 0;
++}
++late_initcall(start_lost_tick_compensation);
++
+ /* convert from cycles(64bits) => nanoseconds (64bits)
+  *  basic equation:
+  *		ns = cycles / (freq / ns_per_sec)
+@@ -196,7 +205,8 @@ static void mark_offset_tsc_hpet(void)
+ 
+ 	/* lost tick compensation */
+ 	offset = hpet_readl(HPET_T0_CMP) - hpet_tick;
+-	if (unlikely(((offset - hpet_last) > hpet_tick) && (hpet_last != 0))) {
++	if (unlikely(((offset - hpet_last) > hpet_tick) && (hpet_last != 0))
++					&& detect_lost_ticks) {
+ 		int lost_ticks = (offset - hpet_last) / hpet_tick;
+ 		jiffies_64 += lost_ticks;
+ 	}
+@@ -421,7 +431,7 @@ static void mark_offset_tsc(void)
+ 	delta += delay_at_last_interrupt;
+ 	lost = delta/(1000000/HZ);
+ 	delay = delta%(1000000/HZ);
+-	if (lost >= 2) {
++	if (lost >= 2 && detect_lost_ticks) {
+ 		jiffies_64 += lost-1;
+ 
+ 		/* sanity check to ensure we're not always losing ticks */
+

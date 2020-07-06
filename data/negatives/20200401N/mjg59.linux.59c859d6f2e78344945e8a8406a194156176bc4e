@@ -1,0 +1,77 @@
+commit 59c859d6f2e78344945e8a8406a194156176bc4e
+Author: Eugeni Dodonov <eugeni.dodonov@intel.com>
+Date:   Wed May 9 15:37:19 2012 -0300
+
+    drm/i915: account for only one PCH receiver on Haswell
+    
+    On Haswell, only one pipe can work in FDI mode, so this patch prevents
+    messing with wrong registers when FDI is being used by non-first pipe. And
+    to prevent this, we also specify that the VGA can only be used on pipe 0
+    for now in the crtc_mask value.
+    
+    Reviewed-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+    Signed-off-by: Eugeni Dodonov <eugeni.dodonov@intel.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/i915/intel_crt.c b/drivers/gpu/drm/i915/intel_crt.c
+index 417ca99e697d..75a70c46ef1b 100644
+--- a/drivers/gpu/drm/i915/intel_crt.c
++++ b/drivers/gpu/drm/i915/intel_crt.c
+@@ -615,7 +615,11 @@ void intel_crt_init(struct drm_device *dev)
+ 	crt->base.clone_mask = (1 << INTEL_SDVO_NON_TV_CLONE_BIT |
+ 				1 << INTEL_ANALOG_CLONE_BIT |
+ 				1 << INTEL_SDVO_LVDS_CLONE_BIT);
+-	crt->base.crtc_mask = (1 << 0) | (1 << 1);
++	if (IS_HASWELL(dev))
++		crt->base.crtc_mask = (1 << 0);
++	else
++		crt->base.crtc_mask = (1 << 0) | (1 << 1);
++
+ 	if (IS_GEN2(dev))
+ 		connector->interlace_allowed = 0;
+ 	else
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 7d59d0e852f8..101c4d458c33 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -977,9 +977,14 @@ static void assert_fdi_rx(struct drm_i915_private *dev_priv,
+ 	u32 val;
+ 	bool cur_state;
+ 
+-	reg = FDI_RX_CTL(pipe);
+-	val = I915_READ(reg);
+-	cur_state = !!(val & FDI_RX_ENABLE);
++	if (IS_HASWELL(dev_priv->dev) && pipe > 0) {
++			DRM_ERROR("Attempting to enable FDI_RX on Haswell pipe > 0\n");
++			return;
++	} else {
++		reg = FDI_RX_CTL(pipe);
++		val = I915_READ(reg);
++		cur_state = !!(val & FDI_RX_ENABLE);
++	}
+ 	WARN(cur_state != state,
+ 	     "FDI RX state assertion failure (expected %s, current %s)\n",
+ 	     state_string(state), state_string(cur_state));
+@@ -1012,6 +1017,10 @@ static void assert_fdi_rx_pll_enabled(struct drm_i915_private *dev_priv,
+ 	int reg;
+ 	u32 val;
+ 
++	if (IS_HASWELL(dev_priv->dev) && pipe > 0) {
++		DRM_ERROR("Attempting to enable FDI on Haswell with pipe > 0\n");
++		return;
++	}
+ 	reg = FDI_RX_CTL(pipe);
+ 	val = I915_READ(reg);
+ 	WARN(!(val & FDI_RX_PLL_ENABLE), "FDI RX PLL assertion failure, should be active but is disabled\n");
+@@ -1483,6 +1492,10 @@ static void intel_enable_transcoder(struct drm_i915_private *dev_priv,
+ 	assert_fdi_tx_enabled(dev_priv, pipe);
+ 	assert_fdi_rx_enabled(dev_priv, pipe);
+ 
++	if (IS_HASWELL(dev_priv->dev) && pipe > 0) {
++		DRM_ERROR("Attempting to enable transcoder on Haswell with pipe > 0\n");
++		return;
++	}
+ 	reg = TRANSCONF(pipe);
+ 	val = I915_READ(reg);
+ 	pipeconf_val = I915_READ(PIPECONF(pipe));
+

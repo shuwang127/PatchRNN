@@ -1,0 +1,55 @@
+commit 1b32d78a5a2aefc0de2d1ff0edff85313dacc24f
+Author: Dan Mick <dan.mick@inktank.com>
+Date:   Fri Aug 17 12:50:00 2012 -0700
+
+    librbd: cause add_child/remove_child to treat duplicate ops as errors
+
+diff --git a/src/cls_rbd.cc b/src/cls_rbd.cc
+index c7f697d782..61bd07056c 100644
+--- a/src/cls_rbd.cc
++++ b/src/cls_rbd.cc
+@@ -958,6 +958,10 @@ int add_child(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+     return r;
+   }
+ 
++  if (children.find(c_image_id) != children.end()) {
++    CLS_LOG(20, "add_child: child already exists: %s", c_image_id.c_str());
++    return -EEXIST;
++  }
+   // add new child
+   children.insert(c_imageid);
+ 
+@@ -1008,6 +1012,10 @@ int remove_child(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+     return r;
+   }
+ 
++  if (children.find(c_image_id) == children.end()) {
++    CLS_LOG(20, "remove_child: child not found: %s", c_image_id.c_str());
++    return -ENOENT;
++  }
+   // find and remove child
+   children.erase(c_imageid);
+ 
+diff --git a/src/test/rbd/test_cls_rbd.cc b/src/test/rbd/test_cls_rbd.cc
+index 36ff8c210d..22a3b415c4 100644
+--- a/src/test/rbd/test_cls_rbd.cc
++++ b/src/test/rbd/test_cls_rbd.cc
+@@ -177,6 +177,8 @@ TEST(cls_rbd, add_remove_child)
+   ASSERT_EQ(0, add_child(&ioctx, oid, pspec, "child2"));
+   ASSERT_EQ(0, get_children(&ioctx, oid, pspec, children));
+   ASSERT_TRUE(children.find("child2") != children.end());
++  // add child2 again, expect -EEXIST
++  ASSERT_EQ(-EEXIST, add_child(&ioctx, oid, pspec, "child2"));
+   // remove first, verify it's gone
+   ASSERT_EQ(0, remove_child(&ioctx, oid, pspec, "child1"));
+   ASSERT_EQ(0, get_children(&ioctx, oid, pspec, children));
+@@ -184,6 +186,8 @@ TEST(cls_rbd, add_remove_child)
+   // remove second, verify list empty
+   ASSERT_EQ(0, remove_child(&ioctx, oid, pspec, "child2"));
+   ASSERT_EQ(-ENOENT, get_children(&ioctx, oid, pspec, children));
++  // try to remove again, validate -ENOENT to that as well
++  ASSERT_EQ(-ENOENT, remove_child(&ioctx, oid, pspec, "child2"));
+ 
+   ioctx.close();
+   ASSERT_EQ(0, destroy_one_pool_pp(pool_name, rados));
+

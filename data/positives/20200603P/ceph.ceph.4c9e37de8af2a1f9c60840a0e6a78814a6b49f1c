@@ -1,0 +1,44 @@
+commit 4c9e37de8af2a1f9c60840a0e6a78814a6b49f1c
+Author: Sage Weil <sage@redhat.com>
+Date:   Mon Apr 27 14:42:55 2015 -0700
+
+    os/newstore: fix race in _txc_aio_submit
+    
+    We cannot rely on the iterator pointers being valid after we submit the
+    aio because we are racing with the completion.  Make our loop decision
+    before submitting and avoid dereferencing txc after that point.
+    
+    Signed-off-by: Sage Weil <sage@redhat.com>
+
+diff --git a/src/os/newstore/NewStore.cc b/src/os/newstore/NewStore.cc
+index 440f4715a7..3ce09f3fff 100644
+--- a/src/os/newstore/NewStore.cc
++++ b/src/os/newstore/NewStore.cc
+@@ -2666,7 +2666,8 @@ void NewStore::_txc_aio_submit(TransContext *txc)
+   txc->submitted_aios.splice(e, txc->pending_aios);
+   list<FS::aio_t>::iterator p = txc->submitted_aios.begin();
+   assert(p != e);
+-  for (; p != e; ++p) {
++  bool done = false;
++  while (!done) {
+     FS::aio_t& aio = *p;
+     dout(20) << __func__ << " aio " << &aio << " fd " << aio.fd << dendl;
+     for (vector<iovec>::iterator q = aio.iov.begin(); q != aio.iov.end(); ++q)
+@@ -2674,6 +2675,16 @@ void NewStore::_txc_aio_submit(TransContext *txc)
+ 	       << " len " << q->iov_len << dendl;
+     dout(30) << " fd " << aio.fd << " offset " << lseek64(aio.fd, 0, SEEK_CUR)
+ 	     << dendl;
++
++    // be careful: as soon as we submit aio we race with completion.
++    // since we are holding a ref take care not to dereference txc at
++    // all after that point.
++    list<FS::aio_t>::iterator next = p;
++    ++next;
++    done = (next == e);
++
++    // do not dereference txc (or it's contents) after we submit (if
++    // done == true and we don't loop)
+     int retries = 0;
+     int r = aio_queue.submit(*p, &retries);
+     if (retries)
+

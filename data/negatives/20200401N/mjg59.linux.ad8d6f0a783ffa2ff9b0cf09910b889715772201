@@ -1,0 +1,53 @@
+commit ad8d6f0a783ffa2ff9b0cf09910b889715772201
+Author: Jens Axboe <axboe@suse.de>
+Date:   Sun Apr 2 23:10:32 2006 +0200
+
+    [PATCH] splice: page stealing needs to wait_on_page_writeback()
+    
+    Thanks to Andrew for the good explanation of why this is so. akpm writes:
+    
+    If a page is under writeback and we remove it from pagecache, it's still
+    going to get written to disk.  But the VFS no longer knows about that page,
+    nor that this page is about to modify disk blocks.
+    
+    So there might be scenarios in which those
+    blocks-which-are-about-to-be-written-to get reused for something else.
+    When writeback completes, it'll scribble on those blocks.
+    
+    This won't happen in ext2/ext3-style filesystems in normal mode because the
+    page has buffers and try_to_release_page() will fail.
+    
+    But ext2 in nobh mode doesn't attach buffers at all - it just sticks the
+    page in a BIO, finds some new blocks, points the BIO at those blocks and
+    lets it rip.
+    
+    While that write IO's in flight, someone could truncate the file.  Truncate
+    won't block on the writeout because the page isn't in pagecache any more.
+    So truncate will the free the blocks from the file under the page's feet.
+    Then something else can reallocate those blocks.  Then write data to them.
+    
+    Now, the original write completes, corrupting the filesystem.
+    
+    Signed-off-by: Jens Axboe <axboe@suse.de>
+
+diff --git a/fs/splice.c b/fs/splice.c
+index 7c2abd4504d7..b5fb2f3e3ac6 100644
+--- a/fs/splice.c
++++ b/fs/splice.c
+@@ -52,6 +52,15 @@ static int page_cache_pipe_buf_steal(struct pipe_inode_info *info,
+ 	WARN_ON(!PageLocked(page));
+ 	WARN_ON(!PageUptodate(page));
+ 
++	/*
++	 * At least for ext2 with nobh option, we need to wait on writeback
++	 * completing on this page, since we'll remove it from the pagecache.
++	 * Otherwise truncate wont wait on the page, allowing the disk
++	 * blocks to be reused by someone else before we actually wrote our
++	 * data to them. fs corruption ensues.
++	 */
++	wait_on_page_writeback(page);
++
+ 	if (PagePrivate(page))
+ 		try_to_release_page(page, mapping_gfp_mask(mapping));
+ 
+

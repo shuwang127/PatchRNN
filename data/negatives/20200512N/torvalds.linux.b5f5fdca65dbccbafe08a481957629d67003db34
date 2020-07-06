@@ -1,0 +1,116 @@
+commit b5f5fdca65dbccbafe08a481957629d67003db34
+Author: Xiaoguang Chen <xiaoguang.chen@intel.com>
+Date:   Sun Oct 9 15:41:44 2016 +0800
+
+    KVM: x86: add track_flush_slot page track notifier
+    
+    When a memory slot is being moved or removed users of page track
+    can be notified. So users can drop write-protection for the pages
+    in that memory slot.
+    
+    This notifier type is needed by KVMGT to sync up its shadow page
+    table when memory slot is being moved or removed.
+    
+    Register the notifier type track_flush_slot to receive memslot move
+    and remove event.
+    
+    Reviewed-by: Xiao Guangrong <guangrong.xiao@intel.com>
+    Signed-off-by: Chen Xiaoguang <xiaoguang.chen@intel.com>
+    [Squashed commits to avoid bisection breakage and reworded the subject.]
+    Signed-off-by: Radim Krčmář <rkrcmar@redhat.com>
+
+diff --git a/arch/x86/include/asm/kvm_page_track.h b/arch/x86/include/asm/kvm_page_track.h
+index c2b8d24a235c..5f66597c71c0 100644
+--- a/arch/x86/include/asm/kvm_page_track.h
++++ b/arch/x86/include/asm/kvm_page_track.h
+@@ -32,6 +32,14 @@ struct kvm_page_track_notifier_node {
+ 	 */
+ 	void (*track_write)(struct kvm_vcpu *vcpu, gpa_t gpa, const u8 *new,
+ 			    int bytes);
++	/*
++	 * It is called when memory slot is being moved or removed
++	 * users can drop write-protection for the pages in that memory slot
++	 *
++	 * @kvm: the kvm where memory slot being moved or removed
++	 * @slot: the memory slot being moved or removed
++	 */
++	void (*track_flush_slot)(struct kvm *kvm, struct kvm_memory_slot *slot);
+ };
+ 
+ void kvm_page_track_init(struct kvm *kvm);
+@@ -58,4 +66,5 @@ kvm_page_track_unregister_notifier(struct kvm *kvm,
+ 				   struct kvm_page_track_notifier_node *n);
+ void kvm_page_track_write(struct kvm_vcpu *vcpu, gpa_t gpa, const u8 *new,
+ 			  int bytes);
++void kvm_page_track_flush_slot(struct kvm *kvm, struct kvm_memory_slot *slot);
+ #endif
+diff --git a/arch/x86/kvm/mmu.c b/arch/x86/kvm/mmu.c
+index d3a94ea9f6ac..25ca7621474a 100644
+--- a/arch/x86/kvm/mmu.c
++++ b/arch/x86/kvm/mmu.c
+@@ -4609,11 +4609,18 @@ void kvm_mmu_setup(struct kvm_vcpu *vcpu)
+ 	init_kvm_mmu(vcpu);
+ }
+ 
++static void kvm_mmu_invalidate_zap_pages_in_memslot(struct kvm *kvm,
++			struct kvm_memory_slot *slot)
++{
++	kvm_mmu_invalidate_zap_all_pages(kvm);
++}
++
+ void kvm_mmu_init_vm(struct kvm *kvm)
+ {
+ 	struct kvm_page_track_notifier_node *node = &kvm->arch.mmu_sp_tracker;
+ 
+ 	node->track_write = kvm_mmu_pte_write;
++	node->track_flush_slot = kvm_mmu_invalidate_zap_pages_in_memslot;
+ 	kvm_page_track_register_notifier(kvm, node);
+ }
+ 
+diff --git a/arch/x86/kvm/page_track.c b/arch/x86/kvm/page_track.c
+index b431539c3714..e79bb256d177 100644
+--- a/arch/x86/kvm/page_track.c
++++ b/arch/x86/kvm/page_track.c
+@@ -225,3 +225,28 @@ void kvm_page_track_write(struct kvm_vcpu *vcpu, gpa_t gpa, const u8 *new,
+ 			n->track_write(vcpu, gpa, new, bytes);
+ 	srcu_read_unlock(&head->track_srcu, idx);
+ }
++
++/*
++ * Notify the node that memory slot is being removed or moved so that it can
++ * drop write-protection for the pages in the memory slot.
++ *
++ * The node should figure out it has any write-protected pages in this slot
++ * by itself.
++ */
++void kvm_page_track_flush_slot(struct kvm *kvm, struct kvm_memory_slot *slot)
++{
++	struct kvm_page_track_notifier_head *head;
++	struct kvm_page_track_notifier_node *n;
++	int idx;
++
++	head = &kvm->arch.track_notifier_head;
++
++	if (hlist_empty(&head->track_notifier_list))
++		return;
++
++	idx = srcu_read_lock(&head->track_srcu);
++	hlist_for_each_entry_rcu(n, &head->track_notifier_list, node)
++		if (n->track_flush_slot)
++			n->track_flush_slot(kvm, slot);
++	srcu_read_unlock(&head->track_srcu, idx);
++}
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 3017de0431bd..7e30c720d0c5 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -8155,7 +8155,7 @@ void kvm_arch_flush_shadow_all(struct kvm *kvm)
+ void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
+ 				   struct kvm_memory_slot *slot)
+ {
+-	kvm_mmu_invalidate_zap_all_pages(kvm);
++	kvm_page_track_flush_slot(kvm, slot);
+ }
+ 
+ static inline bool kvm_vcpu_has_events(struct kvm_vcpu *vcpu)
+

@@ -1,0 +1,80 @@
+commit 6cc0546c058f3e6253c6f99727b28dd602712974
+Author: Timo Sirainen <tss@iki.fi>
+Date:   Sat Nov 24 06:51:27 2007 +0200
+
+    Added last_failed_errno to ostream to make error handling easier with files.
+    
+    --HG--
+    branch : HEAD
+
+diff --git a/src/lib/ostream.c b/src/lib/ostream.c
+index 2da6e7fc5..cf61e9f29 100644
+--- a/src/lib/ostream.c
++++ b/src/lib/ostream.c
+@@ -74,12 +74,17 @@ void o_stream_uncork(struct ostream *stream)
+ int o_stream_flush(struct ostream *stream)
+ {
+ 	struct ostream_private *_stream = stream->real_stream;
++	int ret;
+ 
+ 	if (unlikely(stream->closed))
+ 		return -1;
+ 
+ 	stream->stream_errno = 0;
+-	return _stream->flush(_stream);
++	if (unlikely((ret = _stream->flush(_stream)) < 0)) {
++		i_assert(stream->stream_errno != 0);
++		stream->last_failed_errno = stream->stream_errno;
++	}
++	return ret;
+ }
+ 
+ void o_stream_set_flush_pending(struct ostream *stream, bool set)
+@@ -107,7 +112,11 @@ int o_stream_seek(struct ostream *stream, uoff_t offset)
+ 		return -1;
+ 
+ 	stream->stream_errno = 0;
+-	return _stream->seek(_stream, offset);
++	if (unlikely(_stream->seek(_stream, offset) < 0)) {
++		i_assert(stream->stream_errno != 0);
++		stream->last_failed_errno = stream->stream_errno;
++	}
++	return 1;
+ }
+ 
+ ssize_t o_stream_send(struct ostream *stream, const void *data, size_t size)
+@@ -136,8 +145,14 @@ ssize_t o_stream_sendv(struct ostream *stream, const struct const_iovec *iov,
+ 		total_size += iov[i].iov_len;
+ 
+ 	ret = _stream->sendv(_stream, iov, iov_count);
+-	if (unlikely(ret != (ssize_t)total_size))
+-		stream->overflow = TRUE;
++	if (unlikely(ret != (ssize_t)total_size)) {
++		if (ret < 0) {
++			i_assert(stream->stream_errno != 0);
++			stream->last_failed_errno = stream->stream_errno;
++		} else {
++			stream->overflow = TRUE;
++		}
++	}
+ 	return ret;
+ }
+ 
+diff --git a/src/lib/ostream.h b/src/lib/ostream.h
+index 91ca6cf23..53efe8f74 100644
+--- a/src/lib/ostream.h
++++ b/src/lib/ostream.h
+@@ -6,7 +6,12 @@
+ struct ostream {
+ 	uoff_t offset;
+ 
++	/* errno for the last operation send/seek operation. cleared before
++	   each call. */
+ 	int stream_errno;
++	/* errno of the last failed send/seek. never cleared. */
++	int last_failed_errno;
++
+ 	/* overflow is set when some of the data given to send()
+ 	   functions was neither sent nor buffered. It's never unset inside
+ 	   ostream code. */
+

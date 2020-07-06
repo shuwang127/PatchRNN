@@ -1,0 +1,93 @@
+commit f2090594dd28c033e0a9a267240ffca6d5afbd84
+Author: YOSHIFUJI Hideaki <yoshfuji@linux-ipv6.org>
+Date:   Fri Mar 8 10:43:25 2013 +0900
+
+    firewire net: Omit checking dev->broadcast_rcv_context in fwnet_broadcast_start().
+    
+    dev->broadcast_rcv_context is always non-NULL if dev->broadcast_state is
+    not FWNET_BROADCAST_ERROR.
+    
+    Signed-off-by: YOSHIFUJI Hideaki <yoshfuji@linux-ipv6.org>
+    Signed-off-by: Stefan Richter <stefanr@s5r6.in-berlin.de>
+
+diff --git a/drivers/firewire/net.c b/drivers/firewire/net.c
+index efed4a65fb06..d8cb6ac31044 100644
+--- a/drivers/firewire/net.c
++++ b/drivers/firewire/net.c
+@@ -1154,6 +1154,7 @@ static int fwnet_broadcast_start(struct fwnet_device *dev)
+ 	unsigned max_receive;
+ 	struct fw_iso_packet packet;
+ 	unsigned long offset;
++	void **ptrptr;
+ 	unsigned u;
+ 
+ 	if (dev->broadcast_state != FWNET_BROADCAST_ERROR)
+@@ -1162,42 +1163,36 @@ static int fwnet_broadcast_start(struct fwnet_device *dev)
+ 	max_receive = 1U << (dev->card->max_receive + 1);
+ 	num_packets = (FWNET_ISO_PAGE_COUNT * PAGE_SIZE) / max_receive;
+ 
+-	if (!dev->broadcast_rcv_context) {
+-		void **ptrptr;
+-
+-		context = fw_iso_context_create(dev->card,
+-		    FW_ISO_CONTEXT_RECEIVE, IEEE1394_BROADCAST_CHANNEL,
+-		    dev->card->link_speed, 8, fwnet_receive_broadcast, dev);
+-		if (IS_ERR(context)) {
+-			retval = PTR_ERR(context);
+-			goto failed_context_create;
+-		}
++	context = fw_iso_context_create(dev->card, FW_ISO_CONTEXT_RECEIVE,
++					IEEE1394_BROADCAST_CHANNEL,
++					dev->card->link_speed, 8,
++					fwnet_receive_broadcast, dev);
++	if (IS_ERR(context)) {
++		retval = PTR_ERR(context);
++		goto failed_context_create;
++	}
+ 
+-		retval = fw_iso_buffer_init(&dev->broadcast_rcv_buffer,
+-		    dev->card, FWNET_ISO_PAGE_COUNT, DMA_FROM_DEVICE);
+-		if (retval < 0)
+-			goto failed_buffer_init;
++	retval = fw_iso_buffer_init(&dev->broadcast_rcv_buffer, dev->card,
++				    FWNET_ISO_PAGE_COUNT, DMA_FROM_DEVICE);
++	if (retval < 0)
++		goto failed_buffer_init;
+ 
+-		ptrptr = kmalloc(sizeof(void *) * num_packets, GFP_KERNEL);
+-		if (!ptrptr) {
+-			retval = -ENOMEM;
+-			goto failed_ptrs_alloc;
+-		}
++	ptrptr = kmalloc(sizeof(void *) * num_packets, GFP_KERNEL);
++	if (!ptrptr) {
++		retval = -ENOMEM;
++		goto failed_ptrs_alloc;
++	}
+ 
+-		dev->broadcast_rcv_buffer_ptrs = ptrptr;
+-		for (u = 0; u < FWNET_ISO_PAGE_COUNT; u++) {
+-			void *ptr;
+-			unsigned v;
++	dev->broadcast_rcv_buffer_ptrs = ptrptr;
++	for (u = 0; u < FWNET_ISO_PAGE_COUNT; u++) {
++		void *ptr;
++		unsigned v;
+ 
+-			ptr = kmap(dev->broadcast_rcv_buffer.pages[u]);
+-			for (v = 0; v < num_packets / FWNET_ISO_PAGE_COUNT; v++)
+-				*ptrptr++ = (void *)
+-						((char *)ptr + v * max_receive);
+-		}
+-		dev->broadcast_rcv_context = context;
+-	} else {
+-		context = dev->broadcast_rcv_context;
++		ptr = kmap(dev->broadcast_rcv_buffer.pages[u]);
++		for (v = 0; v < num_packets / FWNET_ISO_PAGE_COUNT; v++)
++			*ptrptr++ = (void *) ((char *)ptr + v * max_receive);
+ 	}
++	dev->broadcast_rcv_context = context;
+ 
+ 	packet.payload_length = max_receive;
+ 	packet.interrupt = 1;
+

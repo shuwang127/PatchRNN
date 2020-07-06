@@ -1,0 +1,73 @@
+commit 07f1a4f5e89cd4e6c79d67d41e8a18c451214ae2
+Author: Dave Chinner <dchinner@redhat.com>
+Date:   Fri May 21 05:47:59 2010 +0000
+
+    xfs: Check new inode size is OK before preallocating
+    
+    The new xfsqa test 228 tries to preallocate more space than the
+    filesystem contains. it should fail, but instead triggers an assert
+    about lock flags.  The failure is due to the size extension failing
+    in vmtruncate() due to rlimit being set. Check this before we start
+    the preallocation to avoid allocating space that will never be used.
+    
+    Also the path through xfs_vn_allocate already holds the IO lock, so
+    it should not be present in the lock flags when the setattr fails.
+    Hence the assert needs to take this into account. This will prevent
+    other such callers from hitting this incorrect ASSERT.
+    
+    (Fixed a reference to "newsize" to read "new_size". -Alex)
+    
+    Signed-off-by: Dave Chinner <dchinner@redhat.com>
+    Reviewed-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Alex Elder <aelder@sgi.com>
+
+diff --git a/fs/xfs/linux-2.6/xfs_iops.c b/fs/xfs/linux-2.6/xfs_iops.c
+index 9c8019c78c92..44f0b2de153e 100644
+--- a/fs/xfs/linux-2.6/xfs_iops.c
++++ b/fs/xfs/linux-2.6/xfs_iops.c
+@@ -585,11 +585,20 @@ xfs_vn_fallocate(
+ 	bf.l_len = len;
+ 
+ 	xfs_ilock(ip, XFS_IOLOCK_EXCL);
++
++	/* check the new inode size is valid before allocating */
++	if (!(mode & FALLOC_FL_KEEP_SIZE) &&
++	    offset + len > i_size_read(inode)) {
++		new_size = offset + len;
++		error = inode_newsize_ok(inode, new_size);
++		if (error)
++			goto out_unlock;
++	}
++
+ 	error = -xfs_change_file_space(ip, XFS_IOC_RESVSP, &bf,
+ 				       0, XFS_ATTR_NOLOCK);
+-	if (!error && !(mode & FALLOC_FL_KEEP_SIZE) &&
+-	    offset + len > i_size_read(inode))
+-		new_size = offset + len;
++	if (error)
++		goto out_unlock;
+ 
+ 	/* Change file size if needed */
+ 	if (new_size) {
+@@ -600,6 +609,7 @@ xfs_vn_fallocate(
+ 		error = -xfs_setattr(ip, &iattr, XFS_ATTR_NOLOCK);
+ 	}
+ 
++out_unlock:
+ 	xfs_iunlock(ip, XFS_IOLOCK_EXCL);
+ out_error:
+ 	return error;
+diff --git a/fs/xfs/xfs_vnodeops.c b/fs/xfs/xfs_vnodeops.c
+index 9d376be0ea38..a06bd62504fc 100644
+--- a/fs/xfs/xfs_vnodeops.c
++++ b/fs/xfs/xfs_vnodeops.c
+@@ -267,7 +267,7 @@ xfs_setattr(
+ 		if (code) {
+ 			ASSERT(tp == NULL);
+ 			lock_flags &= ~XFS_ILOCK_EXCL;
+-			ASSERT(lock_flags == XFS_IOLOCK_EXCL);
++			ASSERT(lock_flags == XFS_IOLOCK_EXCL || !need_iolock);
+ 			goto error_return;
+ 		}
+ 		tp = xfs_trans_alloc(mp, XFS_TRANS_SETATTR_SIZE);
+

@@ -1,0 +1,117 @@
+commit acf99433d98c2570a619d8fb8b51abce4e532059
+Author: Tejun Heo <tj@kernel.org>
+Date:   Wed Nov 26 12:03:55 2008 +0100
+
+    fuse: add file kernel handle
+    
+    The file handle, fuse_file->fh, is opaque value supplied by userland
+    FUSE server and uniqueness is not guaranteed.  Add file kernel handle,
+    fuse_file->kh, which is allocated by the kernel on file allocation and
+    guaranteed to be unique.
+    
+    This will be used by poll to match notification to the respective file
+    but can be used for other purposes where unique file handle is
+    necessary.
+    
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Signed-off-by: Miklos Szeredi <mszeredi@suse.cz>
+
+diff --git a/fs/fuse/dir.c b/fs/fuse/dir.c
+index 9e7c5385699f..16ae55d347bb 100644
+--- a/fs/fuse/dir.c
++++ b/fs/fuse/dir.c
+@@ -408,7 +408,7 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry, int mode,
+ 		goto out_put_forget_req;
+ 
+ 	err = -ENOMEM;
+-	ff = fuse_file_alloc();
++	ff = fuse_file_alloc(fc);
+ 	if (!ff)
+ 		goto out_put_request;
+ 
+diff --git a/fs/fuse/file.c b/fs/fuse/file.c
+index baed06ea7622..a28ced678d38 100644
+--- a/fs/fuse/file.c
++++ b/fs/fuse/file.c
+@@ -46,7 +46,7 @@ static int fuse_send_open(struct inode *inode, struct file *file, int isdir,
+ 	return err;
+ }
+ 
+-struct fuse_file *fuse_file_alloc(void)
++struct fuse_file *fuse_file_alloc(struct fuse_conn *fc)
+ {
+ 	struct fuse_file *ff;
+ 	ff = kmalloc(sizeof(struct fuse_file), GFP_KERNEL);
+@@ -58,6 +58,9 @@ struct fuse_file *fuse_file_alloc(void)
+ 		} else {
+ 			INIT_LIST_HEAD(&ff->write_entry);
+ 			atomic_set(&ff->count, 0);
++			spin_lock(&fc->lock);
++			ff->kh = ++fc->khctr;
++			spin_unlock(&fc->lock);
+ 		}
+ 	}
+ 	return ff;
+@@ -108,6 +111,7 @@ void fuse_finish_open(struct inode *inode, struct file *file,
+ 
+ int fuse_open_common(struct inode *inode, struct file *file, int isdir)
+ {
++	struct fuse_conn *fc = get_fuse_conn(inode);
+ 	struct fuse_open_out outarg;
+ 	struct fuse_file *ff;
+ 	int err;
+@@ -120,7 +124,7 @@ int fuse_open_common(struct inode *inode, struct file *file, int isdir)
+ 	if (err)
+ 		return err;
+ 
+-	ff = fuse_file_alloc();
++	ff = fuse_file_alloc(fc);
+ 	if (!ff)
+ 		return -ENOMEM;
+ 
+diff --git a/fs/fuse/fuse_i.h b/fs/fuse/fuse_i.h
+index 4fc5131f5c9d..86f013303828 100644
+--- a/fs/fuse/fuse_i.h
++++ b/fs/fuse/fuse_i.h
+@@ -100,6 +100,9 @@ struct fuse_file {
+ 	/** Request reserved for flush and release */
+ 	struct fuse_req *reserved_req;
+ 
++	/** Kernel file handle guaranteed to be unique */
++	u64 kh;
++
+ 	/** File handle used by userspace */
+ 	u64 fh;
+ 
+@@ -322,6 +325,9 @@ struct fuse_conn {
+ 	/** The list of requests under I/O */
+ 	struct list_head io;
+ 
++	/** The next unique kernel file handle */
++	u64 khctr;
++
+ 	/** Number of requests currently in the background */
+ 	unsigned num_background;
+ 
+@@ -499,7 +505,7 @@ void fuse_read_fill(struct fuse_req *req, struct file *file,
+  */
+ int fuse_open_common(struct inode *inode, struct file *file, int isdir);
+ 
+-struct fuse_file *fuse_file_alloc(void);
++struct fuse_file *fuse_file_alloc(struct fuse_conn *fc);
+ void fuse_file_free(struct fuse_file *ff);
+ void fuse_finish_open(struct inode *inode, struct file *file,
+ 		      struct fuse_file *ff, struct fuse_open_out *outarg);
+diff --git a/fs/fuse/inode.c b/fs/fuse/inode.c
+index fa474989ec76..0e15bc221d23 100644
+--- a/fs/fuse/inode.c
++++ b/fs/fuse/inode.c
+@@ -485,6 +485,7 @@ static struct fuse_conn *new_conn(struct super_block *sb)
+ 		fc->bdi.unplug_io_fn = default_unplug_io_fn;
+ 		/* fuse does it's own writeback accounting */
+ 		fc->bdi.capabilities = BDI_CAP_NO_ACCT_WB;
++		fc->khctr = 0;
+ 		fc->dev = sb->s_dev;
+ 		err = bdi_init(&fc->bdi);
+ 		if (err)
+

@@ -1,0 +1,124 @@
+commit 289750d1f1fd4a715baa2a2c6dd0cec2b8317fd7
+Author: Robin Holt <holt@sgi.com>
+Date:   Tue Dec 15 16:47:55 2009 -0800
+
+    X86: uv: implement a gru_read_gpa kernel function
+    
+    The BIOS has decided to store a pointer to the partition reserved page in
+    a scratch MMR.  The GRU is only able to read an MMR using a vload
+    instruction.  The gru_read_gpa() function will implemented.
+    
+    Signed-off-by: Robin Holt <holt@sgi.com>
+    Signed-off-by: Jack Steiner <steiner@sgi.com>
+    Cc: Ingo Molnar <mingo@elte.hu>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/misc/sgi-gru/gru_instructions.h b/drivers/misc/sgi-gru/gru_instructions.h
+index 3c9c06618e6a..e033b6ce4a3f 100644
+--- a/drivers/misc/sgi-gru/gru_instructions.h
++++ b/drivers/misc/sgi-gru/gru_instructions.h
+@@ -340,6 +340,19 @@ static inline void gru_start_instruction(struct gru_instruction *ins, int op32)
+  *     	- nelem and stride are in elements
+  *     	- tri0/tri1 is in bytes for the beginning of the data segment.
+  */
++static inline void gru_vload_phys(void *cb, unsigned long gpa,
++		unsigned int tri0, int iaa, unsigned long hints)
++{
++	struct gru_instruction *ins = (struct gru_instruction *)cb;
++
++	ins->baddr0 = (long)gpa | ((unsigned long)iaa << 62);
++	ins->nelem = 1;
++	ins->tri0 = tri0;
++	ins->op1_stride = 1;
++	gru_start_instruction(ins, __opword(OP_VLOAD, 0, XTYPE_DW, iaa, 0,
++					CB_IMA(hints)));
++}
++
+ static inline void gru_vload(void *cb, unsigned long mem_addr,
+ 		unsigned int tri0, unsigned char xtype, unsigned long nelem,
+ 		unsigned long stride, unsigned long hints)
+diff --git a/drivers/misc/sgi-gru/grukservices.c b/drivers/misc/sgi-gru/grukservices.c
+index 766e21e15574..d2b149facda1 100644
+--- a/drivers/misc/sgi-gru/grukservices.c
++++ b/drivers/misc/sgi-gru/grukservices.c
+@@ -857,6 +857,29 @@ EXPORT_SYMBOL_GPL(gru_get_next_message);
+ 
+ /* ---------------------- GRU DATA COPY FUNCTIONS ---------------------------*/
+ 
++/*
++ * Load a DW from a global GPA. The GPA can be a memory or MMR address.
++ */
++int gru_read_gpa(unsigned long *value, unsigned long gpa)
++{
++	void *cb;
++	void *dsr;
++	int ret, iaa;
++
++	STAT(read_gpa);
++	if (gru_get_cpu_resources(GRU_NUM_KERNEL_DSR_BYTES, &cb, &dsr))
++		return MQE_BUG_NO_RESOURCES;
++	iaa = gpa >> 62;
++	gru_vload_phys(cb, gpa, gru_get_tri(dsr), iaa, IMA);
++	ret = gru_wait(cb);
++	if (ret == CBS_IDLE)
++		*value = *(unsigned long *)dsr;
++	gru_free_cpu_resources(cb, dsr);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(gru_read_gpa);
++
++
+ /*
+  * Copy a block of data using the GRU resources
+  */
+diff --git a/drivers/misc/sgi-gru/grukservices.h b/drivers/misc/sgi-gru/grukservices.h
+index d60d34bca44d..02aa94d8484a 100644
+--- a/drivers/misc/sgi-gru/grukservices.h
++++ b/drivers/misc/sgi-gru/grukservices.h
+@@ -130,6 +130,20 @@ extern void gru_free_message(struct gru_message_queue_desc *mqd,
+ extern void *gru_get_next_message(struct gru_message_queue_desc *mqd);
+ 
+ 
++/*
++ * Read a GRU global GPA. Source can be located in a remote partition.
++ *
++ *    Input:
++ *    	value		memory address where MMR value is returned
++ *    	gpa		source numalink physical address of GPA
++ *
++ *    Output:
++ *	0		OK
++ *	>0		error
++ */
++int gru_read_gpa(unsigned long *value, unsigned long gpa);
++
++
+ /*
+  * Copy data using the GRU. Source or destination can be located in a remote
+  * partition.
+diff --git a/drivers/misc/sgi-gru/gruprocfs.c b/drivers/misc/sgi-gru/gruprocfs.c
+index 3f2375c5ba5b..cf6b3e3034d6 100644
+--- a/drivers/misc/sgi-gru/gruprocfs.c
++++ b/drivers/misc/sgi-gru/gruprocfs.c
+@@ -98,6 +98,7 @@ static int statistics_show(struct seq_file *s, void *p)
+ 	printstat(s, flush_tlb_gru_tgh);
+ 	printstat(s, flush_tlb_gru_zero_asid);
+ 	printstat(s, copy_gpa);
++	printstat(s, read_gpa);
+ 	printstat(s, mesq_receive);
+ 	printstat(s, mesq_receive_none);
+ 	printstat(s, mesq_send);
+diff --git a/drivers/misc/sgi-gru/grutables.h b/drivers/misc/sgi-gru/grutables.h
+index 46990bcfa536..f7b553a56ed0 100644
+--- a/drivers/misc/sgi-gru/grutables.h
++++ b/drivers/misc/sgi-gru/grutables.h
+@@ -224,6 +224,7 @@ struct gru_stats_s {
+ 	atomic_long_t flush_tlb_gru_zero_asid;
+ 
+ 	atomic_long_t copy_gpa;
++	atomic_long_t read_gpa;
+ 
+ 	atomic_long_t mesq_receive;
+ 	atomic_long_t mesq_receive_none;
+

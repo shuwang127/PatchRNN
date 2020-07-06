@@ -1,0 +1,54 @@
+commit 4584a00276941db3f64c4db1a1bed91fe107af81
+Author: Timo Sirainen <timo.sirainen@dovecot.fi>
+Date:   Tue Oct 31 23:37:44 2017 +0200
+
+    lib-ssl-iostream: Verify SSL server's hostname against cert if it's non-NULL
+    
+    The hostname verification was skipped when handshake-callback wasn't used.
+    All of the existing code used the callback though, so this doesn't fix
+    any bugs.
+
+diff --git a/src/lib-ssl-iostream/iostream-openssl.c b/src/lib-ssl-iostream/iostream-openssl.c
+index 2c8d81693..b4cb325c7 100644
+--- a/src/lib-ssl-iostream/iostream-openssl.c
++++ b/src/lib-ssl-iostream/iostream-openssl.c
+@@ -614,6 +614,13 @@ static int openssl_iostream_handshake(struct ssl_iostream *ssl_io)
+ 			openssl_iostream_set_error(ssl_io, error);
+ 			ssl_io->handshake_failed = TRUE;
+ 		}
++	} else if (ssl_io->connected_host != NULL && !ssl_io->handshake_failed) {
++		if (ssl_iostream_cert_match_name(ssl_io, ssl_io->connected_host) < 0) {
++			openssl_iostream_set_error(ssl_io, t_strdup_printf(
++				"SSL certificate doesn't match expected host name %s",
++				ssl_io->connected_host));
++			ssl_io->handshake_failed = TRUE;
++		}
+ 	}
+ 	if (ssl_io->handshake_failed) {
+ 		i_stream_close(ssl_io->plain_input);
+diff --git a/src/lib-ssl-iostream/iostream-ssl.h b/src/lib-ssl-iostream/iostream-ssl.h
+index 50b6e8de4..caf51c655 100644
+--- a/src/lib-ssl-iostream/iostream-ssl.h
++++ b/src/lib-ssl-iostream/iostream-ssl.h
+@@ -36,7 +36,8 @@ struct ssl_iostream_settings {
+ int ssl_module_load(const char **error_r);
+ 
+ /* Returns 0 if ok, -1 and sets error_r if failed. The returned error string
+-   becomes available via ssl_iostream_get_last_error() */
++   becomes available via ssl_iostream_get_last_error(). The callback most
++   likely should be calling ssl_iostream_check_cert_validity(). */
+ typedef int
+ ssl_iostream_handshake_callback_t(const char **error_r, void *context);
+ 
+@@ -60,6 +61,10 @@ void ssl_iostream_set_log_prefix(struct ssl_iostream *ssl_io,
+ 				 const char *prefix);
+ 
+ int ssl_iostream_handshake(struct ssl_iostream *ssl_io);
++/* Call the given callback when SSL handshake finishes. The callback must
++   verify whether the certificate and its hostname is valid. If there is no
++   callback, the default is to use ssl_iostream_check_cert_validity() with the
++   same host as given to io_stream_create_ssl_client() */
+ void ssl_iostream_set_handshake_callback(struct ssl_iostream *ssl_io,
+ 					 ssl_iostream_handshake_callback_t *callback,
+ 					 void *context);
+

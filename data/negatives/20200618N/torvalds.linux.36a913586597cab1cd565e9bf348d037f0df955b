@@ -1,0 +1,80 @@
+commit 36a913586597cab1cd565e9bf348d037f0df955b
+Author: Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>
+Date:   Wed Apr 30 13:57:15 2008 -0400
+
+    ACPI: Fix acpi_processor_idle and idle= boot parameters interaction
+    
+    acpi_processor_idle and "idle=" boot parameter interaction is broken.
+    The problem is that, at boot time acpi driver is checking for "idle=" boot
+    option and not registering the acpi idle handler. But, when there is a CST
+    changed callback (typically when switching AC <-> battery or suspend-resume)
+    there are no checks for boot_option_idle_override and acpi idle handler tries
+    to get installed with nasty side effects.
+    
+    With CPU_IDLE configured this issue causes results in a nasty oops on CST
+    change callback and without CPU_IDLE there is no oops, but boot option
+    of "idle=" gets ignored and acpi idle handler gets installed.
+    
+    Change the behavior to not do anything in acpi idle handler when there is a
+    "idle=" boot option.
+    
+    Note that the problem is only there when "idle=" boot option is used.
+    
+    Signed-off-by: Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>
+    Signed-off-by: Len Brown <len.brown@intel.com>
+
+diff --git a/drivers/acpi/processor_idle.c b/drivers/acpi/processor_idle.c
+index 836362b50faa..47b167c731a0 100644
+--- a/drivers/acpi/processor_idle.c
++++ b/drivers/acpi/processor_idle.c
+@@ -1299,6 +1299,8 @@ int acpi_processor_cst_has_changed(struct acpi_processor *pr)
+ {
+ 	int result = 0;
+ 
++	if (boot_option_idle_override)
++		return 0;
+ 
+ 	if (!pr)
+ 		return -EINVAL;
+@@ -1738,6 +1740,9 @@ int acpi_processor_cst_has_changed(struct acpi_processor *pr)
+ {
+ 	int ret;
+ 
++	if (boot_option_idle_override)
++		return 0;
++
+ 	if (!pr)
+ 		return -EINVAL;
+ 
+@@ -1768,6 +1773,8 @@ int __cpuinit acpi_processor_power_init(struct acpi_processor *pr,
+ 	struct proc_dir_entry *entry = NULL;
+ 	unsigned int i;
+ 
++	if (boot_option_idle_override)
++		return 0;
+ 
+ 	if (!first_run) {
+ 		dmi_check_system(processor_power_dmi_table);
+@@ -1803,7 +1810,7 @@ int __cpuinit acpi_processor_power_init(struct acpi_processor *pr,
+ 	 * Note that we use previously set idle handler will be used on
+ 	 * platforms that only support C1.
+ 	 */
+-	if ((pr->flags.power) && (!boot_option_idle_override)) {
++	if (pr->flags.power) {
+ #ifdef CONFIG_CPU_IDLE
+ 		acpi_processor_setup_cpuidle(pr);
+ 		pr->power.dev.cpu = pr->id;
+@@ -1843,8 +1850,11 @@ int __cpuinit acpi_processor_power_init(struct acpi_processor *pr,
+ int acpi_processor_power_exit(struct acpi_processor *pr,
+ 			      struct acpi_device *device)
+ {
++	if (boot_option_idle_override)
++		return 0;
++
+ #ifdef CONFIG_CPU_IDLE
+-	if ((pr->flags.power) && (!boot_option_idle_override))
++	if (pr->flags.power)
+ 		cpuidle_unregister_device(&pr->power.dev);
+ #endif
+ 	pr->flags.power_setup_done = 0;
+

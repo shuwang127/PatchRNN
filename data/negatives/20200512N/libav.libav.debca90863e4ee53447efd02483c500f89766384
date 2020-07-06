@@ -1,0 +1,123 @@
+commit debca90863e4ee53447efd02483c500f89766384
+Author: Anton Khirnov <anton@khirnov.net>
+Date:   Tue May 17 16:45:15 2016 +0200
+
+    h264: store {curr,max}_pic_num in the per-slice context
+    
+    While the value of those variables will be constant for the whole frame,
+    they are only used in two functions called from slice header decoding.
+    Moving them to the per-slice context allows us to make the H264Context
+    passed to slice_header_parse() constant.
+
+diff --git a/libavcodec/h264.h b/libavcodec/h264.h
+index 4a109e119..cc7dd7ffe 100644
+--- a/libavcodec/h264.h
++++ b/libavcodec/h264.h
+@@ -451,6 +451,8 @@ typedef struct H264SliceContext {
+     int poc_lsb;
+     int delta_poc_bottom;
+     int delta_poc[2];
++    int curr_pic_num;
++    int max_pic_num;
+ } H264SliceContext;
+ 
+ /**
+@@ -565,16 +567,6 @@ typedef struct H264Context {
+ 
+     H264POCContext poc;
+ 
+-    /**
+-     * frame_num for frames or 2 * frame_num + 1 for field pics.
+-     */
+-    int curr_pic_num;
+-
+-    /**
+-     * max_frame_num or 2 * max_frame_num for field pics.
+-     */
+-    int max_pic_num;
+-
+     H264Picture *short_ref[32];
+     H264Picture *long_ref[32];
+     H264Picture *delayed_pic[MAX_DELAYED_PIC_COUNT + 2]; // FIXME size?
+diff --git a/libavcodec/h264_refs.c b/libavcodec/h264_refs.c
+index 2e43a8f4e..f7b7211a5 100644
+--- a/libavcodec/h264_refs.c
++++ b/libavcodec/h264_refs.c
+@@ -262,7 +262,7 @@ int ff_h264_build_ref_list(const H264Context *h, H264SliceContext *sl)
+     h264_initialise_ref_list(h, sl);
+ 
+     for (list = 0; list < sl->list_count; list++) {
+-        int pred = h->curr_pic_num;
++        int pred = sl->curr_pic_num;
+ 
+         for (index = 0; index < sl->nb_ref_modifications[list]; index++) {
+             unsigned int modification_of_pic_nums_idc = sl->ref_modifications[list][index].op;
+@@ -277,7 +277,7 @@ int ff_h264_build_ref_list(const H264Context *h, H264SliceContext *sl)
+                 const unsigned int abs_diff_pic_num = val + 1;
+                 int frame_num;
+ 
+-                if (abs_diff_pic_num > h->max_pic_num) {
++                if (abs_diff_pic_num > sl->max_pic_num) {
+                     av_log(h->avctx, AV_LOG_ERROR,
+                            "abs_diff_pic_num overflow\n");
+                     return AVERROR_INVALIDDATA;
+@@ -287,7 +287,7 @@ int ff_h264_build_ref_list(const H264Context *h, H264SliceContext *sl)
+                     pred -= abs_diff_pic_num;
+                 else
+                     pred += abs_diff_pic_num;
+-                pred &= h->max_pic_num - 1;
++                pred &= sl->max_pic_num - 1;
+ 
+                 frame_num = pic_num_extract(h, pred, &pic_structure);
+ 
+@@ -751,8 +751,8 @@ int ff_h264_decode_ref_pic_marking(const H264Context *h, H264SliceContext *sl,
+                 mmco[i].opcode = opcode;
+                 if (opcode == MMCO_SHORT2UNUSED || opcode == MMCO_SHORT2LONG) {
+                     mmco[i].short_pic_num =
+-                        (h->curr_pic_num - get_ue_golomb(gb) - 1) &
+-                            (h->max_pic_num - 1);
++                        (sl->curr_pic_num - get_ue_golomb(gb) - 1) &
++                            (sl->max_pic_num - 1);
+ #if 0
+                     if (mmco[i].short_pic_num >= h->short_ref_count ||
+                         !h->short_ref[mmco[i].short_pic_num]) {
+diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+index be44e66b3..d9268840b 100644
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -405,9 +405,6 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
+ 
+     memcpy(&h->poc,        &h1->poc,        sizeof(h->poc));
+ 
+-    h->curr_pic_num      = h1->curr_pic_num;
+-    h->max_pic_num       = h1->max_pic_num;
+-
+     memcpy(h->short_ref,   h1->short_ref,   sizeof(h->short_ref));
+     memcpy(h->long_ref,    h1->long_ref,    sizeof(h->long_ref));
+     memcpy(h->delayed_pic, h1->delayed_pic, sizeof(h->delayed_pic));
+@@ -1173,7 +1170,7 @@ static int h264_field_start(H264Context *h, const H264SliceContext *sl,
+     return 0;
+ }
+ 
+-static int h264_slice_header_parse(H264Context *h, H264SliceContext *sl,
++static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
+                                    const H2645NAL *nal)
+ {
+     const SPS *sps;
+@@ -1248,11 +1245,11 @@ static int h264_slice_header_parse(H264Context *h, H264SliceContext *sl,
+     sl->mb_field_decoding_flag = picture_structure != PICT_FRAME;
+ 
+     if (picture_structure == PICT_FRAME) {
+-        h->curr_pic_num = sl->frame_num;
+-        h->max_pic_num  = 1 << sps->log2_max_frame_num;
++        sl->curr_pic_num = sl->frame_num;
++        sl->max_pic_num  = 1 << sps->log2_max_frame_num;
+     } else {
+-        h->curr_pic_num = 2 * sl->frame_num + 1;
+-        h->max_pic_num  = 1 << (sps->log2_max_frame_num + 1);
++        sl->curr_pic_num = 2 * sl->frame_num + 1;
++        sl->max_pic_num  = 1 << (sps->log2_max_frame_num + 1);
+     }
+ 
+     if (nal->type == NAL_IDR_SLICE)
+

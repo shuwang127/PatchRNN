@@ -1,0 +1,117 @@
+commit 49af449b457b721ac5c18f537cf7484903f212f8
+Author: Damien Lespiau <damien.lespiau@intel.com>
+Date:   Tue Jan 20 12:51:44 2015 +0000
+
+    drm/i915: Change plane_config to store a tiling_mode
+    
+    Rather than having "tiled" meaning "is it X-tiled?" convert the field to
+    explicitely store the tiling mode. The code doesn't have to change much
+    as 1 is conveniently I915_TILING_X.
+    
+    This is to accommodate future changes around tiling modes and scannout
+    buffers.
+    
+    v2: Rebase on top of Ander's "Make intel_crtc->config a pointer"
+    
+    Reviewed-By: Tvrtko Ursulin <tvrtko.ursulin@intel.com> (v1)
+    Signed-off-by: Damien Lespiau <damien.lespiau@intel.com>
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 8c5dfec98de1..98cd20adac1f 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -2352,10 +2352,9 @@ static bool intel_alloc_plane_obj(struct intel_crtc *crtc,
+ 	if (!obj)
+ 		return false;
+ 
+-	if (plane_config->tiled) {
+-		obj->tiling_mode = I915_TILING_X;
++	obj->tiling_mode = plane_config->tiling;
++	if (obj->tiling_mode == I915_TILING_X)
+ 		obj->stride = crtc->base.primary->fb->pitches[0];
+-	}
+ 
+ 	mode_cmd.pixel_format = crtc->base.primary->fb->pixel_format;
+ 	mode_cmd.width = crtc->base.primary->fb->width;
+@@ -6565,7 +6564,7 @@ static void i9xx_get_plane_config(struct intel_crtc *crtc,
+ 
+ 	if (INTEL_INFO(dev)->gen >= 4)
+ 		if (val & DISPPLANE_TILED)
+-			plane_config->tiled = true;
++			plane_config->tiling = I915_TILING_X;
+ 
+ 	pixel_format = val & DISPPLANE_PIXFORMAT_MASK;
+ 	fourcc = intel_format_to_fourcc(pixel_format);
+@@ -6574,7 +6573,7 @@ static void i9xx_get_plane_config(struct intel_crtc *crtc,
+ 		drm_format_plane_cpp(fourcc, 0) * 8;
+ 
+ 	if (INTEL_INFO(dev)->gen >= 4) {
+-		if (plane_config->tiled)
++		if (plane_config->tiling)
+ 			offset = I915_READ(DSPTILEOFF(plane));
+ 		else
+ 			offset = I915_READ(DSPLINOFF(plane));
+@@ -6592,7 +6591,7 @@ static void i9xx_get_plane_config(struct intel_crtc *crtc,
+ 	crtc->base.primary->fb->pitches[0] = val & 0xffffffc0;
+ 
+ 	aligned_height = intel_align_height(dev, crtc->base.primary->fb->height,
+-					    plane_config->tiled);
++					    plane_config->tiling);
+ 
+ 	plane_config->size = PAGE_ALIGN(crtc->base.primary->fb->pitches[0] *
+ 					aligned_height);
+@@ -7619,7 +7618,7 @@ static void ironlake_get_plane_config(struct intel_crtc *crtc,
+ 
+ 	if (INTEL_INFO(dev)->gen >= 4)
+ 		if (val & DISPPLANE_TILED)
+-			plane_config->tiled = true;
++			plane_config->tiling = I915_TILING_X;
+ 
+ 	pixel_format = val & DISPPLANE_PIXFORMAT_MASK;
+ 	fourcc = intel_format_to_fourcc(pixel_format);
+@@ -7631,7 +7630,7 @@ static void ironlake_get_plane_config(struct intel_crtc *crtc,
+ 	if (IS_HASWELL(dev) || IS_BROADWELL(dev)) {
+ 		offset = I915_READ(DSPOFFSET(plane));
+ 	} else {
+-		if (plane_config->tiled)
++		if (plane_config->tiling)
+ 			offset = I915_READ(DSPTILEOFF(plane));
+ 		else
+ 			offset = I915_READ(DSPLINOFF(plane));
+@@ -7646,7 +7645,7 @@ static void ironlake_get_plane_config(struct intel_crtc *crtc,
+ 	crtc->base.primary->fb->pitches[0] = val & 0xffffffc0;
+ 
+ 	aligned_height = intel_align_height(dev, crtc->base.primary->fb->height,
+-					    plane_config->tiled);
++					    plane_config->tiling);
+ 
+ 	plane_config->size = PAGE_ALIGN(crtc->base.primary->fb->pitches[0] *
+ 					aligned_height);
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index e4b83a6b8227..04e2cfcc630b 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -258,7 +258,7 @@ struct intel_plane_state {
+ };
+ 
+ struct intel_plane_config {
+-	bool tiled;
++	unsigned int tiling;
+ 	int size;
+ 	u32 base;
+ };
+diff --git a/drivers/gpu/drm/i915/intel_fbdev.c b/drivers/gpu/drm/i915/intel_fbdev.c
+index 3eea7ed84bb1..6b18821a0eb2 100644
+--- a/drivers/gpu/drm/i915/intel_fbdev.c
++++ b/drivers/gpu/drm/i915/intel_fbdev.c
+@@ -593,7 +593,7 @@ static bool intel_fbdev_init_bios(struct drm_device *dev,
+ 		}
+ 
+ 		cur_size = intel_crtc->config->base.adjusted_mode.crtc_vdisplay;
+-		cur_size = ALIGN(cur_size, plane_config->tiled ? (IS_GEN2(dev) ? 16 : 8) : 1);
++		cur_size = ALIGN(cur_size, plane_config->tiling ? (IS_GEN2(dev) ? 16 : 8) : 1);
+ 		cur_size *= fb->base.pitches[0];
+ 		DRM_DEBUG_KMS("pipe %c area: %dx%d, bpp: %d, size: %d\n",
+ 			      pipe_name(intel_crtc->pipe),
+

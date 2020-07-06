@@ -1,0 +1,220 @@
+commit f0b791a34cb3cffd2bbc3ca4365c9b719fa2c9f3
+Author: Dave Hansen <dave@sr71.net>
+Date:   Thu Jan 23 15:52:49 2014 -0800
+
+    mm: print more details for bad_page()
+    
+    bad_page() is cool in that it prints out a bunch of data about the page.
+    But, I can never remember which page flags are good and which are bad,
+    or whether ->index or ->mapping is required to be NULL.
+    
+    This patch allows bad/dump_page() callers to specify a string about why
+    they are dumping the page and adds explanation strings to a number of
+    places.  It also adds a 'bad_flags' argument to bad_page(), which it
+    then dumps out separately from the flags which are actually set.
+    
+    This way, the messages will show specifically why the page was bad,
+    *specifically* which flags it is complaining about, if it was a page
+    flag combination which was the problem.
+    
+    [akpm@linux-foundation.org: switch to pr_alert]
+    Signed-off-by: Dave Hansen <dave.hansen@linux.intel.com>
+    Reviewed-by: Christoph Lameter <cl@linux.com>
+    Cc: Andi Kleen <andi@firstfloor.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index a512dd836931..03bbcb84d96e 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -2029,7 +2029,9 @@ extern void shake_page(struct page *p, int access);
+ extern atomic_long_t num_poisoned_pages;
+ extern int soft_offline_page(struct page *page, int flags);
+ 
+-extern void dump_page(struct page *page);
++extern void dump_page(struct page *page, char *reason);
++extern void dump_page_badflags(struct page *page, char *reason,
++			       unsigned long badflags);
+ 
+ #if defined(CONFIG_TRANSPARENT_HUGEPAGE) || defined(CONFIG_HUGETLBFS)
+ extern void clear_huge_page(struct page *page,
+diff --git a/mm/balloon_compaction.c b/mm/balloon_compaction.c
+index 07dbc8ec46cf..6e45a5074bf0 100644
+--- a/mm/balloon_compaction.c
++++ b/mm/balloon_compaction.c
+@@ -267,7 +267,7 @@ void balloon_page_putback(struct page *page)
+ 		put_page(page);
+ 	} else {
+ 		WARN_ON(1);
+-		dump_page(page);
++		dump_page(page, "not movable balloon page");
+ 	}
+ 	unlock_page(page);
+ }
+@@ -287,7 +287,7 @@ int balloon_page_migrate(struct page *newpage,
+ 	BUG_ON(!trylock_page(newpage));
+ 
+ 	if (WARN_ON(!__is_movable_balloon_page(page))) {
+-		dump_page(page);
++		dump_page(page, "not movable balloon page");
+ 		unlock_page(newpage);
+ 		return rc;
+ 	}
+diff --git a/mm/memory.c b/mm/memory.c
+index 86487dfa5e59..71d70c082b98 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -671,7 +671,7 @@ static void print_bad_pte(struct vm_area_struct *vma, unsigned long addr,
+ 		current->comm,
+ 		(long long)pte_val(pte), (long long)pmd_val(*pmd));
+ 	if (page)
+-		dump_page(page);
++		dump_page(page, "bad pte");
+ 	printk(KERN_ALERT
+ 		"addr:%p vm_flags:%08lx anon_vma:%p mapping:%p index:%lx\n",
+ 		(void *)addr, vma->vm_flags, vma->anon_vma, mapping, index);
+diff --git a/mm/memory_hotplug.c b/mm/memory_hotplug.c
+index cc2ab37220b7..a512a47241a4 100644
+--- a/mm/memory_hotplug.c
++++ b/mm/memory_hotplug.c
+@@ -1309,7 +1309,7 @@ do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
+ #ifdef CONFIG_DEBUG_VM
+ 			printk(KERN_ALERT "removing pfn %lx from LRU failed\n",
+ 			       pfn);
+-			dump_page(page);
++			dump_page(page, "failed to remove from LRU");
+ #endif
+ 			put_page(page);
+ 			/* Because we don't have big zone->lock. we should
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 533e2147d14f..1939f4446a36 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -295,7 +295,7 @@ static inline int bad_range(struct zone *zone, struct page *page)
+ }
+ #endif
+ 
+-static void bad_page(struct page *page)
++static void bad_page(struct page *page, char *reason, unsigned long bad_flags)
+ {
+ 	static unsigned long resume;
+ 	static unsigned long nr_shown;
+@@ -329,7 +329,7 @@ static void bad_page(struct page *page)
+ 
+ 	printk(KERN_ALERT "BUG: Bad page state in process %s  pfn:%05lx\n",
+ 		current->comm, page_to_pfn(page));
+-	dump_page(page);
++	dump_page_badflags(page, reason, bad_flags);
+ 
+ 	print_modules();
+ 	dump_stack();
+@@ -383,7 +383,7 @@ static int destroy_compound_page(struct page *page, unsigned long order)
+ 	int bad = 0;
+ 
+ 	if (unlikely(compound_order(page) != order)) {
+-		bad_page(page);
++		bad_page(page, "wrong compound order", 0);
+ 		bad++;
+ 	}
+ 
+@@ -392,8 +392,11 @@ static int destroy_compound_page(struct page *page, unsigned long order)
+ 	for (i = 1; i < nr_pages; i++) {
+ 		struct page *p = page + i;
+ 
+-		if (unlikely(!PageTail(p) || (p->first_page != page))) {
+-			bad_page(page);
++		if (unlikely(!PageTail(p))) {
++			bad_page(page, "PageTail not set", 0);
++			bad++;
++		} else if (unlikely(p->first_page != page)) {
++			bad_page(page, "first_page not consistent", 0);
+ 			bad++;
+ 		}
+ 		__ClearPageTail(p);
+@@ -618,12 +621,23 @@ static inline void __free_one_page(struct page *page,
+ 
+ static inline int free_pages_check(struct page *page)
+ {
+-	if (unlikely(page_mapcount(page) |
+-		(page->mapping != NULL)  |
+-		(atomic_read(&page->_count) != 0) |
+-		(page->flags & PAGE_FLAGS_CHECK_AT_FREE) |
+-		(mem_cgroup_bad_page_check(page)))) {
+-		bad_page(page);
++	char *bad_reason = NULL;
++	unsigned long bad_flags = 0;
++
++	if (unlikely(page_mapcount(page)))
++		bad_reason = "nonzero mapcount";
++	if (unlikely(page->mapping != NULL))
++		bad_reason = "non-NULL mapping";
++	if (unlikely(atomic_read(&page->_count) != 0))
++		bad_reason = "nonzero _count";
++	if (unlikely(page->flags & PAGE_FLAGS_CHECK_AT_FREE)) {
++		bad_reason = "PAGE_FLAGS_CHECK_AT_FREE flag(s) set";
++		bad_flags = PAGE_FLAGS_CHECK_AT_FREE;
++	}
++	if (unlikely(mem_cgroup_bad_page_check(page)))
++		bad_reason = "cgroup check failed";
++	if (unlikely(bad_reason)) {
++		bad_page(page, bad_reason, bad_flags);
+ 		return 1;
+ 	}
+ 	page_cpupid_reset_last(page);
+@@ -843,12 +857,23 @@ static inline void expand(struct zone *zone, struct page *page,
+  */
+ static inline int check_new_page(struct page *page)
+ {
+-	if (unlikely(page_mapcount(page) |
+-		(page->mapping != NULL)  |
+-		(atomic_read(&page->_count) != 0)  |
+-		(page->flags & PAGE_FLAGS_CHECK_AT_PREP) |
+-		(mem_cgroup_bad_page_check(page)))) {
+-		bad_page(page);
++	char *bad_reason = NULL;
++	unsigned long bad_flags = 0;
++
++	if (unlikely(page_mapcount(page)))
++		bad_reason = "nonzero mapcount";
++	if (unlikely(page->mapping != NULL))
++		bad_reason = "non-NULL mapping";
++	if (unlikely(atomic_read(&page->_count) != 0))
++		bad_reason = "nonzero _count";
++	if (unlikely(page->flags & PAGE_FLAGS_CHECK_AT_PREP)) {
++		bad_reason = "PAGE_FLAGS_CHECK_AT_PREP flag set";
++		bad_flags = PAGE_FLAGS_CHECK_AT_PREP;
++	}
++	if (unlikely(mem_cgroup_bad_page_check(page)))
++		bad_reason = "cgroup check failed";
++	if (unlikely(bad_reason)) {
++		bad_page(page, bad_reason, bad_flags);
+ 		return 1;
+ 	}
+ 	return 0;
+@@ -6494,12 +6519,23 @@ static void dump_page_flags(unsigned long flags)
+ 	printk(")\n");
+ }
+ 
+-void dump_page(struct page *page)
++void dump_page_badflags(struct page *page, char *reason, unsigned long badflags)
+ {
+ 	printk(KERN_ALERT
+ 	       "page:%p count:%d mapcount:%d mapping:%p index:%#lx\n",
+ 		page, atomic_read(&page->_count), page_mapcount(page),
+ 		page->mapping, page->index);
+ 	dump_page_flags(page->flags);
++	if (reason)
++		pr_alert("page dumped because: %s\n", reason);
++	if (page->flags & badflags) {
++		pr_alert("bad because of flags:\n");
++		dump_page_flags(page->flags & badflags);
++	}
+ 	mem_cgroup_print_bad_page(page);
+ }
++
++void dump_page(struct page *page, char *reason)
++{
++	dump_page_badflags(page, reason, 0);
++}
+

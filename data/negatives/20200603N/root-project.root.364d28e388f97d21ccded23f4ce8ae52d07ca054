@@ -1,0 +1,118 @@
+commit 364d28e388f97d21ccded23f4ce8ae52d07ca054
+Author: Frederich Munch <marsupial@users.noreply.github.com>
+Date:   Fri Sep 30 00:58:04 2016 -0400
+
+    Add verbosity argument to ClangInternalState::compare.
+
+diff --git a/interpreter/cling/include/cling/Interpreter/ClangInternalState.h b/interpreter/cling/include/cling/Interpreter/ClangInternalState.h
+index 24b3b693af..6d9eaa5dc1 100644
+--- a/interpreter/cling/include/cling/Interpreter/ClangInternalState.h
++++ b/interpreter/cling/include/cling/Interpreter/ClangInternalState.h
+@@ -67,17 +67,18 @@ namespace cling {
+ 
+     ///\brief Compares the states with the current state of the same objects.
+     ///
+-    void compare(const std::string& name);
++    void compare(const std::string& Name, bool Verbose);
+ 
+     ///\brief Runs diff on two files.
+     ///\param[in] file1 - A file to diff
+     ///\param[in] file2 - A file to diff
+     ///\param[in] type - The type/name of the differences to print.
++    ///\param[in] verbose - Verbose output.
+     ///\param[in] ignores - A list of differences to ignore.
+     ///\returns true if there is difference in the contents.
+     ///
+     bool differentContent(const std::string& file1, const std::string& file2,
+-                          const char* type = nullptr,
++                          const char* type = nullptr, bool verbose = false,
+                const llvm::SmallVectorImpl<llvm::StringRef>* ignores = 0) const;
+ 
+     static void printLookupTables(llvm::raw_ostream& Out, clang::ASTContext& C);
+diff --git a/interpreter/cling/lib/Interpreter/ClangInternalState.cpp b/interpreter/cling/lib/Interpreter/ClangInternalState.cpp
+index 6bf6cfa9ed..a7d9e6fcab 100644
+--- a/interpreter/cling/lib/Interpreter/ClangInternalState.cpp
++++ b/interpreter/cling/lib/Interpreter/ClangInternalState.cpp
+@@ -131,7 +131,7 @@ namespace cling {
+     return OS.release();
+   }
+ 
+-  void ClangInternalState::compare(const std::string& name) {
++  void ClangInternalState::compare(const std::string& name, bool verbose) {
+     assert(name == m_Name && "Different names!?");
+     m_DiffPair.reset(new ClangInternalState(m_ASTContext, m_Preprocessor,
+                                             m_Module, m_CodeGen, name));
+@@ -160,12 +160,12 @@ namespace cling {
+     builtinNames.push_back(".*__builtin.*");
+ 
+     differentContent(m_LookupTablesFile, m_DiffPair->m_LookupTablesFile,
+-                     "lookup tables", &builtinNames);
++                     "lookup tables", verbose, &builtinNames);
+ 
+     differentContent(m_IncludedFilesFile, m_DiffPair->m_IncludedFilesFile,
+-                     "included files");
++                     "included files", verbose);
+ 
+-    differentContent(m_ASTFile, m_DiffPair->m_ASTFile, "AST");
++    differentContent(m_ASTFile, m_DiffPair->m_ASTFile, "AST", verbose);
+ 
+     if (m_Module) {
+       assert(m_CodeGen && "Must have CodeGen set");
+@@ -176,16 +176,17 @@ namespace cling {
+           builtinNames.emplace_back(Func.getName());
+       }
+       differentContent(m_LLVMModuleFile, m_DiffPair->m_LLVMModuleFile,
+-                       "llvm Module", &builtinNames);
++                       "llvm Module", verbose, &builtinNames);
+     }
+ 
+     differentContent(m_MacrosFile, m_DiffPair->m_MacrosFile,
+-                     "Macro Definitions");
++                     "Macro Definitions", verbose);
+   }
+ 
+   bool ClangInternalState::differentContent(const std::string& file1,
+                                             const std::string& file2,
+                                             const char* type,
++                                            bool verbose,
+             const llvm::SmallVectorImpl<llvm::StringRef>* ignores/*=0*/) const {
+ 
+     std::string diffCall = m_DiffCommand;
+@@ -204,11 +205,13 @@ namespace cling {
+     llvm::SmallString<1024> Difs;
+     platform::Popen(diffCall, Difs);
+ 
++    if (verbose)
++      llvm::errs() << diffCall << "\n";
++
+     if (Difs.empty())
+       return false;
+ 
+     if (type) {
+-      llvm::errs() << diffCall << "\n";
+       llvm::errs() << "Differences in the " << type << ":\n";
+       llvm::errs() << Difs << "\n";
+     }
+diff --git a/interpreter/cling/lib/Interpreter/Interpreter.cpp b/interpreter/cling/lib/Interpreter/Interpreter.cpp
+index cca7a62b25..ed0fb018d3 100644
+--- a/interpreter/cling/lib/Interpreter/Interpreter.cpp
++++ b/interpreter/cling/lib/Interpreter/Interpreter.cpp
+@@ -128,7 +128,7 @@ namespace cling {
+       // The ClangInternalState destructor can provoke deserialization,
+       // we need a transaction.
+       PushTransactionRAII pushedT(m_Interpreter);
+-      m_State->compare("aName");
++      m_State->compare("aName", m_Interpreter->m_Opts.Verbose());
+       m_State.reset();
+     }
+   }
+@@ -364,7 +364,7 @@ namespace cling {
+ 
+     // This may induce deserialization
+     PushTransactionRAII RAII(this);
+-    m_StoredStates[foundAtPos]->compare(name);
++    m_StoredStates[foundAtPos]->compare(name, m_Opts.Verbose());
+   }
+ 
+   void Interpreter::printIncludedFiles(llvm::raw_ostream& Out) const {
+

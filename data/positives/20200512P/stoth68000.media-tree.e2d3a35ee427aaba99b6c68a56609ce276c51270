@@ -1,0 +1,74 @@
+commit e2d3a35ee427aaba99b6c68a56609ce276c51270
+Author: Brian Norris <computersforpeace@gmail.com>
+Date:   Mon Sep 24 20:40:55 2012 -0700
+
+    mtd: nand: detect Samsung K9GBG08U0A, K9GAG08U0F ID
+    
+    Datasheets for the following Samsung NAND parts (both MLC and SLC) describe
+    extensions to the Samsung 6-byte extended ID decoding table:
+    
+    K9GBG08U0A (MLC, 6-byte ID)
+    K9GAG08U0F (MLC, 6-byte ID)
+    K9FAG08U0M (SLC, 6-byte ID)
+    
+    The table found in K9GAG08U0F, p.44, contains a superset of the information
+    found in other previous datasheets.
+    
+    This patch adds support for all of these chips, with 512B and 640B OOB sizes.
+    It also changes the detection pattern such that this table applies to all
+    Samsung 6-byte ID NAND, not just MLC. This is safe, according to the NAND
+    parameter data I have collected:
+    
+    Note that nand_base.c does not yet support the bad block marker scheme defined
+    for these chips (i.e., scan 1st and last page for BB markers).
+    
+    Signed-off-by: Brian Norris <computersforpeace@gmail.com>
+    Signed-off-by: Artem Bityutskiy <artem.bityutskiy@linux.intel.com>
+    Signed-off-by: David Woodhouse <David.Woodhouse@intel.com>
+
+diff --git a/drivers/mtd/nand/nand_base.c b/drivers/mtd/nand/nand_base.c
+index 304765140634..ec6841d8e956 100644
+--- a/drivers/mtd/nand/nand_base.c
++++ b/drivers/mtd/nand/nand_base.c
+@@ -2983,19 +2983,18 @@ static void nand_decode_ext_id(struct mtd_info *mtd, struct nand_chip *chip,
+ 	/*
+ 	 * Field definitions are in the following datasheets:
+ 	 * Old style (4,5 byte ID): Samsung K9GAG08U0M (p.32)
+-	 * New style   (6 byte ID): Samsung K9GBG08U0M (p.40)
++	 * New style   (6 byte ID): Samsung K9GAG08U0F (p.44)
+ 	 * Hynix MLC   (6 byte ID): Hynix H27UBG8T2B (p.22)
+ 	 *
+ 	 * Check for ID length, cell type, and Hynix/Samsung ID to decide what
+ 	 * to do.
+ 	 */
+-	if (id_len == 6 && id_data[0] == NAND_MFR_SAMSUNG &&
+-			(chip->cellinfo & NAND_CI_CELLTYPE_MSK)) {
++	if (id_len == 6 && id_data[0] == NAND_MFR_SAMSUNG) {
+ 		/* Calc pagesize */
+ 		mtd->writesize = 2048 << (extid & 0x03);
+ 		extid >>= 2;
+ 		/* Calc oobsize */
+-		switch (extid & 0x03) {
++		switch (((extid >> 2) & 0x04) | (extid & 0x03)) {
+ 		case 1:
+ 			mtd->oobsize = 128;
+ 			break;
+@@ -3005,9 +3004,16 @@ static void nand_decode_ext_id(struct mtd_info *mtd, struct nand_chip *chip,
+ 		case 3:
+ 			mtd->oobsize = 400;
+ 			break;
+-		default:
++		case 4:
+ 			mtd->oobsize = 436;
+ 			break;
++		case 5:
++			mtd->oobsize = 512;
++			break;
++		case 6:
++		default: /* Other cases are "reserved" (unknown) */
++			mtd->oobsize = 640;
++			break;
+ 		}
+ 		extid >>= 2;
+ 		/* Calc blocksize */
+

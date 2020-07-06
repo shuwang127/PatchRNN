@@ -1,0 +1,296 @@
+commit 90dfe35ff5483e86583a4c161740ac0161e5f7fc
+Author: Guilherme Ottoni <ottoni@fb.com>
+Date:   Fri Feb 2 13:02:50 2018 -0800
+
+    Revert D6709611: "Support CLI-server mode in ext_zip"
+    
+    Summary: Original commit changeset: 58107dc3c6f8
+    
+    Reviewed By: paulbiss
+    
+    Differential Revision: D6886437
+    
+    fbshipit-source-id: 1c74c14e679c26c630a9616b50a0493abd269d49
+
+diff --git a/hphp/runtime/ext/zip/ext_zip.cpp b/hphp/runtime/ext/zip/ext_zip.cpp
+index 9a8e55b0e4..5211721b77 100644
+--- a/hphp/runtime/ext/zip/ext_zip.cpp
++++ b/hphp/runtime/ext/zip/ext_zip.cpp
+@@ -22,7 +22,6 @@
+ #include "hphp/runtime/base/stream-wrapper-registry.h"
+ #include "hphp/runtime/ext/extension.h"
+ #include "hphp/runtime/ext/std/ext_std_file.h"
+-#include "hphp/runtime/server/cli-server.h"
+ 
+ namespace HPHP {
+ 
+@@ -36,24 +35,6 @@ static String to_full_path(const String& filename) {
+ // A wrapper for `zip_open` that prepares a full path
+ // file name to consider current working directory.
+ static zip* _zip_open(const String& filename, int _flags, int* zep) {
+-  if (is_cli_mode()) {
+-    int open_flags =
+-      (_flags & ZIP_EXCL ? O_EXCL : 0)
+-      | (_flags & ZIP_TRUNCATE ? O_TRUNC : 0)
+-      | (_flags & ZIP_CREATE ? O_CREAT : 0)
+-      | (_flags & ZIP_RDONLY ? O_RDONLY : O_RDWR);
+-    auto fd = cli_openfd_unsafe(
+-      filename,
+-      open_flags,
+-      static_cast<mode_t>(-1),
+-      /* use_include_path */ false,
+-      /* quiet */ true);
+-    if (fd == -1) {
+-      *zep = ZIP_ER_OPEN;
+-      return nullptr;
+-    }
+-    return zip_fdopen(fd, _flags & ZIP_CHECKCONS, zep);
+-  }
+   return zip_open(to_full_path(filename).c_str(), _flags, zep);
+ }
+ 
+@@ -769,12 +750,7 @@ static bool extractFileTo(zip* zip, const std::string &file, std::string& to,
+   auto zipFile = zip_fopen_index(zip, zipStat.index, 0);
+   FAIL_IF_INVALID_PTR(zipFile);
+ 
+-  auto stream = Stream::getWrapperFromURI(to);
+-  if (stream == nullptr) {
+-    zip_fclose(zipFile);
+-    return false;
+-  }
+-  auto outFile = stream->open(to, "wb", 0, nullptr);
++  auto outFile = fopen(to.c_str(), "wb");
+   if (outFile == nullptr) {
+     zip_fclose(zipFile);
+     return false;
+@@ -782,17 +758,20 @@ static bool extractFileTo(zip* zip, const std::string &file, std::string& to,
+ 
+   for (auto n = zip_fread(zipFile, buf, len); n != 0;
+        n = zip_fread(zipFile, buf, len)) {
+-    if (n < 0
+-        || outFile->write(String(buf, n, CopyStringMode::CopyString)) != n) {
++    if (n < 0 || fwrite(buf, sizeof(char), n, outFile) != n) {
+       zip_fclose(zipFile);
+-      outFile->close();
++      fclose(outFile);
+       remove(to.c_str());
+       return false;
+     }
+   }
+ 
+   zip_fclose(zipFile);
+-  return outFile->close();
++  if (fclose(outFile) != 0) {
++    return false;
++  }
++
++  return true;
+ }
+ 
+ static bool HHVM_METHOD(ZipArchive, extractTo, const String& destination,
+diff --git a/hphp/runtime/server/cli-server.cpp b/hphp/runtime/server/cli-server.cpp
+index 5bbd1c9463..6a0665be4f 100644
+--- a/hphp/runtime/server/cli-server.cpp
++++ b/hphp/runtime/server/cli-server.cpp
+@@ -1060,47 +1060,41 @@ void CLIWorker::doJob(int client) {
+ 
+ req::ptr<File>
+ CLIWrapper::open(const String& filename, const String& mode, int options,
+-                 const req::ptr<StreamContext>& context) {
+-  mode_t md = static_cast<mode_t>(-1);
+-  int fl = 0;
+-  switch (mode[0]) {
+-   case 'x':
+-     md = 0666;
+-     fl = O_CREAT|O_EXCL;
+-     fl |= (mode.find('+') == -1) ? O_WRONLY : O_RDWR;
+-     break;
+-   case 'c':
+-     md = 0666;
+-     fl = O_CREAT;
+-     fl |= (mode.find('+') == -1) ? O_WRONLY : O_RDWR;
+-     break;
+-   case 'r':
+-     fl = (mode.find('+') == -1) ? O_RDONLY : O_RDWR;
+-     break;
+-   case 'w':
+-     md = 0666;
+-     fl = O_CREAT | O_TRUNC;
+-     fl |= (mode.find('+') == -1) ? O_WRONLY : O_RDWR;
+-     break;
+-   case 'a':
+-     md = 0666;
+-     fl = O_CREAT | O_APPEND;
+-     fl |= (mode.find('+') == -1) ? O_WRONLY : O_RDWR;
+-     break;
+-   default:
+-    raise_warning("Invalid mode string");
+-    return nullptr;
++                 const req::ptr<StreamContext>& /*context*/) {
++  String fname;
++  if (StringUtil::IsFileUrl(filename)) {
++    fname = StringUtil::DecodeFileUrl(filename);
++    if (fname.empty()) {
++      raise_warning("invalid file:// URL");
++      return nullptr;
++    }
++  } else {
++    fname = filename;
++  }
++
++  if (options & File::USE_INCLUDE_PATH) {
++    struct stat s;
++    String resolved_fname = resolveVmInclude(fname.get(), "", &s);
++    if (!resolved_fname.isNull()) {
++      fname = resolved_fname;
++    }
+   }
+-  auto fd = cli_openfd_unsafe(
+-    filename,
+-    fl,
+-    md,
+-    options & File::USE_INCLUDE_PATH,
+-    /* quiet */ false);
+-  if (fd == -1) {
++
++  bool res;
++  std::string error;
++  FTRACE(3, "CLIWrapper({})::open({}, {}, {}): calling remote...\n",
++         m_cli_fd, fname.data(), mode.data(), options);
++  cli_write(m_cli_fd, "open", fname.data(), mode.data());
++  cli_read(m_cli_fd, res, error);
++  FTRACE(3, "{} = CLIWrapper({})::open(...) [err = {}]\n",
++         res, m_cli_fd, error);
++
++  if (!res) {
++    raise_warning("%s", error.c_str());
+     return nullptr;
+   }
+-  return req::make<CLIClientGuardedFile>(fd);
++
++  return req::make<CLIClientGuardedFile>(cli_read_fd(m_cli_fd));
+ }
+ 
+ req::ptr<Directory> CLIWrapper::opendir(const String& path) {
+@@ -1283,13 +1277,43 @@ void cli_process_command_loop(int fd) {
+ 
+     if (cmd == "open") {
+       std::string name;
+-      int flags;
+-      mode_t mode;
+-      cli_read(fd, name, flags, mode);
++      std::string mode;
++      cli_read(fd, name, mode);
++      int md = -1;
++      int fl = 0;
++
++      switch (mode[0]) {
++        case 'x':
++          md = 0666;
++          fl = O_CREAT|O_EXCL;
++          fl |= (mode.find('+') == -1) ? O_WRONLY : O_RDWR;
++          break;
++        case 'c':
++          md = 0666;
++          fl = O_CREAT;
++          fl |= (mode.find('+') == -1) ? O_WRONLY : O_RDWR;
++          break;
++        case 'r':
++          fl = (mode.find('+') == -1) ? O_RDONLY : O_RDWR;
++          break;
++        case 'w':
++          md = 0666;
++          fl = O_CREAT | O_TRUNC;
++          fl |= (mode.find('+') == -1) ? O_WRONLY : O_RDWR;
++          break;
++        case 'a':
++          md = 0666;
++          fl = O_CREAT | O_APPEND;
++          fl |= (mode.find('+') == -1) ? O_WRONLY : O_RDWR;
++          break;
++        default:
++          cli_write(fd, false, "Invalid mode string");
++          continue;
++      }
+ 
+-      int new_fd = mode != static_cast<unsigned int>(-1)
+-        ? open(name.c_str(), flags, mode)
+-        : open(name.c_str(), flags);
++      int new_fd = md != -1
++        ? open(name.c_str(), fl, md)
++        : open(name.c_str(), fl);
+ 
+       FTRACE(2, "cli_process_command_loop({}): {} = open({}, {})\n",
+              fd, new_fd, name, mode);
+@@ -1563,46 +1587,6 @@ bool cli_mkstemp(char* buf) {
+   return true;
+ }
+ 
+-int cli_openfd_unsafe(const String& filename, int flags, mode_t mode,
+-                      bool use_include_path, bool quiet) {
+-  String fname;
+-  if (StringUtil::IsFileUrl(filename)) {
+-    fname = StringUtil::DecodeFileUrl(filename);
+-    if (fname.empty()) {
+-      raise_warning("invalid file:// URL");
+-      return -1;
+-    }
+-  } else {
+-    fname = filename;
+-  }
+-
+-  if (use_include_path) {
+-    struct stat s;
+-    String resolved_fname = resolveVmInclude(fname.get(), "", &s);
+-    if (!resolved_fname.isNull()) {
+-      fname = resolved_fname;
+-    }
+-  }
+-
+-  bool res;
+-  std::string error;
+-  FTRACE(3, "cli_openfd[{}]({}, {}, {}): calling remote...\n",
+-         tl_cliSock, fname.data(), flags, mode);
+-  cli_write(tl_cliSock, "open", fname.data(), flags, mode);
+-  cli_read(tl_cliSock, res, error);
+-  FTRACE(3, "{} = cli_openfd[{}](...) [err = {}]\n",
+-         res, tl_cliSock, error);
+-
+-  if (!res) {
+-    if (!quiet) {
+-      raise_warning("%s", error.c_str());
+-    }
+-    return -1;
+-  }
+-
+-  return cli_read_fd(tl_cliSock);
+-}
+-
+ Array cli_env() {
+   return tl_env ? *tl_env : empty_array();
+ }
+diff --git a/hphp/runtime/server/cli-server.h b/hphp/runtime/server/cli-server.h
+index 3ac3e52e5a..1687d18143 100644
+--- a/hphp/runtime/server/cli-server.h
++++ b/hphp/runtime/server/cli-server.h
+@@ -125,19 +125,6 @@ ucred* get_cli_ucred();
+  */
+ bool cli_mkstemp(char* buf);
+ 
+-/*
+- * Explicitly open a file via the CLI-server client.
+- *
+- * WARNING: use of this function should be considered a last resort, it's
+- * much better to get a CLIWrapper instance and use that. The problem with
+- * getting a raw fd is reads/writes will be unchecked, and if the client dies
+- * (e.g. the user presses ^C to "kill the script") nothing will immediately stop
+- * IO happening on this fd. So, the user may experience surprising behavior
+- * where files change even after the script is "dead".
+- */
+-int cli_openfd_unsafe(const String& filename, int flags, mode_t mode,
+-                      bool use_include_path, bool quiet);
+-
+ /*
+  * Fetch the environment for the CLI process.
+  */
+

@@ -1,0 +1,106 @@
+commit 4480d17bd1445ce355199aae931b874dc0fced14
+Author: mestre <mestre@openbsd.org>
+Date:   Sun Aug 5 09:33:13 2018 +0000
+
+    Remove cpath pledge(2) promise. We decided that not deleting the unix control
+    sockets cause no harm and this way we close another attack surface by not
+    allowing the daemon to create/delete any more files.
+    
+    While here also scramble pledge promises to their canonical form.
+    
+    OK florian@
+
+diff --git a/usr.sbin/snmpd/control.c b/usr.sbin/snmpd/control.c
+index 4cbc911ba36..54b58bbb7b6 100644
+--- a/usr.sbin/snmpd/control.c
++++ b/usr.sbin/snmpd/control.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: control.c,v 1.43 2018/06/17 18:19:59 rob Exp $	*/
++/*	$OpenBSD: control.c,v 1.44 2018/08/05 09:33:13 mestre Exp $	*/
+ 
+ /*
+  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
+@@ -128,15 +128,6 @@ control_listen(struct control_sock *cs)
+ 	return (0);
+ }
+ 
+-void
+-control_cleanup(struct control_sock *cs)
+-{
+-	if (cs->cs_name == NULL)
+-		return;
+-	event_del(&cs->cs_ev);
+-	event_del(&cs->cs_evt);
+-}
+-
+ /* ARGSUSED */
+ void
+ control_accept(int listenfd, short event, void *arg)
+diff --git a/usr.sbin/snmpd/proc.c b/usr.sbin/snmpd/proc.c
+index 40c19f6f5e8..eba26bd7e56 100644
+--- a/usr.sbin/snmpd/proc.c
++++ b/usr.sbin/snmpd/proc.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: proc.c,v 1.24 2017/05/29 12:56:26 benno Exp $	*/
++/*	$OpenBSD: proc.c,v 1.25 2018/08/05 09:33:13 mestre Exp $	*/
+ 
+ /*
+  * Copyright (c) 2010 - 2016 Reyk Floeter <reyk@openbsd.org>
+@@ -475,9 +475,6 @@ proc_shutdown(struct privsep_proc *p)
+ {
+ 	struct privsep	*ps = p->p_ps;
+ 
+-	if (p->p_id == PROC_CONTROL && ps)
+-		control_cleanup(&ps->ps_csock);
+-
+ 	if (p->p_shutdown != NULL)
+ 		(*p->p_shutdown)();
+ 
+diff --git a/usr.sbin/snmpd/snmpd.c b/usr.sbin/snmpd/snmpd.c
+index ce07685ce3b..67bea8a6425 100644
+--- a/usr.sbin/snmpd/snmpd.c
++++ b/usr.sbin/snmpd/snmpd.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: snmpd.c,v 1.38 2018/04/15 11:57:29 mpf Exp $	*/
++/*	$OpenBSD: snmpd.c,v 1.39 2018/08/05 09:33:13 mestre Exp $	*/
+ 
+ /*
+  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
+@@ -255,7 +255,7 @@ main(int argc, char *argv[])
+ 
+ 	proc_connect(ps);
+ 
+-	if (pledge("stdio rpath cpath dns id proc sendfd exec", NULL) == -1)
++	if (pledge("stdio rpath dns sendfd proc exec id", NULL) == -1)
+ 		fatal("pledge");
+ 
+ 	event_dispatch();
+@@ -270,9 +270,6 @@ snmpd_shutdown(struct snmpd *env)
+ {
+ 	proc_kill(&env->sc_ps);
+ 
+-	if (env->sc_ps.ps_csock.cs_name != NULL)
+-		(void)unlink(env->sc_ps.ps_csock.cs_name);
+-
+ 	free(env);
+ 
+ 	log_info("terminating");
+diff --git a/usr.sbin/snmpd/snmpd.h b/usr.sbin/snmpd/snmpd.h
+index 945da0bdc42..c941c6d9821 100644
+--- a/usr.sbin/snmpd/snmpd.h
++++ b/usr.sbin/snmpd/snmpd.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: snmpd.h,v 1.79 2018/07/31 11:01:29 claudio Exp $	*/
++/*	$OpenBSD: snmpd.h,v 1.80 2018/08/05 09:33:13 mestre Exp $	*/
+ 
+ /*
+  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
+@@ -615,7 +615,6 @@ extern struct snmpd *snmpd_env;
+ /* control.c */
+ int		 control_init(struct privsep *, struct control_sock *);
+ int		 control_listen(struct control_sock *);
+-void		 control_cleanup(struct control_sock *);
+ 
+ /* parse.y */
+ struct snmpd	*parse_config(const char *, u_int);
+

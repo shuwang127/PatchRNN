@@ -1,0 +1,496 @@
+commit 717e01f486bc8fd6af3274290065d4d4b98ba4e1
+Author: Vasil Dimov <vasil.dimov@oracle.com>
+Date:   Fri Nov 28 18:35:26 2014 +0200
+
+    Progress-instrument the log phase of ALTER TABLE
+    
+    WL#5889 Add InnoDB events to Performance Schema's Event Stage table
+
+diff --git a/storage/innobase/buf/buf0flu.cc b/storage/innobase/buf/buf0flu.cc
+index 6997255635a..87f4f15dcd3 100644
+--- a/storage/innobase/buf/buf0flu.cc
++++ b/storage/innobase/buf/buf0flu.cc
+@@ -1962,6 +1962,7 @@ buf_flush_lists(
+ 					back to caller. Ignored if NULL */
+ #ifdef HAVE_PSI_STAGE_INTERFACE
+ 	, PSI_stage_progress*	progress
++	, ulint			work_todo_during_log
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ )
+ {
+@@ -1998,10 +1999,8 @@ buf_flush_lists(
+ 		/* We will not flush more than 'min_n' pages. */
+ 		pages_to_flush = std::min(min_n, pages_to_flush);
+ 
+-		mysql_stage_set_work_estimated(
+-			progress,
+-			mysql_stage_get_work_completed(progress)
+-			+ pages_to_flush);
++		ut_stage_new_estimate(progress,
++				      pages_to_flush + work_todo_during_log);
+ 	}
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ 
+diff --git a/storage/innobase/handler/handler0alter.cc b/storage/innobase/handler/handler0alter.cc
+index 858d4d1a2bd..55d0d19c375 100644
+--- a/storage/innobase/handler/handler0alter.cc
++++ b/storage/innobase/handler/handler0alter.cc
+@@ -4629,18 +4629,17 @@ ok_exit:
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ 		);
+ 
+-#ifdef HAVE_PSI_STAGE_INTERFACE
+-	ut_stage_change(&ha_alter_info->alter_info->progress,
+-			&srv_stage_alter_table_end);
+-#endif /* HAVE_PSI_STAGE_INTERFACE */
+-
+ #ifndef DBUG_OFF
+ oom:
+ #endif /* !DBUG_OFF */
+ 	if (error == DB_SUCCESS && ctx->online && ctx->need_rebuild()) {
+ 		DEBUG_SYNC_C("row_log_table_apply1_before");
+ 		error = row_log_table_apply(
+-			ctx->thr, m_prebuilt->table, altered_table);
++			ctx->thr, m_prebuilt->table, altered_table
++#ifdef HAVE_PSI_STAGE_INTERFACE
++			, &ha_alter_info->alter_info->progress
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++			);
+ 	}
+ 
+ 	DEBUG_SYNC_C("inplace_after_index_build");
+@@ -4649,8 +4648,6 @@ oom:
+ 			error = DB_DUPLICATE_KEY;
+ 			m_prebuilt->trx->error_key_num = ULINT_UNDEFINED;);
+ 
+-	mysql_end_stage();
+-
+ 	/* After an error, remove all those index definitions
+ 	from the dictionary which were defined. */
+ 
+@@ -5717,7 +5714,11 @@ commit_try_rebuild(
+ 	if (ctx->online) {
+ 		DEBUG_SYNC_C("row_log_table_apply2_before");
+ 		error = row_log_table_apply(
+-			ctx->thr, user_table, altered_table);
++			ctx->thr, user_table, altered_table
++#ifdef HAVE_PSI_STAGE_INTERFACE
++			, &ha_alter_info->alter_info->progress
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++			);
+ 		ulint	err_key = thr_get_trx(ctx->thr)->error_key_num;
+ 
+ 		switch (error) {
+diff --git a/storage/innobase/include/buf0flu.h b/storage/innobase/include/buf0flu.h
+index 8bbb81f1340..8ec7a820ea8 100644
+--- a/storage/innobase/include/buf0flu.h
++++ b/storage/innobase/include/buf0flu.h
+@@ -134,6 +134,7 @@ buf_flush_lists(
+ 					back to caller. Ignored if NULL */
+ #ifdef HAVE_PSI_STAGE_INTERFACE
+ 	, PSI_stage_progress*	progress = NULL
++	, ulint			work_todo_during_log = 0
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ );
+ 
+diff --git a/storage/innobase/include/log0log.h b/storage/innobase/include/log0log.h
+index 118be4c28fd..65ed911452c 100644
+--- a/storage/innobase/include/log0log.h
++++ b/storage/innobase/include/log0log.h
+@@ -218,6 +218,7 @@ log_make_checkpoint_at(
+ 	bool	write_always
+ #ifdef HAVE_PSI_STAGE_INTERFACE
+ 	, PSI_stage_progress*	progress = NULL
++	, ulint			work_todo_during_log = 0
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ );
+ 
+diff --git a/storage/innobase/include/row0log.h b/storage/innobase/include/row0log.h
+index 491eee1d382..a12fb2a6e89 100644
+--- a/storage/innobase/include/row0log.h
++++ b/storage/innobase/include/row0log.h
+@@ -26,6 +26,11 @@ Created 2011-05-26 Marko Makela
+ #ifndef row0log_h
+ #define row0log_h
+ 
++#include "my_global.h"
++
++#include "mysql/psi/mysql_stage.h"
++#include "mysql/psi/psi.h"
++
+ #include "univ.i"
+ #include "mtr0types.h"
+ #include "row0types.h"
+@@ -192,9 +197,12 @@ row_log_table_apply(
+ 	que_thr_t*	thr,	/*!< in: query graph */
+ 	dict_table_t*	old_table,
+ 				/*!< in: old table */
+-	struct TABLE*	table)	/*!< in/out: MySQL table
++	struct TABLE*	table	/*!< in/out: MySQL table
+ 				(for reporting duplicates) */
+-	__attribute__((nonnull, warn_unused_result));
++#ifdef HAVE_PSI_STAGE_INTERFACE
++	, PSI_stage_progress**	progress
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++) __attribute__((warn_unused_result));
+ 
+ /******************************************************//**
+ Get the latest transaction ID that has invoked row_log_online_op()
+@@ -219,6 +227,17 @@ row_log_apply(
+ 				(for reporting duplicates) */
+ 	__attribute__((nonnull, warn_unused_result));
+ 
++#ifdef HAVE_PSI_STAGE_INTERFACE
++/** Estimate how much work is to be done by the log apply phase
++of an ALTER TABLE for this index.
++@param[in]	index	index whose log to assess
++@return work to be done by log-apply in abstract units
++*/
++ulint
++row_log_estimate_work(
++	const dict_index_t*	index);
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++
+ #ifndef UNIV_NONINL
+ #include "row0log.ic"
+ #endif
+diff --git a/storage/innobase/include/srv0srv.h b/storage/innobase/include/srv0srv.h
+index 45bfacac7bf..1663d47166e 100644
+--- a/storage/innobase/include/srv0srv.h
++++ b/storage/innobase/include/srv0srv.h
+@@ -478,6 +478,10 @@ extern PSI_stage_info	srv_stage_alter_table_flush;
+ row_merge_insert_index_tuples(). */
+ extern PSI_stage_info	srv_stage_alter_table_insert;
+ 
++/** Performance schema stage event for monitoring ALTER TABLE progress
++row_log_table_apply(). */
++extern PSI_stage_info	srv_stage_alter_table_log;
++
+ /** Performance schema stage event for monitoring ALTER TABLE progress
+ row_merge_read_clustered_index(). */
+ extern PSI_stage_info	srv_stage_alter_table_read_pk;
+diff --git a/storage/innobase/include/ut0stage.h b/storage/innobase/include/ut0stage.h
+index 09eda616836..0065d18e78b 100644
+--- a/storage/innobase/include/ut0stage.h
++++ b/storage/innobase/include/ut0stage.h
+@@ -35,21 +35,22 @@ Created Nov 12, 2014 Vasil Dimov
+ 
+ #ifdef HAVE_PSI_STAGE_INTERFACE
+ 
+-/** Increment a stage progress.
++/** Increment a stage progress (work completed).
+ This function will take care to increment also the total work estimated
+ in case the work completed is going to become larger than it.
+ @param[in,out]	progress	progress to increment
++@param[in]	inc_val		increment with this amount, default to 1
+ */
+ inline
+ void
+ ut_stage_inc(
+-	PSI_stage_progress*	progress)
++	PSI_stage_progress*	progress,
++	ulint			inc_val = 1)
+ {
+ 	if (progress == NULL) {
+ 		return;
+ 	}
+ 
+-	const int	inc_val = 1;
+ 	const ulonglong	old_work_estimated
+ 		= mysql_stage_get_work_estimated(progress);
+ 
+@@ -63,6 +64,22 @@ ut_stage_inc(
+ 	mysql_stage_inc_work_completed(progress, inc_val);
+ }
+ 
++/** Set a stage's total estimate (work estimated) based on a new estimate of
++the remaining work.
++@param[in,out]	progress	progress whose estimate to set
++@param[in]	work_remaining	new estimate of work remaining
++*/
++inline
++void
++ut_stage_new_estimate(
++	PSI_stage_progress*	progress,
++	ulint			work_remaining)
++{
++	mysql_stage_set_work_estimated(
++		progress,
++		mysql_stage_get_work_completed(progress) + work_remaining);
++}
++
+ /** Change the current stage to a new one and keep the "work completed"
+ and "work estimated" numbers.
+ @param[in,out]	progress	progress whose stage to change
+diff --git a/storage/innobase/log/log0log.cc b/storage/innobase/log/log0log.cc
+index b05a4a36757..79a0b30e2ed 100644
+--- a/storage/innobase/log/log0log.cc
++++ b/storage/innobase/log/log0log.cc
+@@ -1347,6 +1347,7 @@ log_preflush_pool_modified_pages(
+ 				at least to this lsn */
+ #ifdef HAVE_PSI_STAGE_INTERFACE
+ 	, PSI_stage_progress*	progress = NULL
++	, ulint			work_todo_during_log = 0
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ )
+ {
+@@ -1369,6 +1370,7 @@ log_preflush_pool_modified_pages(
+ 	success = buf_flush_lists(ULINT_MAX, new_oldest, &n_pages
+ #ifdef HAVE_PSI_STAGE_INTERFACE
+ 				  , progress
++				  , work_todo_during_log
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ 	);
+ 
+@@ -1798,6 +1800,7 @@ log_make_checkpoint_at(
+ 	bool			write_always
+ #ifdef HAVE_PSI_STAGE_INTERFACE
+ 	, PSI_stage_progress*	progress
++	, ulint			work_todo_during_log
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ )
+ {
+@@ -1806,6 +1809,7 @@ log_make_checkpoint_at(
+ 	while (!log_preflush_pool_modified_pages(lsn
+ #ifdef HAVE_PSI_STAGE_INTERFACE
+ 						 , progress
++						 , work_todo_during_log
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ 	)) {
+ 		/* Flush as much as we can */
+diff --git a/storage/innobase/row/row0log.cc b/storage/innobase/row/row0log.cc
+index 5fd8c286f54..10b1abdc893 100644
+--- a/storage/innobase/row/row0log.cc
++++ b/storage/innobase/row/row0log.cc
+@@ -23,23 +23,31 @@ Modification log for online index creation and online table rebuild
+ Created 2011-05-26 Marko Makela
+ *******************************************************/
+ 
++#include "my_global.h"
++
++#include "mysql/psi/mysql_stage.h"
++#include "mysql/psi/psi.h"
++
+ #include "row0log.h"
+ 
+ #ifdef UNIV_NONINL
+ #include "row0log.ic"
+ #endif
+ 
+-#include "row0row.h"
+-#include "row0ins.h"
+-#include "row0upd.h"
+-#include "row0merge.h"
+-#include "row0ext.h"
+ #include "data0data.h"
++#include "handler0alter.h"
+ #include "que0que.h"
++#include "row0ext.h"
++#include "row0ins.h"
++#include "row0merge.h"
++#include "row0row.h"
++#include "row0upd.h"
+ #include "srv0mon.h"
+-#include "handler0alter.h"
++#include "srv0srv.h"
+ #include "ut0new.h"
++#include "ut0stage.h"
+ 
++#include <algorithm>
+ #include <map>
+ 
+ /** Table row modification operations during online table rebuild.
+@@ -2441,6 +2449,51 @@ row_log_table_apply_op(
+ 	return(next_mrec);
+ }
+ 
++#ifdef HAVE_PSI_STAGE_INTERFACE
++/** Estimate how much an ALTER TABLE progress should be incremented per
++one block of log applied.
++For the other phases of ALTER TABLE we increment the progress with 1 per
++page processed.
++@return amount of abstract units to add to work_completed when one block
++of log is applied.
++*/
++inline
++ulint
++row_log_progress_inc_per_block()
++{
++	/* We must increment the progress once per page (as in
++	univ_page_size, usually 16KiB). One block here is srv_sort_buf_size
++	(usually 1MiB). */
++	const ulint	pages_per_block = std::max(
++		1UL, srv_sort_buf_size / univ_page_size.physical());
++
++	/* Multiply by an artificial factor of 6 to even the pace with
++	the rest of the ALTER TABLE phases, they process page_size amount
++	of data faster. */
++	return(pages_per_block * 6);
++}
++
++/** Estimate how much work is to be done by the log apply phase
++of an ALTER TABLE for this index.
++@param[in]	index	index whose log to assess
++@return work to be done by log-apply in abstract units
++*/
++ulint
++row_log_estimate_work(
++	const dict_index_t*	index)
++{
++	if (index == NULL || index->online_log == NULL) {
++		return(0);
++	}
++
++	const row_log_t*	l = index->online_log;
++	const ulint		bytes_left = l->tail.total - l->head.total;
++	const ulint		blocks_left = bytes_left / srv_sort_buf_size;
++
++	return(blocks_left * row_log_progress_inc_per_block());
++}
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++
+ /******************************************************//**
+ Applies operations to a table was rebuilt.
+ @return DB_SUCCESS, or error code on failure */
+@@ -2449,8 +2502,12 @@ dberr_t
+ row_log_table_apply_ops(
+ /*====================*/
+ 	que_thr_t*	thr,	/*!< in: query graph */
+-	row_merge_dup_t*dup)	/*!< in/out: for reporting duplicate key
++	row_merge_dup_t*dup	/*!< in/out: for reporting duplicate key
+ 				errors */
++#ifdef HAVE_PSI_STAGE_INTERFACE
++	, PSI_stage_progress*	progress
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++)
+ {
+ 	dberr_t		error;
+ 	const mrec_t*	mrec		= NULL;
+@@ -2504,6 +2561,13 @@ next_block:
+ #endif /* UNIV_SYNC_DEBUG */
+ 	ut_ad(index->online_log->head.bytes == 0);
+ 
++#ifdef HAVE_PSI_STAGE_INTERFACE
++	/* Adjust the total estimate based on the length of the log. */
++	ut_stage_new_estimate(progress, row_log_estimate_work(index));
++
++	ut_stage_inc(progress, row_log_progress_inc_per_block());
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++
+ 	if (trx_is_interrupted(trx)) {
+ 		goto interrupted;
+ 	}
+@@ -2796,8 +2860,12 @@ row_log_table_apply(
+ 	que_thr_t*	thr,	/*!< in: query graph */
+ 	dict_table_t*	old_table,
+ 				/*!< in: old table */
+-	struct TABLE*	table)	/*!< in/out: MySQL table
++	struct TABLE*	table	/*!< in/out: MySQL table
+ 				(for reporting duplicates) */
++#ifdef HAVE_PSI_STAGE_INTERFACE
++	, PSI_stage_progress**	progress
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++)
+ {
+ 	dberr_t		error;
+ 	dict_index_t*	clust_index;
+@@ -2806,6 +2874,10 @@ row_log_table_apply(
+ 	DBUG_EXECUTE_IF("innodb_trx_duplicates",
+ 			thr_get_trx(thr)->duplicates = TRX_DUP_REPLACE;);
+ 
++#ifdef HAVE_PSI_STAGE_INTERFACE
++	ut_stage_change(progress, &srv_stage_alter_table_log);
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++
+ #ifdef UNIV_SYNC_DEBUG
+ 	ut_ad(!rw_lock_own(&dict_operation_lock, RW_LOCK_S));
+ #endif /* UNIV_SYNC_DEBUG */
+@@ -2827,7 +2899,11 @@ row_log_table_apply(
+ 			clust_index->online_log->col_map, 0
+ 		};
+ 
+-		error = row_log_table_apply_ops(thr, &dup);
++		error = row_log_table_apply_ops(thr, &dup
++#ifdef HAVE_PSI_STAGE_INTERFACE
++						, *progress
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++		);
+ 
+ 		ut_ad(error != DB_SUCCESS
+ 		      || clust_index->online_log->head.total
+@@ -2837,6 +2913,11 @@ row_log_table_apply(
+ 	rw_lock_x_unlock(dict_index_get_lock(clust_index));
+ 	DBUG_EXECUTE_IF("innodb_trx_duplicates",
+ 			thr_get_trx(thr)->duplicates = 0;);
++
++#ifdef HAVE_PSI_STAGE_INTERFACE
++	ut_stage_change(progress, &srv_stage_alter_table_end);
++#endif /* HAVE_PSI_STAGE_INTERFACE */
++
+ 	return(error);
+ }
+ 
+diff --git a/storage/innobase/row/row0merge.cc b/storage/innobase/row/row0merge.cc
+index 33b39d83383..2d3c4eb00e3 100644
+--- a/storage/innobase/row/row0merge.cc
++++ b/storage/innobase/row/row0merge.cc
+@@ -4088,12 +4088,14 @@ row_merge_build_indexes(
+ 		= skip_pk_sort && new_table != old_table
+ 		? n_indexes - 1
+ 		: n_indexes;
++	const ulint	n_leaf_pk_pages
++		= dict_table_get_first_index(old_table)->stat_n_leaf_pages;
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ 
+ 	mysql_stage_set_work_estimated(
+ 		*progress,
+ 		row_merge_estimate_alter_table(
+-			old_table->stat_clustered_index_size, n_sort_indexes));
++			n_leaf_pk_pages, n_sort_indexes));
+ 	mysql_stage_set_work_completed(*progress, 0);
+ 
+ 	/* Allocate memory for merge file data structure and initialize
+@@ -4406,9 +4408,12 @@ func_exit:
+ 		ut_stage_change(progress, &srv_stage_alter_table_flush);
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ 
+-		log_make_checkpoint_at(LSN_MAX, TRUE
++		log_make_checkpoint_at(
++			LSN_MAX, TRUE
+ #ifdef HAVE_PSI_STAGE_INTERFACE
+-				       , *progress
++			, *progress
++			, row_log_estimate_work(
++				dict_table_get_first_index(old_table))
+ #endif /* HAVE_PSI_STAGE_INTERFACE */
+ 		);
+ 	}
+diff --git a/storage/innobase/srv/srv0srv.cc b/storage/innobase/srv/srv0srv.cc
+index 1710d2812e1..ffa16531d42 100644
+--- a/storage/innobase/srv/srv0srv.cc
++++ b/storage/innobase/srv/srv0srv.cc
+@@ -585,6 +585,11 @@ row_merge_insert_index_tuples(). */
+ PSI_stage_info	srv_stage_alter_table_insert
+ 	= {0, "alter table (insert)", PSI_FLAG_STAGE_PROGRESS};
+ 
++/** Performance schema stage event for monitoring ALTER TABLE progress
++row_log_table_apply(). */
++PSI_stage_info	srv_stage_alter_table_log
++	= {0, "alter table (log)", PSI_FLAG_STAGE_PROGRESS};
++
+ /** Performance schema stage event for monitoring ALTER TABLE progress
+ row_merge_read_clustered_index(). */
+ PSI_stage_info	srv_stage_alter_table_read_pk
+diff --git a/storage/innobase/srv/srv0start.cc b/storage/innobase/srv/srv0start.cc
+index cb8e3b02fb4..3aa7edb3ece 100644
+--- a/storage/innobase/srv/srv0start.cc
++++ b/storage/innobase/srv/srv0start.cc
+@@ -191,6 +191,7 @@ static PSI_stage_info*	srv_stages[] =
+ 	&srv_stage_alter_table_end,
+ 	&srv_stage_alter_table_flush,
+ 	&srv_stage_alter_table_insert,
++	&srv_stage_alter_table_log,
+ 	&srv_stage_alter_table_read_pk,
+ 	&srv_stage_alter_table_sort,
+ 	&srv_stage_buffer_pool_load,
+

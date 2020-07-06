@@ -1,0 +1,37 @@
+commit 15b9f360c0316c06d37c09b02d85565edbaf9dd3
+Author: Oleg Nesterov <oleg@tv-sign.ru>
+Date:   Fri Jul 25 01:47:39 2008 -0700
+
+    coredump: zap_threads() must skip kernel threads
+    
+    The main loop in zap_threads() must skip kthreads which may use the same
+    mm.  Otherwise we "kill" this thread erroneously (for example, it can not
+    fork or exec after that), and the coredumping task stucks in the
+    TASK_UNINTERRUPTIBLE state forever because of the wrong ->core_waiters
+    count.
+    
+    Signed-off-by: Oleg Nesterov <oleg@tv-sign.ru>
+    Cc: Roland McGrath <roland@redhat.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/exec.c b/fs/exec.c
+index cd2e8c9b1249..e347e6ed1617 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1574,11 +1574,12 @@ static inline int zap_threads(struct task_struct *tsk, struct mm_struct *mm,
+ 	for_each_process(g) {
+ 		if (g == tsk->group_leader)
+ 			continue;
+-
++		if (g->flags & PF_KTHREAD)
++			continue;
+ 		p = g;
+ 		do {
+ 			if (p->mm) {
+-				if (p->mm == mm) {
++				if (unlikely(p->mm == mm)) {
+ 					lock_task_sighand(p, &flags);
+ 					zap_process(p);
+ 					unlock_task_sighand(p, &flags);
+

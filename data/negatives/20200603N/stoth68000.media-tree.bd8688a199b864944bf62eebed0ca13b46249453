@@ -1,0 +1,86 @@
+commit bd8688a199b864944bf62eebed0ca13b46249453
+Author: NeilBrown <neilb@suse.com>
+Date:   Sat Oct 24 16:02:16 2015 +1100
+
+    md/raid1: don't clear bitmap bit when bad-block-list write fails.
+    
+    When a write fails and a bad-block-list is present, we can
+    update the bad-block-list instead of writing the data.  If
+    this succeeds then it is OK clear the relevant bitmap-bit as
+    no further 'sync' of the block is needed.
+    
+    However if writing the bad-block-list fails then we need to
+    treat the write as failed and particularly must not clear
+    the bitmap bit.  Otherwise the device can be re-added (after
+    any hardware connection issues are resolved) and because the
+    relevant bit in the bitmap is clear, that block will not be
+    resynced.  This leads to data corruption.
+    
+    We already delay the final bio_endio() on the write until
+    the bad-block-list is written so that when the write
+    returns: either that data is safe, the bad-block record is
+    safe, or the fact that the device is faulty is safe.
+    However we *don't* delay the clearing of the bitmap, so the
+    bitmap bit can be recorded as cleared before we know if the
+    bad-block-list was written safely.
+    
+    So: delay that until the write really is safe.
+    i.e. move the call to close_write() until just before
+    calling bio_endio(), and recheck the 'is array degraded'
+    status before making that call.
+    
+    This bug goes back to v3.1 when bad-block-lists were
+    introduced, though it only affects arrays created with
+    mdadm-3.3 or later as only those have bad-block lists.
+    
+    Backports will require at least
+    Commit: 55ce74d4bfe1 ("md/raid1: ensure device failure recorded before write request returns.")
+    as well.  I'll send that to 'stable' separately.
+    
+    Note that of the two tests of R1BIO_WriteError that this
+    patch adds, the first is certain to fail and the second is
+    certain to succeed.  However doing it this way makes the
+    patch more obviously correct.  I will tidy the code up in a
+    future merge window.
+    
+    Reported-and-tested-by: Nate Dailey <nate.dailey@stratus.com>
+    Cc: Jes Sorensen <Jes.Sorensen@redhat.com>
+    Fixes: cd5ff9a16f08 ("md/raid1:  Handle write errors by updating badblock log.")
+    Signed-off-by: NeilBrown <neilb@suse.com>
+
+diff --git a/drivers/md/raid1.c b/drivers/md/raid1.c
+index cfca6edf7813..d9d031ede4bf 100644
+--- a/drivers/md/raid1.c
++++ b/drivers/md/raid1.c
+@@ -2258,15 +2258,16 @@ static void handle_write_finished(struct r1conf *conf, struct r1bio *r1_bio)
+ 			rdev_dec_pending(conf->mirrors[m].rdev,
+ 					 conf->mddev);
+ 		}
+-	if (test_bit(R1BIO_WriteError, &r1_bio->state))
+-		close_write(r1_bio);
+ 	if (fail) {
+ 		spin_lock_irq(&conf->device_lock);
+ 		list_add(&r1_bio->retry_list, &conf->bio_end_io_list);
+ 		spin_unlock_irq(&conf->device_lock);
+ 		md_wakeup_thread(conf->mddev->thread);
+-	} else
++	} else {
++		if (test_bit(R1BIO_WriteError, &r1_bio->state))
++			close_write(r1_bio);
+ 		raid_end_bio_io(r1_bio);
++	}
+ }
+ 
+ static void handle_read_error(struct r1conf *conf, struct r1bio *r1_bio)
+@@ -2385,6 +2386,10 @@ static void raid1d(struct md_thread *thread)
+ 			r1_bio = list_first_entry(&tmp, struct r1bio,
+ 						  retry_list);
+ 			list_del(&r1_bio->retry_list);
++			if (mddev->degraded)
++				set_bit(R1BIO_Degraded, &r1_bio->state);
++			if (test_bit(R1BIO_WriteError, &r1_bio->state))
++				close_write(r1_bio);
+ 			raid_end_bio_io(r1_bio);
+ 		}
+ 	}
+

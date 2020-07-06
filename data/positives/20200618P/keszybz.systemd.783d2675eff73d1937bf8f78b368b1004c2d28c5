@@ -1,0 +1,68 @@
+commit 783d2675eff73d1937bf8f78b368b1004c2d28c5
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Fri Dec 30 22:15:58 2011 +0100
+
+    journal: fix a few bad memory accesses and leaks
+
+diff --git a/src/journal/journal-rate-limit.c b/src/journal/journal-rate-limit.c
+index f69ab2770..243ff2a37 100644
+--- a/src/journal/journal-rate-limit.c
++++ b/src/journal/journal-rate-limit.c
+@@ -111,6 +111,8 @@ void journal_rate_limit_free(JournalRateLimit *r) {
+ 
+         while (r->lru)
+                 journal_rate_limit_group_free(r->lru);
++
++        free(r);
+ }
+ 
+ static bool journal_rate_limit_group_expired(JournalRateLimitGroup *g, usec_t ts) {
+diff --git a/src/journal/journald.c b/src/journal/journald.c
+index b290b5d2c..8d6b3ab43 100644
+--- a/src/journal/journald.c
++++ b/src/journal/journald.c
+@@ -378,11 +378,22 @@ static char *shortened_cgroup_path(pid_t pid) {
+         if (streq(init_path, "/"))
+                 init_path[0] = 0;
+ 
+-        if (startswith(process_path, init_path))
+-                path = process_path + strlen(init_path);
+-        else
++        if (startswith(process_path, init_path)) {
++                char *p;
++
++                p = strdup(process_path + strlen(init_path));
++                if (!p) {
++                        free(process_path);
++                        free(init_path);
++                        return NULL;
++                }
++                path = p;
++        } else {
+                 path = process_path;
++                process_path = NULL;
++        }
+ 
++        free(process_path);
+         free(init_path);
+ 
+         return path;
+@@ -544,7 +555,7 @@ static void dispatch_message(Server *s,
+                              struct timeval *tv,
+                              int priority) {
+         int rl;
+-        char *path, *c;
++        char *path = NULL, *c;
+ 
+         assert(s);
+         assert(iovec || n == 0);
+@@ -1828,6 +1839,8 @@ static void server_done(Server *s) {
+ 
+         if (s->rate_limit)
+                 journal_rate_limit_free(s->rate_limit);
++
++        free(s->buffer);
+ }
+ 
+ int main(int argc, char *argv[]) {
+

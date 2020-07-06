@@ -1,0 +1,109 @@
+commit 73218a7a6577ed6dd25d661f057f5e54557e557b
+Author: Sage Weil <sage@inktank.com>
+Date:   Mon Aug 13 10:48:20 2012 -0700
+
+    msgr: make set_policy() and set_default_policy() safe to re-use
+    
+    Introduce a policy_lock in SimpleMessenger to make this safe even after
+    the messenger has been started up.  The user needs to be aware that
+    policy changes will not affect connections that are already established.
+    
+    Signed-off-by: Sage Weil <sage@inktank.com>
+
+diff --git a/src/msg/Messenger.h b/src/msg/Messenger.h
+index 67eb662ec4..4795c35d85 100644
+--- a/src/msg/Messenger.h
++++ b/src/msg/Messenger.h
+@@ -231,9 +231,14 @@ public:
+    */
+   virtual void set_policy(int type, Policy p) = 0;
+   /**
+-   * Get the Policy associated with a type of peer.
+-   * @param t The peer type to get the default policy for.
++   * Set the Policy associated with a type of peer.
++   *
++   * This can be called either on initial setup, or after connections
++   * are already established.  However, the policies for existing
++   * connections will not be affected; the new policy will only apply
++   * to future connections.
+    *
++   * @param t The peer type to get the default policy for.
+    * @return A const Policy reference.
+    */
+   virtual Policy get_policy(int t) = 0;
+@@ -246,6 +251,7 @@ public:
+   /**
+    * Set a Throttler which is applied to all Messages from the given
+    * type of peer.
++   *
+    * This is an init-time function and cannot be called after calling
+    * start() or bind().
+    *
+@@ -257,6 +263,7 @@ public:
+   virtual void set_policy_throttler(int type, Throttle *t) = 0;
+   /**
+    * Set the default send priority
++   *
+    * This is an init-time function and must be called *before* calling
+    * start().
+    *
+diff --git a/src/msg/SimpleMessenger.cc b/src/msg/SimpleMessenger.cc
+index eaad6fe31a..f633975d35 100644
+--- a/src/msg/SimpleMessenger.cc
++++ b/src/msg/SimpleMessenger.cc
+@@ -46,6 +46,7 @@ SimpleMessenger::SimpleMessenger(CephContext *cct, entity_name_t name,
+     lock("SimpleMessenger::lock"), need_addr(true), did_bind(false),
+     global_seq(0),
+     cluster_protocol(0),
++    policy_lock("SimpleMessenger::policy_lock"),
+     dispatch_throttler(cct, string("msgr_dispatch_throttler-") + mname, cct->_conf->ms_dispatch_throttle_bytes),
+     reaper_started(false), reaper_stop(false),
+     timeout(0),
+diff --git a/src/msg/SimpleMessenger.h b/src/msg/SimpleMessenger.h
+index 5cd3966e6f..bee3238420 100644
+--- a/src/msg/SimpleMessenger.h
++++ b/src/msg/SimpleMessenger.h
+@@ -136,7 +136,7 @@ public:
+    * @param p The Policy to apply.
+    */
+   void set_default_policy(Policy p) {
+-    assert(!started && !did_bind);
++    Mutex::Locker l(policy_lock);
+     default_policy = p;
+   }
+   /**
+@@ -148,7 +148,7 @@ public:
+    * @param p The policy to apply.
+    */
+   void set_policy(int type, Policy p) {
+-    assert(!started && !did_bind);
++    Mutex::Locker l(policy_lock);
+     policy_map[type] = p;
+   }
+   /**
+@@ -502,6 +502,9 @@ private:
+ 
+   /// internal cluster protocol version, if any, for talking to entities of the same type.
+   int cluster_protocol;
++
++  /// lock protecting policy
++  Mutex policy_lock;
+   /// the default Policy we use for Pipes
+   Policy default_policy;
+   /// map specifying different Policies for specific peer types
+@@ -588,12 +591,14 @@ public:
+    * @return A const Policy reference.
+    */
+   Policy get_policy(int t) {
++    Mutex::Locker l(policy_lock);
+     if (policy_map.count(t))
+       return policy_map[t];
+     else
+       return default_policy;
+   }
+   Policy get_default_policy() {
++    Mutex::Locker l(policy_lock);
+     return default_policy;
+   }
+ 
+

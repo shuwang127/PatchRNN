@@ -1,0 +1,1503 @@
+commit c7b0ac0546985fc6361a8d92cf808d46da797677
+Author: Mauro Carvalho Chehab <mchehab@infradead.org>
+Date:   Fri Mar 10 12:29:15 2006 -0300
+
+    V4L/DVB (3516): Make video_buf more generic
+    
+    Video_buf were concerned to allow PCI devices to be used as
+    video capture devices. This patch extends video_buf features
+    by virtualizing pci-dependent functions and allowing other
+    type of devices to use it.
+    It is still DMA centric, although it may be used also by
+    devices that emulates scatter/gather behavior or a DMA device
+    
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@infradead.org>
+
+diff --git a/drivers/media/common/saa7146_fops.c b/drivers/media/common/saa7146_fops.c
+index 3870fa948cc0..523ab3851c7b 100644
+--- a/drivers/media/common/saa7146_fops.c
++++ b/drivers/media/common/saa7146_fops.c
+@@ -50,14 +50,15 @@ void saa7146_res_free(struct saa7146_fh *fh, unsigned int bits)
+ /********************************************************************************/
+ /* common dma functions */
+ 
+-void saa7146_dma_free(struct saa7146_dev *dev,struct saa7146_buf *buf)
++void saa7146_dma_free(struct saa7146_dev *dev,struct videobuf_queue *q,
++						struct saa7146_buf *buf)
+ {
+ 	DEB_EE(("dev:%p, buf:%p\n",dev,buf));
+ 
+ 	BUG_ON(in_interrupt());
+ 
+ 	videobuf_waiton(&buf->vb,0,0);
+-	videobuf_dma_pci_unmap(dev->pci, &buf->vb.dma);
++	videobuf_dma_unmap(q, &buf->vb.dma);
+ 	videobuf_dma_free(&buf->vb.dma);
+ 	buf->vb.state = STATE_NEEDS_INIT;
+ }
+diff --git a/drivers/media/common/saa7146_vbi.c b/drivers/media/common/saa7146_vbi.c
+index 500bd3f05e16..063608462ebe 100644
+--- a/drivers/media/common/saa7146_vbi.c
++++ b/drivers/media/common/saa7146_vbi.c
+@@ -236,7 +236,7 @@ static int buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,e
+ 	}
+ 
+ 	if (buf->vb.size != size)
+-		saa7146_dma_free(dev,buf);
++		saa7146_dma_free(dev,q,buf);
+ 
+ 	if (STATE_NEEDS_INIT == buf->vb.state) {
+ 		buf->vb.width  = llength;
+@@ -247,7 +247,7 @@ static int buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,e
+ 		saa7146_pgtable_free(dev->pci, &buf->pt[2]);
+ 		saa7146_pgtable_alloc(dev->pci, &buf->pt[2]);
+ 
+-		err = videobuf_iolock(dev->pci,&buf->vb, NULL);
++		err = videobuf_iolock(q,&buf->vb, NULL);
+ 		if (err)
+ 			goto oops;
+ 		err = saa7146_pgtable_build_single(dev->pci, &buf->pt[2], buf->vb.dma.sglist, buf->vb.dma.sglen);
+@@ -261,7 +261,7 @@ static int buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,e
+ 
+  oops:
+ 	DEB_VBI(("error out.\n"));
+-	saa7146_dma_free(dev,buf);
++	saa7146_dma_free(dev,q,buf);
+ 
+ 	return err;
+ }
+@@ -301,7 +301,7 @@ static void buffer_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ 	struct saa7146_buf *buf = (struct saa7146_buf *)vb;
+ 
+ 	DEB_VBI(("vb:%p\n",vb));
+-	saa7146_dma_free(dev,buf);
++	saa7146_dma_free(dev,q,buf);
+ }
+ 
+ static struct videobuf_queue_ops vbi_qops = {
+diff --git a/drivers/media/common/saa7146_video.c b/drivers/media/common/saa7146_video.c
+index 6b42713d97f4..e7079d1bd537 100644
+--- a/drivers/media/common/saa7146_video.c
++++ b/drivers/media/common/saa7146_video.c
+@@ -1275,7 +1275,7 @@ static int buffer_prepare(struct videobuf_queue *q,
+ 	    buf->vb.field  != field      ||
+ 	    buf->vb.field  != fh->video_fmt.field  ||
+ 	    buf->fmt       != &fh->video_fmt) {
+-		saa7146_dma_free(dev,buf);
++		saa7146_dma_free(dev,q,buf);
+ 	}
+ 
+ 	if (STATE_NEEDS_INIT == buf->vb.state) {
+@@ -1304,7 +1304,7 @@ static int buffer_prepare(struct videobuf_queue *q,
+ 			saa7146_pgtable_alloc(dev->pci, &buf->pt[0]);
+ 		}
+ 
+-		err = videobuf_iolock(dev->pci,&buf->vb, &vv->ov_fb);
++		err = videobuf_iolock(q,&buf->vb, &vv->ov_fb);
+ 		if (err)
+ 			goto oops;
+ 		err = saa7146_pgtable_build(dev,buf);
+@@ -1318,7 +1318,7 @@ static int buffer_prepare(struct videobuf_queue *q,
+ 
+  oops:
+ 	DEB_D(("error out.\n"));
+-	saa7146_dma_free(dev,buf);
++	saa7146_dma_free(dev,q,buf);
+ 
+ 	return err;
+ }
+@@ -1363,7 +1363,7 @@ static void buffer_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ 	struct saa7146_buf *buf = (struct saa7146_buf *)vb;
+ 
+ 	DEB_CAP(("vbuf:%p\n",vb));
+-	saa7146_dma_free(dev,buf);
++	saa7146_dma_free(dev,q,buf);
+ }
+ 
+ static struct videobuf_queue_ops video_qops = {
+diff --git a/drivers/media/video/bttv-driver.c b/drivers/media/video/bttv-driver.c
+index c0415d6e7fee..2505ae5a7b97 100644
+--- a/drivers/media/video/bttv-driver.c
++++ b/drivers/media/video/bttv-driver.c
+@@ -1397,7 +1397,7 @@ bttv_switch_overlay(struct bttv *btv, struct bttv_fh *fh,
+ 		free_btres(btv,fh,RESOURCE_OVERLAY);
+ 	if (NULL != old) {
+ 		dprintk("switch_overlay: old=%p state is %d\n",old,old->vb.state);
+-		bttv_dma_free(btv, old);
++		bttv_dma_free(&fh->cap,btv, old);
+ 		kfree(old);
+ 	}
+ 	dprintk("switch_overlay: done\n");
+@@ -1407,7 +1407,8 @@ bttv_switch_overlay(struct bttv *btv, struct bttv_fh *fh,
+ /* ----------------------------------------------------------------------- */
+ /* video4linux (1) interface                                               */
+ 
+-static int bttv_prepare_buffer(struct bttv *btv, struct bttv_buffer *buf,
++static int bttv_prepare_buffer(struct videobuf_queue *q,struct bttv *btv,
++			       struct bttv_buffer *buf,
+ 			       const struct bttv_format *fmt,
+ 			       unsigned int width, unsigned int height,
+ 			       enum v4l2_field field)
+@@ -1450,7 +1451,7 @@ static int bttv_prepare_buffer(struct bttv *btv, struct bttv_buffer *buf,
+ 	/* alloc risc memory */
+ 	if (STATE_NEEDS_INIT == buf->vb.state) {
+ 		redo_dma_risc = 1;
+-		if (0 != (rc = videobuf_iolock(btv->c.pci,&buf->vb,&btv->fbuf)))
++		if (0 != (rc = videobuf_iolock(q,&buf->vb,&btv->fbuf)))
+ 			goto fail;
+ 	}
+ 
+@@ -1462,7 +1463,7 @@ static int bttv_prepare_buffer(struct bttv *btv, struct bttv_buffer *buf,
+ 	return 0;
+ 
+  fail:
+-	bttv_dma_free(btv,buf);
++	bttv_dma_free(q,btv,buf);
+ 	return rc;
+ }
+ 
+@@ -1486,7 +1487,7 @@ buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
+ 	struct bttv_buffer *buf = container_of(vb,struct bttv_buffer,vb);
+ 	struct bttv_fh *fh = q->priv_data;
+ 
+-	return bttv_prepare_buffer(fh->btv, buf, fh->fmt,
++	return bttv_prepare_buffer(q,fh->btv, buf, fh->fmt,
+ 				   fh->width, fh->height, field);
+ }
+ 
+@@ -1510,7 +1511,7 @@ static void buffer_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ 	struct bttv_buffer *buf = container_of(vb,struct bttv_buffer,vb);
+ 	struct bttv_fh *fh = q->priv_data;
+ 
+-	bttv_dma_free(fh->btv,buf);
++	bttv_dma_free(&fh->cap,fh->btv,buf);
+ }
+ 
+ static struct videobuf_queue_ops bttv_video_qops = {
+@@ -2496,7 +2497,7 @@ static int bttv_do_ioctl(struct inode *inode, struct file *file,
+ 		field = (vm->height > bttv_tvnorms[btv->tvnorm].sheight/2)
+ 			? V4L2_FIELD_INTERLACED
+ 			: V4L2_FIELD_BOTTOM;
+-		retval = bttv_prepare_buffer(btv,buf,
++		retval = bttv_prepare_buffer(&fh->cap,btv,buf,
+ 					     format_by_palette(vm->format),
+ 					     vm->width,vm->height,field);
+ 		if (0 != retval)
+@@ -2528,8 +2529,8 @@ static int bttv_do_ioctl(struct inode *inode, struct file *file,
+ 			retval = -EIO;
+ 			/* fall through */
+ 		case STATE_DONE:
+-			videobuf_dma_pci_sync(btv->c.pci,&buf->vb.dma);
+-			bttv_dma_free(btv,buf);
++			videobuf_dma_sync(&fh->cap,&buf->vb.dma);
++			bttv_dma_free(&fh->cap,btv,buf);
+ 			break;
+ 		default:
+ 			retval = -EINVAL;
+diff --git a/drivers/media/video/bttv-risc.c b/drivers/media/video/bttv-risc.c
+index 344f84e9af04..16323a5d68ac 100644
+--- a/drivers/media/video/bttv-risc.c
++++ b/drivers/media/video/bttv-risc.c
+@@ -509,11 +509,11 @@ bttv_risc_hook(struct bttv *btv, int slot, struct btcx_riscmem *risc,
+ }
+ 
+ void
+-bttv_dma_free(struct bttv *btv, struct bttv_buffer *buf)
++bttv_dma_free(struct videobuf_queue *q,struct bttv *btv, struct bttv_buffer *buf)
+ {
+ 	BUG_ON(in_interrupt());
+ 	videobuf_waiton(&buf->vb,0,0);
+-	videobuf_dma_pci_unmap(btv->c.pci, &buf->vb.dma);
++	videobuf_dma_unmap(q, &buf->vb.dma);
+ 	videobuf_dma_free(&buf->vb.dma);
+ 	btcx_riscmem_free(btv->c.pci,&buf->bottom);
+ 	btcx_riscmem_free(btv->c.pci,&buf->top);
+diff --git a/drivers/media/video/bttv-vbi.c b/drivers/media/video/bttv-vbi.c
+index 72afdd64b882..e20ff238e409 100644
+--- a/drivers/media/video/bttv-vbi.c
++++ b/drivers/media/video/bttv-vbi.c
+@@ -96,7 +96,7 @@ static int vbi_buffer_prepare(struct videobuf_queue *q,
+ 		return -EINVAL;
+ 
+ 	if (STATE_NEEDS_INIT == buf->vb.state) {
+-		if (0 != (rc = videobuf_iolock(btv->c.pci, &buf->vb, NULL)))
++		if (0 != (rc = videobuf_iolock(q, &buf->vb, NULL)))
+ 			goto fail;
+ 		if (0 != (rc = vbi_buffer_risc(btv,buf,fh->lines)))
+ 			goto fail;
+@@ -109,7 +109,7 @@ static int vbi_buffer_prepare(struct videobuf_queue *q,
+ 	return 0;
+ 
+  fail:
+-	bttv_dma_free(btv,buf);
++	bttv_dma_free(q,btv,buf);
+ 	return rc;
+ }
+ 
+@@ -136,7 +136,7 @@ static void vbi_buffer_release(struct videobuf_queue *q, struct videobuf_buffer
+ 	struct bttv_buffer *buf = container_of(vb,struct bttv_buffer,vb);
+ 
+ 	dprintk("free %p\n",vb);
+-	bttv_dma_free(fh->btv,buf);
++	bttv_dma_free(&fh->cap,fh->btv,buf);
+ }
+ 
+ struct videobuf_queue_ops bttv_vbi_qops = {
+diff --git a/drivers/media/video/bttvp.h b/drivers/media/video/bttvp.h
+index 9cb72f176f7d..12223a203960 100644
+--- a/drivers/media/video/bttvp.h
++++ b/drivers/media/video/bttvp.h
+@@ -190,7 +190,8 @@ int bttv_buffer_activate_video(struct bttv *btv,
+ 			       struct bttv_buffer_set *set);
+ int bttv_buffer_activate_vbi(struct bttv *btv,
+ 			     struct bttv_buffer *vbi);
+-void bttv_dma_free(struct bttv *btv, struct bttv_buffer *buf);
++void bttv_dma_free(struct videobuf_queue *q, struct bttv *btv,
++		   struct bttv_buffer *buf);
+ 
+ /* overlay handling */
+ int bttv_overlay_risc(struct bttv *btv, struct bttv_overlay *ov,
+diff --git a/drivers/media/video/cx88/cx88-alsa.c b/drivers/media/video/cx88/cx88-alsa.c
+index 3170b8f72c68..f9d87b86492c 100644
+--- a/drivers/media/video/cx88/cx88-alsa.c
++++ b/drivers/media/video/cx88/cx88-alsa.c
+@@ -303,7 +303,7 @@ static int dsp_buffer_free(snd_cx88_card_t *chip)
+ 	BUG_ON(!chip->dma_size);
+ 
+ 	dprintk(2,"Freeing buffer\n");
+-	videobuf_dma_pci_unmap(chip->pci, &chip->dma_risc);
++	videobuf_pci_dma_unmap(chip->pci, &chip->dma_risc);
+ 	videobuf_dma_free(&chip->dma_risc);
+ 	btcx_riscmem_free(chip->pci,&chip->buf->risc);
+ 	kfree(chip->buf);
+@@ -429,7 +429,7 @@ static int snd_cx88_hw_params(struct snd_pcm_substream * substream,
+ 	videobuf_dma_init_kernel(&buf->vb.dma,PCI_DMA_FROMDEVICE,
+ 			(PAGE_ALIGN(buf->vb.size) >> PAGE_SHIFT));
+ 
+-	videobuf_dma_pci_map(chip->pci,&buf->vb.dma);
++	videobuf_pci_dma_map(chip->pci,&buf->vb.dma);
+ 
+ 
+ 	cx88_risc_databuffer(chip->pci, &buf->risc,
+diff --git a/drivers/media/video/cx88/cx88-blackbird.c b/drivers/media/video/cx88/cx88-blackbird.c
+index a502a4d6e4ae..e100d8ef369a 100644
+--- a/drivers/media/video/cx88/cx88-blackbird.c
++++ b/drivers/media/video/cx88/cx88-blackbird.c
+@@ -1341,7 +1341,7 @@ bb_buf_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
+ 	       enum v4l2_field field)
+ {
+ 	struct cx8802_fh *fh = q->priv_data;
+-	return cx8802_buf_prepare(fh->dev, (struct cx88_buffer*)vb, field);
++	return cx8802_buf_prepare(q, fh->dev, (struct cx88_buffer*)vb, field);
+ }
+ 
+ static void
+@@ -1354,8 +1354,7 @@ bb_buf_queue(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ static void
+ bb_buf_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ {
+-	struct cx8802_fh *fh = q->priv_data;
+-	cx88_free_buffer(fh->dev->pci, (struct cx88_buffer*)vb);
++	cx88_free_buffer(q, (struct cx88_buffer*)vb);
+ }
+ 
+ static struct videobuf_queue_ops blackbird_qops = {
+diff --git a/drivers/media/video/cx88/cx88-core.c b/drivers/media/video/cx88/cx88-core.c
+index c2cdbafdb77b..2c3d9f1999be 100644
+--- a/drivers/media/video/cx88/cx88-core.c
++++ b/drivers/media/video/cx88/cx88-core.c
+@@ -213,13 +213,13 @@ int cx88_risc_stopper(struct pci_dev *pci, struct btcx_riscmem *risc,
+ }
+ 
+ void
+-cx88_free_buffer(struct pci_dev *pci, struct cx88_buffer *buf)
++cx88_free_buffer(struct videobuf_queue *q, struct cx88_buffer *buf)
+ {
+ 	BUG_ON(in_interrupt());
+ 	videobuf_waiton(&buf->vb,0,0);
+-	videobuf_dma_pci_unmap(pci, &buf->vb.dma);
++	videobuf_dma_unmap(q, &buf->vb.dma);
+ 	videobuf_dma_free(&buf->vb.dma);
+-	btcx_riscmem_free(pci, &buf->risc);
++	btcx_riscmem_free((struct pci_dev *)q->dev, &buf->risc);
+ 	buf->vb.state = STATE_NEEDS_INIT;
+ }
+ 
+diff --git a/drivers/media/video/cx88/cx88-dvb.c b/drivers/media/video/cx88/cx88-dvb.c
+index a9fc2695b157..f0ea9b5cdbc2 100644
+--- a/drivers/media/video/cx88/cx88-dvb.c
++++ b/drivers/media/video/cx88/cx88-dvb.c
+@@ -90,7 +90,7 @@ static int dvb_buf_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
+ 			   enum v4l2_field field)
+ {
+ 	struct cx8802_dev *dev = q->priv_data;
+-	return cx8802_buf_prepare(dev, (struct cx88_buffer*)vb,field);
++	return cx8802_buf_prepare(q, dev, (struct cx88_buffer*)vb,field);
+ }
+ 
+ static void dvb_buf_queue(struct videobuf_queue *q, struct videobuf_buffer *vb)
+@@ -101,8 +101,7 @@ static void dvb_buf_queue(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ 
+ static void dvb_buf_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ {
+-	struct cx8802_dev *dev = q->priv_data;
+-	cx88_free_buffer(dev->pci, (struct cx88_buffer*)vb);
++	cx88_free_buffer(q, (struct cx88_buffer*)vb);
+ }
+ 
+ static struct videobuf_queue_ops dvb_qops = {
+diff --git a/drivers/media/video/cx88/cx88-mpeg.c b/drivers/media/video/cx88/cx88-mpeg.c
+index c79cc1d2bf8b..7d16888b4a86 100644
+--- a/drivers/media/video/cx88/cx88-mpeg.c
++++ b/drivers/media/video/cx88/cx88-mpeg.c
+@@ -163,8 +163,8 @@ static int cx8802_restart_queue(struct cx8802_dev    *dev,
+ 
+ /* ------------------------------------------------------------------ */
+ 
+-int cx8802_buf_prepare(struct cx8802_dev *dev, struct cx88_buffer *buf,
+-			enum v4l2_field field)
++int cx8802_buf_prepare(struct videobuf_queue *q, struct cx8802_dev *dev,
++			struct cx88_buffer *buf, enum v4l2_field field)
+ {
+ 	int size = dev->ts_packet_size * dev->ts_packet_count;
+ 	int rc;
+@@ -179,7 +179,7 @@ int cx8802_buf_prepare(struct cx8802_dev *dev, struct cx88_buffer *buf,
+ 		buf->vb.size   = size;
+ 		buf->vb.field  = field /*V4L2_FIELD_TOP*/;
+ 
+-		if (0 != (rc = videobuf_iolock(dev->pci,&buf->vb,NULL)))
++		if (0 != (rc = videobuf_iolock(q,&buf->vb,NULL)))
+ 			goto fail;
+ 		cx88_risc_databuffer(dev->pci, &buf->risc,
+ 				     buf->vb.dma.sglist,
+@@ -189,36 +189,36 @@ int cx8802_buf_prepare(struct cx8802_dev *dev, struct cx88_buffer *buf,
+ 	return 0;
+ 
+  fail:
+-	cx88_free_buffer(dev->pci,buf);
++	cx88_free_buffer(q,buf);
+ 	return rc;
+ }
+ 
+ void cx8802_buf_queue(struct cx8802_dev *dev, struct cx88_buffer *buf)
+ {
+ 	struct cx88_buffer    *prev;
+-	struct cx88_dmaqueue  *q    = &dev->mpegq;
++	struct cx88_dmaqueue  *cx88q = &dev->mpegq;
+ 
+ 	dprintk( 1, "cx8802_buf_queue\n" );
+ 	/* add jump to stopper */
+ 	buf->risc.jmp[0] = cpu_to_le32(RISC_JUMP | RISC_IRQ1 | RISC_CNT_INC);
+-	buf->risc.jmp[1] = cpu_to_le32(q->stopper.dma);
++	buf->risc.jmp[1] = cpu_to_le32(cx88q->stopper.dma);
+ 
+-	if (list_empty(&q->active)) {
++	if (list_empty(&cx88q->active)) {
+ 		dprintk( 0, "queue is empty - first active\n" );
+-		list_add_tail(&buf->vb.queue,&q->active);
+-		cx8802_start_dma(dev, q, buf);
++		list_add_tail(&buf->vb.queue,&cx88q->active);
++		cx8802_start_dma(dev, cx88q, buf);
+ 		buf->vb.state = STATE_ACTIVE;
+-		buf->count    = q->count++;
+-		mod_timer(&q->timeout, jiffies+BUFFER_TIMEOUT);
++		buf->count    = cx88q->count++;
++		mod_timer(&cx88q->timeout, jiffies+BUFFER_TIMEOUT);
+ 		dprintk(0,"[%p/%d] %s - first active\n",
+ 			buf, buf->vb.i, __FUNCTION__);
+ 
+ 	} else {
+ 		dprintk( 1, "queue is not empty - append to active\n" );
+-		prev = list_entry(q->active.prev, struct cx88_buffer, vb.queue);
+-		list_add_tail(&buf->vb.queue,&q->active);
++		prev = list_entry(cx88q->active.prev, struct cx88_buffer, vb.queue);
++		list_add_tail(&buf->vb.queue,&cx88q->active);
+ 		buf->vb.state = STATE_ACTIVE;
+-		buf->count    = q->count++;
++		buf->count    = cx88q->count++;
+ 		prev->risc.jmp[1] = cpu_to_le32(buf->risc.dma);
+ 		dprintk( 1, "[%p/%d] %s - append to active\n",
+ 			buf, buf->vb.i, __FUNCTION__);
+diff --git a/drivers/media/video/cx88/cx88-vbi.c b/drivers/media/video/cx88/cx88-vbi.c
+index 9bc6c8995581..846faadc9f1c 100644
+--- a/drivers/media/video/cx88/cx88-vbi.c
++++ b/drivers/media/video/cx88/cx88-vbi.c
+@@ -175,7 +175,7 @@ vbi_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
+ 		buf->vb.size   = size;
+ 		buf->vb.field  = V4L2_FIELD_SEQ_TB;
+ 
+-		if (0 != (rc = videobuf_iolock(dev->pci,&buf->vb,NULL)))
++		if (0 != (rc = videobuf_iolock(q,&buf->vb,NULL)))
+ 			goto fail;
+ 		cx88_risc_buffer(dev->pci, &buf->risc,
+ 				 buf->vb.dma.sglist,
+@@ -187,7 +187,7 @@ vbi_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
+ 	return 0;
+ 
+  fail:
+-	cx88_free_buffer(dev->pci,buf);
++	cx88_free_buffer(q,buf);
+ 	return rc;
+ }
+ 
+@@ -227,9 +227,8 @@ vbi_queue(struct videobuf_queue *vq, struct videobuf_buffer *vb)
+ static void vbi_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ {
+ 	struct cx88_buffer *buf = container_of(vb,struct cx88_buffer,vb);
+-	struct cx8800_fh   *fh  = q->priv_data;
+ 
+-	cx88_free_buffer(fh->dev->pci,buf);
++	cx88_free_buffer(q,buf);
+ }
+ 
+ struct videobuf_queue_ops cx8800_vbi_qops = {
+diff --git a/drivers/media/video/cx88/cx88-video.c b/drivers/media/video/cx88/cx88-video.c
+index 6c97aa740d27..72a417b31745 100644
+--- a/drivers/media/video/cx88/cx88-video.c
++++ b/drivers/media/video/cx88/cx88-video.c
+@@ -564,7 +564,7 @@ buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
+ 
+ 	if (STATE_NEEDS_INIT == buf->vb.state) {
+ 		init_buffer = 1;
+-		if (0 != (rc = videobuf_iolock(dev->pci,&buf->vb,NULL)))
++		if (0 != (rc = videobuf_iolock(q,&buf->vb,NULL)))
+ 			goto fail;
+ 	}
+ 
+@@ -614,7 +614,7 @@ buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
+ 	return 0;
+ 
+  fail:
+-	cx88_free_buffer(dev->pci,buf);
++	cx88_free_buffer(q,buf);
+ 	return rc;
+ }
+ 
+@@ -671,9 +671,8 @@ buffer_queue(struct videobuf_queue *vq, struct videobuf_buffer *vb)
+ static void buffer_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ {
+ 	struct cx88_buffer *buf = container_of(vb,struct cx88_buffer,vb);
+-	struct cx8800_fh   *fh  = q->priv_data;
+ 
+-	cx88_free_buffer(fh->dev->pci,buf);
++	cx88_free_buffer(q,buf);
+ }
+ 
+ static struct videobuf_queue_ops cx8800_video_qops = {
+@@ -1251,9 +1250,17 @@ int cx88_do_ioctl(struct inode *inode, struct file *file, int radio,
+ {
+ 	int err;
+ 
+-	dprintk(2, "CORE IOCTL: 0x%x\n", cmd );
+-	if (video_debug > 1)
+-		v4l_print_ioctl(core->name,cmd);
++       if (video_debug) {
++	       if (video_debug > 1) {
++		       if (_IOC_DIR(cmd) & _IOC_WRITE)
++			       v4l_printk_ioctl_arg("cx88(w)",cmd, arg);
++		       else if (!_IOC_DIR(cmd) & _IOC_READ) {
++			       v4l_print_ioctl("cx88", cmd);
++		       }
++	       } else
++		       v4l_print_ioctl(core->name,cmd);
++
++       }
+ 
+ 	switch (cmd) {
+ 	/* ---------- tv norms ---------- */
+@@ -1460,7 +1467,19 @@ int cx88_do_ioctl(struct inode *inode, struct file *file, int radio,
+ static int video_ioctl(struct inode *inode, struct file *file,
+ 		       unsigned int cmd, unsigned long arg)
+ {
+-	return video_usercopy(inode, file, cmd, arg, video_do_ioctl);
++       int retval;
++
++       retval=video_usercopy(inode, file, cmd, arg, video_do_ioctl);
++
++       if (video_debug > 1) {
++	       if (retval < 0) {
++		       v4l_print_ioctl("cx88(err)", cmd);
++		       printk(KERN_DEBUG "cx88(err): errcode=%d\n",retval);
++	       } else if (_IOC_DIR(cmd) & _IOC_READ)
++		       v4l_printk_ioctl_arg("cx88(r)",cmd, (void *)arg);
++       }
++
++       return retval;
+ }
+ 
+ /* ----------------------------------------------------------- */
+diff --git a/drivers/media/video/cx88/cx88.h b/drivers/media/video/cx88/cx88.h
+index cfa8668784b4..5b2e499eab22 100644
+--- a/drivers/media/video/cx88/cx88.h
++++ b/drivers/media/video/cx88/cx88.h
+@@ -485,7 +485,7 @@ extern int
+ cx88_risc_stopper(struct pci_dev *pci, struct btcx_riscmem *risc,
+ 		  u32 reg, u32 mask, u32 value);
+ extern void
+-cx88_free_buffer(struct pci_dev *pci, struct cx88_buffer *buf);
++cx88_free_buffer(struct videobuf_queue *q, struct cx88_buffer *buf);
+ 
+ extern void cx88_risc_disasm(struct cx88_core *core,
+ 			     struct btcx_riscmem *risc);
+@@ -577,8 +577,8 @@ void cx88_ir_irq(struct cx88_core *core);
+ /* ----------------------------------------------------------- */
+ /* cx88-mpeg.c                                                 */
+ 
+-int cx8802_buf_prepare(struct cx8802_dev *dev, struct cx88_buffer *buf,
+-			enum v4l2_field field);
++int cx8802_buf_prepare(struct videobuf_queue *q,struct cx8802_dev *dev,
++			struct cx88_buffer *buf, enum v4l2_field field);
+ void cx8802_buf_queue(struct cx8802_dev *dev, struct cx88_buffer *buf);
+ void cx8802_cancel_buffers(struct cx8802_dev *dev);
+ 
+diff --git a/drivers/media/video/saa7134/saa7134-alsa.c b/drivers/media/video/saa7134/saa7134-alsa.c
+index aca84d2f9825..bb3e0ba946d3 100644
+--- a/drivers/media/video/saa7134/saa7134-alsa.c
++++ b/drivers/media/video/saa7134/saa7134-alsa.c
+@@ -507,7 +507,7 @@ static int snd_card_saa7134_hw_params(struct snd_pcm_substream * substream,
+ 	/* release the old buffer */
+ 	if (substream->runtime->dma_area) {
+ 		saa7134_pgtable_free(dev->pci, &dev->dmasound.pt);
+-		videobuf_dma_pci_unmap(dev->pci, &dev->dmasound.dma);
++		videobuf_pci_dma_unmap(dev->pci, &dev->dmasound.dma);
+ 		dsp_buffer_free(dev);
+ 		substream->runtime->dma_area = NULL;
+ 	}
+@@ -523,12 +523,12 @@ static int snd_card_saa7134_hw_params(struct snd_pcm_substream * substream,
+ 		return err;
+ 	}
+ 
+-	if (0 != (err = videobuf_dma_pci_map(dev->pci, &dev->dmasound.dma))) {
++	if (0 != (err = videobuf_pci_dma_map(dev->pci, &dev->dmasound.dma))) {
+ 		dsp_buffer_free(dev);
+ 		return err;
+ 	}
+ 	if (0 != (err = saa7134_pgtable_alloc(dev->pci,&dev->dmasound.pt))) {
+-		videobuf_dma_pci_unmap(dev->pci, &dev->dmasound.dma);
++		videobuf_pci_dma_unmap(dev->pci, &dev->dmasound.dma);
+ 		dsp_buffer_free(dev);
+ 		return err;
+ 	}
+@@ -537,7 +537,7 @@ static int snd_card_saa7134_hw_params(struct snd_pcm_substream * substream,
+ 						dev->dmasound.dma.sglen,
+ 						0))) {
+ 		saa7134_pgtable_free(dev->pci, &dev->dmasound.pt);
+-		videobuf_dma_pci_unmap(dev->pci, &dev->dmasound.dma);
++		videobuf_pci_dma_unmap(dev->pci, &dev->dmasound.dma);
+ 		dsp_buffer_free(dev);
+ 		return err;
+ 	}
+@@ -571,7 +571,7 @@ static int snd_card_saa7134_hw_free(struct snd_pcm_substream * substream)
+ 
+ 	if (substream->runtime->dma_area) {
+ 		saa7134_pgtable_free(dev->pci, &dev->dmasound.pt);
+-		videobuf_dma_pci_unmap(dev->pci, &dev->dmasound.dma);
++		videobuf_pci_dma_unmap(dev->pci, &dev->dmasound.dma);
+ 		dsp_buffer_free(dev);
+ 		substream->runtime->dma_area = NULL;
+ 	}
+diff --git a/drivers/media/video/saa7134/saa7134-core.c b/drivers/media/video/saa7134/saa7134-core.c
+index 58e568d7d2ee..15405d1e1675 100644
+--- a/drivers/media/video/saa7134/saa7134-core.c
++++ b/drivers/media/video/saa7134/saa7134-core.c
+@@ -254,12 +254,12 @@ void saa7134_pgtable_free(struct pci_dev *pci, struct saa7134_pgtable *pt)
+ 
+ /* ------------------------------------------------------------------ */
+ 
+-void saa7134_dma_free(struct saa7134_dev *dev,struct saa7134_buf *buf)
++void saa7134_dma_free(struct videobuf_queue *q,struct saa7134_buf *buf)
+ {
+ 	BUG_ON(in_interrupt());
+ 
+ 	videobuf_waiton(&buf->vb,0,0);
+-	videobuf_dma_pci_unmap(dev->pci, &buf->vb.dma);
++	videobuf_dma_unmap(q, &buf->vb.dma);
+ 	videobuf_dma_free(&buf->vb.dma);
+ 	buf->vb.state = STATE_NEEDS_INIT;
+ }
+diff --git a/drivers/media/video/saa7134/saa7134-oss.c b/drivers/media/video/saa7134/saa7134-oss.c
+index d79d05f88705..7aa02b34e012 100644
+--- a/drivers/media/video/saa7134/saa7134-oss.c
++++ b/drivers/media/video/saa7134/saa7134-oss.c
+@@ -124,7 +124,7 @@ static int dsp_rec_start(struct saa7134_dev *dev)
+ 	unsigned long flags;
+ 
+ 	/* prepare buffer */
+-	if (0 != (err = videobuf_dma_pci_map(dev->pci,&dev->dmasound.dma)))
++	if (0 != (err = videobuf_pci_dma_map(dev->pci,&dev->dmasound.dma)))
+ 		return err;
+ 	if (0 != (err = saa7134_pgtable_alloc(dev->pci,&dev->dmasound.pt)))
+ 		goto fail1;
+@@ -213,7 +213,7 @@ static int dsp_rec_start(struct saa7134_dev *dev)
+  fail2:
+ 	saa7134_pgtable_free(dev->pci,&dev->dmasound.pt);
+  fail1:
+-	videobuf_dma_pci_unmap(dev->pci,&dev->dmasound.dma);
++	videobuf_pci_dma_unmap(dev->pci,&dev->dmasound.dma);
+ 	return err;
+ }
+ 
+@@ -231,7 +231,7 @@ static int dsp_rec_stop(struct saa7134_dev *dev)
+ 
+ 	/* unlock buffer */
+ 	saa7134_pgtable_free(dev->pci,&dev->dmasound.pt);
+-	videobuf_dma_pci_unmap(dev->pci,&dev->dmasound.dma);
++	videobuf_pci_dma_unmap(dev->pci,&dev->dmasound.dma);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/media/video/saa7134/saa7134-ts.c b/drivers/media/video/saa7134/saa7134-ts.c
+index 470903e2f5e5..60a90a2617ae 100644
+--- a/drivers/media/video/saa7134/saa7134-ts.c
++++ b/drivers/media/video/saa7134/saa7134-ts.c
+@@ -89,7 +89,7 @@ static int buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
+ 		return -EINVAL;
+ 
+ 	if (buf->vb.size != size) {
+-		saa7134_dma_free(dev,buf);
++		saa7134_dma_free(q,buf);
+ 	}
+ 
+ 	if (STATE_NEEDS_INIT == buf->vb.state) {
+@@ -98,7 +98,7 @@ static int buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
+ 		buf->vb.size   = size;
+ 		buf->pt        = &dev->ts.pt_ts;
+ 
+-		err = videobuf_iolock(dev->pci,&buf->vb,NULL);
++		err = videobuf_iolock(q,&buf->vb,NULL);
+ 		if (err)
+ 			goto oops;
+ 		err = saa7134_pgtable_build(dev->pci,buf->pt,
+@@ -126,7 +126,7 @@ static int buffer_prepare(struct videobuf_queue *q, struct videobuf_buffer *vb,
+ 	return 0;
+ 
+  oops:
+-	saa7134_dma_free(dev,buf);
++	saa7134_dma_free(q,buf);
+ 	return err;
+ }
+ 
+@@ -152,10 +152,9 @@ static void buffer_queue(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ 
+ static void buffer_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ {
+-	struct saa7134_dev *dev = q->priv_data;
+ 	struct saa7134_buf *buf = container_of(vb,struct saa7134_buf,vb);
+ 
+-	saa7134_dma_free(dev,buf);
++	saa7134_dma_free(q,buf);
+ }
+ 
+ struct videobuf_queue_ops saa7134_ts_qops = {
+diff --git a/drivers/media/video/saa7134/saa7134-vbi.c b/drivers/media/video/saa7134/saa7134-vbi.c
+index f4aee0af80e1..f38366a470fa 100644
+--- a/drivers/media/video/saa7134/saa7134-vbi.c
++++ b/drivers/media/video/saa7134/saa7134-vbi.c
+@@ -135,7 +135,7 @@ static int buffer_prepare(struct videobuf_queue *q,
+ 		return -EINVAL;
+ 
+ 	if (buf->vb.size != size)
+-		saa7134_dma_free(dev,buf);
++		saa7134_dma_free(q,buf);
+ 
+ 	if (STATE_NEEDS_INIT == buf->vb.state) {
+ 		buf->vb.width  = llength;
+@@ -143,7 +143,7 @@ static int buffer_prepare(struct videobuf_queue *q,
+ 		buf->vb.size   = size;
+ 		buf->pt        = &fh->pt_vbi;
+ 
+-		err = videobuf_iolock(dev->pci,&buf->vb,NULL);
++		err = videobuf_iolock(q,&buf->vb,NULL);
+ 		if (err)
+ 			goto oops;
+ 		err = saa7134_pgtable_build(dev->pci,buf->pt,
+@@ -159,7 +159,7 @@ static int buffer_prepare(struct videobuf_queue *q,
+ 	return 0;
+ 
+  oops:
+-	saa7134_dma_free(dev,buf);
++	saa7134_dma_free(q,buf);
+ 	return err;
+ }
+ 
+@@ -190,11 +190,9 @@ static void buffer_queue(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ 
+ static void buffer_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ {
+-	struct saa7134_fh *fh   = q->priv_data;
+-	struct saa7134_dev *dev = fh->dev;
+ 	struct saa7134_buf *buf = container_of(vb,struct saa7134_buf,vb);
+ 
+-	saa7134_dma_free(dev,buf);
++	saa7134_dma_free(q,buf);
+ }
+ 
+ struct videobuf_queue_ops saa7134_vbi_qops = {
+diff --git a/drivers/media/video/saa7134/saa7134-video.c b/drivers/media/video/saa7134/saa7134-video.c
+index 57a11e71d996..aeef80f88a6b 100644
+--- a/drivers/media/video/saa7134/saa7134-video.c
++++ b/drivers/media/video/saa7134/saa7134-video.c
+@@ -993,7 +993,7 @@ static int buffer_prepare(struct videobuf_queue *q,
+ 	    buf->vb.size   != size       ||
+ 	    buf->vb.field  != field      ||
+ 	    buf->fmt       != fh->fmt) {
+-		saa7134_dma_free(dev,buf);
++		saa7134_dma_free(q,buf);
+ 	}
+ 
+ 	if (STATE_NEEDS_INIT == buf->vb.state) {
+@@ -1004,7 +1004,7 @@ static int buffer_prepare(struct videobuf_queue *q,
+ 		buf->fmt       = fh->fmt;
+ 		buf->pt        = &fh->pt_cap;
+ 
+-		err = videobuf_iolock(dev->pci,&buf->vb,&dev->ovbuf);
++		err = videobuf_iolock(q,&buf->vb,&dev->ovbuf);
+ 		if (err)
+ 			goto oops;
+ 		err = saa7134_pgtable_build(dev->pci,buf->pt,
+@@ -1019,7 +1019,7 @@ static int buffer_prepare(struct videobuf_queue *q,
+ 	return 0;
+ 
+  oops:
+-	saa7134_dma_free(dev,buf);
++	saa7134_dma_free(q,buf);
+ 	return err;
+ }
+ 
+@@ -1045,10 +1045,9 @@ static void buffer_queue(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ 
+ static void buffer_release(struct videobuf_queue *q, struct videobuf_buffer *vb)
+ {
+-	struct saa7134_fh *fh = q->priv_data;
+ 	struct saa7134_buf *buf = container_of(vb,struct saa7134_buf,vb);
+ 
+-	saa7134_dma_free(fh->dev,buf);
++	saa7134_dma_free(q,buf);
+ }
+ 
+ static struct videobuf_queue_ops video_qops = {
+diff --git a/drivers/media/video/saa7134/saa7134.h b/drivers/media/video/saa7134/saa7134.h
+index ce1c2e0b065e..104bd2e054e5 100644
+--- a/drivers/media/video/saa7134/saa7134.h
++++ b/drivers/media/video/saa7134/saa7134.h
+@@ -579,7 +579,7 @@ void saa7134_buffer_finish(struct saa7134_dev *dev, struct saa7134_dmaqueue *q,
+ 			   unsigned int state);
+ void saa7134_buffer_next(struct saa7134_dev *dev, struct saa7134_dmaqueue *q);
+ void saa7134_buffer_timeout(unsigned long data);
+-void saa7134_dma_free(struct saa7134_dev *dev,struct saa7134_buf *buf);
++void saa7134_dma_free(struct videobuf_queue *q,struct saa7134_buf *buf);
+ 
+ int saa7134_set_dmabits(struct saa7134_dev *dev);
+ 
+diff --git a/drivers/media/video/v4l2-common.c b/drivers/media/video/v4l2-common.c
+index 95a6e47c99f1..9b029e4dbfb7 100644
+--- a/drivers/media/video/v4l2-common.c
++++ b/drivers/media/video/v4l2-common.c
+@@ -481,7 +481,7 @@ void v4l_printk_ioctl_arg(char *s,unsigned int cmd, void *arg)
+ 				prt_names(p->memory,v4l2_memory_names),
+ 				p->m.userptr);
+ 		printk ("%s: timecode= %02d:%02d:%02d type=%d, "
+-			"flags=0x%08d, frames=%d, userbits=0x%08x",
++			"flags=0x%08d, frames=%d, userbits=0x%08x\n",
+ 				s,tc->hours,tc->minutes,tc->seconds,
+ 				tc->type, tc->flags, tc->frames, (__u32) tc->userbits);
+ 		break;
+@@ -489,8 +489,8 @@ void v4l_printk_ioctl_arg(char *s,unsigned int cmd, void *arg)
+ 	case VIDIOC_QUERYCAP:
+ 	{
+ 		struct v4l2_capability *p=arg;
+-		printk ("%s: driver=%s, card=%s, bus=%s, version=%d, "
+-			"capabilities=%d\n", s,
++		printk ("%s: driver=%s, card=%s, bus=%s, version=0x%08x, "
++			"capabilities=0x%08x\n", s,
+ 				p->driver,p->card,p->bus_info,
+ 				p->version,
+ 				p->capabilities);
+diff --git a/drivers/media/video/video-buf.c b/drivers/media/video/video-buf.c
+index 87e937581d5a..d2ca0f08d0df 100644
+--- a/drivers/media/video/video-buf.c
++++ b/drivers/media/video/video-buf.c
+@@ -1,15 +1,20 @@
+ /*
+  *
+  * generic helper functions for video4linux capture buffers, to handle
+- * memory management and PCI DMA.  Right now bttv + saa7134 use it.
++ * memory management and PCI DMA.
++ * Right now, bttv, saa7134, saa7146 and cx88 use it.
+  *
+  * The functions expect the hardware being able to scatter gatter
+  * (i.e. the buffers are not linear in physical memory, but fragmented
+  * into PAGE_SIZE chunks).  They also assume the driver does not need
+- * to touch the video data (thus it is probably not useful for USB 1.1
+- * as data often must be uncompressed by the drivers).
++ * to touch the video data.
++ *
++ * device specific map/unmap/sync stuff now are mapped as operations
++ * to allow its usage by USB and virtual devices.
+  *
+  * (c) 2001-2004 Gerd Knorr <kraxel@bytesex.org> [SUSE Labs]
++ * (c) 2006 Mauro Carvalho Chehab <mchehab@infradead.org>
++ * (c) 2006 Ted Walther and John Sokol
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -167,6 +172,9 @@ int videobuf_dma_init_kernel(struct videobuf_dmabuf *dma, int direction,
+ 		dprintk(1,"vmalloc_32(%d pages) failed\n",nr_pages);
+ 		return -ENOMEM;
+ 	}
++	dprintk(1,"vmalloc is at addr 0x%08lx, size=%d\n",
++				(unsigned long)dma->vmalloc,
++				nr_pages << PAGE_SHIFT);
+ 	memset(dma->vmalloc,0,nr_pages << PAGE_SHIFT);
+ 	dma->nr_pages = nr_pages;
+ 	return 0;
+@@ -186,8 +194,10 @@ int videobuf_dma_init_overlay(struct videobuf_dmabuf *dma, int direction,
+ 	return 0;
+ }
+ 
+-int videobuf_dma_pci_map(struct pci_dev *dev, struct videobuf_dmabuf *dma)
++int videobuf_dma_map(struct videobuf_queue* q,struct videobuf_dmabuf *dma)
+ {
++	void                   *dev=q->dev;
++
+ 	MAGIC_CHECK(dma->magic,MAGIC_DMABUF);
+ 	BUG_ON(0 == dma->nr_pages);
+ 
+@@ -197,7 +207,7 @@ int videobuf_dma_pci_map(struct pci_dev *dev, struct videobuf_dmabuf *dma)
+ 	}
+ 	if (dma->vmalloc) {
+ 		dma->sglist = videobuf_vmalloc_to_sg
+-			(dma->vmalloc,dma->nr_pages);
++						(dma->vmalloc,dma->nr_pages);
+ 	}
+ 	if (dma->bus_addr) {
+ 		dma->sglist = kmalloc(sizeof(struct scatterlist), GFP_KERNEL);
+@@ -212,13 +222,14 @@ int videobuf_dma_pci_map(struct pci_dev *dev, struct videobuf_dmabuf *dma)
+ 		dprintk(1,"scatterlist is NULL\n");
+ 		return -ENOMEM;
+ 	}
+-
+ 	if (!dma->bus_addr) {
+-		dma->sglen = pci_map_sg(dev,dma->sglist,dma->nr_pages,
+-					dma->direction);
++		if (q->ops->vb_map_sg) {
++			dma->sglen = q->ops->vb_map_sg(dev,dma->sglist,
++					dma->nr_pages, dma->direction);
++		}
+ 		if (0 == dma->sglen) {
+ 			printk(KERN_WARNING
+-			       "%s: pci_map_sg failed\n",__FUNCTION__);
++			       "%s: videobuf_map_sg failed\n",__FUNCTION__);
+ 			kfree(dma->sglist);
+ 			dma->sglist = NULL;
+ 			dma->sglen = 0;
+@@ -228,24 +239,31 @@ int videobuf_dma_pci_map(struct pci_dev *dev, struct videobuf_dmabuf *dma)
+ 	return 0;
+ }
+ 
+-int videobuf_dma_pci_sync(struct pci_dev *dev, struct videobuf_dmabuf *dma)
++int videobuf_dma_sync(struct videobuf_queue* q,struct videobuf_dmabuf *dma)
+ {
++	void                   *dev=q->dev;
++
+ 	MAGIC_CHECK(dma->magic,MAGIC_DMABUF);
+ 	BUG_ON(!dma->sglen);
+ 
+-	if (!dma->bus_addr)
+-		pci_dma_sync_sg_for_cpu(dev,dma->sglist,dma->nr_pages,dma->direction);
++	if (!dma->bus_addr && q->ops->vb_dma_sync_sg)
++		q->ops->vb_dma_sync_sg(dev,dma->sglist,dma->nr_pages,
++							dma->direction);
++
+ 	return 0;
+ }
+ 
+-int videobuf_dma_pci_unmap(struct pci_dev *dev, struct videobuf_dmabuf *dma)
++int videobuf_dma_unmap(struct videobuf_queue* q,struct videobuf_dmabuf *dma)
+ {
++	void                   *dev=q->dev;
++
+ 	MAGIC_CHECK(dma->magic,MAGIC_DMABUF);
+ 	if (!dma->sglen)
+ 		return 0;
+ 
+-	if (!dma->bus_addr)
+-		pci_unmap_sg(dev,dma->sglist,dma->nr_pages,dma->direction);
++	if (!dma->bus_addr && q->ops->vb_unmap_sg)
++			q->ops->vb_unmap_sg(dev,dma->sglist,dma->nr_pages,
++							dma->direction);
+ 	kfree(dma->sglist);
+ 	dma->sglist = NULL;
+ 	dma->sglen = 0;
+@@ -318,7 +336,7 @@ int videobuf_waiton(struct videobuf_buffer *vb, int non_blocking, int intr)
+ }
+ 
+ int
+-videobuf_iolock(struct pci_dev *pci, struct videobuf_buffer *vb,
++videobuf_iolock(struct videobuf_queue* q, struct videobuf_buffer *vb,
+ 		struct v4l2_framebuffer *fbuf)
+ {
+ 	int err,pages;
+@@ -357,7 +375,7 @@ videobuf_iolock(struct pci_dev *pci, struct videobuf_buffer *vb,
+ 	default:
+ 		BUG();
+ 	}
+-	err = videobuf_dma_pci_map(pci,&vb->dma);
++	err = videobuf_dma_map(q,&vb->dma);
+ 	if (0 != err)
+ 		return err;
+ 
+@@ -366,9 +384,41 @@ videobuf_iolock(struct pci_dev *pci, struct videobuf_buffer *vb,
+ 
+ /* --------------------------------------------------------------------- */
+ 
++void videobuf_queue_pci(struct videobuf_queue* q)
++{
++	/* If not specified, defaults to PCI map sg */
++	if (!q->ops->vb_map_sg)
++		q->ops->vb_map_sg=(vb_map_sg_t *)pci_map_sg;
++
++	if (!q->ops->vb_dma_sync_sg)
++		q->ops->vb_dma_sync_sg=(vb_map_sg_t *)pci_dma_sync_sg_for_cpu;
++	if (!q->ops->vb_unmap_sg)
++		q->ops->vb_unmap_sg=(vb_map_sg_t *)pci_unmap_sg;
++}
++
++int videobuf_pci_dma_map(struct pci_dev *pci,struct videobuf_dmabuf *dma)
++{
++	struct videobuf_queue q;
++
++	q.dev=pci;
++	q.ops->vb_map_sg=(vb_map_sg_t *)pci_unmap_sg;
++
++	return (videobuf_dma_unmap(&q,dma));
++}
++
++int videobuf_pci_dma_unmap(struct pci_dev *pci,struct videobuf_dmabuf *dma)
++{
++	struct videobuf_queue q;
++
++	q.dev=pci;
++	q.ops->vb_map_sg=(vb_map_sg_t *)pci_unmap_sg;
++
++	return (videobuf_dma_unmap(&q,dma));
++}
++
+ void videobuf_queue_init(struct videobuf_queue* q,
+ 			 struct videobuf_queue_ops *ops,
+-			 struct pci_dev *pci,
++			 void *dev,
+ 			 spinlock_t *irqlock,
+ 			 enum v4l2_buf_type type,
+ 			 enum v4l2_field field,
+@@ -377,13 +427,15 @@ void videobuf_queue_init(struct videobuf_queue* q,
+ {
+ 	memset(q,0,sizeof(*q));
+ 	q->irqlock = irqlock;
+-	q->pci     = pci;
++	q->dev     = dev;
+ 	q->type    = type;
+ 	q->field   = field;
+ 	q->msize   = msize;
+ 	q->ops     = ops;
+ 	q->priv_data = priv;
+ 
++	videobuf_queue_pci(q);
++
+ 	mutex_init(&q->lock);
+ 	INIT_LIST_HEAD(&q->stream);
+ }
+@@ -431,7 +483,8 @@ videobuf_queue_cancel(struct videobuf_queue *q)
+ 	int i;
+ 
+ 	/* remove queued buffers from list */
+-	spin_lock_irqsave(q->irqlock,flags);
++	if (q->irqlock)
++		spin_lock_irqsave(q->irqlock,flags);
+ 	for (i = 0; i < VIDEO_MAX_FRAME; i++) {
+ 		if (NULL == q->bufs[i])
+ 			continue;
+@@ -440,7 +493,8 @@ videobuf_queue_cancel(struct videobuf_queue *q)
+ 			q->bufs[i]->state = STATE_ERROR;
+ 		}
+ 	}
+-	spin_unlock_irqrestore(q->irqlock,flags);
++	if (q->irqlock)
++		spin_unlock_irqrestore(q->irqlock,flags);
+ 
+ 	/* free all buffers + clear queue */
+ 	for (i = 0; i < VIDEO_MAX_FRAME; i++) {
+@@ -534,19 +588,29 @@ videobuf_reqbufs(struct videobuf_queue *q,
+ 	unsigned int size,count;
+ 	int retval;
+ 
+-	if (req->type != q->type)
++	if (req->type != q->type) {
++		dprintk(1,"reqbufs: queue type invalid\n");
+ 		return -EINVAL;
+-	if (req->count < 1)
++	}
++	if (req->count < 1) {
++		dprintk(1,"reqbufs: count invalid (%d)\n",req->count);
+ 		return -EINVAL;
++	}
+ 	if (req->memory != V4L2_MEMORY_MMAP     &&
+ 	    req->memory != V4L2_MEMORY_USERPTR  &&
+-	    req->memory != V4L2_MEMORY_OVERLAY)
++	    req->memory != V4L2_MEMORY_OVERLAY) {
++		dprintk(1,"reqbufs: memory type invalid\n");
+ 		return -EINVAL;
++	}
+ 
+-	if (q->streaming)
++	if (q->streaming) {
++		dprintk(1,"reqbufs: streaming already exists\n");
+ 		return -EBUSY;
+-	if (!list_empty(&q->stream))
++	}
++	if (!list_empty(&q->stream)) {
++		dprintk(1,"reqbufs: stream running\n");
+ 		return -EBUSY;
++	}
+ 
+ 	mutex_lock(&q->lock);
+ 	count = req->count;
+@@ -559,8 +623,10 @@ videobuf_reqbufs(struct videobuf_queue *q,
+ 		count, size, (count*size)>>PAGE_SHIFT);
+ 
+ 	retval = videobuf_mmap_setup(q,count,size,req->memory);
+-	if (retval < 0)
++	if (retval < 0) {
++		dprintk(1,"reqbufs: mmap setup returned %d\n",retval);
+ 		goto done;
++	}
+ 
+ 	req->count = count;
+ 
+@@ -572,12 +638,18 @@ videobuf_reqbufs(struct videobuf_queue *q,
+ int
+ videobuf_querybuf(struct videobuf_queue *q, struct v4l2_buffer *b)
+ {
+-	if (unlikely(b->type != q->type))
++	if (unlikely(b->type != q->type)) {
++		dprintk(1,"querybuf: Wrong type.\n");
+ 		return -EINVAL;
+-	if (unlikely(b->index < 0 || b->index >= VIDEO_MAX_FRAME))
++	}
++	if (unlikely(b->index < 0 || b->index >= VIDEO_MAX_FRAME)) {
++		dprintk(1,"querybuf: index out of range.\n");
+ 		return -EINVAL;
+-	if (unlikely(NULL == q->bufs[b->index]))
++	}
++	if (unlikely(NULL == q->bufs[b->index])) {
++		dprintk(1,"querybuf: buffer is null.\n");
+ 		return -EINVAL;
++	}
+ 	videobuf_status(b,q->bufs[b->index],q->type);
+ 	return 0;
+ }
+@@ -593,26 +665,40 @@ videobuf_qbuf(struct videobuf_queue *q,
+ 
+ 	mutex_lock(&q->lock);
+ 	retval = -EBUSY;
+-	if (q->reading)
++	if (q->reading) {
++		dprintk(1,"qbuf: Reading running...\n");
+ 		goto done;
++	}
+ 	retval = -EINVAL;
+-	if (b->type != q->type)
++	if (b->type != q->type) {
++		dprintk(1,"qbuf: Wrong type.\n");
+ 		goto done;
+-	if (b->index < 0 || b->index >= VIDEO_MAX_FRAME)
++	}
++	if (b->index < 0 || b->index >= VIDEO_MAX_FRAME) {
++		dprintk(1,"qbuf: index out of range.\n");
+ 		goto done;
++	}
+ 	buf = q->bufs[b->index];
+-	if (NULL == buf)
++	if (NULL == buf) {
++		dprintk(1,"qbuf: buffer is null.\n");
+ 		goto done;
++	}
+ 	MAGIC_CHECK(buf->magic,MAGIC_BUFFER);
+-	if (buf->memory != b->memory)
++	if (buf->memory != b->memory) {
++		dprintk(1,"qbuf: memory type is wrong.\n");
+ 		goto done;
++	}
+ 	if (buf->state == STATE_QUEUED ||
+-	    buf->state == STATE_ACTIVE)
++	    buf->state == STATE_ACTIVE) {
++		dprintk(1,"qbuf: buffer is already queued or active.\n");
+ 		goto done;
++	}
+ 
+ 	if (b->flags & V4L2_BUF_FLAG_INPUT) {
+-		if (b->input >= q->inputs)
++		if (b->input >= q->inputs) {
++			dprintk(1,"qbuf: wrong input.\n");
+ 			goto done;
++		}
+ 		buf->input = b->input;
+ 	} else {
+ 		buf->input = UNSET;
+@@ -620,12 +706,16 @@ videobuf_qbuf(struct videobuf_queue *q,
+ 
+ 	switch (b->memory) {
+ 	case V4L2_MEMORY_MMAP:
+-		if (0 == buf->baddr)
++		if (0 == buf->baddr) {
++			dprintk(1,"qbuf: mmap requested but buffer addr is zero!\n");
+ 			goto done;
++		}
+ 		break;
+ 	case V4L2_MEMORY_USERPTR:
+-		if (b->length < buf->bsize)
++		if (b->length < buf->bsize) {
++			dprintk(1,"qbuf: buffer length is not enough\n");
+ 			goto done;
++		}
+ 		if (STATE_NEEDS_INIT != buf->state && buf->baddr != b->m.userptr)
+ 			q->ops->buf_release(q,buf);
+ 		buf->baddr = b->m.userptr;
+@@ -634,20 +724,27 @@ videobuf_qbuf(struct videobuf_queue *q,
+ 		buf->boff = b->m.offset;
+ 		break;
+ 	default:
++		dprintk(1,"qbuf: wrong memory type\n");
+ 		goto done;
+ 	}
+ 
++	dprintk(1,"qbuf: requesting next field\n");
+ 	field = videobuf_next_field(q);
+ 	retval = q->ops->buf_prepare(q,buf,field);
+-	if (0 != retval)
++	if (0 != retval) {
++		dprintk(1,"qbuf: buffer_prepare returned %d\n",retval);
+ 		goto done;
++	}
+ 
+ 	list_add_tail(&buf->stream,&q->stream);
+ 	if (q->streaming) {
+-		spin_lock_irqsave(q->irqlock,flags);
++		if (q->irqlock)
++			spin_lock_irqsave(q->irqlock,flags);
+ 		q->ops->buf_queue(q,buf);
+-		spin_unlock_irqrestore(q->irqlock,flags);
++		if (q->irqlock)
++			spin_unlock_irqrestore(q->irqlock,flags);
+ 	}
++	dprintk(1,"qbuf: succeded\n");
+ 	retval = 0;
+ 
+  done:
+@@ -664,26 +761,39 @@ videobuf_dqbuf(struct videobuf_queue *q,
+ 
+ 	mutex_lock(&q->lock);
+ 	retval = -EBUSY;
+-	if (q->reading)
++	if (q->reading) {
++		dprintk(1,"dqbuf: Reading running...\n");
+ 		goto done;
++	}
+ 	retval = -EINVAL;
+-	if (b->type != q->type)
++	if (b->type != q->type) {
++		dprintk(1,"dqbuf: Wrong type.\n");
+ 		goto done;
+-	if (list_empty(&q->stream))
++	}
++	if (list_empty(&q->stream)) {
++		dprintk(1,"dqbuf: stream running\n");
+ 		goto done;
++	}
+ 	buf = list_entry(q->stream.next, struct videobuf_buffer, stream);
+ 	retval = videobuf_waiton(buf, nonblocking, 1);
+-	if (retval < 0)
++	if (retval < 0) {
++		dprintk(1,"dqbuf: waiton returned %d\n",retval);
+ 		goto done;
++	}
+ 	switch (buf->state) {
+ 	case STATE_ERROR:
++		dprintk(1,"dqbuf: state is error\n");
+ 		retval = -EIO;
+-		/* fall through */
++		videobuf_dma_sync(q,&buf->dma);
++		buf->state = STATE_IDLE;
++		break;
+ 	case STATE_DONE:
+-		videobuf_dma_pci_sync(q->pci,&buf->dma);
++		dprintk(1,"dqbuf: state is done\n");
++		videobuf_dma_sync(q,&buf->dma);
+ 		buf->state = STATE_IDLE;
+ 		break;
+ 	default:
++		dprintk(1,"dqbuf: state invalid\n");
+ 		retval = -EINVAL;
+ 		goto done;
+ 	}
+@@ -711,13 +821,15 @@ int videobuf_streamon(struct videobuf_queue *q)
+ 	if (q->streaming)
+ 		goto done;
+ 	q->streaming = 1;
+-	spin_lock_irqsave(q->irqlock,flags);
++	if (q->irqlock)
++		spin_lock_irqsave(q->irqlock,flags);
+ 	list_for_each(list,&q->stream) {
+ 		buf = list_entry(list, struct videobuf_buffer, stream);
+ 		if (buf->state == STATE_PREPARED)
+ 			q->ops->buf_queue(q,buf);
+ 	}
+-	spin_unlock_irqrestore(q->irqlock,flags);
++	if (q->irqlock)
++		spin_unlock_irqrestore(q->irqlock,flags);
+ 
+  done:
+ 	mutex_unlock(&q->lock);
+@@ -762,12 +874,14 @@ videobuf_read_zerocopy(struct videobuf_queue *q, char __user *data,
+ 		goto done;
+ 
+ 	/* start capture & wait */
+-	spin_lock_irqsave(q->irqlock,flags);
++	if (q->irqlock)
++		spin_lock_irqsave(q->irqlock,flags);
+ 	q->ops->buf_queue(q,q->read_buf);
+-	spin_unlock_irqrestore(q->irqlock,flags);
++	if (q->irqlock)
++		spin_unlock_irqrestore(q->irqlock,flags);
+ 	retval = videobuf_waiton(q->read_buf,0,0);
+ 	if (0 == retval) {
+-		videobuf_dma_pci_sync(q->pci,&q->read_buf->dma);
++		videobuf_dma_sync(q,&q->read_buf->dma);
+ 		if (STATE_ERROR == q->read_buf->state)
+ 			retval = -EIO;
+ 		else
+@@ -809,6 +923,7 @@ ssize_t videobuf_read_one(struct videobuf_queue *q,
+ 		/* need to capture a new frame */
+ 		retval = -ENOMEM;
+ 		q->read_buf = videobuf_alloc(q->msize);
++		dprintk(1,"video alloc=0x%08x\n",(unsigned int) q->read_buf);
+ 		if (NULL == q->read_buf)
+ 			goto done;
+ 		q->read_buf->memory = V4L2_MEMORY_USERPTR;
+@@ -820,9 +935,11 @@ ssize_t videobuf_read_one(struct videobuf_queue *q,
+ 			q->read_buf = NULL;
+ 			goto done;
+ 		}
+-		spin_lock_irqsave(q->irqlock,flags);
++		if (q->irqlock)
++			spin_lock_irqsave(q->irqlock,flags);
+ 		q->ops->buf_queue(q,q->read_buf);
+-		spin_unlock_irqrestore(q->irqlock,flags);
++		if (q->irqlock)
++			spin_unlock_irqrestore(q->irqlock,flags);
+ 		q->read_off = 0;
+ 	}
+ 
+@@ -830,7 +947,7 @@ ssize_t videobuf_read_one(struct videobuf_queue *q,
+ 	retval = videobuf_waiton(q->read_buf, nonblocking, 1);
+ 	if (0 != retval)
+ 		goto done;
+-	videobuf_dma_pci_sync(q->pci,&q->read_buf->dma);
++	videobuf_dma_sync(q,&q->read_buf->dma);
+ 
+ 	if (STATE_ERROR == q->read_buf->state) {
+ 		/* catch I/O errors */
+@@ -887,10 +1004,12 @@ int videobuf_read_start(struct videobuf_queue *q)
+ 			return err;
+ 		list_add_tail(&q->bufs[i]->stream, &q->stream);
+ 	}
+-	spin_lock_irqsave(q->irqlock,flags);
++	if (q->irqlock)
++		spin_lock_irqsave(q->irqlock,flags);
+ 	for (i = 0; i < count; i++)
+ 		q->ops->buf_queue(q,q->bufs[i]);
+-	spin_unlock_irqrestore(q->irqlock,flags);
++	if (q->irqlock)
++		spin_unlock_irqrestore(q->irqlock,flags);
+ 	q->reading = 1;
+ 	return 0;
+ }
+@@ -985,9 +1104,11 @@ ssize_t videobuf_read_stream(struct videobuf_queue *q,
+ 		if (q->read_off == q->read_buf->size) {
+ 			list_add_tail(&q->read_buf->stream,
+ 				      &q->stream);
+-			spin_lock_irqsave(q->irqlock,flags);
++			if (q->irqlock)
++				spin_lock_irqsave(q->irqlock,flags);
+ 			q->ops->buf_queue(q,q->read_buf);
+-			spin_unlock_irqrestore(q->irqlock,flags);
++			if (q->irqlock)
++				spin_unlock_irqrestore(q->irqlock,flags);
+ 			q->read_buf = NULL;
+ 		}
+ 		if (retval < 0)
+@@ -1249,11 +1370,14 @@ EXPORT_SYMBOL_GPL(videobuf_dma_init);
+ EXPORT_SYMBOL_GPL(videobuf_dma_init_user);
+ EXPORT_SYMBOL_GPL(videobuf_dma_init_kernel);
+ EXPORT_SYMBOL_GPL(videobuf_dma_init_overlay);
+-EXPORT_SYMBOL_GPL(videobuf_dma_pci_map);
+-EXPORT_SYMBOL_GPL(videobuf_dma_pci_sync);
+-EXPORT_SYMBOL_GPL(videobuf_dma_pci_unmap);
++EXPORT_SYMBOL_GPL(videobuf_dma_map);
++EXPORT_SYMBOL_GPL(videobuf_dma_sync);
++EXPORT_SYMBOL_GPL(videobuf_dma_unmap);
+ EXPORT_SYMBOL_GPL(videobuf_dma_free);
+ 
++EXPORT_SYMBOL_GPL(videobuf_pci_dma_map);
++EXPORT_SYMBOL_GPL(videobuf_pci_dma_unmap);
++
+ EXPORT_SYMBOL_GPL(videobuf_alloc);
+ EXPORT_SYMBOL_GPL(videobuf_waiton);
+ EXPORT_SYMBOL_GPL(videobuf_iolock);
+diff --git a/include/media/saa7146_vv.h b/include/media/saa7146_vv.h
+index e5e749e984ee..4507cb61ae93 100644
+--- a/include/media/saa7146_vv.h
++++ b/include/media/saa7146_vv.h
+@@ -197,7 +197,8 @@ void saa7146_buffer_finish(struct saa7146_dev *dev, struct saa7146_dmaqueue *q,
+ void saa7146_buffer_next(struct saa7146_dev *dev, struct saa7146_dmaqueue *q,int vbi);
+ int saa7146_buffer_queue(struct saa7146_dev *dev, struct saa7146_dmaqueue *q, struct saa7146_buf *buf);
+ void saa7146_buffer_timeout(unsigned long data);
+-void saa7146_dma_free(struct saa7146_dev *dev,struct saa7146_buf *buf);
++void saa7146_dma_free(struct saa7146_dev* dev,struct videobuf_queue *q,
++						struct saa7146_buf *buf);
+ 
+ int saa7146_vv_init(struct saa7146_dev* dev, struct saa7146_ext_vv *ext_vv);
+ int saa7146_vv_release(struct saa7146_dev* dev);
+diff --git a/include/media/video-buf.h b/include/media/video-buf.h
+index d90dec5484ee..fff3fd0fbf94 100644
+--- a/include/media/video-buf.h
++++ b/include/media/video-buf.h
+@@ -1,15 +1,20 @@
+ /*
+  *
+  * generic helper functions for video4linux capture buffers, to handle
+- * memory management and PCI DMA.  Right now bttv + saa7134 use it.
++ * memory management and PCI DMA.
++ * Right now, bttv, saa7134, saa7146 and cx88 use it.
+  *
+  * The functions expect the hardware being able to scatter gatter
+  * (i.e. the buffers are not linear in physical memory, but fragmented
+  * into PAGE_SIZE chunks).  They also assume the driver does not need
+- * to touch the video data (thus it is probably not useful for USB as
+- * data often must be uncompressed by the drivers).
++ * to touch the video data.
++ *
++ * device specific map/unmap/sync stuff now are mapped as file operations
++ * to allow its usage by USB and virtual devices.
+  *
+  * (c) 2001,02 Gerd Knorr <kraxel@bytesex.org>
++ * (c) 2006 Mauro Carvalho Chehab, <mchehab@infradead.org>
++ * (c) 2006 Ted Walther and John Sokol
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -38,6 +43,9 @@ struct scatterlist* videobuf_vmalloc_to_sg(unsigned char *virt, int nr_pages);
+ struct scatterlist* videobuf_pages_to_sg(struct page **pages, int nr_pages,
+ 					 int offset);
+ 
++struct videobuf_buffer;
++struct videobuf_queue;
++
+ /* --------------------------------------------------------------------- */
+ 
+ /*
+@@ -49,7 +57,7 @@ struct scatterlist* videobuf_pages_to_sg(struct page **pages, int nr_pages,
+  *	pointer + length.  The kernel version just wants the size and
+  *	does memory allocation too using vmalloc_32().
+  *
+- * videobuf_dma_pci_*()
++ * videobuf_dma_*()
+  *	see Documentation/DMA-mapping.txt, these functions to
+  *	basically the same.  The map function does also build a
+  *	scatterlist for the buffer (and unmap frees it ...)
+@@ -86,12 +94,18 @@ int videobuf_dma_init_kernel(struct videobuf_dmabuf *dma, int direction,
+ 			     int nr_pages);
+ int videobuf_dma_init_overlay(struct videobuf_dmabuf *dma, int direction,
+ 			      dma_addr_t addr, int nr_pages);
+-int videobuf_dma_pci_map(struct pci_dev *dev, struct videobuf_dmabuf *dma);
+-int videobuf_dma_pci_sync(struct pci_dev *dev,
+-			  struct videobuf_dmabuf *dma);
+-int videobuf_dma_pci_unmap(struct pci_dev *dev, struct videobuf_dmabuf *dma);
+ int videobuf_dma_free(struct videobuf_dmabuf *dma);
+ 
++int videobuf_dma_map(struct videobuf_queue* q,struct videobuf_dmabuf *dma);
++int videobuf_dma_sync(struct videobuf_queue* q,struct videobuf_dmabuf *dma);
++int videobuf_dma_unmap(struct videobuf_queue* q,struct videobuf_dmabuf *dma);
++
++	/*FIXME: these variants are used only on *-alsa code, where videobuf is
++	 * used without queue
++	 */
++int videobuf_pci_dma_map(struct pci_dev *pci,struct videobuf_dmabuf *dma);
++int videobuf_pci_dma_unmap(struct pci_dev *pci,struct videobuf_dmabuf *dma);
++
+ /* --------------------------------------------------------------------- */
+ 
+ /*
+@@ -115,9 +129,6 @@ int videobuf_dma_free(struct videobuf_dmabuf *dma);
+  *
+  */
+ 
+-struct videobuf_buffer;
+-struct videobuf_queue;
+-
+ struct videobuf_mapping {
+ 	unsigned int count;
+ 	unsigned long start;
+@@ -164,6 +175,10 @@ struct videobuf_buffer {
+ 	struct timeval          ts;
+ };
+ 
++typedef int (vb_map_sg_t)(void *dev,struct scatterlist *sglist,int nr_pages,
++					int direction);
++
++
+ struct videobuf_queue_ops {
+ 	int (*buf_setup)(struct videobuf_queue *q,
+ 			 unsigned int *count, unsigned int *size);
+@@ -174,12 +189,20 @@ struct videobuf_queue_ops {
+ 			  struct videobuf_buffer *vb);
+ 	void (*buf_release)(struct videobuf_queue *q,
+ 			    struct videobuf_buffer *vb);
++
++	/* Helper operations - device dependent.
++	 * If null, videobuf_init defaults all to PCI handling
++	 */
++
++	vb_map_sg_t	*vb_map_sg;
++	vb_map_sg_t	*vb_dma_sync_sg;
++	vb_map_sg_t	*vb_unmap_sg;
+ };
+ 
+ struct videobuf_queue {
+ 	struct mutex               lock;
+ 	spinlock_t                 *irqlock;
+-	struct pci_dev             *pci;
++	void			   *dev; /* on pci, points to struct pci_dev */
+ 
+ 	enum v4l2_buf_type         type;
+ 	unsigned int               inputs; /* for V4L2_BUF_FLAG_INPUT */
+@@ -204,12 +227,15 @@ struct videobuf_queue {
+ 
+ void* videobuf_alloc(unsigned int size);
+ int videobuf_waiton(struct videobuf_buffer *vb, int non_blocking, int intr);
+-int videobuf_iolock(struct pci_dev *pci, struct videobuf_buffer *vb,
+-		    struct v4l2_framebuffer *fbuf);
++int videobuf_iolock(struct videobuf_queue* q, struct videobuf_buffer *vb,
++		struct v4l2_framebuffer *fbuf);
++
++/* Maps fops to PCI stuff */
++void videobuf_queue_pci(struct videobuf_queue* q);
+ 
+ void videobuf_queue_init(struct videobuf_queue *q,
+ 			 struct videobuf_queue_ops *ops,
+-			 struct pci_dev *pci,
++			 void *dev,
+ 			 spinlock_t *irqlock,
+ 			 enum v4l2_buf_type type,
+ 			 enum v4l2_field field,
+

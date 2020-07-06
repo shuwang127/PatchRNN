@@ -1,0 +1,46 @@
+commit b6ba0c164d23e2612ebd14d5d942f918ae955730
+Author: Alan Jenkins <alan.christopher.jenkins@gmail.com>
+Date:   Sat Jan 20 20:12:09 2018 +0000
+
+    mount: don't consider activated until /sbin/mount returns
+    
+    So far, we considered mount units activated as soon as the mount
+    appeared.  This avoided seeing a difference between mounts started by
+    systemd, and e.g. by running `mount` from a terminal.
+    (`umount` was not handled this way).
+    
+    However in some cases, options passed to `mount` require additional
+    system calls after the mount is successfully created.  E.g. the
+    `private` mount option, or the `ro` option on bind mounts.
+    It seems best to wait for mount to finish doing that.  E.g. in
+    the `private` case, the current behaviour could theoretically cause
+    non-deterministic results, as child mounts inherit the
+    private/shared propagation setting from their parent.
+    
+    This also avoids a special case in mount_reload().
+
+diff --git a/src/core/mount.c b/src/core/mount.c
+index 12f9bb2af..453a83f93 100644
+--- a/src/core/mount.c
++++ b/src/core/mount.c
+@@ -55,7 +55,7 @@ DEFINE_TRIVIAL_CLEANUP_FUNC(struct libmnt_iter*, mnt_free_iter);
+ static const UnitActiveState state_translation_table[_MOUNT_STATE_MAX] = {
+         [MOUNT_DEAD] = UNIT_INACTIVE,
+         [MOUNT_MOUNTING] = UNIT_ACTIVATING,
+-        [MOUNT_MOUNTING_DONE] = UNIT_ACTIVE,
++        [MOUNT_MOUNTING_DONE] = UNIT_ACTIVATING,
+         [MOUNT_MOUNTED] = UNIT_ACTIVE,
+         [MOUNT_REMOUNTING] = UNIT_RELOADING,
+         [MOUNT_UNMOUNTING] = UNIT_DEACTIVATING,
+@@ -1135,10 +1135,6 @@ static int mount_reload(Unit *u) {
+         Mount *m = MOUNT(u);
+ 
+         assert(m);
+-
+-        if (m->state == MOUNT_MOUNTING_DONE) /* not yet ready to reload, try again */
+-                return -EAGAIN;
+-
+         assert(m->state == MOUNT_MOUNTED);
+ 
+         mount_enter_remounting(m);
+

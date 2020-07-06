@@ -1,0 +1,184 @@
+commit 7a1eca1726609fcc75594c688756621c3329a509
+Author: Mikael Kanstrup <mikael.kanstrup@gmail.com>
+Date:   Wed Feb 3 12:14:15 2016 +0100
+
+    extcap: Convert settings to preference friendly key names
+    
+    Preferences are only allowed to contain lowercase ASCII letters,
+    numbers, underscores or dot characters. Create a utility function
+    to convert an extcap setting to its equivalent preference key and
+    use it wherever conversion from setting to preference key is needed.
+    
+    Bug: 12064
+    Change-Id: I39bbac7de5f0f905bd41c54257fa997a3b32442d
+    Reviewed-on: https://code.wireshark.org/review/13687
+    Petri-Dish: Pascal Quantin <pascal.quantin@gmail.com>
+    Tested-by: Petri Dish Buildbot <buildbot-no-reply@wireshark.org>
+    Reviewed-by: Roland Knall <rknall@gmail.com>
+
+diff --git a/extcap.c b/extcap.c
+index 938042880a..61a4c3aa8b 100644
+--- a/extcap.c
++++ b/extcap.c
+@@ -461,6 +461,34 @@ static void extcap_free_if_configuration(GList *list)
+     g_list_free(list);
+ }
+ 
++gchar * extcap_settings_key(const gchar * ifname, const gchar * setting)
++{
++    gchar * setting_nohyphen;
++    gchar * ifname_underscore;
++    gchar * ifname_lower;
++    gchar * key;
++    GRegex * regex = g_regex_new ("(?![a-zA-Z1-9_]).", (GRegexCompileFlags) 0, (GRegexMatchFlags) 0, NULL );
++
++    if (!regex)
++        return NULL;
++
++    setting_nohyphen =
++        g_regex_replace_literal(regex, setting, strlen(setting), 0,
++            "", (GRegexMatchFlags) 0, NULL );
++    ifname_underscore =
++        g_regex_replace_literal(regex, ifname, strlen(ifname), 0,
++            "_", (GRegexMatchFlags) 0, NULL );
++    ifname_lower = g_utf8_strdown(ifname_underscore, -1);
++    key = g_strconcat(ifname_lower, ".", setting_nohyphen, NULL);
++
++    g_free(setting_nohyphen);
++    g_free(ifname_underscore);
++    g_free(ifname_lower);
++    g_regex_unref(regex);
++
++    return key;
++}
++
+ static gboolean search_cb(const gchar *extcap _U_, const gchar *ifname _U_, gchar *output, void *data,
+         char **err_str _U_) {
+     extcap_token_sentence *tokens = NULL;
+@@ -482,37 +510,29 @@ static gboolean search_cb(const gchar *extcap _U_, const gchar *ifname _U_, gcha
+     if ( dev_module ) {
+         GList * walker = arguments;
+ 
+-        GRegex * regex = g_regex_new ("[-]+", (GRegexCompileFlags) 0, (GRegexMatchFlags) 0, NULL );
+-        if (regex) {
+-            while ( walker != NULL ) {
+-                extcap_arg * arg = (extcap_arg *)walker->data;
+-
+-                if ( arg->save ) {
+-                    struct preference * pref = NULL;
++        while ( walker != NULL ) {
++            extcap_arg * arg = (extcap_arg *)walker->data;
+ 
+-                    gchar * pref_name = g_regex_replace(regex, arg->call, strlen(arg->call), 0, "", (GRegexMatchFlags) 0, NULL );
+-                    gchar * pref_ifname = g_strdup(g_strconcat(ifname, ".", pref_name, NULL));
++            if ( arg->save ) {
++                struct preference * pref = NULL;
++                gchar * pref_ifname = extcap_settings_key(ifname, arg->call);
+ 
+-                    if ( ( pref = prefs_find_preference(dev_module, pref_ifname) ) == NULL ) {
+-                        /* Set an initial value */
+-                        if ( ! arg->storeval && arg->default_complex )
+-                            arg->storeval = g_strdup(arg->default_complex->_val);
++                if ( ( pref = prefs_find_preference(dev_module, pref_ifname) ) == NULL ) {
++                    /* Set an initial value */
++                    if ( ! arg->storeval && arg->default_complex )
++                        arg->storeval = g_strdup(arg->default_complex->_val);
+ 
+-                        prefs_register_string_preference(dev_module, g_strdup(pref_ifname),
+-                                arg->display, arg->display, (const gchar **)&(arg->storeval));
+-                    } else {
+-                        /* Been here before, restore stored value */
+-                        if (! arg->storeval && pref->varp.string)
+-                            arg->storeval = g_strdup(*(pref->varp.string));
++                    prefs_register_string_preference(dev_module, g_strdup(pref_ifname),
++                            arg->display, arg->display, (const gchar **)&(arg->storeval));
++                } else {
++                    /* Been here before, restore stored value */
++                    if (! arg->storeval && pref->varp.string)
++                        arg->storeval = g_strdup(*(pref->varp.string));
+                     }
+-
+-                    g_free(pref_name);
+-                    g_free(pref_ifname);
+-                }
+-
+-                walker = g_list_next(walker);
++                g_free(pref_ifname);
+             }
+-            g_regex_unref(regex);
++
++            walker = g_list_next(walker);
+         }
+     }
+ 
+diff --git a/extcap.h b/extcap.h
+index b2b6b5fa43..823c04af3c 100644
+--- a/extcap.h
++++ b/extcap.h
+@@ -87,6 +87,9 @@ extcap_get_if_configuration(const char * ifname);
+ gboolean
+ extcap_has_configuration(const char * ifname, gboolean is_required);
+ 
++/* converts an extcap setting to its equivalent preference key */
++gchar * extcap_settings_key(const gchar * ifname, const gchar * setting);
++
+ #ifdef WIN32
+ HANDLE
+ extcap_get_win32_handle();
+diff --git a/ui/qt/extcap_argument.cpp b/ui/qt/extcap_argument.cpp
+index 3200a7e1d6..c4e14039d4 100644
+--- a/ui/qt/extcap_argument.cpp
++++ b/ui/qt/extcap_argument.cpp
+@@ -593,12 +593,12 @@ QString ExtcapArgument::defaultValue()
+     return QString();
+ }
+ 
+-QString ExtcapArgument::prefKey()
++QString ExtcapArgument::prefKey(const QString & device_name)
+ {
+     if ( ! _argument->save )
+         return QString();
+ 
+-    return QString(_argument->call).replace("-", "");
++    return QString(extcap_settings_key(device_name.toStdString().c_str(), _argument->call));
+ }
+ 
+ bool ExtcapArgument::isRequired()
+diff --git a/ui/qt/extcap_argument.h b/ui/qt/extcap_argument.h
+index 2d605d2881..084b3336f1 100644
+--- a/ui/qt/extcap_argument.h
++++ b/ui/qt/extcap_argument.h
+@@ -98,7 +98,7 @@ public:
+     bool isValid();
+     bool isRequired();
+ 
+-    QString prefKey();
++    QString prefKey(const QString & device_name);
+     virtual QString prefValue();
+ 
+     static ExtcapArgument * create(extcap_arg * argument = 0);
+diff --git a/ui/qt/extcap_options_dialog.cpp b/ui/qt/extcap_options_dialog.cpp
+index ed7a0150e4..07c0523628 100644
+--- a/ui/qt/extcap_options_dialog.cpp
++++ b/ui/qt/extcap_options_dialog.cpp
+@@ -373,16 +373,15 @@ void ExtcapOptionsDialog::storeValues()
+         else
+             value = (*iter)->prefValue();
+ 
+-        QString prefKey = QString("%1.%2").arg(device_name).arg(argument->prefKey());
+-        if ( prefKey.length() > 0 )
++        QString key = argument->prefKey(device_name);
++        if (key.length() > 0)
+         {
+-            gchar * key = g_strdup(prefKey.toStdString().c_str());
+             gchar * val = g_strdup(value.length() == 0 ? " " : value.toStdString().c_str());
+ 
+             /* Setting the internally stored value for the preference to the new value */
+             (*iter)->argument()->storeval = g_strdup(val);
+ 
+-            g_hash_table_insert(entries, key, val);
++            g_hash_table_insert(entries, g_strdup(key.toStdString().c_str()), val);
+         }
+     }
+ 
+

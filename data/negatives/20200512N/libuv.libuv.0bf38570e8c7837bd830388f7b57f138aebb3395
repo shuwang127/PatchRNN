@@ -1,0 +1,65 @@
+commit 0bf38570e8c7837bd830388f7b57f138aebb3395
+Author: Paul Querna <pquerna@apache.org>
+Date:   Tue Jul 5 20:45:50 2011 -0700
+
+    unix: Don't malloc for each write
+
+diff --git a/uv-unix.c b/uv-unix.c
+index 3ca72837..c9b66280 100644
+--- a/uv-unix.c
++++ b/uv-unix.c
+@@ -659,7 +659,9 @@ static uv_req_t* uv__write(uv_tcp_t* tcp) {
+ 
+           /* Pop the req off tcp->write_queue. */
+           ngx_queue_remove(&req->queue);
+-          free(req->bufs); /* FIXME: we should not be allocing for each read */
++          if (req->bufs != req->bufsml) {
++            free(req->bufs);
++          }
+           req->bufs = NULL;
+ 
+           /* Add it to the write_completed_queue where it will have its
+@@ -973,11 +975,19 @@ int uv_write(uv_req_t* req, uv_buf_t bufs[], int bufcnt) {
+   ngx_queue_init(&req->queue);
+   req->type = UV_WRITE;
+ 
+-  /* TODO: Don't malloc for each write... */
+-  req->bufs = malloc(sizeof(uv_buf_t) * bufcnt);
++
++  if (bufcnt < UV_REQ_BUFSML_SIZE) {
++    req->bufs = req->bufsml;
++  }
++  else {
++    req->bufs = malloc(sizeof(uv_buf_t) * bufcnt);
++  }
++
+   memcpy(req->bufs, bufs, bufcnt * sizeof(uv_buf_t));
+   req->bufcnt = bufcnt;
+ 
++  // fprintf(stderr, "cnt: %d bufs: %p bufsml: %p\n", bufcnt, req->bufs, req->bufsml);
++
+   req->write_index = 0;
+   tcp->write_queue_size += uv__buf_count(bufs, bufcnt);
+ 
+diff --git a/uv-unix.h b/uv-unix.h
+index 576598ae..f6c5134b 100644
+--- a/uv-unix.h
++++ b/uv-unix.h
+@@ -39,13 +39,15 @@ typedef struct {
+   size_t len;
+ } uv_buf_t;
+ 
++#define UV_REQ_BUFSML_SIZE (4)
+ 
+ #define UV_REQ_PRIVATE_FIELDS \
+   int write_index; \
+   ev_timer timer; \
+   ngx_queue_t queue; \
+   uv_buf_t* bufs; \
+-  int bufcnt;
++  int bufcnt; \
++  uv_buf_t bufsml[UV_REQ_BUFSML_SIZE];
+ 
+ 
+ /* TODO: union or classes please! */
+

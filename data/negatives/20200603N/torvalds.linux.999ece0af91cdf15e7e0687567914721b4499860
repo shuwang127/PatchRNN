@@ -1,0 +1,66 @@
+commit 999ece0af91cdf15e7e0687567914721b4499860
+Author: Sumit.Saxena@lsi.com <Sumit.Saxena@lsi.com>
+Date:   Fri Oct 18 12:50:37 2013 +0530
+
+    [SCSI] megaraid_sas: Fix synchronization problem between sysPD IO path and AEN path
+    
+    There is syncronization problem between sysPD IO path and AEN path. Driver
+    maintains instance->pd_list[] array, which will get updated(by calling
+    function megasas_get_pd_list[]), whenever any of below events occurs-
+    
+    MR_EVT_PD_INSERTED
+    MR_EVT_PD_REMOVED
+    MR_EVT_CTRL_HOST_BUS_SCAN_REQUESTED
+    MR_EVT_FOREIGN_CFG_IMPORTED
+    
+    At same time running sysPD IO will be accessing the same array
+    instance->pd_list[], which is getting updated in AEN path, because of this IO
+    may not get correct PD info from instance->pd_list[] array.
+    
+    Signed-off-by: Adam Radford <adam.radford@lsi.com>
+    Signed-off-by: Sumit Saxena <sumit.saxena@lsi.com>
+    Signed-off-by: James Bottomley <JBottomley@Parallels.com>
+
+diff --git a/drivers/scsi/megaraid/megaraid_sas.h b/drivers/scsi/megaraid/megaraid_sas.h
+index 0c73ba4bf451..e9e543c58485 100644
+--- a/drivers/scsi/megaraid/megaraid_sas.h
++++ b/drivers/scsi/megaraid/megaraid_sas.h
+@@ -1531,6 +1531,7 @@ struct megasas_instance {
+ 	struct megasas_register_set __iomem *reg_set;
+ 	u32 *reply_post_host_index_addr[MR_MAX_MSIX_REG_ARRAY];
+ 	struct megasas_pd_list          pd_list[MEGASAS_MAX_PD];
++	struct megasas_pd_list          local_pd_list[MEGASAS_MAX_PD];
+ 	u8     ld_ids[MEGASAS_MAX_LD_IDS];
+ 	s8 init_id;
+ 
+diff --git a/drivers/scsi/megaraid/megaraid_sas_base.c b/drivers/scsi/megaraid/megaraid_sas_base.c
+index e62ff020c253..2cf9470dd11b 100644
+--- a/drivers/scsi/megaraid/megaraid_sas_base.c
++++ b/drivers/scsi/megaraid/megaraid_sas_base.c
+@@ -3194,19 +3194,21 @@ megasas_get_pd_list(struct megasas_instance *instance)
+ 	     (le32_to_cpu(ci->count) <
+ 		  (MEGASAS_MAX_PD_CHANNELS * MEGASAS_MAX_DEV_PER_CHANNEL))) {
+ 
+-		memset(instance->pd_list, 0,
++		memset(instance->local_pd_list, 0,
+ 			MEGASAS_MAX_PD * sizeof(struct megasas_pd_list));
+ 
+ 		for (pd_index = 0; pd_index < le32_to_cpu(ci->count); pd_index++) {
+ 
+-			instance->pd_list[le16_to_cpu(pd_addr->deviceId)].tid	=
++			instance->local_pd_list[le16_to_cpu(pd_addr->deviceId)].tid	=
+ 				le16_to_cpu(pd_addr->deviceId);
+-			instance->pd_list[le16_to_cpu(pd_addr->deviceId)].driveType	=
++			instance->local_pd_list[le16_to_cpu(pd_addr->deviceId)].driveType	=
+ 							pd_addr->scsiDevType;
+-			instance->pd_list[le16_to_cpu(pd_addr->deviceId)].driveState	=
++			instance->local_pd_list[le16_to_cpu(pd_addr->deviceId)].driveState	=
+ 							MR_PD_STATE_SYSTEM;
+ 			pd_addr++;
+ 		}
++		memcpy(instance->pd_list, instance->local_pd_list,
++			sizeof(instance->pd_list));
+ 	}
+ 
+ 	pci_free_consistent(instance->pdev,
+

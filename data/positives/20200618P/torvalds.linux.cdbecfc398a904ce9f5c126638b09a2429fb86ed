@@ -1,0 +1,54 @@
+commit cdbecfc398a904ce9f5c126638b09a2429fb86ed
+Author: Lai Jiangshan <laijs@cn.fujitsu.com>
+Date:   Sat Apr 17 16:41:47 2010 +0800
+
+    KVM: VMX: free vpid when fail to create vcpu
+    
+    Fix bug of the exception path, free allocated vpid when fail
+    to create vcpu.
+    
+    Signed-off-by: Lai Jiangshan <laijs@cn.fujitsu.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index d0a10b5612e9..54c0035a63f0 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -2333,6 +2333,16 @@ static void allocate_vpid(struct vcpu_vmx *vmx)
+ 	spin_unlock(&vmx_vpid_lock);
+ }
+ 
++static void free_vpid(struct vcpu_vmx *vmx)
++{
++	if (!enable_vpid)
++		return;
++	spin_lock(&vmx_vpid_lock);
++	if (vmx->vpid != 0)
++		__clear_bit(vmx->vpid, vmx_vpid_bitmap);
++	spin_unlock(&vmx_vpid_lock);
++}
++
+ static void __vmx_disable_intercept_for_msr(unsigned long *msr_bitmap, u32 msr)
+ {
+ 	int f = sizeof(unsigned long);
+@@ -3916,10 +3926,7 @@ static void vmx_free_vcpu(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+ 
+-	spin_lock(&vmx_vpid_lock);
+-	if (vmx->vpid != 0)
+-		__clear_bit(vmx->vpid, vmx_vpid_bitmap);
+-	spin_unlock(&vmx_vpid_lock);
++	free_vpid(vmx);
+ 	vmx_free_vmcs(vcpu);
+ 	kfree(vmx->guest_msrs);
+ 	kvm_vcpu_uninit(vcpu);
+@@ -3981,6 +3988,7 @@ static struct kvm_vcpu *vmx_create_vcpu(struct kvm *kvm, unsigned int id)
+ uninit_vcpu:
+ 	kvm_vcpu_uninit(&vmx->vcpu);
+ free_vcpu:
++	free_vpid(vmx);
+ 	kmem_cache_free(kvm_vcpu_cache, vmx);
+ 	return ERR_PTR(err);
+ }
+

@@ -1,0 +1,150 @@
+commit ce09d7667dd225564df1e20b8185d4ce7be886cc
+Author: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+Date:   Thu Apr 6 13:19:03 2017 +0200
+
+    drm/atomic: Add connector atomic_check function, v2.
+    
+    The atomic_check function is useful for implementing properties, but
+    it can be used for other connector modeset related checks as well.
+    
+    Similar to plane check functions, on a modeset atomic_check() is always
+    called.
+    
+    Changes since v1:
+    - Make sure atomic_check() is called on any modeset.
+    
+    Signed-off-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+    Reviewed-by: Dhinakaran Pandiyan <dhinakaran.pandiyan@intel.com>
+    Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Signed-off-by: Sean Paul <seanpaul@chromium.org>
+    Link: http://patchwork.freedesktop.org/patch/msgid/1491477543-31257-5-git-send-email-maarten.lankhorst@linux.intel.com
+
+diff --git a/drivers/gpu/drm/drm_atomic_helper.c b/drivers/gpu/drm/drm_atomic_helper.c
+index ff3c6eb5b6bd..8be9719284b0 100644
+--- a/drivers/gpu/drm/drm_atomic_helper.c
++++ b/drivers/gpu/drm/drm_atomic_helper.c
+@@ -459,10 +459,20 @@ mode_fixup(struct drm_atomic_state *state)
+  *
+  * Check the state object to see if the requested state is physically possible.
+  * This does all the crtc and connector related computations for an atomic
+- * update and adds any additional connectors needed for full modesets and calls
+- * down into &drm_crtc_helper_funcs.mode_fixup and
+- * &drm_encoder_helper_funcs.mode_fixup or
+- * &drm_encoder_helper_funcs.atomic_check functions of the driver backend.
++ * update and adds any additional connectors needed for full modesets. It calls
++ * the various per-object callbacks in the follow order:
++ *
++ * 1. &drm_connector_helper_funcs.atomic_best_encoder for determining the new encoder.
++ * 2. &drm_connector_helper_funcs.atomic_check to validate the connector state.
++ * 3. If it's determined a modeset is needed then all connectors on the affected crtc
++ *    crtc are added and &drm_connector_helper_funcs.atomic_check is run on them.
++ * 4. &drm_bridge_funcs.mode_fixup is called on all encoder bridges.
++ * 5. &drm_encoder_helper_funcs.atomic_check is called to validate any encoder state.
++ *    This function is only called when the encoder will be part of a configured crtc,
++ *    it must not be used for implementing connector property validation.
++ *    If this function is NULL, &drm_atomic_encoder_helper_funcs.mode_fixup is called
++ *    instead.
++ * 6. &drm_crtc_helper_funcs.mode_fixup is called last, to fix up the mode with crtc constraints.
+  *
+  * &drm_crtc_state.mode_changed is set when the input mode is changed.
+  * &drm_crtc_state.connectors_changed is set when a connector is added or
+@@ -492,6 +502,7 @@ drm_atomic_helper_check_modeset(struct drm_device *dev,
+ 	struct drm_connector *connector;
+ 	struct drm_connector_state *old_connector_state, *new_connector_state;
+ 	int i, ret;
++	unsigned connectors_mask = 0;
+ 
+ 	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state, new_crtc_state, i) {
+ 		bool has_connectors =
+@@ -538,6 +549,8 @@ drm_atomic_helper_check_modeset(struct drm_device *dev,
+ 		return ret;
+ 
+ 	for_each_oldnew_connector_in_state(state, connector, old_connector_state, new_connector_state, i) {
++		const struct drm_connector_helper_funcs *funcs = connector->helper_private;
++
+ 		/*
+ 		 * This only sets crtc->connectors_changed for routing changes,
+ 		 * drivers must set crtc->connectors_changed themselves when
+@@ -555,6 +568,13 @@ drm_atomic_helper_check_modeset(struct drm_device *dev,
+ 			    new_connector_state->link_status)
+ 				new_crtc_state->connectors_changed = true;
+ 		}
++
++		if (funcs->atomic_check)
++			ret = funcs->atomic_check(connector, new_connector_state);
++		if (ret)
++			return ret;
++
++		connectors_mask += BIT(i);
+ 	}
+ 
+ 	/*
+@@ -581,6 +601,22 @@ drm_atomic_helper_check_modeset(struct drm_device *dev,
+ 			return ret;
+ 	}
+ 
++	/*
++	 * Iterate over all connectors again, to make sure atomic_check()
++	 * has been called on them when a modeset is forced.
++	 */
++	for_each_oldnew_connector_in_state(state, connector, old_connector_state, new_connector_state, i) {
++		const struct drm_connector_helper_funcs *funcs = connector->helper_private;
++
++		if (connectors_mask & BIT(i))
++			continue;
++
++		if (funcs->atomic_check)
++			ret = funcs->atomic_check(connector, new_connector_state);
++		if (ret)
++			return ret;
++	}
++
+ 	return mode_fixup(state);
+ }
+ EXPORT_SYMBOL(drm_atomic_helper_check_modeset);
+diff --git a/include/drm/drm_modeset_helper_vtables.h b/include/drm/drm_modeset_helper_vtables.h
+index 7847babd893c..c01c328f6cc8 100644
+--- a/include/drm/drm_modeset_helper_vtables.h
++++ b/include/drm/drm_modeset_helper_vtables.h
+@@ -872,6 +872,40 @@ struct drm_connector_helper_funcs {
+ 	 */
+ 	struct drm_encoder *(*atomic_best_encoder)(struct drm_connector *connector,
+ 						   struct drm_connector_state *connector_state);
++
++	/**
++	 * @atomic_check:
++	 *
++	 * This hook is used to validate connector state. This function is
++	 * called from &drm_atomic_helper_check_modeset, and is called when
++	 * a connector property is set, or a modeset on the crtc is forced.
++	 *
++	 * Because &drm_atomic_helper_check_modeset may be called multiple times,
++	 * this function should handle being called multiple times as well.
++	 *
++	 * This function is also allowed to inspect any other object's state and
++	 * can add more state objects to the atomic commit if needed. Care must
++	 * be taken though to ensure that state check and compute functions for
++	 * these added states are all called, and derived state in other objects
++	 * all updated. Again the recommendation is to just call check helpers
++	 * until a maximal configuration is reached.
++	 *
++	 * NOTE:
++	 *
++	 * This function is called in the check phase of an atomic update. The
++	 * driver is not allowed to change anything outside of the free-standing
++	 * state objects passed-in or assembled in the overall &drm_atomic_state
++	 * update tracking structure.
++	 *
++	 * RETURNS:
++	 *
++	 * 0 on success, -EINVAL if the state or the transition can't be
++	 * supported, -ENOMEM on memory allocation failure and -EDEADLK if an
++	 * attempt to obtain another state object ran into a &drm_modeset_lock
++	 * deadlock.
++	 */
++	int (*atomic_check)(struct drm_connector *connector,
++			    struct drm_connector_state *state);
+ };
+ 
+ /**
+

@@ -1,0 +1,88 @@
+commit 1dccfdac1b3aaff78c1dd0177b272c2856e52135
+Author: unknown <georg@lmy002.wdf.sap.corp>
+Date:   Tue Jul 19 17:31:18 2005 +0200
+
+    fix for bug#12001
+    
+    
+    sql-common/client.c:
+      fixed wrong offset
+    tests/mysql_client_test.c:
+      testcase for bug #12001
+
+diff --git a/sql-common/client.c b/sql-common/client.c
+index c25e0e3de8f..860db63c531 100644
+--- a/sql-common/client.c
++++ b/sql-common/client.c
+@@ -755,7 +755,7 @@ static void cli_flush_use_result(MYSQL *mysql)
+     {
+       if (protocol_41(mysql))
+       {
+-        char *pos= (char*) mysql->net.read_pos;
++        char *pos= (char*) mysql->net.read_pos + 1;
+         mysql->warning_count=uint2korr(pos); pos+=2;
+         mysql->server_status=uint2korr(pos); pos+=2;
+       }
+diff --git a/tests/mysql_client_test.c b/tests/mysql_client_test.c
+index d3adbd8d601..1af9e82fde3 100644
+--- a/tests/mysql_client_test.c
++++ b/tests/mysql_client_test.c
+@@ -11751,6 +11751,49 @@ static void test_bug11183()
+   myquery(rc);
+ }
+ 
++static void test_bug12001()
++{
++  MYSQL *mysql_local;
++  MYSQL_RES *result;
++  const char *query = "DROP TABLE IF EXISTS test_table;"
++                      "CREATE TABLE test_table(id INT);" 
++                      "INSERT INTO test_table VALUES(10);" 
++                      "UPDATE test_table SET id=20 WHERE id=10;" 
++                      "SELECT * FROM test_table;" 
++                      "INSERT INTO non_existent_table VALUES(11);";
++  int rc, res;
++
++  myheader("test_bug12001");
++
++  if (!(mysql_local= mysql_init(NULL)))
++  {
++    fprintf(stdout, "\n mysql_init() failed");
++    exit(1);
++  }
++
++  /* Create connection that supports multi statements */
++  if (!mysql_real_connect(mysql_local, opt_host, opt_user,
++                           opt_password, current_db, opt_port,
++                           opt_unix_socket, CLIENT_MULTI_STATEMENTS | CLIENT_MULTI_RESULTS)) {
++    fprintf(stdout, "\n mysql_real_connect() failed");
++    exit(1);
++  }
++
++  rc = mysql_query(mysql_local, query);
++  myquery(rc);
++
++  do {
++    if (mysql_field_count(mysql_local) && (result = mysql_use_result(mysql_local)))  {
++      mysql_free_result(result);	
++    }
++  } while (!(res = mysql_next_result(mysql_local))); 
++  
++  rc = mysql_query(mysql_local, "DROP TABLE IF EXISTS test_table");
++  myquery(rc);
++
++  mysql_close(mysql_local);
++  DIE_UNLESS(res==1);
++}
+ 
+ /*
+   Read and parse arguments and MySQL options from my.cnf
+@@ -11968,6 +12011,7 @@ static struct my_tests_st my_tests[]= {
+   { "test_bug8378", test_bug8378 },
+   { "test_bug9735", test_bug9735 },
+   { "test_bug11183", test_bug11183 },
++  { "test_bug12001", test_bug12001 },
+   { 0, 0 }
+ };
+ 
+

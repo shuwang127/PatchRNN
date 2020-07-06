@@ -1,0 +1,105 @@
+commit 9184d254e23c14a67b5b1aa5dc5dbbbf747a9ff6
+Author: Yukihiro "Matz" Matsumoto <matz@ruby-lang.org>
+Date:   Wed May 14 17:32:30 2014 +0900
+
+    resize register number in LVAR section from 32bits to 16bits
+
+diff --git a/include/mruby/irep.h b/include/mruby/irep.h
+index 13298f17..3d6b5efc 100644
+--- a/include/mruby/irep.h
++++ b/include/mruby/irep.h
+@@ -21,7 +21,7 @@ enum irep_pool_type {
+ 
+ struct mrb_locals {
+   mrb_sym name;
+-  size_t r;
++  uint16_t r;
+ };
+ 
+ /* Program data array struct */
+diff --git a/src/codegen.c b/src/codegen.c
+index 226cd9bf..6406c58b 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -66,8 +66,8 @@ typedef struct scope {
+   size_t scapa;
+   size_t rcapa;
+ 
+-  int nlocals;
+-  int nregs;
++  uint16_t nlocals;
++  uint16_t nregs;
+   int ai;
+ 
+   int debug_start_pos;
+@@ -2505,7 +2505,7 @@ scope_new(mrb_state *mrb, codegen_scope *prev, node *lv)
+       p->irep->lv[i].name = lv_name(n);
+       p->irep->lv[i].r = lv_idx(p, lv_name(n));
+     }
+-    mrb_assert(i == (p->nlocals - 1));
++    mrb_assert(i + 1 == p->nlocals);
+   }
+   p->ai = mrb_gc_arena_save(mrb);
+ 
+diff --git a/src/dump.c b/src/dump.c
+index 7ad3d698..d0e230f1 100644
+--- a/src/dump.c
++++ b/src/dump.c
+@@ -701,7 +701,7 @@ create_lv_sym_table(mrb_state *mrb, const mrb_irep *irep, mrb_sym **syms, uint32
+     *syms = (mrb_sym*)mrb_malloc(mrb, sizeof(mrb_sym) * 1);
+   }
+ 
+-  for (i = 0; i < (irep->nlocals - 1); ++i) {
++  for (i = 0; i + 1 < irep->nlocals; ++i) {
+     mrb_sym const name = irep->lv[i].name;
+     if (find_filename_index(*syms, *syms_len, name) != -1) continue;
+ 
+@@ -743,12 +743,12 @@ write_lv_record(mrb_state *mrb, const mrb_irep *irep, uint8_t **start, mrb_sym c
+   uint8_t *cur = *start;
+   size_t i;
+ 
+-  for (i = 0; i < (irep->nlocals - 1); ++i) {
++  for (i = 0; i + 1 < irep->nlocals; ++i) {
+     int const sym_idx = find_filename_index(syms, syms_len, irep->lv[i].name);
+     mrb_assert(sym_idx != -1); /* local variable name must be in syms */
+ 
+     cur += uint16_to_bin(sym_idx, cur);
+-    cur += uint32_to_bin(irep->lv[i].r, cur);
++    cur += uint16_to_bin(irep->lv[i].r, cur);
+   }
+ 
+   for (i = 0; i < irep->rlen; ++i) {
+@@ -765,7 +765,7 @@ get_lv_record_size(mrb_state *mrb, mrb_irep *irep)
+ {
+   size_t ret = 0, i;
+ 
+-  ret += (sizeof(uint16_t) + sizeof(uint32_t)) * (irep->nlocals - 1);
++  ret += (sizeof(uint16_t) + sizeof(uint16_t)) * (irep->nlocals - 1);
+ 
+   for (i = 0; i < irep->rlen; ++i) {
+     ret += get_lv_record_size(mrb, irep->reps[i]);
+diff --git a/src/load.c b/src/load.c
+index dc5a5bf0..89a5f7cd 100644
+--- a/src/load.c
++++ b/src/load.c
+@@ -408,7 +408,7 @@ read_lv_record(mrb_state *mrb, const uint8_t *start, mrb_irep *irep, size_t *rec
+ 
+   irep->lv = (struct mrb_locals*)mrb_malloc(mrb, sizeof(struct mrb_locals) * (irep->nlocals - 1));
+ 
+-  for (i = 0; i < (irep->nlocals - 1); ++i) {
++  for (i = 0; i + 1< irep->nlocals; ++i) {
+     uint16_t const sym_idx = bin_to_uint16(bin);
+     bin += sizeof(uint16_t);
+     if (sym_idx >= syms_len) {
+@@ -416,8 +416,8 @@ read_lv_record(mrb_state *mrb, const uint8_t *start, mrb_irep *irep, size_t *rec
+     }
+     irep->lv[i].name = syms[sym_idx];
+ 
+-    irep->lv[i].r = bin_to_uint32(bin);
+-    bin += sizeof(uint32_t);
++    irep->lv[i].r = bin_to_uint16(bin);
++    bin += sizeof(uint16_t);
+   }
+ 
+   for (i = 0; i < irep->rlen; ++i) {
+

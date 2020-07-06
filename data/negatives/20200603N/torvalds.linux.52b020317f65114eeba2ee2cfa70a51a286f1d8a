@@ -1,0 +1,98 @@
+commit 52b020317f65114eeba2ee2cfa70a51a286f1d8a
+Author: Artem Bityutskiy <artem.bityutskiy@linux.intel.com>
+Date:   Fri Dec 30 15:57:25 2011 +0200
+
+    mtd: clean-up the default_mtd_writev function
+    
+    1. Teach 'mtd_write()' function to return '-EROFS' if the write method
+       is undefined, and remove the corresponding check from
+       'default_mtd_writev()'.
+    2. Do not test 'retlen' for NULL - it cannot be NULL.
+    3. Few minor coding stile clean-ups.
+    4. Add a kerneldoc comment
+    
+    Additionally, minor fixes to the kerneldoc comments of the neighbor function.
+    
+    Signed-off-by: Artem Bityutskiy <artem.bityutskiy@linux.intel.com>
+    Signed-off-by: David Woodhouse <David.Woodhouse@intel.com>
+
+diff --git a/drivers/mtd/mtdcore.c b/drivers/mtd/mtdcore.c
+index 8bea2d0fdb20..85a3f197e7f0 100644
+--- a/drivers/mtd/mtdcore.c
++++ b/drivers/mtd/mtdcore.c
+@@ -683,10 +683,17 @@ void __put_mtd_device(struct mtd_info *mtd)
+ 	module_put(mtd->owner);
+ }
+ 
+-/* default_mtd_writev - default mtd writev method for MTD devices that
+- *			don't implement their own
++/*
++ * default_mtd_writev - the default writev method
++ * @mtd: mtd device description object pointer
++ * @vecs: the vectors to write
++ * @count: count of vectors in @vecs
++ * @to: the MTD device offset to write to
++ * @retlen: on exit contains the count of bytes written to the MTD device.
++ *
++ * This function returns zero in case of success and a negative error code in
++ * case of failure.
+  */
+-
+ int default_mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
+ 		       unsigned long count, loff_t to, size_t *retlen)
+ {
+@@ -694,28 +701,24 @@ int default_mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
+ 	size_t totlen = 0, thislen;
+ 	int ret = 0;
+ 
+-	if(!mtd->write) {
+-		ret = -EROFS;
+-	} else {
+-		for (i=0; i<count; i++) {
+-			if (!vecs[i].iov_len)
+-				continue;
+-			ret = mtd_write(mtd, to, vecs[i].iov_len, &thislen,
+-					vecs[i].iov_base);
+-			totlen += thislen;
+-			if (ret || thislen != vecs[i].iov_len)
+-				break;
+-			to += vecs[i].iov_len;
+-		}
++	for (i = 0; i < count; i++) {
++		if (!vecs[i].iov_len)
++			continue;
++		ret = mtd_write(mtd, to, vecs[i].iov_len, &thislen,
++				vecs[i].iov_base);
++		totlen += thislen;
++		if (ret || thislen != vecs[i].iov_len)
++			break;
++		to += vecs[i].iov_len;
+ 	}
+-	if (retlen)
+-		*retlen = totlen;
++	*retlen = totlen;
+ 	return ret;
+ }
+ 
+ /**
+  * mtd_kmalloc_up_to - allocate a contiguous buffer up to the specified size
+- * @size: A pointer to the ideal or maximum size of the allocation. Points
++ * @mtd: mtd device description object pointer
++ * @size: a pointer to the ideal or maximum size of the allocation, points
+  *        to the actual allocation size on success.
+  *
+  * This routine attempts to allocate a contiguous kernel buffer up to
+diff --git a/include/linux/mtd/mtd.h b/include/linux/mtd/mtd.h
+index 671c89289fc3..f0dd5a305b89 100644
+--- a/include/linux/mtd/mtd.h
++++ b/include/linux/mtd/mtd.h
+@@ -291,6 +291,8 @@ static inline int mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
+ 			    size_t *retlen, const u_char *buf)
+ {
+ 	*retlen = 0;
++	if (!mtd->write)
++		return -EROFS;
+ 	return mtd->write(mtd, to, len, retlen, buf);
+ }
+ 
+

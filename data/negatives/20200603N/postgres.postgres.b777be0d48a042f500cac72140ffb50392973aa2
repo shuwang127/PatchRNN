@@ -1,0 +1,74 @@
+commit b777be0d48a042f500cac72140ffb50392973aa2
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+Date:   Fri Mar 28 10:30:37 2014 -0400
+
+    Un-break peer authentication.
+    
+    Commit 613c6d26bd42dd8c2dd0664315be9551475b8864 sloppily replaced a
+    lookup of the UID obtained from getpeereid() with a lookup of the
+    server's own user name, thus totally destroying peer authentication.
+    Revert.  Per report from Christoph Berg.
+    
+    In passing, make sure get_user_name() zeroes *errstr on success on
+    Windows as well as non-Windows.  I don't think any callers actually
+    depend on this ATM, but we should be consistent across platforms.
+
+diff --git a/src/backend/libpq/auth.c b/src/backend/libpq/auth.c
+index 2a46f7b913..a2f1c96b8b 100644
+--- a/src/backend/libpq/auth.c
++++ b/src/backend/libpq/auth.c
+@@ -21,7 +21,6 @@
+ #include <arpa/inet.h>
+ #include <unistd.h>
+ 
+-#include "common/username.h"
+ #include "libpq/auth.h"
+ #include "libpq/crypt.h"
+ #include "libpq/ip.h"
+@@ -1560,8 +1559,7 @@ auth_peer(hbaPort *port)
+ 	char		ident_user[IDENT_USERNAME_MAX + 1];
+ 	uid_t		uid;
+ 	gid_t		gid;
+-	const char *user_name;
+-	char	   *errstr;
++	struct passwd *pass;
+ 
+ 	errno = 0;
+ 	if (getpeereid(port->sock, &uid, &gid) != 0)
+@@ -1578,15 +1576,17 @@ auth_peer(hbaPort *port)
+ 		return STATUS_ERROR;
+ 	}
+ 
+-	user_name = get_user_name(&errstr);
+-	if (!user_name)
++	pass = getpwuid(uid);
++
++	if (pass == NULL)
+ 	{
+-		ereport(LOG, (errmsg_internal("%s", errstr)));
+-		pfree(errstr);
++		ereport(LOG,
++				(errmsg("local user with ID %d does not exist",
++						(int) uid)));
+ 		return STATUS_ERROR;
+ 	}
+ 
+-	strlcpy(ident_user, user_name, IDENT_USERNAME_MAX + 1);
++	strlcpy(ident_user, pass->pw_name, IDENT_USERNAME_MAX + 1);
+ 
+ 	return check_usermap(port->hba->usermap, port->user_name, ident_user, false);
+ }
+diff --git a/src/common/username.c b/src/common/username.c
+index e946972a56..24c5b47627 100644
+--- a/src/common/username.c
++++ b/src/common/username.c
+@@ -54,6 +54,8 @@ get_user_name(char **errstr)
+ 	static char username[256 + 1];
+ 	DWORD		len = sizeof(username) - 1;
+ 
++	*errstr = NULL;
++
+ 	if (!GetUserName(username, &len))
+ 	{
+ 		*errstr = psprintf(_("user name lookup failure: %s"), strerror(errno));
+

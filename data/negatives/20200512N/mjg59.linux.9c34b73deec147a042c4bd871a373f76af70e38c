@@ -1,0 +1,107 @@
+commit 9c34b73deec147a042c4bd871a373f76af70e38c
+Author: Srinivas Kandagatla <srinivas.kandagatla@linaro.org>
+Date:   Mon Jun 2 10:10:04 2014 +0100
+
+    mmc: mmci: Add Qcom specific rx_fifocnt logic.
+    
+    MCIFIFOCNT register behaviour on Qcom chips is very different than the other
+    pl180 integrations. MCIFIFOCNT register contains the number of
+    words that are still waiting to be transferred through the FIFO. It keeps
+    decrementing once the host CPU reads the MCIFIFO. With the existing logic and
+    the MCIFIFOCNT behaviour, mmci_pio_read will loop forever, as the FIFOCNT
+    register will always return transfer size before reading the FIFO.
+    
+    Also the data sheet states that "This register is only useful for debug
+    purposes and should not be used for normal operation since it does not reflect
+    data which may or may not be in the pipeline".
+    
+    This patch implements a qcom specific get_rx_fifocnt function which is
+    implemented based on status register flags. Based on qcom_fifo flag in
+    variant data structure, the corresponding get_rx_fifocnt function is selected.
+    
+    Signed-off-by: Srinivas Kandagatla <srinivas.kandagatla@linaro.org>
+    Reviewed-by: Linus Walleij <linus.walleij@linaro.org>
+    Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
+
+diff --git a/drivers/mmc/host/mmci.c b/drivers/mmc/host/mmci.c
+index 2e6075fdce46..063136d89b42 100644
+--- a/drivers/mmc/host/mmci.c
++++ b/drivers/mmc/host/mmci.c
+@@ -73,6 +73,7 @@ static unsigned int fmax = 515633;
+  * @busy_detect: true if busy detection on dat0 is supported
+  * @pwrreg_nopower: bits in MMCIPOWER don't controls ext. power supply
+  * @explicit_mclk_control: enable explicit mclk control in driver.
++ * @qcom_fifo: enables qcom specific fifo pio read logic.
+  */
+ struct variant_data {
+ 	unsigned int		clkreg;
+@@ -95,6 +96,7 @@ struct variant_data {
+ 	bool			busy_detect;
+ 	bool			pwrreg_nopower;
+ 	bool			explicit_mclk_control;
++	bool			qcom_fifo;
+ };
+ 
+ static struct variant_data variant_arm = {
+@@ -992,15 +994,34 @@ mmci_cmd_irq(struct mmci_host *host, struct mmc_command *cmd,
+ 	}
+ }
+ 
++static int mmci_get_rx_fifocnt(struct mmci_host *host, u32 status, int remain)
++{
++	return remain - (readl(host->base + MMCIFIFOCNT) << 2);
++}
++
++static int mmci_qcom_get_rx_fifocnt(struct mmci_host *host, u32 status, int r)
++{
++	/*
++	 * on qcom SDCC4 only 8 words are used in each burst so only 8 addresses
++	 * from the fifo range should be used
++	 */
++	if (status & MCI_RXFIFOHALFFULL)
++		return host->variant->fifohalfsize;
++	else if (status & MCI_RXDATAAVLBL)
++		return 4;
++
++	return 0;
++}
++
+ static int mmci_pio_read(struct mmci_host *host, char *buffer, unsigned int remain)
+ {
+ 	void __iomem *base = host->base;
+ 	char *ptr = buffer;
+-	u32 status;
++	u32 status = readl(host->base + MMCISTATUS);
+ 	int host_remain = host->size;
+ 
+ 	do {
+-		int count = host_remain - (readl(base + MMCIFIFOCNT) << 2);
++		int count = host->get_rx_fifocnt(host, status, host_remain);
+ 
+ 		if (count > remain)
+ 			count = remain;
+@@ -1489,6 +1510,11 @@ static int mmci_probe(struct amba_device *dev,
+ 	if (ret)
+ 		goto host_free;
+ 
++	if (variant->qcom_fifo)
++		host->get_rx_fifocnt = mmci_qcom_get_rx_fifocnt;
++	else
++		host->get_rx_fifocnt = mmci_get_rx_fifocnt;
++
+ 	host->plat = plat;
+ 	host->variant = variant;
+ 	host->mclk = clk_get_rate(host->clk);
+diff --git a/drivers/mmc/host/mmci.h b/drivers/mmc/host/mmci.h
+index ef346170b241..a1f5e4f49e2a 100644
+--- a/drivers/mmc/host/mmci.h
++++ b/drivers/mmc/host/mmci.h
+@@ -229,6 +229,7 @@ struct mmci_host {
+ 	/* pio stuff */
+ 	struct sg_mapping_iter	sg_miter;
+ 	unsigned int		size;
++	int (*get_rx_fifocnt)(struct mmci_host *h, u32 status, int remain);
+ 
+ #ifdef CONFIG_DMA_ENGINE
+ 	/* DMA stuff */
+

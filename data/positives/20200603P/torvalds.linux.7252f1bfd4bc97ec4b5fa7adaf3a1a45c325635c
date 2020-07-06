@@ -1,0 +1,45 @@
+commit 7252f1bfd4bc97ec4b5fa7adaf3a1a45c325635c
+Author: Vincent Palatin <vpalatin@chromium.org>
+Date:   Sun Mar 15 13:24:32 2015 -0700
+
+    usb: dwc2: avoid leaking DMA channels on disconnection
+    
+    When the HCD is disconnected, the DMA transfers still in-flight were cleaned-up
+    but the count of available DMA channels (e.g. available_host_channels) was not
+    reset.
+    The pool of DMA channels can be depleted when doing unclean
+    disconnection of USB peripherals, and reaches the point where no
+    transfer was possible until the next reboot/reload of the driver.
+    
+    Tested by putting a programmable USB mux on the port and randomly
+    plugging/unpluging a USB HUB with USB mass-storage key, USB-audio and
+    USB-ethernet dongle connected to its downstream ports, and also doing the
+    disconnection early while the devices are still enumerating to get more URBs
+    in-flight.
+    After the patch, the devices are still enumerating after thousands of cycles,
+    while the port was totally dead before.
+    
+    Signed-off-by: Vincent Palatin <vpalatin@chromium.org>
+    Acked-by: John Youn <johnyoun@synopsys.com>
+    Signed-off-by: Felipe Balbi <balbi@ti.com>
+
+diff --git a/drivers/usb/dwc2/hcd.c b/drivers/usb/dwc2/hcd.c
+index c78c8740db1d..559b55e5debb 100644
+--- a/drivers/usb/dwc2/hcd.c
++++ b/drivers/usb/dwc2/hcd.c
+@@ -257,6 +257,14 @@ static void dwc2_hcd_cleanup_channels(struct dwc2_hsotg *hsotg)
+ 		 */
+ 		channel->qh = NULL;
+ 	}
++	/* All channels have been freed, mark them available */
++	if (hsotg->core_params->uframe_sched > 0) {
++		hsotg->available_host_channels =
++			hsotg->core_params->host_channels;
++	} else {
++		hsotg->non_periodic_channels = 0;
++		hsotg->periodic_channels = 0;
++	}
+ }
+ 
+ /**
+

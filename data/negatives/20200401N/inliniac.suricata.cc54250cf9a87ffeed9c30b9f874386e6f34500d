@@ -1,0 +1,84 @@
+commit cc54250cf9a87ffeed9c30b9f874386e6f34500d
+Author: Victor Julien <victor@inliniac.net>
+Date:   Tue May 20 13:03:09 2014 +0200
+
+    Fix live reload segv when startup isn't complete
+    
+    If a live reload signal was given before the engine was fully started
+    up (e.g. pcap file thread waiting for a disk to spin up), a segv could
+    occur.
+    
+    This patch only enables live reloads after the threads have been
+    started up completely.
+
+diff --git a/src/detect-engine.c b/src/detect-engine.c
+index 92526582..b34c7aef 100644
+--- a/src/detect-engine.c
++++ b/src/detect-engine.c
+@@ -496,6 +496,13 @@ static void *DetectEngineLiveRuleSwap(void *arg)
+         tv = tv->next;
+     }
+ 
++    if (no_of_detect_tvs == 0) {
++        TmThreadsSetFlag(tv_local, THV_CLOSED);
++        UtilSignalHandlerSetup(SIGUSR2, SignalHandlerSigusr2);
++        SCLogInfo("===== Live rule swap FAILURE =====");
++        pthread_exit(NULL);
++    }
++
+     DetectEngineThreadCtx *old_det_ctx[no_of_detect_tvs];
+     DetectEngineThreadCtx *new_det_ctx[no_of_detect_tvs];
+     ThreadVars *detect_tvs[no_of_detect_tvs];
+diff --git a/src/suricata.c b/src/suricata.c
+index 19be3dda..4117492a 100644
+--- a/src/suricata.c
++++ b/src/suricata.c
+@@ -269,6 +269,13 @@ void SignalHandlerSigusr2Disabled(int sig)
+     return;
+ }
+ 
++void SignalHandlerSigusr2StartingUp(int sig)
++{
++    SCLogInfo("Live rule reload only possible after engine completely started.");
++
++    return;
++}
++
+ void SignalHandlerSigusr2DelayedDetect(int sig)
+ {
+     SCLogWarning(SC_ERR_LIVE_RULE_SWAP, "Live rule reload blocked while delayed detect is still loading.");
+@@ -2071,7 +2078,7 @@ static int PostConfLoadedSetup(SCInstance *suri)
+         if (suri->sig_file != NULL)
+             UtilSignalHandlerSetup(SIGUSR2, SignalHandlerSigusr2SigFileStartup);
+         else
+-            UtilSignalHandlerSetup(SIGUSR2, SignalHandlerSigusr2Idle);
++            UtilSignalHandlerSetup(SIGUSR2, SignalHandlerSigusr2StartingUp);
+     } else {
+         UtilSignalHandlerSetup(SIGUSR2, SignalHandlerSigusr2Disabled);
+     }
+@@ -2237,11 +2244,6 @@ int main(int argc, char **argv)
+                 exit(EXIT_SUCCESS);
+             }
+         }
+-
+-        /* registering singal handlers we use.  We register usr2 here, so that one
+-         * can't call it during the first sig load phase */
+-        if (suri.sig_file == NULL && suri.rule_reload == 1 && suri.delayed_detect == 0)
+-            UtilSignalHandlerSetup(SIGUSR2, SignalHandlerSigusr2);
+     }
+ 
+     SCAsn1LoadConfig();
+@@ -2307,6 +2309,12 @@ int main(int argc, char **argv)
+ 
+     /* Un-pause all the paused threads */
+     TmThreadContinueThreads();
++    /* registering singal handlers we use.  We register usr2 here, so that one
++     * can't call it during the first sig load phase or while threads are still
++     * starting up. */
++    if (de_ctx != NULL && suri.sig_file == NULL && suri.rule_reload == 1 &&
++            suri.delayed_detect == 0)
++        UtilSignalHandlerSetup(SIGUSR2, SignalHandlerSigusr2);
+ 
+     if (de_ctx != NULL && suri.delayed_detect) {
+         if (LoadSignatures(de_ctx, &suri) != TM_ECODE_OK)
+

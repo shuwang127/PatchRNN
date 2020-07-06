@@ -1,0 +1,100 @@
+commit 8b76f46a2db29407fed66cf4aca19d61b3dcb3e1
+Author: Andrew Morton <akpm@linux-foundation.org>
+Date:   Tue Sep 2 14:36:14 2008 -0700
+
+    drivers/char/random.c: fix a race which can lead to a bogus BUG()
+    
+    Fix a bug reported by and diagnosed by Aaron Straus.
+    
+    This is a regression intruduced into 2.6.26 by
+    
+        commit adc782dae6c4c0f6fb679a48a544cfbcd79ae3dc
+        Author: Matt Mackall <mpm@selenic.com>
+        Date:   Tue Apr 29 01:03:07 2008 -0700
+    
+            random: simplify and rename credit_entropy_store
+    
+    credit_entropy_bits() does:
+    
+            spin_lock_irqsave(&r->lock, flags);
+            ...
+            if (r->entropy_count > r->poolinfo->POOLBITS)
+                    r->entropy_count = r->poolinfo->POOLBITS;
+    
+    so there is a time window in which this BUG_ON():
+    
+    static size_t account(struct entropy_store *r, size_t nbytes, int min,
+                          int reserved)
+    {
+            unsigned long flags;
+    
+            BUG_ON(r->entropy_count > r->poolinfo->POOLBITS);
+    
+            /* Hold lock while accounting */
+            spin_lock_irqsave(&r->lock, flags);
+    
+    can trigger.
+    
+    We could fix this by moving the assertion inside the lock, but it seems
+    safer and saner to revert to the old behaviour wherein
+    entropy_store.entropy_count at no time exceeds
+    entropy_store.poolinfo->POOLBITS.
+    
+    Reported-by: Aaron Straus <aaron@merfinllc.com>
+    Cc: Matt Mackall <mpm@selenic.com>
+    Cc: Theodore Ts'o <tytso@mit.edu>
+    Cc: <stable@kernel.org>         [2.6.26.x]
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/char/random.c b/drivers/char/random.c
+index 1838aa3d24fe..7ce1ac4baa6d 100644
+--- a/drivers/char/random.c
++++ b/drivers/char/random.c
+@@ -407,7 +407,7 @@ struct entropy_store {
+ 	/* read-write data: */
+ 	spinlock_t lock;
+ 	unsigned add_ptr;
+-	int entropy_count;
++	int entropy_count;	/* Must at no time exceed ->POOLBITS! */
+ 	int input_rotate;
+ };
+ 
+@@ -520,6 +520,7 @@ static void mix_pool_bytes(struct entropy_store *r, const void *in, int bytes)
+ static void credit_entropy_bits(struct entropy_store *r, int nbits)
+ {
+ 	unsigned long flags;
++	int entropy_count;
+ 
+ 	if (!nbits)
+ 		return;
+@@ -527,20 +528,20 @@ static void credit_entropy_bits(struct entropy_store *r, int nbits)
+ 	spin_lock_irqsave(&r->lock, flags);
+ 
+ 	DEBUG_ENT("added %d entropy credits to %s\n", nbits, r->name);
+-	r->entropy_count += nbits;
+-	if (r->entropy_count < 0) {
++	entropy_count = r->entropy_count;
++	entropy_count += nbits;
++	if (entropy_count < 0) {
+ 		DEBUG_ENT("negative entropy/overflow\n");
+-		r->entropy_count = 0;
+-	} else if (r->entropy_count > r->poolinfo->POOLBITS)
+-		r->entropy_count = r->poolinfo->POOLBITS;
++		entropy_count = 0;
++	} else if (entropy_count > r->poolinfo->POOLBITS)
++		entropy_count = r->poolinfo->POOLBITS;
++	r->entropy_count = entropy_count;
+ 
+ 	/* should we wake readers? */
+-	if (r == &input_pool &&
+-	    r->entropy_count >= random_read_wakeup_thresh) {
++	if (r == &input_pool && entropy_count >= random_read_wakeup_thresh) {
+ 		wake_up_interruptible(&random_read_wait);
+ 		kill_fasync(&fasync, SIGIO, POLL_IN);
+ 	}
+-
+ 	spin_unlock_irqrestore(&r->lock, flags);
+ }
+ 
+

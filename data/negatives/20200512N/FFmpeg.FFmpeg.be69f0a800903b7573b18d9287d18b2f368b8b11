@@ -1,0 +1,93 @@
+commit be69f0a800903b7573b18d9287d18b2f368b8b11
+Author: Anton Khirnov <anton@khirnov.net>
+Date:   Sat Jan 17 22:28:46 2015 +0100
+
+    h264: move col_{parity,fieldoff} into the per-slice context
+
+diff --git a/libavcodec/h264.h b/libavcodec/h264.h
+index a259a97ca5..3d8f624713 100644
+--- a/libavcodec/h264.h
++++ b/libavcodec/h264.h
+@@ -356,6 +356,8 @@ typedef struct H264SliceContext {
+     int neighbor_transform_size;
+ 
+     int direct_spatial_mv_pred;
++    int col_parity;
++    int col_fieldoff;
+ 
+     /**
+      * non zero coeff count cache.
+@@ -442,8 +444,6 @@ typedef struct H264Context {
+     int picture_structure;
+     int first_field;
+ 
+-    int col_parity;
+-    int col_fieldoff;
+     int dist_scale_factor[32];
+     int dist_scale_factor_field[2][32];
+     int map_col_to_list0[2][16 + 32];
+diff --git a/libavcodec/h264_direct.c b/libavcodec/h264_direct.c
+index cd30dd33f2..989c64a6b7 100644
+--- a/libavcodec/h264_direct.c
++++ b/libavcodec/h264_direct.c
+@@ -126,18 +126,18 @@ void ff_h264_direct_ref_list_init(H264Context *const h, H264SliceContext *sl)
+ 
+     cur->mbaff = FRAME_MBAFF(h);
+ 
+-    h->col_fieldoff = 0;
++    sl->col_fieldoff = 0;
+     if (h->picture_structure == PICT_FRAME) {
+         int cur_poc  = h->cur_pic_ptr->poc;
+         int *col_poc = h->ref_list[1]->field_poc;
+-        h->col_parity = (FFABS(col_poc[0] - cur_poc) >=
+-                         FFABS(col_poc[1] - cur_poc));
++        sl->col_parity = (FFABS(col_poc[0] - cur_poc) >=
++                          FFABS(col_poc[1] - cur_poc));
+         ref1sidx =
+-        sidx     = h->col_parity;
++        sidx     = sl->col_parity;
+     // FL -> FL & differ parity
+     } else if (!(h->picture_structure & h->ref_list[1][0].reference) &&
+                !h->ref_list[1][0].mbaff) {
+-        h->col_fieldoff = 2 * h->ref_list[1][0].reference - 3;
++        sl->col_fieldoff = 2 * h->ref_list[1][0].reference - 3;
+     }
+ 
+     if (sl->slice_type_nos != AV_PICTURE_TYPE_B || sl->direct_spatial_mv_pred)
+@@ -259,13 +259,13 @@ static void pred_spatial_direct_motion(H264Context *const h, H264SliceContext *s
+ 
+     if (IS_INTERLACED(h->ref_list[1][0].mb_type[mb_xy])) { // AFL/AFR/FR/FL -> AFL/FL
+         if (!IS_INTERLACED(*mb_type)) {                    //     AFR/FR    -> AFL/FL
+-            mb_y  = (h->mb_y & ~1) + h->col_parity;
++            mb_y  = (h->mb_y & ~1) + sl->col_parity;
+             mb_xy = h->mb_x +
+-                    ((h->mb_y & ~1) + h->col_parity) * h->mb_stride;
++                    ((h->mb_y & ~1) + sl->col_parity) * h->mb_stride;
+             b8_stride = 0;
+         } else {
+-            mb_y  += h->col_fieldoff;
+-            mb_xy += h->mb_stride * h->col_fieldoff; // non-zero for FL -> FL & differ parity
++            mb_y  += sl->col_fieldoff;
++            mb_xy += h->mb_stride * sl->col_fieldoff; // non-zero for FL -> FL & differ parity
+         }
+         goto single_col;
+     } else {                                             // AFL/AFR/FR/FL -> AFR/FR
+@@ -477,13 +477,13 @@ static void pred_temp_direct_motion(H264Context *const h, H264SliceContext *sl,
+ 
+     if (IS_INTERLACED(h->ref_list[1][0].mb_type[mb_xy])) { // AFL/AFR/FR/FL -> AFL/FL
+         if (!IS_INTERLACED(*mb_type)) {                    //     AFR/FR    -> AFL/FL
+-            mb_y  = (h->mb_y & ~1) + h->col_parity;
++            mb_y  = (h->mb_y & ~1) + sl->col_parity;
+             mb_xy = h->mb_x +
+-                    ((h->mb_y & ~1) + h->col_parity) * h->mb_stride;
++                    ((h->mb_y & ~1) + sl->col_parity) * h->mb_stride;
+             b8_stride = 0;
+         } else {
+-            mb_y  += h->col_fieldoff;
+-            mb_xy += h->mb_stride * h->col_fieldoff; // non-zero for FL -> FL & differ parity
++            mb_y  += sl->col_fieldoff;
++            mb_xy += h->mb_stride * sl->col_fieldoff; // non-zero for FL -> FL & differ parity
+         }
+         goto single_col;
+     } else {                                        // AFL/AFR/FR/FL -> AFR/FR
+

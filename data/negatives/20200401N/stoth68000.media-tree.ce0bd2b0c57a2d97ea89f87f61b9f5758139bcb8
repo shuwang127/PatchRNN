@@ -1,0 +1,295 @@
+commit ce0bd2b0c57a2d97ea89f87f61b9f5758139bcb8
+Author: Nogah Frankel <nogahf@mellanox.com>
+Date:   Tue Sep 20 11:16:50 2016 +0200
+
+    mlxsw: spectrum: lag resources- use resources data instead of consts
+    
+    Use max lag and max ports in lag resources as the result of resource query
+    instead of using const to save them.
+    
+    Signed-off-by: Nogah Frankel <nogahf@mellanox.com>
+    Reviewed-by: Ido Schimmel <idosch@mellanox.com>
+    Signed-off-by: Jiri Pirko <jiri@mellanox.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/mellanox/mlxsw/core.c b/drivers/net/ethernet/mellanox/mlxsw/core.c
+index 068ee65a960b..aa33d58b9f81 100644
+--- a/drivers/net/ethernet/mellanox/mlxsw/core.c
++++ b/drivers/net/ethernet/mellanox/mlxsw/core.c
+@@ -1100,10 +1100,15 @@ int mlxsw_core_bus_device_register(const struct mlxsw_bus_info *mlxsw_bus_info,
+ 		goto err_alloc_stats;
+ 	}
+ 
+-	if (mlxsw_driver->profile->used_max_lag &&
+-	    mlxsw_driver->profile->used_max_port_per_lag) {
+-		alloc_size = sizeof(u8) * mlxsw_driver->profile->max_lag *
+-			     mlxsw_driver->profile->max_port_per_lag;
++	err = mlxsw_bus->init(bus_priv, mlxsw_core, mlxsw_driver->profile,
++			      &mlxsw_core->resources);
++	if (err)
++		goto err_bus_init;
++
++	if (mlxsw_core->resources.max_lag_valid &&
++	    mlxsw_core->resources.max_ports_in_lag_valid) {
++		alloc_size = sizeof(u8) * mlxsw_core->resources.max_lag *
++			mlxsw_core->resources.max_ports_in_lag;
+ 		mlxsw_core->lag.mapping = kzalloc(alloc_size, GFP_KERNEL);
+ 		if (!mlxsw_core->lag.mapping) {
+ 			err = -ENOMEM;
+@@ -1111,11 +1116,6 @@ int mlxsw_core_bus_device_register(const struct mlxsw_bus_info *mlxsw_bus_info,
+ 		}
+ 	}
+ 
+-	err = mlxsw_bus->init(bus_priv, mlxsw_core, mlxsw_driver->profile,
+-			      &mlxsw_core->resources);
+-	if (err)
+-		goto err_bus_init;
+-
+ 	err = mlxsw_emad_init(mlxsw_core);
+ 	if (err)
+ 		goto err_emad_init;
+@@ -1146,10 +1146,10 @@ int mlxsw_core_bus_device_register(const struct mlxsw_bus_info *mlxsw_bus_info,
+ err_devlink_register:
+ 	mlxsw_emad_fini(mlxsw_core);
+ err_emad_init:
+-	mlxsw_bus->fini(bus_priv);
+-err_bus_init:
+ 	kfree(mlxsw_core->lag.mapping);
+ err_alloc_lag_mapping:
++	mlxsw_bus->fini(bus_priv);
++err_bus_init:
+ 	free_percpu(mlxsw_core->pcpu_stats);
+ err_alloc_stats:
+ 	devlink_free(devlink);
+@@ -1615,7 +1615,7 @@ EXPORT_SYMBOL(mlxsw_core_skb_receive);
+ static int mlxsw_core_lag_mapping_index(struct mlxsw_core *mlxsw_core,
+ 					u16 lag_id, u8 port_index)
+ {
+-	return mlxsw_core->driver->profile->max_port_per_lag * lag_id +
++	return mlxsw_core->resources.max_ports_in_lag * lag_id +
+ 	       port_index;
+ }
+ 
+@@ -1644,7 +1644,7 @@ void mlxsw_core_lag_mapping_clear(struct mlxsw_core *mlxsw_core,
+ {
+ 	int i;
+ 
+-	for (i = 0; i < mlxsw_core->driver->profile->max_port_per_lag; i++) {
++	for (i = 0; i < mlxsw_core->resources.max_ports_in_lag; i++) {
+ 		int index = mlxsw_core_lag_mapping_index(mlxsw_core,
+ 							 lag_id, i);
+ 
+diff --git a/drivers/net/ethernet/mellanox/mlxsw/core.h b/drivers/net/ethernet/mellanox/mlxsw/core.h
+index 51f27a35749e..558d1ce89531 100644
+--- a/drivers/net/ethernet/mellanox/mlxsw/core.h
++++ b/drivers/net/ethernet/mellanox/mlxsw/core.h
+@@ -179,8 +179,6 @@ struct mlxsw_swid_config {
+ 
+ struct mlxsw_config_profile {
+ 	u16	used_max_vepa_channels:1,
+-		used_max_lag:1,
+-		used_max_port_per_lag:1,
+ 		used_max_mid:1,
+ 		used_max_pgt:1,
+ 		used_max_system_port:1,
+@@ -194,8 +192,6 @@ struct mlxsw_config_profile {
+ 		used_adaptive_routing_group_cap:1,
+ 		used_kvd_sizes:1;
+ 	u8	max_vepa_channels;
+-	u16	max_lag;
+-	u16	max_port_per_lag;
+ 	u16	max_mid;
+ 	u16	max_pgt;
+ 	u16	max_system_port;
+diff --git a/drivers/net/ethernet/mellanox/mlxsw/pci.c b/drivers/net/ethernet/mellanox/mlxsw/pci.c
+index cb284eaeec39..57c2d3474bb6 100644
+--- a/drivers/net/ethernet/mellanox/mlxsw/pci.c
++++ b/drivers/net/ethernet/mellanox/mlxsw/pci.c
+@@ -1232,18 +1232,6 @@ static int mlxsw_pci_config_profile(struct mlxsw_pci *mlxsw_pci, char *mbox,
+ 		mlxsw_cmd_mbox_config_profile_max_vepa_channels_set(
+ 			mbox, profile->max_vepa_channels);
+ 	}
+-	if (profile->used_max_lag) {
+-		mlxsw_cmd_mbox_config_profile_set_max_lag_set(
+-			mbox, 1);
+-		mlxsw_cmd_mbox_config_profile_max_lag_set(
+-			mbox, profile->max_lag);
+-	}
+-	if (profile->used_max_port_per_lag) {
+-		mlxsw_cmd_mbox_config_profile_set_max_port_per_lag_set(
+-			mbox, 1);
+-		mlxsw_cmd_mbox_config_profile_max_port_per_lag_set(
+-			mbox, profile->max_port_per_lag);
+-	}
+ 	if (profile->used_max_mid) {
+ 		mlxsw_cmd_mbox_config_profile_set_max_mid_set(
+ 			mbox, 1);
+diff --git a/drivers/net/ethernet/mellanox/mlxsw/spectrum.c b/drivers/net/ethernet/mellanox/mlxsw/spectrum.c
+index 43d508111b17..0f96d1108568 100644
+--- a/drivers/net/ethernet/mellanox/mlxsw/spectrum.c
++++ b/drivers/net/ethernet/mellanox/mlxsw/spectrum.c
+@@ -2887,7 +2887,9 @@ static int mlxsw_sp_flood_init(struct mlxsw_sp *mlxsw_sp)
+ 
+ static int mlxsw_sp_lag_init(struct mlxsw_sp *mlxsw_sp)
+ {
++	struct mlxsw_resources *resources;
+ 	char slcr_pl[MLXSW_REG_SLCR_LEN];
++	int err;
+ 
+ 	mlxsw_reg_slcr_pack(slcr_pl, MLXSW_REG_SLCR_LAG_HASH_SMAC |
+ 				     MLXSW_REG_SLCR_LAG_HASH_DMAC |
+@@ -2898,7 +2900,26 @@ static int mlxsw_sp_lag_init(struct mlxsw_sp *mlxsw_sp)
+ 				     MLXSW_REG_SLCR_LAG_HASH_SPORT |
+ 				     MLXSW_REG_SLCR_LAG_HASH_DPORT |
+ 				     MLXSW_REG_SLCR_LAG_HASH_IPPROTO);
+-	return mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(slcr), slcr_pl);
++	err = mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(slcr), slcr_pl);
++	if (err)
++		return err;
++
++	resources = mlxsw_core_resources_get(mlxsw_sp->core);
++	if (!(resources->max_lag_valid && resources->max_ports_in_lag_valid))
++		return -EIO;
++
++	mlxsw_sp->lags = kcalloc(resources->max_lag,
++				 sizeof(struct mlxsw_sp_upper),
++				 GFP_KERNEL);
++	if (!mlxsw_sp->lags)
++		return -ENOMEM;
++
++	return 0;
++}
++
++static void mlxsw_sp_lag_fini(struct mlxsw_sp *mlxsw_sp)
++{
++	kfree(mlxsw_sp->lags);
+ }
+ 
+ static int mlxsw_sp_init(struct mlxsw_core *mlxsw_core,
+@@ -2982,6 +3003,7 @@ static int mlxsw_sp_init(struct mlxsw_core *mlxsw_core,
+ err_router_init:
+ 	mlxsw_sp_switchdev_fini(mlxsw_sp);
+ err_switchdev_init:
++	mlxsw_sp_lag_fini(mlxsw_sp);
+ err_lag_init:
+ 	mlxsw_sp_buffers_fini(mlxsw_sp);
+ err_buffers_init:
+@@ -3001,6 +3023,7 @@ static void mlxsw_sp_fini(struct mlxsw_core *mlxsw_core)
+ 	mlxsw_sp_span_fini(mlxsw_sp);
+ 	mlxsw_sp_router_fini(mlxsw_sp);
+ 	mlxsw_sp_switchdev_fini(mlxsw_sp);
++	mlxsw_sp_lag_fini(mlxsw_sp);
+ 	mlxsw_sp_buffers_fini(mlxsw_sp);
+ 	mlxsw_sp_traps_fini(mlxsw_sp);
+ 	mlxsw_sp_event_unregister(mlxsw_sp, MLXSW_TRAP_ID_PUDE);
+@@ -3013,10 +3036,6 @@ static void mlxsw_sp_fini(struct mlxsw_core *mlxsw_core)
+ static struct mlxsw_config_profile mlxsw_sp_config_profile = {
+ 	.used_max_vepa_channels		= 1,
+ 	.max_vepa_channels		= 0,
+-	.used_max_lag			= 1,
+-	.max_lag			= MLXSW_SP_LAG_MAX,
+-	.used_max_port_per_lag		= 1,
+-	.max_port_per_lag		= MLXSW_SP_PORT_PER_LAG_MAX,
+ 	.used_max_mid			= 1,
+ 	.max_mid			= MLXSW_SP_MID_MAX,
+ 	.used_max_pgt			= 1,
+@@ -3683,12 +3702,14 @@ static bool mlxsw_sp_port_fdb_should_flush(struct mlxsw_sp_port *mlxsw_sp_port,
+ 	struct mlxsw_sp *mlxsw_sp = mlxsw_sp_port->mlxsw_sp;
+ 	u8 local_port = mlxsw_sp_port->local_port;
+ 	u16 lag_id = mlxsw_sp_port->lag_id;
++	struct mlxsw_resources *resources;
+ 	int i, count = 0;
+ 
+ 	if (!mlxsw_sp_port->lagged)
+ 		return true;
+ 
+-	for (i = 0; i < MLXSW_SP_PORT_PER_LAG_MAX; i++) {
++	resources = mlxsw_core_resources_get(mlxsw_sp->core);
++	for (i = 0; i < resources->max_ports_in_lag; i++) {
+ 		struct mlxsw_sp_port *lag_port;
+ 
+ 		lag_port = mlxsw_sp_port_lagged_get(mlxsw_sp, lag_id, i);
+@@ -3894,11 +3915,13 @@ static int mlxsw_sp_lag_index_get(struct mlxsw_sp *mlxsw_sp,
+ 				  struct net_device *lag_dev,
+ 				  u16 *p_lag_id)
+ {
++	struct mlxsw_resources *resources;
+ 	struct mlxsw_sp_upper *lag;
+ 	int free_lag_id = -1;
+ 	int i;
+ 
+-	for (i = 0; i < MLXSW_SP_LAG_MAX; i++) {
++	resources = mlxsw_core_resources_get(mlxsw_sp->core);
++	for (i = 0; i < resources->max_lag; i++) {
+ 		lag = mlxsw_sp_lag_get(mlxsw_sp, i);
+ 		if (lag->ref_count) {
+ 			if (lag->dev == lag_dev) {
+@@ -3932,9 +3955,11 @@ mlxsw_sp_master_lag_check(struct mlxsw_sp *mlxsw_sp,
+ static int mlxsw_sp_port_lag_index_get(struct mlxsw_sp *mlxsw_sp,
+ 				       u16 lag_id, u8 *p_port_index)
+ {
++	struct mlxsw_resources *resources;
+ 	int i;
+ 
+-	for (i = 0; i < MLXSW_SP_PORT_PER_LAG_MAX; i++) {
++	resources = mlxsw_core_resources_get(mlxsw_sp->core);
++	for (i = 0; i < resources->max_ports_in_lag; i++) {
+ 		if (!mlxsw_sp_port_lagged_get(mlxsw_sp, lag_id, i)) {
+ 			*p_port_index = i;
+ 			return 0;
+diff --git a/drivers/net/ethernet/mellanox/mlxsw/spectrum.h b/drivers/net/ethernet/mellanox/mlxsw/spectrum.h
+index 49f4cafce148..a056aaa6c584 100644
+--- a/drivers/net/ethernet/mellanox/mlxsw/spectrum.h
++++ b/drivers/net/ethernet/mellanox/mlxsw/spectrum.h
+@@ -56,9 +56,6 @@
+ #define MLXSW_SP_RFID_BASE 15360
+ #define MLXSW_SP_RIF_MAX 800
+ 
+-#define MLXSW_SP_LAG_MAX 64
+-#define MLXSW_SP_PORT_PER_LAG_MAX 16
+-
+ #define MLXSW_SP_MID_MAX 7000
+ 
+ #define MLXSW_SP_PORTS_PER_CLUSTER_MAX 4
+@@ -290,7 +287,7 @@ struct mlxsw_sp {
+ #define MLXSW_SP_DEFAULT_AGEING_TIME 300
+ 	u32 ageing_time;
+ 	struct mlxsw_sp_upper master_bridge;
+-	struct mlxsw_sp_upper lags[MLXSW_SP_LAG_MAX];
++	struct mlxsw_sp_upper *lags;
+ 	u8 port_to_module[MLXSW_PORT_MAX_PORTS];
+ 	struct mlxsw_sp_sb sb;
+ 	struct mlxsw_sp_router router;
+diff --git a/drivers/net/ethernet/mellanox/mlxsw/spectrum_switchdev.c b/drivers/net/ethernet/mellanox/mlxsw/spectrum_switchdev.c
+index 7186c4810785..2b04b76b503e 100644
+--- a/drivers/net/ethernet/mellanox/mlxsw/spectrum_switchdev.c
++++ b/drivers/net/ethernet/mellanox/mlxsw/spectrum_switchdev.c
+@@ -1205,9 +1205,11 @@ static struct mlxsw_sp_port *mlxsw_sp_lag_rep_port(struct mlxsw_sp *mlxsw_sp,
+ 						   u16 lag_id)
+ {
+ 	struct mlxsw_sp_port *mlxsw_sp_port;
++	struct mlxsw_resources *resources;
+ 	int i;
+ 
+-	for (i = 0; i < MLXSW_SP_PORT_PER_LAG_MAX; i++) {
++	resources = mlxsw_core_resources_get(mlxsw_sp->core);
++	for (i = 0; i < resources->max_ports_in_lag; i++) {
+ 		mlxsw_sp_port = mlxsw_sp_port_lagged_get(mlxsw_sp, lag_id, i);
+ 		if (mlxsw_sp_port)
+ 			return mlxsw_sp_port;
+diff --git a/drivers/net/ethernet/mellanox/mlxsw/switchx2.c b/drivers/net/ethernet/mellanox/mlxsw/switchx2.c
+index 377daa4d509c..8b15bf0c744d 100644
+--- a/drivers/net/ethernet/mellanox/mlxsw/switchx2.c
++++ b/drivers/net/ethernet/mellanox/mlxsw/switchx2.c
+@@ -1512,10 +1512,6 @@ static void mlxsw_sx_fini(struct mlxsw_core *mlxsw_core)
+ static struct mlxsw_config_profile mlxsw_sx_config_profile = {
+ 	.used_max_vepa_channels		= 1,
+ 	.max_vepa_channels		= 0,
+-	.used_max_lag			= 1,
+-	.max_lag			= 64,
+-	.used_max_port_per_lag		= 1,
+-	.max_port_per_lag		= 16,
+ 	.used_max_mid			= 1,
+ 	.max_mid			= 7000,
+ 	.used_max_pgt			= 1,
+

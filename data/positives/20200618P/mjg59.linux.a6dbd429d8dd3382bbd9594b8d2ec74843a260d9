@@ -1,0 +1,59 @@
+commit a6dbd429d8dd3382bbd9594b8d2ec74843a260d9
+Author: Josef Bacik <josef@redhat.com>
+Date:   Wed Nov 11 15:53:34 2009 -0500
+
+    Btrfs: fix panic when trying to destroy a newly allocated
+    
+    There is a problem where iget5_locked will look for an inode, not find it, and
+    then subsequently try to allocate it.  Another CPU will have raced in and
+    allocated the inode instead, so when iget5_locked gets the inode spin lock again
+    and does a search, it finds the new inode.  So it goes ahead and calls
+    destroy_inode on the inode it just allocated.  The problem is we don't set
+    BTRFS_I(inode)->root until the new inode is completely initialized.  This patch
+    makes us set root to NULL when alloc'ing a new inode, so when we get to
+    btrfs_destroy_inode and we see that root is NULL we can just free up the memory
+    and continue on.  This fixes the panic
+    
+    http://www.kerneloops.org/submitresult.php?number=812690
+    
+    Thanks,
+    
+    Signed-off-by: Josef Bacik <josef@redhat.com>
+    Signed-off-by: Chris Mason <chris.mason@oracle.com>
+
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index d3d7d46a6af2..ee92801fc5db 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -5180,6 +5180,7 @@ struct inode *btrfs_alloc_inode(struct super_block *sb)
+ 	ei->logged_trans = 0;
+ 	ei->outstanding_extents = 0;
+ 	ei->reserved_extents = 0;
++	ei->root = NULL;
+ 	spin_lock_init(&ei->accounting_lock);
+ 	btrfs_ordered_inode_tree_init(&ei->ordered_tree);
+ 	INIT_LIST_HEAD(&ei->i_orphan);
+@@ -5195,6 +5196,14 @@ void btrfs_destroy_inode(struct inode *inode)
+ 	WARN_ON(!list_empty(&inode->i_dentry));
+ 	WARN_ON(inode->i_data.nrpages);
+ 
++	/*
++	 * This can happen where we create an inode, but somebody else also
++	 * created the same inode and we need to destroy the one we already
++	 * created.
++	 */
++	if (!root)
++		goto free;
++
+ 	/*
+ 	 * Make sure we're properly removed from the ordered operation
+ 	 * lists.
+@@ -5230,6 +5239,7 @@ void btrfs_destroy_inode(struct inode *inode)
+ 	}
+ 	inode_tree_del(inode);
+ 	btrfs_drop_extent_cache(inode, 0, (u64)-1, 0);
++free:
+ 	kmem_cache_free(btrfs_inode_cachep, BTRFS_I(inode));
+ }
+ 
+

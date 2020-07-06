@@ -1,0 +1,49 @@
+commit 9699eda6bc1f708a28acb716e1477aa351362fe2
+Author: Xiaotian Feng <dfeng@redhat.com>
+Date:   Thu Apr 22 18:56:17 2010 +0800
+
+    nfs: fix memory leak in nfs_get_sb with CONFIG_NFS_V4
+    
+    With CONFIG_NFS_V4 and data version 4, nfs_get_sb will allocate memory for
+    export_path in nfs4_validate_text_mount_data, so we need to free it then.
+    This is addressed in following kmemleak report:
+    
+    unreferenced object 0xffff88016bf48a50 (size 16):
+      comm "mount.nfs", pid 22567, jiffies 4651574704 (age 175471.200s)
+      hex dump (first 16 bytes):
+        2f 6f 70 74 2f 77 6f 72 6b 00 6b 6b 6b 6b 6b a5  /opt/work.kkkkk.
+      backtrace:
+        [<ffffffff814b34f9>] kmemleak_alloc+0x60/0xa7
+        [<ffffffff81102c76>] kmemleak_alloc_recursive.clone.5+0x1b/0x1d
+        [<ffffffff811046b3>] __kmalloc_track_caller+0x18f/0x1b7
+        [<ffffffff810e1b08>] kstrndup+0x37/0x54
+        [<ffffffffa0336971>] nfs_parse_devname+0x152/0x204 [nfs]
+        [<ffffffffa0336af3>] nfs4_validate_text_mount_data+0xd0/0xdc [nfs]
+        [<ffffffffa0338deb>] nfs_get_sb+0x325/0x736 [nfs]
+        [<ffffffff81113671>] vfs_kern_mount+0xbd/0x17c
+        [<ffffffff81113798>] do_kern_mount+0x4d/0xed
+        [<ffffffff81129a87>] do_mount+0x787/0x7fe
+        [<ffffffff81129b86>] sys_mount+0x88/0xc2
+        [<ffffffff81009b42>] system_call_fastpath+0x16/0x1b
+    
+    Signed-off-by: Xiaotian Feng <dfeng@redhat.com>
+    Cc: Trond Myklebust <Trond.Myklebust@netapp.com>
+    Cc: Chuck Lever <chuck.lever@oracle.com>
+    Cc: Benny Halevy <bhalevy@panasas.com>
+    Cc: Al Viro <viro@ZenIV.linux.org.uk>
+    Cc: Andy Adamson <andros@netapp.com>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/fs/nfs/super.c b/fs/nfs/super.c
+index f9327bbaf466..b4148fc00f9f 100644
+--- a/fs/nfs/super.c
++++ b/fs/nfs/super.c
+@@ -2187,6 +2187,7 @@ static int nfs_get_sb(struct file_system_type *fs_type,
+ 	if (data->version == 4) {
+ 		error = nfs4_try_mount(flags, dev_name, data, mnt);
+ 		kfree(data->client_address);
++		kfree(data->nfs_server.export_path);
+ 		goto out;
+ 	}
+ #endif	/* CONFIG_NFS_V4 */
+

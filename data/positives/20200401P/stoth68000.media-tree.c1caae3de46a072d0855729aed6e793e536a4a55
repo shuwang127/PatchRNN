@@ -1,0 +1,88 @@
+commit c1caae3de46a072d0855729aed6e793e536a4a55
+Author: Hari Bathini <hbathini@linux.vnet.ibm.com>
+Date:   Thu Dec 18 23:36:55 2014 +0530
+
+    powerpc/kdump: Ignore failure in enabling big endian exception during crash
+    
+    In LE kernel, we currently have a hack for kexec that resets the exception
+    endian before starting a new kernel as the kernel that is loaded could be a
+    big endian or a little endian kernel. In kdump case, resetting exception
+    endian fails when one or more cpus is disabled. But we can ignore the failure
+    and still go ahead, as in most cases crashkernel will be of same endianess
+    as primary kernel and reseting endianess is not even needed in those cases.
+    This patch adds a new inline function to say if this is kdump path. This
+    function is used at places where such a check is needed.
+    
+    Signed-off-by: Hari Bathini <hbathini@linux.vnet.ibm.com>
+    [mpe: Rename to kdump_in_progress(), use bool, and edit comment]
+    Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+
+diff --git a/arch/powerpc/include/asm/kexec.h b/arch/powerpc/include/asm/kexec.h
+index 19c36cba37c4..a46f5f45570c 100644
+--- a/arch/powerpc/include/asm/kexec.h
++++ b/arch/powerpc/include/asm/kexec.h
+@@ -86,6 +86,11 @@ extern int overlaps_crashkernel(unsigned long start, unsigned long size);
+ extern void reserve_crashkernel(void);
+ extern void machine_kexec_mask_interrupts(void);
+ 
++static inline bool kdump_in_progress(void)
++{
++	return crashing_cpu >= 0;
++}
++
+ #else /* !CONFIG_KEXEC */
+ static inline void crash_kexec_secondary(struct pt_regs *regs) { }
+ 
+@@ -106,6 +111,11 @@ static inline int crash_shutdown_unregister(crash_shutdown_t handler)
+ 	return 0;
+ }
+ 
++static inline bool kdump_in_progress(void)
++{
++	return false;
++}
++
+ #endif /* CONFIG_KEXEC */
+ #endif /* ! __ASSEMBLY__ */
+ #endif /* __KERNEL__ */
+diff --git a/arch/powerpc/kernel/machine_kexec_64.c b/arch/powerpc/kernel/machine_kexec_64.c
+index 879b3aacac32..f96d1ec24189 100644
+--- a/arch/powerpc/kernel/machine_kexec_64.c
++++ b/arch/powerpc/kernel/machine_kexec_64.c
+@@ -330,7 +330,7 @@ void default_machine_kexec(struct kimage *image)
+         * using debugger IPI.
+         */
+ 
+-	if (crashing_cpu == -1)
++	if (!kdump_in_progress())
+ 		kexec_prepare_cpus();
+ 
+ 	pr_debug("kexec: Starting switchover sequence.\n");
+diff --git a/arch/powerpc/platforms/pseries/lpar.c b/arch/powerpc/platforms/pseries/lpar.c
+index 469751d92004..b5682fd6c984 100644
+--- a/arch/powerpc/platforms/pseries/lpar.c
++++ b/arch/powerpc/platforms/pseries/lpar.c
+@@ -43,6 +43,7 @@
+ #include <asm/trace.h>
+ #include <asm/firmware.h>
+ #include <asm/plpar_wrappers.h>
++#include <asm/kexec.h>
+ #include <asm/fadump.h>
+ 
+ #include "pseries.h"
+@@ -267,8 +268,13 @@ static void pSeries_lpar_hptab_clear(void)
+ 		 * out to the user, but at least this will stop us from
+ 		 * continuing on further and creating an even more
+ 		 * difficult to debug situation.
++		 *
++		 * There is a known problem when kdump'ing, if cpus are offline
++		 * the above call will fail. Rather than panicking again, keep
++		 * going and hope the kdump kernel is also little endian, which
++		 * it usually is.
+ 		 */
+-		if (rc)
++		if (rc && !kdump_in_progress())
+ 			panic("Could not enable big endian exceptions");
+ 	}
+ #endif
+

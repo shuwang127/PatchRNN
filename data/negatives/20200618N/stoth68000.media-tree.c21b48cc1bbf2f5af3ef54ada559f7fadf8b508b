@@ -1,0 +1,38 @@
+commit c21b48cc1bbf2f5af3ef54ada559f7fadf8b508b
+Author: Eric Dumazet <edumazet@google.com>
+Date:   Wed Apr 26 09:07:46 2017 -0700
+
+    net: adjust skb->truesize in ___pskb_trim()
+    
+    Andrey found a way to trigger the WARN_ON_ONCE(delta < len) in
+    skb_try_coalesce() using syzkaller and a filter attached to a TCP
+    socket.
+    
+    As we did recently in commit 158f323b9868 ("net: adjust skb->truesize in
+    pskb_expand_head()") we can adjust skb->truesize from ___pskb_trim(),
+    via a call to skb_condense().
+    
+    If all frags were freed, then skb->truesize can be recomputed.
+    
+    This call can be done if skb is not yet owned, or destructor is
+    sock_edemux().
+    
+    Signed-off-by: Eric Dumazet <edumazet@google.com>
+    Reported-by: Andrey Konovalov <andreyknvl@google.com>
+    Cc: Willem de Bruijn <willemb@google.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index f86bf69cfb8d..f1d04592ace0 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -1576,6 +1576,8 @@ int ___pskb_trim(struct sk_buff *skb, unsigned int len)
+ 		skb_set_tail_pointer(skb, len);
+ 	}
+ 
++	if (!skb->sk || skb->destructor == sock_edemux)
++		skb_condense(skb);
+ 	return 0;
+ }
+ EXPORT_SYMBOL(___pskb_trim);
+

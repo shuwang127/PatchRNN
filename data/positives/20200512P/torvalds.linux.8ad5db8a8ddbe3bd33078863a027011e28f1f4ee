@@ -1,0 +1,48 @@
+commit 8ad5db8a8ddbe3bd33078863a027011e28f1f4ee
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Fri Aug 17 20:10:46 2012 -0400
+
+    introduce kref_put_mutex()
+    
+    equivalent of
+            mutex_lock(mutex);
+            if (!kref_put(kref, release))
+                    mutex_unlock(mutex);
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/include/linux/kref.h b/include/linux/kref.h
+index 9c07dcebded7..65af6887872f 100644
+--- a/include/linux/kref.h
++++ b/include/linux/kref.h
+@@ -18,6 +18,7 @@
+ #include <linux/bug.h>
+ #include <linux/atomic.h>
+ #include <linux/kernel.h>
++#include <linux/mutex.h>
+ 
+ struct kref {
+ 	atomic_t refcount;
+@@ -93,4 +94,21 @@ static inline int kref_put(struct kref *kref, void (*release)(struct kref *kref)
+ {
+ 	return kref_sub(kref, 1, release);
+ }
++
++static inline int kref_put_mutex(struct kref *kref,
++				 void (*release)(struct kref *kref),
++				 struct mutex *lock)
++{
++	WARN_ON(release == NULL);
++        if (unlikely(!atomic_add_unless(&kref->refcount, -1, 1))) {
++		mutex_lock(lock);
++		if (unlikely(!atomic_dec_and_test(&kref->refcount))) {
++			mutex_unlock(lock);
++			return 0;
++		}
++		release(kref);
++		return 1;
++	}
++	return 0;
++}
+ #endif /* _KREF_H_ */
+

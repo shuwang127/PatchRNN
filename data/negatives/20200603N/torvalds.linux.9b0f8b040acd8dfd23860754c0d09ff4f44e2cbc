@@ -1,0 +1,257 @@
+commit 9b0f8b040acd8dfd23860754c0d09ff4f44e2cbc
+Author: Christoph Lameter <clameter@engr.sgi.com>
+Date:   Mon Feb 20 18:27:52 2006 -0800
+
+    [PATCH] Terminate process that fails on a constrained allocation
+    
+    Some allocations are restricted to a limited set of nodes (due to memory
+    policies or cpuset constraints).  If the page allocator is not able to find
+    enough memory then that does not mean that overall system memory is low.
+    
+    In particular going postal and more or less randomly shooting at processes
+    is not likely going to help the situation but may just lead to suicide (the
+    whole system coming down).
+    
+    It is better to signal to the process that no memory exists given the
+    constraints that the process (or the configuration of the process) has
+    placed on the allocation behavior.  The process may be killed but then the
+    sysadmin or developer can investigate the situation.  The solution is
+    similar to what we do when running out of hugepages.
+    
+    This patch adds a check before we kill processes.  At that point
+    performance considerations do not matter much so we just scan the zonelist
+    and reconstruct a list of nodes.  If the list of nodes does not contain all
+    online nodes then this is a constrained allocation and we should kill the
+    current process.
+    
+    Signed-off-by: Christoph Lameter <clameter@sgi.com>
+    Cc: Nick Piggin <nickpiggin@yahoo.com.au>
+    Cc: Andi Kleen <ak@muc.de>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/drivers/char/sysrq.c b/drivers/char/sysrq.c
+index 5765f672e853..d58f82318853 100644
+--- a/drivers/char/sysrq.c
++++ b/drivers/char/sysrq.c
+@@ -243,7 +243,7 @@ static struct sysrq_key_op sysrq_term_op = {
+ 
+ static void moom_callback(void *ignored)
+ {
+-	out_of_memory(GFP_KERNEL, 0);
++	out_of_memory(&NODE_DATA(0)->node_zonelists[ZONE_NORMAL], GFP_KERNEL, 0);
+ }
+ 
+ static DECLARE_WORK(moom_work, moom_callback, NULL);
+diff --git a/include/linux/swap.h b/include/linux/swap.h
+index f3e17d5963c3..d572b19afb7d 100644
+--- a/include/linux/swap.h
++++ b/include/linux/swap.h
+@@ -147,7 +147,7 @@ struct swap_list_t {
+ #define vm_swap_full() (nr_swap_pages*2 < total_swap_pages)
+ 
+ /* linux/mm/oom_kill.c */
+-extern void out_of_memory(gfp_t gfp_mask, int order);
++extern void out_of_memory(struct zonelist *zonelist, gfp_t gfp_mask, int order);
+ 
+ /* linux/mm/memory.c */
+ extern void swapin_readahead(swp_entry_t, unsigned long, struct vm_area_struct *);
+diff --git a/mm/oom_kill.c b/mm/oom_kill.c
+index 949eba1d5ba3..8123fad5a485 100644
+--- a/mm/oom_kill.c
++++ b/mm/oom_kill.c
+@@ -132,6 +132,36 @@ unsigned long badness(struct task_struct *p, unsigned long uptime)
+ 	return points;
+ }
+ 
++/*
++ * Types of limitations to the nodes from which allocations may occur
++ */
++#define CONSTRAINT_NONE 1
++#define CONSTRAINT_MEMORY_POLICY 2
++#define CONSTRAINT_CPUSET 3
++
++/*
++ * Determine the type of allocation constraint.
++ */
++static inline int constrained_alloc(struct zonelist *zonelist, gfp_t gfp_mask)
++{
++#ifdef CONFIG_NUMA
++	struct zone **z;
++	nodemask_t nodes = node_online_map;
++
++	for (z = zonelist->zones; *z; z++)
++		if (cpuset_zone_allowed(*z, gfp_mask))
++			node_clear((*z)->zone_pgdat->node_id,
++					nodes);
++		else
++			return CONSTRAINT_CPUSET;
++
++	if (!nodes_empty(nodes))
++		return CONSTRAINT_MEMORY_POLICY;
++#endif
++
++	return CONSTRAINT_NONE;
++}
++
+ /*
+  * Simple selection loop. We chose the process with the highest
+  * number of 'points'. We expect the caller will lock the tasklist.
+@@ -184,7 +214,7 @@ static struct task_struct *select_bad_process(unsigned long *ppoints)
+  * CAP_SYS_RAW_IO set, send SIGTERM instead (but it's unlikely that
+  * we select a process with CAP_SYS_RAW_IO set).
+  */
+-static void __oom_kill_task(task_t *p)
++static void __oom_kill_task(task_t *p, const char *message)
+ {
+ 	if (p->pid == 1) {
+ 		WARN_ON(1);
+@@ -200,8 +230,8 @@ static void __oom_kill_task(task_t *p)
+ 		return;
+ 	}
+ 	task_unlock(p);
+-	printk(KERN_ERR "Out of Memory: Killed process %d (%s).\n",
+-							p->pid, p->comm);
++	printk(KERN_ERR "%s: Killed process %d (%s).\n",
++				message, p->pid, p->comm);
+ 
+ 	/*
+ 	 * We give our sacrificial lamb high priority and access to
+@@ -214,7 +244,7 @@ static void __oom_kill_task(task_t *p)
+ 	force_sig(SIGKILL, p);
+ }
+ 
+-static struct mm_struct *oom_kill_task(task_t *p)
++static struct mm_struct *oom_kill_task(task_t *p, const char *message)
+ {
+ 	struct mm_struct *mm = get_task_mm(p);
+ 	task_t * g, * q;
+@@ -226,21 +256,21 @@ static struct mm_struct *oom_kill_task(task_t *p)
+ 		return NULL;
+ 	}
+ 
+-	__oom_kill_task(p);
++	__oom_kill_task(p, message);
+ 	/*
+ 	 * kill all processes that share the ->mm (i.e. all threads),
+ 	 * but are in a different thread group
+ 	 */
+ 	do_each_thread(g, q)
+ 		if (q->mm == mm && q->tgid != p->tgid)
+-			__oom_kill_task(q);
++			__oom_kill_task(q, message);
+ 	while_each_thread(g, q);
+ 
+ 	return mm;
+ }
+ 
+ static struct mm_struct *oom_kill_process(struct task_struct *p,
+-					  unsigned long points)
++				unsigned long points, const char *message)
+ {
+  	struct mm_struct *mm;
+ 	struct task_struct *c;
+@@ -253,11 +283,11 @@ static struct mm_struct *oom_kill_process(struct task_struct *p,
+ 		c = list_entry(tsk, struct task_struct, sibling);
+ 		if (c->mm == p->mm)
+ 			continue;
+-		mm = oom_kill_task(c);
++		mm = oom_kill_task(c, message);
+ 		if (mm)
+ 			return mm;
+ 	}
+-	return oom_kill_task(p);
++	return oom_kill_task(p, message);
+ }
+ 
+ /**
+@@ -268,10 +298,10 @@ static struct mm_struct *oom_kill_process(struct task_struct *p,
+  * OR try to be smart about which process to kill. Note that we
+  * don't have to be perfect here, we just have to be good.
+  */
+-void out_of_memory(gfp_t gfp_mask, int order)
++void out_of_memory(struct zonelist *zonelist, gfp_t gfp_mask, int order)
+ {
+ 	struct mm_struct *mm = NULL;
+-	task_t * p;
++	task_t *p;
+ 	unsigned long points;
+ 
+ 	if (printk_ratelimit()) {
+@@ -283,25 +313,48 @@ void out_of_memory(gfp_t gfp_mask, int order)
+ 
+ 	cpuset_lock();
+ 	read_lock(&tasklist_lock);
++
++	/*
++	 * Check if there were limitations on the allocation (only relevant for
++	 * NUMA) that may require different handling.
++	 */
++	switch (constrained_alloc(zonelist, gfp_mask)) {
++	case CONSTRAINT_MEMORY_POLICY:
++		mm = oom_kill_process(current, points,
++				"No available memory (MPOL_BIND)");
++		break;
++
++	case CONSTRAINT_CPUSET:
++		mm = oom_kill_process(current, points,
++				"No available memory in cpuset");
++		break;
++
++	case CONSTRAINT_NONE:
+ retry:
+-	p = select_bad_process(&points);
++		/*
++		 * Rambo mode: Shoot down a process and hope it solves whatever
++		 * issues we may have.
++		 */
++		p = select_bad_process(&points);
+ 
+-	if (PTR_ERR(p) == -1UL)
+-		goto out;
++		if (PTR_ERR(p) == -1UL)
++			goto out;
+ 
+-	/* Found nothing?!?! Either we hang forever, or we panic. */
+-	if (!p) {
+-		read_unlock(&tasklist_lock);
+-		cpuset_unlock();
+-		panic("Out of memory and no killable processes...\n");
+-	}
++		/* Found nothing?!?! Either we hang forever, or we panic. */
++		if (!p) {
++			read_unlock(&tasklist_lock);
++			cpuset_unlock();
++			panic("Out of memory and no killable processes...\n");
++		}
+ 
+-	mm = oom_kill_process(p, points);
+-	if (!mm)
+-		goto retry;
++		mm = oom_kill_process(p, points, "Out of memory");
++		if (!mm)
++			goto retry;
++
++		break;
++	}
+ 
+- out:
+-	read_unlock(&tasklist_lock);
++out:
+ 	cpuset_unlock();
+ 	if (mm)
+ 		mmput(mm);
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 208812b25597..791690d7d3fa 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -1015,7 +1015,7 @@ __alloc_pages(gfp_t gfp_mask, unsigned int order,
+ 		if (page)
+ 			goto got_pg;
+ 
+-		out_of_memory(gfp_mask, order);
++		out_of_memory(zonelist, gfp_mask, order);
+ 		goto restart;
+ 	}
+ 
+

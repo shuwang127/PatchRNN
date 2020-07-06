@@ -1,0 +1,81 @@
+commit 16e179bda58f0931854a669c9a70fd9139015899
+Author: Sreekanth Reddy <sreekanth.reddy@avagotech.com>
+Date:   Wed Nov 11 17:30:27 2015 +0530
+
+    mpt3sas: fix for driver fails EEH, recovery from injected pci bus error
+    
+    This patch stops the driver to invoke kthread (which remove the dead
+    ioc) for some time while EEH recovery has started.
+    
+    This patch is a port of commit b4730fb6e54a ("mpt2sas: fix for driver
+    fails EEH, recovery from injected pci bus error")'.
+    
+    Signed-off-by: Sreekanth Reddy <Sreekanth.Reddy@avagotech.com>
+    Acked-by: Christoph Hellwig <hch@lst.de>
+    Reviewed-by: Hannes Reinecke <hare@suse.de>
+    Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+
+diff --git a/drivers/scsi/mpt3sas/mpt3sas_base.c b/drivers/scsi/mpt3sas/mpt3sas_base.c
+index 2b33e48eea90..b5b1eb260750 100644
+--- a/drivers/scsi/mpt3sas/mpt3sas_base.c
++++ b/drivers/scsi/mpt3sas/mpt3sas_base.c
+@@ -157,7 +157,7 @@ _base_fault_reset_work(struct work_struct *work)
+ 
+ 
+ 	spin_lock_irqsave(&ioc->ioc_reset_in_progress_lock, flags);
+-	if (ioc->shost_recovery)
++	if (ioc->shost_recovery || ioc->pci_error_recovery)
+ 		goto rearm_timer;
+ 	spin_unlock_irqrestore(&ioc->ioc_reset_in_progress_lock, flags);
+ 
+@@ -166,6 +166,20 @@ _base_fault_reset_work(struct work_struct *work)
+ 		pr_err(MPT3SAS_FMT "SAS host is non-operational !!!!\n",
+ 		    ioc->name);
+ 
++		/* It may be possible that EEH recovery can resolve some of
++		 * pci bus failure issues rather removing the dead ioc function
++		 * by considering controller is in a non-operational state. So
++		 * here priority is given to the EEH recovery. If it doesn't
++		 * not resolve this issue, mpt3sas driver will consider this
++		 * controller to non-operational state and remove the dead ioc
++		 * function.
++		 */
++		if (ioc->non_operational_loop++ < 5) {
++			spin_lock_irqsave(&ioc->ioc_reset_in_progress_lock,
++							 flags);
++			goto rearm_timer;
++		}
++
+ 		/*
+ 		 * Call _scsih_flush_pending_cmds callback so that we flush all
+ 		 * pending commands back to OS. This call is required to aovid
+@@ -193,6 +207,8 @@ _base_fault_reset_work(struct work_struct *work)
+ 		return; /* don't rearm timer */
+ 	}
+ 
++	ioc->non_operational_loop = 0;
++
+ 	if ((doorbell & MPI2_IOC_STATE_MASK) != MPI2_IOC_STATE_OPERATIONAL) {
+ 		rc = mpt3sas_base_hard_reset_handler(ioc, CAN_SLEEP,
+ 		    FORCE_BIG_HAMMER);
+@@ -5162,6 +5178,7 @@ mpt3sas_base_attach(struct MPT3SAS_ADAPTER *ioc)
+ 	if (r)
+ 		goto out_free_resources;
+ 
++	ioc->non_operational_loop = 0;
+ 	return 0;
+ 
+  out_free_resources:
+diff --git a/drivers/scsi/mpt3sas/mpt3sas_base.h b/drivers/scsi/mpt3sas/mpt3sas_base.h
+index 08f46a7bb00c..a0d1f1304b44 100644
+--- a/drivers/scsi/mpt3sas/mpt3sas_base.h
++++ b/drivers/scsi/mpt3sas/mpt3sas_base.h
+@@ -845,6 +845,7 @@ struct MPT3SAS_ADAPTER {
+ 	u16		cpu_msix_table_sz;
+ 	u32		ioc_reset_count;
+ 	MPT3SAS_FLUSH_RUNNING_CMDS schedule_dead_ioc_flush_running_cmds;
++	u32             non_operational_loop;
+ 
+ 	/* internal commands, callback index */
+ 	u8		scsi_io_cb_idx;
+

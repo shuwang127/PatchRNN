@@ -1,0 +1,82 @@
+commit 25d7c363f2663fe399e623c9bd819258c9760bdc
+Author: Tony Battersby <tonyb@cybernetics.com>
+Date:   Mon Nov 12 10:00:44 2007 -0500
+
+    [SCSI] move single_lun flag from scsi_device to scsi_target
+    
+    Some SCSI tape medium changers that need the BLIST_SINGLELUN flag have
+    the medium changer at one LUN and the tape drive at a different LUN.
+    The inquiry string of the tape drive may be different from that of the
+    medium changer.  In order for single_lun to be effective, every
+    scsi_device under a given scsi_target must have it set.  This means that
+    there needs to be a blacklist entry for BOTH the medium changer AND the
+    tape drive, which is impractical because some medium changers may be
+    paired with a variety of different tape drive models.  It makes more
+    sense to put the single_lun flag in scsi_target instead of scsi_device,
+    which causes every device at a given target ID to inherit the single_lun
+    flag from one LUN.  This makes it possible to blacklist just the medium
+    changer and not the tape drive.
+    
+    Signed-off-by: Tony Battersby <tonyb@cybernetics.com>
+    Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+
+diff --git a/drivers/scsi/scsi_lib.c b/drivers/scsi/scsi_lib.c
+index 199b02452259..b0c59ae63a2f 100644
+--- a/drivers/scsi/scsi_lib.c
++++ b/drivers/scsi/scsi_lib.c
+@@ -526,7 +526,7 @@ static void scsi_run_queue(struct request_queue *q)
+ 	struct Scsi_Host *shost = sdev->host;
+ 	unsigned long flags;
+ 
+-	if (sdev->single_lun)
++	if (scsi_target(sdev)->single_lun)
+ 		scsi_single_lun_run(sdev);
+ 
+ 	spin_lock_irqsave(shost->host_lock, flags);
+@@ -1559,7 +1559,7 @@ static void scsi_request_fn(struct request_queue *q)
+ 
+ 		if (!scsi_host_queue_ready(q, shost, sdev))
+ 			goto not_ready;
+-		if (sdev->single_lun) {
++		if (scsi_target(sdev)->single_lun) {
+ 			if (scsi_target(sdev)->starget_sdev_user &&
+ 			    scsi_target(sdev)->starget_sdev_user != sdev)
+ 				goto not_ready;
+diff --git a/drivers/scsi/scsi_scan.c b/drivers/scsi/scsi_scan.c
+index 7e8b2045ccfa..ada72af0a6dd 100644
+--- a/drivers/scsi/scsi_scan.c
++++ b/drivers/scsi/scsi_scan.c
+@@ -865,7 +865,7 @@ static int scsi_add_lun(struct scsi_device *sdev, unsigned char *inq_result,
+ 		sdev->no_start_on_add = 1;
+ 
+ 	if (*bflags & BLIST_SINGLELUN)
+-		sdev->single_lun = 1;
++		scsi_target(sdev)->single_lun = 1;
+ 
+ 	sdev->use_10_for_rw = 1;
+ 
+diff --git a/include/scsi/scsi_device.h b/include/scsi/scsi_device.h
+index 6c2d80b36aa1..45bb12b54175 100644
+--- a/include/scsi/scsi_device.h
++++ b/include/scsi/scsi_device.h
+@@ -122,9 +122,6 @@ struct scsi_device {
+ 	unsigned tagged_supported:1;	/* Supports SCSI-II tagged queuing */
+ 	unsigned simple_tags:1;	/* simple queue tag messages are enabled */
+ 	unsigned ordered_tags:1;/* ordered queue tag messages are enabled */
+-	unsigned single_lun:1;	/* Indicates we should only allow I/O to
+-				 * one of the luns for the device at a 
+-				 * time. */
+ 	unsigned was_reset:1;	/* There was a bus reset on the bus for 
+ 				 * this device */
+ 	unsigned expecting_cc_ua:1; /* Expecting a CHECK_CONDITION/UNIT_ATTN
+@@ -202,6 +199,9 @@ struct scsi_target {
+ 	unsigned int		id; /* target id ... replace
+ 				     * scsi_device.id eventually */
+ 	unsigned int		create:1; /* signal that it needs to be added */
++	unsigned int		single_lun:1;	/* Indicates we should only
++						 * allow I/O to one of the luns
++						 * for the device at a time. */
+ 	unsigned int		pdt_1f_for_no_lun;	/* PDT = 0x1f */
+ 						/* means no lun present */
+ 
+

@@ -1,0 +1,102 @@
+commit 7c7e6e07e2a7c0d2d96389f4f0540e44a80ecdaa
+Author: Jeremy Fitzhardinge <jeremy@goop.org>
+Date:   Tue Jun 17 11:41:54 2008 -0700
+
+    x86: unify __set_fixmap
+    
+    In both cases, I went with the 32-bit behaviour.
+    
+    Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/arch/x86/mm/init_64.c b/arch/x86/mm/init_64.c
+index 156e6d7b0e32..e5f531949857 100644
+--- a/arch/x86/mm/init_64.c
++++ b/arch/x86/mm/init_64.c
+@@ -213,18 +213,6 @@ void __init cleanup_highmap(void)
+ 	}
+ }
+ 
+-/* NOTE: this is meant to be run only at boot */
+-void __set_fixmap(enum fixed_addresses idx, unsigned long phys, pgprot_t prot)
+-{
+-	unsigned long address = __fix_to_virt(idx);
+-
+-	if (idx >= __end_of_fixed_addresses) {
+-		printk(KERN_ERR "Invalid __set_fixmap\n");
+-		return;
+-	}
+-	set_pte_phys(address, phys, prot);
+-}
+-
+ static unsigned long __initdata table_start;
+ static unsigned long __meminitdata table_end;
+ 
+diff --git a/arch/x86/mm/pgtable.c b/arch/x86/mm/pgtable.c
+index 50159764f694..3ebebe480b53 100644
+--- a/arch/x86/mm/pgtable.c
++++ b/arch/x86/mm/pgtable.c
+@@ -274,3 +274,17 @@ int ptep_clear_flush_young(struct vm_area_struct *vma,
+ 
+ 	return young;
+ }
++
++int fixmaps_set;
++
++void __set_fixmap (enum fixed_addresses idx, unsigned long phys, pgprot_t flags)
++{
++	unsigned long address = __fix_to_virt(idx);
++
++	if (idx >= __end_of_fixed_addresses) {
++		BUG();
++		return;
++	}
++	set_pte_pfn(address, phys >> PAGE_SHIFT, flags);
++	fixmaps_set++;
++}
+diff --git a/arch/x86/mm/pgtable_32.c b/arch/x86/mm/pgtable_32.c
+index 369cf065b6a4..3f97c3c87288 100644
+--- a/arch/x86/mm/pgtable_32.c
++++ b/arch/x86/mm/pgtable_32.c
+@@ -145,18 +145,6 @@ static int fixmaps;
+ unsigned long __FIXADDR_TOP = 0xfffff000;
+ EXPORT_SYMBOL(__FIXADDR_TOP);
+ 
+-void __set_fixmap (enum fixed_addresses idx, unsigned long phys, pgprot_t flags)
+-{
+-	unsigned long address = __fix_to_virt(idx);
+-
+-	if (idx >= __end_of_fixed_addresses) {
+-		BUG();
+-		return;
+-	}
+-	set_pte_pfn(address, phys >> PAGE_SHIFT, flags);
+-	fixmaps++;
+-}
+-
+ /**
+  * reserve_top_address - reserves a hole in the top of kernel address space
+  * @reserve - size of hole to reserve
+@@ -166,7 +154,7 @@ void __set_fixmap (enum fixed_addresses idx, unsigned long phys, pgprot_t flags)
+  */
+ void reserve_top_address(unsigned long reserve)
+ {
+-	BUG_ON(fixmaps > 0);
++	BUG_ON(fixmaps_set > 0);
+ 	printk(KERN_INFO "Reserving virtual address space above 0x%08x\n",
+ 	       (int)-reserve);
+ 	__FIXADDR_TOP = -reserve - PAGE_SIZE;
+diff --git a/include/asm-x86/fixmap.h b/include/asm-x86/fixmap.h
+index 01b0f98f9929..934d6b49b530 100644
+--- a/include/asm-x86/fixmap.h
++++ b/include/asm-x86/fixmap.h
+@@ -7,6 +7,8 @@
+ # include "fixmap_64.h"
+ #endif
+ 
++extern int fixmaps_set;
++
+ extern void __set_fixmap(enum fixed_addresses idx,
+ 			 unsigned long phys, pgprot_t flags);
+ #define set_fixmap(idx, phys)				\
+

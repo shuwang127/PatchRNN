@@ -1,0 +1,146 @@
+commit a58614391d52ef8240071c1db5db6aceaf66a3ea
+Author: Peter Xu <peterx@redhat.com>
+Date:   Thu Jul 14 13:56:18 2016 +0800
+
+    intel_iommu: define interrupt remap table addr register
+    
+    Defined Interrupt Remap Table Address register to store IR table
+    pointer. Also, do proper handling on global command register writes to
+    store table pointer and its size.
+    
+    One more debug flag "DEBUG_IR" is added for interrupt remapping.
+    
+    Signed-off-by: Peter Xu <peterx@redhat.com>
+    Reviewed-by: Michael S. Tsirkin <mst@redhat.com>
+    Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+
+diff --git a/hw/i386/intel_iommu.c b/hw/i386/intel_iommu.c
+index 9c7a08424f..bf74533240 100644
+--- a/hw/i386/intel_iommu.c
++++ b/hw/i386/intel_iommu.c
+@@ -33,7 +33,7 @@
+ #ifdef DEBUG_INTEL_IOMMU
+ enum {
+     DEBUG_GENERAL, DEBUG_CSR, DEBUG_INV, DEBUG_MMU, DEBUG_FLOG,
+-    DEBUG_CACHE,
++    DEBUG_CACHE, DEBUG_IR,
+ };
+ #define VTD_DBGBIT(x)   (1 << DEBUG_##x)
+ static int vtd_dbgflags = VTD_DBGBIT(GENERAL) | VTD_DBGBIT(CSR);
+@@ -903,6 +903,19 @@ static void vtd_root_table_setup(IntelIOMMUState *s)
+                 (s->root_extended ? "(extended)" : ""));
+ }
+ 
++static void vtd_interrupt_remap_table_setup(IntelIOMMUState *s)
++{
++    uint64_t value = 0;
++    value = vtd_get_quad_raw(s, DMAR_IRTA_REG);
++    s->intr_size = 1UL << ((value & VTD_IRTA_SIZE_MASK) + 1);
++    s->intr_root = value & VTD_IRTA_ADDR_MASK;
++
++    /* TODO: invalidate interrupt entry cache */
++
++    VTD_DPRINTF(CSR, "int remap table addr 0x%"PRIx64 " size %"PRIu32,
++                s->intr_root, s->intr_size);
++}
++
+ static void vtd_context_global_invalidate(IntelIOMMUState *s)
+ {
+     s->context_cache_gen++;
+@@ -1141,6 +1154,16 @@ static void vtd_handle_gcmd_srtp(IntelIOMMUState *s)
+     vtd_set_clear_mask_long(s, DMAR_GSTS_REG, 0, VTD_GSTS_RTPS);
+ }
+ 
++/* Set Interrupt Remap Table Pointer */
++static void vtd_handle_gcmd_sirtp(IntelIOMMUState *s)
++{
++    VTD_DPRINTF(CSR, "set Interrupt Remap Table Pointer");
++
++    vtd_interrupt_remap_table_setup(s);
++    /* Ok - report back to driver */
++    vtd_set_clear_mask_long(s, DMAR_GSTS_REG, 0, VTD_GSTS_IRTPS);
++}
++
+ /* Handle Translation Enable/Disable */
+ static void vtd_handle_gcmd_te(IntelIOMMUState *s, bool en)
+ {
+@@ -1180,6 +1203,10 @@ static void vtd_handle_gcmd_write(IntelIOMMUState *s)
+         /* Queued Invalidation Enable */
+         vtd_handle_gcmd_qie(s, val & VTD_GCMD_QIE);
+     }
++    if (val & VTD_GCMD_SIRTP) {
++        /* Set/update the interrupt remapping root-table pointer */
++        vtd_handle_gcmd_sirtp(s);
++    }
+ }
+ 
+ /* Handle write to Context Command Register */
+@@ -1841,6 +1868,23 @@ static void vtd_mem_write(void *opaque, hwaddr addr,
+         vtd_update_fsts_ppf(s);
+         break;
+ 
++    case DMAR_IRTA_REG:
++        VTD_DPRINTF(IR, "DMAR_IRTA_REG write addr 0x%"PRIx64
++                    ", size %d, val 0x%"PRIx64, addr, size, val);
++        if (size == 4) {
++            vtd_set_long(s, addr, val);
++        } else {
++            vtd_set_quad(s, addr, val);
++        }
++        break;
++
++    case DMAR_IRTA_REG_HI:
++        VTD_DPRINTF(IR, "DMAR_IRTA_REG_HI write addr 0x%"PRIx64
++                    ", size %d, val 0x%"PRIx64, addr, size, val);
++        assert(size == 4);
++        vtd_set_long(s, addr, val);
++        break;
++
+     default:
+         VTD_DPRINTF(GENERAL, "error: unhandled reg write addr 0x%"PRIx64
+                     ", size %d, val 0x%"PRIx64, addr, size, val);
+@@ -2032,6 +2076,12 @@ static void vtd_init(IntelIOMMUState *s)
+     /* Fault Recording Registers, 128-bit */
+     vtd_define_quad(s, DMAR_FRCD_REG_0_0, 0, 0, 0);
+     vtd_define_quad(s, DMAR_FRCD_REG_0_2, 0, 0, 0x8000000000000000ULL);
++
++    /*
++     * Interrupt remapping registers, not support extended interrupt
++     * mode for now.
++     */
++    vtd_define_quad(s, DMAR_IRTA_REG, 0, 0xfffffffffffff00fULL, 0);
+ }
+ 
+ /* Should not reset address_spaces when reset because devices will still use
+diff --git a/hw/i386/intel_iommu_internal.h b/hw/i386/intel_iommu_internal.h
+index 5b98a1143c..309833f99a 100644
+--- a/hw/i386/intel_iommu_internal.h
++++ b/hw/i386/intel_iommu_internal.h
+@@ -172,6 +172,10 @@
+ #define VTD_RTADDR_RTT              (1ULL << 11)
+ #define VTD_RTADDR_ADDR_MASK        (VTD_HAW_MASK ^ 0xfffULL)
+ 
++/* IRTA_REG */
++#define VTD_IRTA_ADDR_MASK          (VTD_HAW_MASK ^ 0xfffULL)
++#define VTD_IRTA_SIZE_MASK          (0xfULL)
++
+ /* ECAP_REG */
+ /* (offset >> 4) << 8 */
+ #define VTD_ECAP_IRO                (DMAR_IOTLB_REG_OFFSET << 4)
+diff --git a/include/hw/i386/intel_iommu.h b/include/hw/i386/intel_iommu.h
+index 741242e1e6..ce515c42f2 100644
+--- a/include/hw/i386/intel_iommu.h
++++ b/include/hw/i386/intel_iommu.h
+@@ -125,6 +125,11 @@ struct IntelIOMMUState {
+     MemoryRegionIOMMUOps iommu_ops;
+     GHashTable *vtd_as_by_busptr;   /* VTDBus objects indexed by PCIBus* reference */
+     VTDBus *vtd_as_by_bus_num[VTD_PCI_BUS_MAX]; /* VTDBus objects indexed by bus number */
++
++    /* interrupt remapping */
++    bool intr_enabled;              /* Whether guest enabled IR */
++    dma_addr_t intr_root;           /* Interrupt remapping table pointer */
++    uint32_t intr_size;             /* Number of IR table entries */
+ };
+ 
+ /* Find the VTD Address space associated with the given bus pointer,
+

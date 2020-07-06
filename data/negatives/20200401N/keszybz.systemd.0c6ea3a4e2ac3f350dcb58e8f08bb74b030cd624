@@ -1,0 +1,240 @@
+commit 0c6ea3a4e2ac3f350dcb58e8f08bb74b030cd624
+Author: Zbigniew Jędrzejewski-Szmek <zbyszek@in.waw.pl>
+Date:   Sat Jul 26 14:47:31 2014 -0400
+
+    Add utility function to append root to path
+
+diff --git a/src/journal/journalctl.c b/src/journal/journalctl.c
+index 5a59a3ac8..78495f8c9 100644
+--- a/src/journal/journalctl.c
++++ b/src/journal/journalctl.c
+@@ -1614,16 +1614,12 @@ int main(int argc, char *argv[]) {
+             arg_action == ACTION_LIST_CATALOG ||
+             arg_action == ACTION_DUMP_CATALOG) {
+ 
+-                const char* database = CATALOG_DATABASE;
+-                _cleanup_free_ char *copy = NULL;
+-                if (arg_root) {
+-                        copy = strjoin(arg_root, "/", CATALOG_DATABASE, NULL);
+-                        if (!copy) {
+-                                r = log_oom();
+-                                goto finish;
+-                        }
+-                        path_kill_slashes(copy);
+-                        database = copy;
++                _cleanup_free_ char *database;
++
++                database = path_join(arg_root, CATALOG_DATABASE, NULL);
++                if (!database) {
++                        r = log_oom();
++                        goto finish;
+                 }
+ 
+                 if (arg_action == ACTION_UPDATE_CATALOG) {
+diff --git a/src/shared/install.c b/src/shared/install.c
+index e957c3334..cc61c01e2 100644
+--- a/src/shared/install.c
++++ b/src/shared/install.c
+@@ -88,18 +88,10 @@ static int get_config_path(UnitFileScope scope, bool runtime, const char *root_d
+ 
+         case UNIT_FILE_SYSTEM:
+ 
+-                if (root_dir && runtime) {
+-                        if (asprintf(&p, "%s/run/systemd/system", root_dir) < 0)
+-                                return -ENOMEM;
+-                } else if (runtime)
+-                        p = strdup("/run/systemd/system");
+-                else if (root_dir) {
+-                        if (asprintf(&p, "%s/%s", root_dir,
+-                                     SYSTEM_CONFIG_UNIT_PATH) < 0)
+-                                return -ENOMEM;
+-                } else
+-                        p = strdup(SYSTEM_CONFIG_UNIT_PATH);
+-
++                if (runtime)
++                        p = path_join(root_dir, "/run/systemd/system", NULL);
++                else
++                        p = path_join(root_dir, SYSTEM_CONFIG_UNIT_PATH, NULL);
+                 break;
+ 
+         case UNIT_FILE_GLOBAL:
+@@ -1664,11 +1656,7 @@ int unit_file_get_default(
+                 _cleanup_free_ char *path = NULL, *tmp = NULL;
+                 char *n;
+ 
+-                if (isempty(root_dir))
+-                        path = strappend(*p, "/" SPECIAL_DEFAULT_TARGET);
+-                else
+-                        path = strjoin(root_dir, "/", *p, "/" SPECIAL_DEFAULT_TARGET, NULL);
+-
++                path = path_join(root_dir, *p, SPECIAL_DEFAULT_TARGET);
+                 if (!path)
+                         return -ENOMEM;
+ 
+@@ -1725,15 +1713,12 @@ UnitFileState unit_file_get_state(
+                 free(path);
+                 path = NULL;
+ 
+-                if (root_dir)
+-                        asprintf(&path, "%s/%s/%s", root_dir, *i, name);
+-                else
+-                        asprintf(&path, "%s/%s", *i, name);
++                path = path_join(root_dir, *i, name);
+                 if (!path)
+                         return -ENOMEM;
+ 
+                 if (root_dir)
+-                        partial = path + strlen(root_dir) + 1;
++                        partial = path + strlen(root_dir);
+                 else
+                         partial = path;
+ 
+@@ -1960,17 +1945,11 @@ int unit_file_preset_all(
+ 
+         STRV_FOREACH(i, paths.unit_path) {
+                 _cleanup_closedir_ DIR *d = NULL;
+-                _cleanup_free_ char *buf = NULL;
+-                const char *units_dir;
+-
+-                if (!isempty(root_dir)) {
+-                        buf = strjoin(root_dir, "/", *i, NULL);
+-                        if (!buf)
+-                                return -ENOMEM;
++                _cleanup_free_ char *units_dir;
+ 
+-                        units_dir = buf;
+-                } else
+-                        units_dir = *i;
++                units_dir = path_join(root_dir, *i, NULL);
++                if (!units_dir)
++                        return -ENOMEM;
+ 
+                 d = opendir(units_dir);
+                 if (!d) {
+@@ -2069,17 +2048,11 @@ int unit_file_get_list(
+ 
+         STRV_FOREACH(i, paths.unit_path) {
+                 _cleanup_closedir_ DIR *d = NULL;
+-                _cleanup_free_ char *buf = NULL;
+-                const char *units_dir;
++                _cleanup_free_ char *units_dir;
+ 
+-                if (!isempty(root_dir)) {
+-                        buf = strjoin(root_dir, "/", *i, NULL);
+-                        if (!buf)
+-                                return -ENOMEM;
+-
+-                        units_dir = buf;
+-                } else
+-                        units_dir = *i;
++                units_dir = path_join(root_dir, *i, NULL);
++                if (!units_dir)
++                        return -ENOMEM;
+ 
+                 d = opendir(units_dir);
+                 if (!d) {
+diff --git a/src/shared/path-util.c b/src/shared/path-util.c
+index 6b13f0254..5bc5012fe 100644
+--- a/src/shared/path-util.c
++++ b/src/shared/path-util.c
+@@ -435,6 +435,22 @@ bool path_equal(const char *a, const char *b) {
+         }
+ }
+ 
++char* path_join(const char *root, const char *path, const char *rest) {
++        assert(path);
++
++        if (!isempty(root))
++                return strjoin(root, "/",
++                               path[0] == '/' ? path+1 : path,
++                               rest ? "/" : NULL,
++                               rest && rest[0] == '/' ? rest+1 : rest,
++                               NULL);
++        else
++                return strjoin(path,
++                               rest ? "/" : NULL,
++                               rest && rest[0] == '/' ? rest+1 : rest,
++                               NULL);
++}
++
+ int path_is_mount_point(const char *t, bool allow_symlink) {
+ 
+         union file_handle_union h = {
+diff --git a/src/shared/path-util.h b/src/shared/path-util.h
+index 976d2b26d..d85291bb4 100644
+--- a/src/shared/path-util.h
++++ b/src/shared/path-util.h
+@@ -45,6 +45,7 @@ int path_make_relative(const char *from_dir, const char *to_path, char **_r);
+ char* path_kill_slashes(char *path);
+ char* path_startswith(const char *path, const char *prefix) _pure_;
+ bool path_equal(const char *a, const char *b) _pure_;
++char* path_join(const char *root, const char *path, const char *rest);
+ 
+ char** path_strv_make_absolute_cwd(char **l);
+ char** path_strv_resolve(char **l, const char *prefix);
+diff --git a/src/systemctl/systemctl.c b/src/systemctl/systemctl.c
+index 063119050..599d59074 100644
+--- a/src/systemctl/systemctl.c
++++ b/src/systemctl/systemctl.c
+@@ -4998,11 +4998,8 @@ static int enable_sysv_units(const char *verb, char **args) {
+                 STRV_FOREACH(k, paths.unit_path) {
+                         _cleanup_free_ char *path = NULL;
+ 
+-                        if (!isempty(arg_root))
+-                                j = asprintf(&path, "%s/%s/%s", arg_root, *k, name);
+-                        else
+-                                j = asprintf(&path, "%s/%s", *k, name);
+-                        if (j < 0)
++                        path = path_join(arg_root, *k, name);
++                        if (!path)
+                                 return log_oom();
+ 
+                         found_native = access(path, F_OK) >= 0;
+@@ -5013,11 +5010,8 @@ static int enable_sysv_units(const char *verb, char **args) {
+                 if (found_native)
+                         continue;
+ 
+-                if (!isempty(arg_root))
+-                        j = asprintf(&p, "%s/" SYSTEM_SYSVINIT_PATH "/%s", arg_root, name);
+-                else
+-                        j = asprintf(&p, SYSTEM_SYSVINIT_PATH "/%s", name);
+-                if (j < 0)
++                p = path_join(arg_root, SYSTEM_SYSVINIT_PATH, name);
++                if (!p)
+                         return log_oom();
+ 
+                 p[strlen(p) - strlen(".service")] = 0;
+diff --git a/src/test/test-path-util.c b/src/test/test-path-util.c
+index 19462c357..c8dcd8539 100644
+--- a/src/test/test-path-util.c
++++ b/src/test/test-path-util.c
+@@ -162,6 +162,20 @@ static void test_prefixes(void) {
+         }
+ }
+ 
++static void test_path_join(void) {
++        assert_se(streq(path_join("/root", "/a/b", "/c"), "/root/a/b/c"));
++        assert_se(streq(path_join("/root", "a/b", "c"), "/root/a/b/c"));
++        assert_se(streq(path_join("/root", "/a/b", "c"), "/root/a/b/c"));
++        assert_se(streq(path_join("/root", "/", "c"), "/root//c"));
++        assert_se(streq(path_join("/root", "/", NULL), "/root/"));
++
++        assert_se(streq(path_join(NULL, "/a/b", "/c"), "/a/b/c"));
++        assert_se(streq(path_join(NULL, "a/b", "c"), "a/b/c"));
++        assert_se(streq(path_join(NULL, "/a/b", "c"), "/a/b/c"));
++        assert_se(streq(path_join(NULL, "/", "c"), "//c"));
++        assert_se(streq(path_join(NULL, "/", NULL), "/"));
++}
++
+ static void test_fsck_exists(void) {
+         /* Ensure we use a sane default for PATH. */
+         unsetenv("PATH");
+@@ -225,6 +239,7 @@ int main(int argc, char **argv) {
+         test_path();
+         test_find_binary(argv[0]);
+         test_prefixes();
++        test_path_join();
+         test_fsck_exists();
+         test_make_relative();
+         test_strv_resolve();
+

@@ -1,0 +1,64 @@
+commit fd5723b385557bc77b93dfe5ab591813407686c0
+Author: Wu Fengguang <fengguang.wu@intel.com>
+Date:   Wed Sep 29 12:18:41 2010 +0800
+
+    pulse-audio: fix bug on updating rpos
+    
+    Fix a rpos coordination bug between qpa_run_out() and qpa_thread_out(),
+    which shows up as playback noises.
+    
+            qpa_run_out()
+                            qpa_thread_out loop N critical section 1
+            qpa_run_out()   qpa_thread_out loop N doing pa_simple_write()
+            qpa_run_out()   qpa_thread_out loop N doing pa_simple_write()
+                            qpa_thread_out loop N critical section 2
+                            qpa_thread_out loop N+1 critical section 1
+            qpa_run_out()   qpa_thread_out loop N+1 doing pa_simple_write()
+    
+    In the above scheme, "qpa_thread_out loop N+1 critical section 1" will
+    get the same rpos as the one used by "qpa_thread_out loop N critical
+    section 1". So it will be reading dead samples from the old rpos.
+    
+    The rpos can only be updated back to qpa_thread_out when there is a
+    qpa_run_out() run between two qpa_thread_out loops.
+    
+    normal sequence:
+            qpa_thread_out:
+                            hw->rpos (X0) => local rpos => pa->rpos (X1)
+            qpa_run_out:
+                            pa->rpos (X1) => hw->rpos (X1)
+            qpa_thread_out:
+                            hw->rpos (X1) => local rpos => pa->rpos (X2)
+    
+    buggy sequence:
+            qpa_thread_out:
+                            hw->rpos (X0) => local rpos => pa->rpos (X1)
+            qpa_thread_out:
+                            hw->rpos (X0) => local rpos => pa->rpos (X1')
+    
+    Obviously qpa_run_out() shall be called at least once between any two
+    qpa_thread_out loops (after pa->rpos is set), in order for the new
+    qpa_thread_out loop to see the updated rpos.
+    
+    Setting pa->live to 0 does the trick. The next loop will have to wait
+    for one qpa_run_out() invocation in order to get a non-zero pa->live
+    and proceed.
+    
+    Signed-off-by: malc <av1474@comtv.ru>
+    Signed-off-by: Wu Fengguang <fengguang.wu@intel.com>
+
+diff --git a/audio/paaudio.c b/audio/paaudio.c
+index 9118ece40c..ff71dac2a5 100644
+--- a/audio/paaudio.c
++++ b/audio/paaudio.c
+@@ -110,8 +110,8 @@ static void *qpa_thread_out (void *arg)
+             return NULL;
+         }
+ 
++        pa->live = 0;
+         pa->rpos = rpos;
+-        pa->live -= decr;
+         pa->decr += decr;
+     }
+ 
+

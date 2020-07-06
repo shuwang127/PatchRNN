@@ -1,0 +1,83 @@
+commit 34e0a6c6f61c626bb4cac3d6d15e03f9779d1887
+Author: Thilo Schulz <arny@ats.s.bawue.de>
+Date:   Wed Feb 23 18:09:17 2011 +0000
+
+    Make NET_Sleep wait 1ms less than requested, then busy-wait the last ms for better timeout precision.
+
+diff --git a/code/qcommon/common.c b/code/qcommon/common.c
+index a0fcc6c6..d397a1cf 100644
+--- a/code/qcommon/common.c
++++ b/code/qcommon/common.c
+@@ -2907,7 +2907,7 @@ void Com_Frame( void ) {
+ 
+ 	int		msec, minMsec;
+ 	int		timeVal;
+-	static int	lastTime = 0;
++	static int	lastTime = 0, bias = 0;
+  
+ 	int		timeBeforeFirstEvents;
+ 	int		timeBeforeServer;
+@@ -2953,18 +2953,14 @@ void Com_Frame( void ) {
+ 				minMsec = 1;
+ 			
+ 			timeVal = com_frameTime - lastTime;
+-			if(timeVal > minMsec)
+-			{
+-				// Adjust minMsec if previous frame took too long to render so
+-				// that framerate is stable at the requested value.
+-				timeVal -= minMsec;
+-
+-				if(timeVal > minMsec)
+-					minMsec = 0;
+-				else
+-					minMsec -= timeVal;
+-			}
++			bias += timeVal - minMsec;
++			
++			if(bias > minMsec)
++				bias = minMsec;
+ 			
++			// Adjust minMsec if previous frame took too long to render so
++			// that framerate is stable at the requested value.
++			minMsec -= bias;
+ 		}
+ 	}
+ 	else
+@@ -2973,10 +2969,11 @@ void Com_Frame( void ) {
+ 	timeVal = 0;
+ 	do
+ 	{
+-		if(com_busyWait->integer)
++		// Busy sleep the last millisecond for better timeout precision
++		if(com_busyWait->integer || timeVal < 2)
+ 			NET_Sleep(0);
+ 		else
+-			NET_Sleep(timeVal);
++			NET_Sleep(timeVal - 1);
+ 
+ 		msec = Sys_Milliseconds() - com_frameTime;
+ 		
+diff --git a/code/qcommon/net_ip.c b/code/qcommon/net_ip.c
+index fbb46486..ce7a3252 100644
+--- a/code/qcommon/net_ip.c
++++ b/code/qcommon/net_ip.c
+@@ -1707,18 +1707,9 @@ void NET_Sleep(int msec)
+ 	if(highestfd < 0)
+ 	{
+ 		// windows ain't happy when select is called without valid FDs
+-	
+-		if(msec > 0)
+-			msec--;
+-		
+ 		SleepEx(msec, 0);
+ 		return;
+ 	}
+-
+-	#define TVW32_BIAS 999
+-	// windows adds a whole millisecond of latency, otherwise granularity seems to be fine.
+-	if(timeout.tv_usec > TVW32_BIAS)
+-		timeout.tv_usec -= TVW32_BIAS;
+ #endif
+ 
+ 	retval = select(highestfd + 1, &fdr, NULL, NULL, &timeout);
+

@@ -1,0 +1,83 @@
+commit 3d61f75eefedf75914ab4453c67aaa2ee64bcf93
+Author: Hisashi Hifumi <hifumi.hisashi@oss.ntt.co.jp>
+Date:   Mon Apr 28 02:16:05 2008 -0700
+
+    ext3: fdatasync should skip metadata writeout when overwriting
+    
+    Currently fdatasync is identical to fsync in ext3.
+    
+    I think fdatasync should skip journal flush in data=ordered and
+    data=writeback mode when it overwrites to already-instantiated blocks on
+    HDD.  When I_DIRTY_DATASYNC flag is not set, fdatasync should skip journal
+    writeout because this indicates only atime or/and mtime updates.
+    
+    Following patch is the same approach of ext2's fsync code(ext2_sync_file).
+    
+    I did a performance test using the sysbench.
+    
+    #sysbench --num-threads=128 --max-requests=50000 --test=fileio --file-total-size=128G
+    --file-test-mode=rndwr --file-fsync-mode=fdatasync run
+    
+    The result on ext3 was:
+    
+            -2.6.24
+            Operations performed:  0 Read, 50080 Write, 59600 Other = 109680 Total
+            Read 0b  Written 782.5Mb  Total transferred 782.5Mb  (12.116Mb/sec)
+              775.45 Requests/sec executed
+    
+            Test execution summary:
+                total time:                          64.5814s
+                total number of events:              50080
+                total time taken by event execution: 3713.9836
+                per-request statistics:
+                     min:                            0.0000s
+                     avg:                            0.0742s
+                     max:                            0.9375s
+                     approx.  95 percentile:         0.2901s
+    
+            Threads fairness:
+                events (avg/stddev):           391.2500/23.26
+                execution time (avg/stddev):   29.0155/1.99
+    
+            -2.6.24-patched
+            Operations performed:  0 Read, 50009 Write, 61596 Other = 111605 Total
+            Read 0b  Written 781.39Mb  Total transferred 781.39Mb  (16.419Mb/sec)
+            1050.83 Requests/sec executed
+    
+            Test execution summary:
+                total time:                          47.5900s
+                total number of events:              50009
+                total time taken by event execution: 2934.5768
+                per-request statistics:
+                     min:                            0.0000s
+                     avg:                            0.0587s
+                     max:                            0.8938s
+                     approx.  95 percentile:         0.1993s
+    
+            Threads fairness:
+                events (avg/stddev):           390.6953/22.64
+                execution time (avg/stddev):   22.9264/1.17
+    
+    Filesystem I/O throughput was improved.
+    
+    Signed-off-by :Hisashi Hifumi <hifumi.hisashi@oss.ntt.co.jp>
+    Acked-by: Jan Kara <jack@suse.cz>
+    Cc: <linux-ext4@vger.kernel.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/ext3/fsync.c b/fs/ext3/fsync.c
+index a588e23841d4..d33634119e17 100644
+--- a/fs/ext3/fsync.c
++++ b/fs/ext3/fsync.c
+@@ -72,6 +72,9 @@ int ext3_sync_file(struct file * file, struct dentry *dentry, int datasync)
+ 		goto out;
+ 	}
+ 
++	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
++		goto out;
++
+ 	/*
+ 	 * The VFS has written the file data.  If the inode is unaltered
+ 	 * then we need not start a commit.
+

@@ -1,0 +1,88 @@
+commit 10ab3cd0360c62665bda113cde9e7c81714855ba
+Author: ptaulborg <njaguar@gmail.com>
+Date:   Tue Aug 21 10:35:29 2018 -0500
+
+    Epoll Bug Fixes - Timer Resolution Accuracy Improved (#781)
+    
+    * Fixed two major bugs with Epoll timers.
+    1) Rewrote the timer check in Loop::run to reset the next epoll_wait() epollTimeout/delay if there was socket activity but no executed timer. This fixes timer resolution to be very accurate, regardless of i/o activity.
+    2) Critical bug fix where if while executing a timer callback, the callback stop()'d a different timer, the loop code would "continue" thinking the current timer was stopped. This was because it uses a Loop:: boolean that is global to that context. Added checking to make sure the current processing timer was stopped. The result of this bug would be that the timer would execute a second time immediately.
+    
+    * removed commented code
+    
+    * removed another extra line
+    
+    * Some style fixes
+
+diff --git a/src/Epoll.cpp b/src/Epoll.cpp
+index 62b298e..adac5bd 100644
+--- a/src/Epoll.cpp
++++ b/src/Epoll.cpp
+@@ -35,20 +35,28 @@ void Loop::doEpoll(int epollTimeout) {
+         callbacks[poll->state.cbIndex](poll, status, readyEvents[i].events);
+     }
+ 
+-    while (timers.size() && timers[0].timepoint < timepoint) {
+-        Timer *timer = timers[0].timer;
+-        cancelledLastTimer = false;
+-        timers[0].cb(timers[0].timer);
+-
+-        if (cancelledLastTimer) {
+-            continue;
+-        }
+-
+-        int repeat = timers[0].nextDelay;
+-        auto cb = timers[0].cb;
+-        timers.erase(timers.begin());
+-        if (repeat) {
+-            timer->start(cb, repeat, repeat);
++    if (timers.size()) {
++        if (timers[0].timepoint < timepoint) {
++            do {
++                Timer *timer = timers[0].timer;
++                processingTimer = timer; // processing this timer
++                cancelledLastTimer = false;
++                timers[0].cb(timers[0].timer);
++
++                if (cancelledLastTimer) {
++                    continue;
++                }
++
++                int repeat = timers[0].nextDelay;
++                auto cb = timers[0].cb;
++                timers.erase(timers.begin());
++                if (repeat) {
++                    timer->start(cb, repeat, repeat);
++                }
++            } while (timers.size() && timers[0].timepoint < timepoint);
++
++        } else { // we have a timer but it did not process, so update our next delay
++            delay = std::max<int>(std::chrono::duration_cast<std::chrono::milliseconds>(timers[0].timepoint - timepoint).count(), 0);
+         }
+     }
+ 
+diff --git a/src/Epoll.h b/src/Epoll.h
+index 2d69a12..1ec9bba 100644
+--- a/src/Epoll.h
++++ b/src/Epoll.h
+@@ -34,6 +34,7 @@ struct Loop {
+     int epfd;
+     int numPolls = 0;
+     bool cancelledLastTimer;
++    Timer *processingTimer = nullptr; // the timer we're currently processing a callback for
+     int delay = -1;  // delay to next timer expiry, or -1 if no timers pending
+     epoll_event readyEvents[1024];
+     std::chrono::system_clock::time_point timepoint;
+@@ -113,7 +114,10 @@ struct Timer {
+             }
+             pos++;
+         }
+-        loop->cancelledLastTimer = true;
++
++        if(loop->processingTimer == this) {
++            loop->cancelledLastTimer = true;
++        }
+ 
+         loop->delay = -1;
+         if (loop->timers.size()) {
+

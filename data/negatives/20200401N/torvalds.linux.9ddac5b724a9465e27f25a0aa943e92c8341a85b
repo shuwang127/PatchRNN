@@ -1,0 +1,77 @@
+commit 9ddac5b724a9465e27f25a0aa943e92c8341a85b
+Author: Juergen Gross <jgross@suse.com>
+Date:   Fri Jul 17 06:51:29 2015 +0200
+
+    xen: find unused contiguous memory area
+    
+    For being able to relocate pre-allocated data areas like initrd or
+    p2m list it is mandatory to find a contiguous memory area which is
+    not yet in use and doesn't conflict with the memory map we want to
+    be in effect.
+    
+    In case such an area is found reserve it at once as this will be
+    required to be done in any case.
+    
+    Signed-off-by: Juergen Gross <jgross@suse.com>
+    Reviewed-by: David Vrabel <david.vrabel@citrix.com>
+    Acked-by: Konrad Rzeszutek Wilk <Konrad.wilk@oracle.com>
+    Signed-off-by: David Vrabel <david.vrabel@citrix.com>
+
+diff --git a/arch/x86/xen/setup.c b/arch/x86/xen/setup.c
+index 99ef82cc4edc..973d29441f96 100644
+--- a/arch/x86/xen/setup.c
++++ b/arch/x86/xen/setup.c
+@@ -596,6 +596,40 @@ bool __init xen_is_e820_reserved(phys_addr_t start, phys_addr_t size)
+ 	return true;
+ }
+ 
++/*
++ * Find a free area in physical memory not yet reserved and compliant with
++ * E820 map.
++ * Used to relocate pre-allocated areas like initrd or p2m list which are in
++ * conflict with the to be used E820 map.
++ * In case no area is found, return 0. Otherwise return the physical address
++ * of the area which is already reserved for convenience.
++ */
++phys_addr_t __init xen_find_free_area(phys_addr_t size)
++{
++	unsigned mapcnt;
++	phys_addr_t addr, start;
++	struct e820entry *entry = xen_e820_map;
++
++	for (mapcnt = 0; mapcnt < xen_e820_map_entries; mapcnt++, entry++) {
++		if (entry->type != E820_RAM || entry->size < size)
++			continue;
++		start = entry->addr;
++		for (addr = start; addr < start + size; addr += PAGE_SIZE) {
++			if (!memblock_is_reserved(addr))
++				continue;
++			start = addr + PAGE_SIZE;
++			if (start + size > entry->addr + entry->size)
++				break;
++		}
++		if (addr >= start + size) {
++			memblock_reserve(start, size);
++			return start;
++		}
++	}
++
++	return 0;
++}
++
+ /*
+  * Reserve Xen mfn_list.
+  * See comment above "struct start_info" in <xen/interface/xen.h>
+diff --git a/arch/x86/xen/xen-ops.h b/arch/x86/xen/xen-ops.h
+index a4cbb76642d8..c4c3c23597a5 100644
+--- a/arch/x86/xen/xen-ops.h
++++ b/arch/x86/xen/xen-ops.h
+@@ -43,6 +43,7 @@ bool __init xen_is_e820_reserved(phys_addr_t start, phys_addr_t size);
+ unsigned long __ref xen_chk_extra_mem(unsigned long pfn);
+ void __init xen_inv_extra_mem(void);
+ void __init xen_remap_memory(void);
++phys_addr_t __init xen_find_free_area(phys_addr_t size);
+ char * __init xen_memory_setup(void);
+ char * xen_auto_xlated_memory_setup(void);
+ void __init xen_arch_setup(void);
+

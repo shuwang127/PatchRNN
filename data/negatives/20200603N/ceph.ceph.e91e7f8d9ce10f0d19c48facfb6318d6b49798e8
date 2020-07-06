@@ -1,0 +1,78 @@
+commit e91e7f8d9ce10f0d19c48facfb6318d6b49798e8
+Author: Jason Dillaman <dillaman@redhat.com>
+Date:   Wed Apr 27 15:45:25 2016 -0400
+
+    librbd: avoid second close attempt of invalid parent image
+    
+    Fixes: http://tracker.ceph.com/issues/15574
+    Signed-off-by: Jason Dillaman <dillaman@redhat.com>
+
+diff --git a/src/librbd/image/RefreshParentRequest.cc b/src/librbd/image/RefreshParentRequest.cc
+index f9ce4f18a8..a44124f391 100644
+--- a/src/librbd/image/RefreshParentRequest.cc
++++ b/src/librbd/image/RefreshParentRequest.cc
+@@ -117,8 +117,9 @@ void RefreshParentRequest<I>::send_open_parent() {
+   }
+ 
+   using klass = RefreshParentRequest<I>;
+-  Context *ctx = create_context_callback<
+-    klass, &klass::handle_open_parent, false>(this);
++  Context *ctx = create_async_context_callback(
++    m_child_image_ctx, create_context_callback<
++      klass, &klass::handle_open_parent, false>(this));
+   OpenRequest<I> *req = OpenRequest<I>::create(m_parent_image_ctx, ctx);
+   req->send();
+ }
+@@ -132,8 +133,12 @@ Context *RefreshParentRequest<I>::handle_open_parent(int *result) {
+   if (*result < 0) {
+     lderr(cct) << "failed to open parent image: " << cpp_strerror(*result)
+                << dendl;
+-    send_close_parent();
+-    return nullptr;
++
++    // image already closed by open state machine
++    delete m_parent_image_ctx;
++    m_parent_image_ctx = nullptr;
++
++    return m_on_finish;
+   }
+ 
+   send_set_parent_snap();
+diff --git a/src/librbd/image/RefreshParentRequest.h b/src/librbd/image/RefreshParentRequest.h
+index e51d24f48b..3fe653952c 100644
+--- a/src/librbd/image/RefreshParentRequest.h
++++ b/src/librbd/image/RefreshParentRequest.h
+@@ -38,19 +38,19 @@ private:
+    * <start>
+    *    |
+    *    | (open required)
+-   *    |----------------> OPEN_PARENT * * * * * * * *
+-   *    |                     |                      *
+-   *    |                     v                      * (on error)
+-   *    |                  SET_PARENT_SNAP * * * * * *
+-   *    |                     |                      *
+-   *    |                     v                      *
+-   *    \----------------> <apply>                   *
+-   *                          |                      *
+-   *                          | (close required)     v
+-   *                          |-----------------> CLOSE_PARENT
+-   *                          |                      |
+-   *                          |                      v
+-   *                          \-----------------> <finish>
++   *    |----------------> OPEN_PARENT * * * * * * * * * * * * * * *
++   *    |                     |                                    *
++   *    |                     v                                    *
++   *    |                  SET_PARENT_SNAP * * * * * *             *
++   *    |                     |                      *             *
++   *    |                     v                      * (on error)  *
++   *    \----------------> <apply>                   *             *
++   *                          |                      *             *
++   *                          | (close required)     v             *
++   *                          |-----------------> CLOSE_PARENT     *
++   *                          |                      |             *
++   *                          |                      v             *
++   *                          \-----------------> <finish> < * * * *
+    *
+    * @endverbatim
+    */
+

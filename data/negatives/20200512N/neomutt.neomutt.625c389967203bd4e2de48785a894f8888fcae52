@@ -1,0 +1,512 @@
+commit 625c389967203bd4e2de48785a894f8888fcae52
+Author: Thomas Roessler <roessler@does-not-exist.org>
+Date:   Tue Sep 15 20:53:17 1998 +0000
+
+    Adding basic UTF-8 support.
+
+diff --git a/charset.c b/charset.c
+index 0de70c9c0..158fdeb3b 100644
+--- a/charset.c
++++ b/charset.c
+@@ -31,8 +31,8 @@ static CHARSET *mutt_new_charset(void)
+ {
+   CHARSET *chs;
+   
+-  chs       = safe_malloc(sizeof(CHARSET));
+-  chs->map  = NULL;
++  chs          = safe_malloc(sizeof(CHARSET));
++  chs->map     = NULL;
+   
+   return chs;
+ }
+@@ -220,8 +220,8 @@ CHARSET_MAP *mutt_get_translation(const char *_from, const char *_to)
+     if(!from_cs->map || !to_cs->map)
+       return NULL;
+     
+-    map = build_translation(from_cs->map, to_cs->map);
+-    hash_insert(Translations, safe_strdup(key), map, 1);
++    if((map = build_translation(from_cs->map, to_cs->map)))
++       hash_insert(Translations, safe_strdup(key), map, 1);
+   }
+   return map;
+ }
+@@ -241,6 +241,169 @@ int mutt_display_string(char *str, CHARSET_MAP *map)
+ 
+   while ((*str = mutt_display_char((unsigned char)*str, map)))
+     str++;
+-
++  
+   return 0;
+ }
++
++/*************************************************************/
++/* UTF-8 support                                             */
++
++int mutt_is_utf8(const char *s)
++{
++  char buffer[SHORT_STRING];
++
++  if(!s) 
++    return 0;
++
++  canonical_charset(buffer, sizeof(buffer), s);
++  return !strcmp(buffer, "utf-8");
++}
++  
++/* macros for the various bit maps we need */
++
++#define IOOOOOOO 0x80
++#define IIOOOOOO 0xc0
++#define IIIOOOOO 0xe0
++#define IIIIOOOO 0xf0
++#define IIIIIOOO 0xf8
++#define IIIIIIOO 0xfc
++#define IIIIIIIO 0xfe
++#define IIIIIIII 0xff
++
++static struct unicode_mask
++{
++  int mask;
++  int value;
++  short len;
++}
++unicode_masks[] = 
++{
++  { IOOOOOOO,	    0,   1 },
++  { IIIOOOOO, IIOOOOOO,  2 },
++  { IIIIOOOO, IIIOOOOO,  3 },
++  { IIIIIOOO, IIIIOOOO,  4 },
++  { IIIIIIOO, IIIIIOOO,  5 },
++  { IIIIIIIO, IIIIIIOO,  6 },
++  {        0,	     0,  0 }
++};
++
++
++static char *utf_to_unicode(int *out, char *in)
++{
++  struct unicode_mask *um = NULL;
++  short i;
++  
++  for(i = 0; unicode_masks[i].mask; i++)
++  {
++    if((*in & unicode_masks[i].mask) == unicode_masks[i].value)
++    {
++      um = &unicode_masks[i];
++      break;
++    }
++  }
++  
++  if(!um)
++  {
++    *out = (int) '?';
++    return in + 1;
++  }
++
++  for(i = 1; i < um->len; i++)
++  {
++    if((in[i] & IIOOOOOO) != IOOOOOOO)
++    {
++      *out = (int) '?';
++      return in + i;
++    }
++  }
++  
++  *out = ((int)in[0]) & ~um->mask & 0xff;
++  for(i = 1; i < um->len; i++)
++    *out = (*out << 6) | (((int)in[i]) & ~IIOOOOOO & 0xff);
++
++  if(!*out) 
++    *out = '?';
++  
++  return in + um->len;
++}
++
++void mutt_decode_utf8_string(char *str, CHARSET *chs)
++{
++  char *s, *t;
++  int ch, i;
++  CHARSET_MAP *map = NULL;
++  
++  if(chs)
++    map = chs->map;
++  
++  for( s = t = str; *t; s++)
++  {
++    t = utf_to_unicode(&ch, t);
++
++    if(!map)
++    {
++      *s = (char) ch;
++    }
++    else
++    {
++      for(i = 0, *s = '\0'; i < 256; i++)
++      {
++	if((*map)[i] == ch)
++	{
++	  *s = i;
++	  break;
++	}
++      }
++    }
++      
++    if(!*s) *s = '?';
++  }
++  
++  *s = '\0';
++}
++
++static char *sfu_buffer = NULL;
++static size_t sfu_blen = 0;
++static size_t sfu_bp = 0;
++
++static void _state_utf8_flush(STATE *s, CHARSET *chs)
++{
++  char *t;
++  if(!sfu_buffer || !sfu_bp)
++    return;
++  
++  sfu_buffer[sfu_bp] = '\0';
++  
++  mutt_decode_utf8_string(sfu_buffer, chs);
++  for(t = sfu_buffer; *t; t++)
++  {
++    /* this is text mode, so throw out raw CRs. */
++    if(*t == '\r')
++      t++;
++    
++    state_prefix_putc(*t, s);
++  }
++  sfu_bp = 0;
++}
++    
++void state_fput_utf8(STATE *st, char u, CHARSET *chs)
++{
++  if((u & 0x80) == 0 || (sfu_bp && (u & IIOOOOOO) != IOOOOOOO))
++    _state_utf8_flush(st, chs);
++     
++  if((u & 0x80) == 0)
++  {
++    if(u && u != '\r')
++      state_prefix_putc(u, st);
++  }
++  else
++  {
++    if(sfu_bp + 1 >= sfu_blen)
++    {
++      sfu_blen = (sfu_blen + 80) * 2;
++      safe_realloc((void **) &sfu_buffer, sfu_blen);
++    }
++    sfu_buffer[sfu_bp++] = u;
++  }
++}
++
+diff --git a/charset.h b/charset.h
+index aa29f78be..5bb198603 100644
+--- a/charset.h
++++ b/charset.h
+@@ -28,12 +28,20 @@ typedef int CHARSET_MAP[256];
+ typedef struct 
+ {
+   CHARSET_MAP *map;
+-} CHARSET;
+-  
+-CHARSET     *mutt_get_charset(const char *);
++} 
++CHARSET;
++
++CHARSET *mutt_get_charset(const char *);
+ CHARSET_MAP *mutt_get_translation(const char *, const char *);
++
+ unsigned char mutt_display_char(unsigned char, CHARSET_MAP *);
++
+ int mutt_display_string(char *, CHARSET_MAP *);
++int mutt_is_utf8(const char *);
++
++void mutt_decode_utf8_string(char *, CHARSET *);
++
++void state_fput_utf8(STATE *, char, CHARSET *);
+ 
+ #endif
+ 
+diff --git a/handler.c b/handler.c
+index 417ede45c..b5eee8ce6 100644
+--- a/handler.c
++++ b/handler.c
+@@ -64,43 +64,40 @@ int Index_64[128] = {
+     41,42,43,44, 45,46,47,48, 49,50,51,-1, -1,-1,-1,-1
+ };
+ 
++static void state_maybe_utf8_putc(STATE *s, char c, int is_utf8, CHARSET *chs, CHARSET_MAP *map)
++{
++  if(is_utf8)
++    state_fput_utf8(s, c, chs);
++  else
++    state_prefix_putc(mutt_display_char ((unsigned char) c, map), s);
++}
++
+ void mutt_decode_xbit (STATE *s, BODY *b, int istext)
+ {
+   long len = b->length;
+   int c;
+-  int lbreak = 1;
+   
+   if (istext)
+   {
+-    CHARSET_MAP *map;
+-    
+-    map = mutt_get_translation(mutt_get_parameter("charset", b->parameter), Charset);
++    CHARSET_MAP *map = NULL;
++    CHARSET *chs = NULL;
++    char *charset = mutt_get_parameter("charset", b->parameter);
++    int is_utf8;
++
++    if((is_utf8 = mutt_is_utf8(charset)))
++      chs = mutt_get_charset(Charset);
++    else
++      map = mutt_get_translation(charset, Charset);
+ 
++    if(s->prefix)
++      state_puts(s->prefix, s);
++    
+     while ((c = fgetc(s->fpin)) != EOF && len--)
+-    {
+-      if(lbreak && s->prefix)
+-      {
+-	state_puts(s->prefix, s);
+-	lbreak = 0;
+-      }
+-	  
+-      if (c == '\r' && len)
+-      {
+-	int ch;
+-	
+-	if((ch = fgetc(s->fpin)) != '\n')
+-	  ungetc(ch, s->fpin);
+-	else
+-	{
+-	  c = ch;
+-	  len--;
+-	}
+-	
+-      }
+-      state_putc(mutt_display_char((unsigned char) c, map), s);
+-      if(c == '\n')
+-	lbreak = 1;
+-    }
++      state_maybe_utf8_putc(s, c, is_utf8, chs, map);
++    
++    if(is_utf8)
++      state_fput_utf8(s, '\0', chs);
++    
+   }
+   else
+     mutt_copy_bytes (s->fpin, s->fpout, len);
+@@ -121,9 +118,22 @@ static int handler_state_fgetc(STATE *s)
+ void mutt_decode_quoted (STATE *s, BODY *b, int istext)
+ {
+   long len = b->length;
+-  int ch, lbreak = 1;
+-  CHARSET_MAP *map = mutt_get_translation(mutt_get_parameter("charset", b->parameter), Charset);
+-
++  int ch;
++  char *charset = mutt_get_parameter("charset", b->parameter);
++  int is_utf8 = 0;
++  CHARSET *chs = NULL;
++  CHARSET_MAP *map = NULL;
++  
++  if(istext)
++  {
++    if((is_utf8 = mutt_is_utf8(charset)))
++      chs = mutt_get_charset(Charset);
++    else
++      map = mutt_get_translation(charset, Charset);
++  }
++  
++  if(s->prefix) state_puts(s->prefix, s);
++  
+   while (len > 0)
+   {
+     if ((ch = handler_state_fgetc(s)) == EOF)
+@@ -131,10 +141,6 @@ void mutt_decode_quoted (STATE *s, BODY *b, int istext)
+ 
+     len--;
+     
+-    if (s->prefix && lbreak)
+-      state_puts (s->prefix, s);
+-    
+-    lbreak = 0;
+     if (ch == '=')
+     {
+       int ch1, ch2;
+@@ -178,23 +184,14 @@ void mutt_decode_quoted (STATE *s, BODY *b, int istext)
+     } /* ch == '=' */
+     else if (istext && ch == '\r')
+     {
+-      int ch1;
+-
+-      if((ch1 =fgetc(s->fpin)) == '\n')
+-      {
+-	ch = ch1;
+-	len--;
+-      }
+-      else
+-	ungetc(ch1, s->fpin);
++      continue;
+     }
+-
+     if(ch != EOF)
+-      state_putc(istext ? mutt_display_char((unsigned char) ch, map) : ch, s);
+-
+-    if(ch == '\n')
+-      lbreak = 1;
++      state_maybe_utf8_putc(s, ch, is_utf8, chs, map);
+   }
++  
++  if(is_utf8)
++    state_fput_utf8(s, '\0', chs);
+ }
+ 
+ void mutt_decode_base64 (STATE *s, BODY *b, int istext)
+@@ -202,11 +199,22 @@ void mutt_decode_base64 (STATE *s, BODY *b, int istext)
+   long len = b->length;
+   char buf[5];
+   int c1, c2, c3, c4, ch, cr = 0, i;
+-  CHARSET_MAP *map = mutt_get_translation(mutt_get_parameter("charset", b->parameter), Charset);
++  char *charset = mutt_get_parameter("charset", b->parameter);
++  CHARSET_MAP *map = NULL;
++  CHARSET *chs = NULL;
++  int is_utf8 = 0;
+ 
++  if(istext)
++  {
++    if((is_utf8 = mutt_is_utf8(charset)))
++      chs = mutt_get_charset(Charset);
++    else
++      map = mutt_get_translation(charset, Charset);
++  }
++  
+   buf[4] = 0;
+ 
+-  if (s->prefix) state_puts (s->prefix, s);
++  if (s->prefix && istext) state_puts (s->prefix, s);
+ 
+   while (len > 0)
+   {
+@@ -224,16 +232,14 @@ void mutt_decode_base64 (STATE *s, BODY *b, int istext)
+     c2 = base64val (buf[1]);
+     ch = (c1 << 2) | (c2 >> 4);
+ 
+-    if (cr && ch != '\n') state_putc ('\r', s);
++    if (cr && ch != '\n') 
++      state_maybe_utf8_putc(s, '\r', is_utf8, chs, map);
+     cr = 0;
+       
+     if (istext && ch == '\r')
+       cr = 1;
+     else
+-    {
+-      state_putc(istext ? mutt_display_char((unsigned char) ch, map) : ch, s);
+-      if (ch == '\n' && s->prefix) state_puts (s->prefix, s);
+-    }
++      state_maybe_utf8_putc(s, ch, is_utf8, chs, map);
+ 
+     if (buf[2] == '=')
+       break;
+@@ -241,34 +247,27 @@ void mutt_decode_base64 (STATE *s, BODY *b, int istext)
+     ch = ((c2 & 0xf) << 4) | (c3 >> 2);
+ 
+     if (cr && ch != '\n')
+-      state_putc ('\r', s);
++      state_maybe_utf8_putc(s, ch, is_utf8, chs, map);
++
+     cr = 0;
+ 
+     if (istext && ch == '\r')
+       cr = 1;
+     else
+-    {
+-      state_putc(istext ? mutt_display_char((unsigned char)ch, map) : ch, s);
+-      if (ch == '\n' && s->prefix)
+-	state_puts (s->prefix, s);
+-    }
++      state_maybe_utf8_putc(s, ch, is_utf8, chs, map);
+ 
+     if (buf[3] == '=') break;
+     c4 = base64val (buf[3]);
+     ch = ((c3 & 0x3) << 6) | c4;
+ 
+     if (cr && ch != '\n')
+-      state_putc ('\r', s);
++      state_maybe_utf8_putc(s, ch, is_utf8, chs, map);
+     cr = 0;
+ 
+     if (istext && ch == '\r')
+       cr = 1;
+     else
+-    {
+-      state_putc(istext ? mutt_display_char((unsigned char) ch, map) : ch, s);
+-      if (ch == '\n' && s->prefix)
+-	state_puts (s->prefix, s);
+-    }
++      state_maybe_utf8_putc(s, ch, is_utf8, chs, map);
+   }
+ }
+ 
+diff --git a/lib.c b/lib.c
+index ebc24c6e5..726acc75b 100644
+--- a/lib.c
++++ b/lib.c
+@@ -1218,3 +1218,10 @@ char *mutt_quote_filename(const char *f)
+   
+   return d;
+ }
++
++void state_prefix_putc(char c, STATE *s)
++{
++  state_putc(c, s);
++  if(c == '\n' && s->prefix)
++    state_puts(s->prefix, s);
++}
+diff --git a/mutt.h b/mutt.h
+index b8db968cb..6e5d18cb7 100644
+--- a/mutt.h
++++ b/mutt.h
+@@ -635,5 +635,7 @@ typedef struct
+ #define state_puts(x,y) fputs(x,(y)->fpout)
+ #define state_putc(x,y) fputc(x,(y)->fpout)
+ 
++void state_prefix_putc(char, STATE *);
++
+ #include "protos.h"
+ #include "globals.h"
+diff --git a/rfc2047.c b/rfc2047.c
+index 3bfaafb74..87745bd8c 100644
+--- a/rfc2047.c
++++ b/rfc2047.c
+@@ -324,16 +324,20 @@ static int rfc2047_decode_word (char *d, const char *s, size_t len)
+     }
+     pp = 0;
+   }
++  
+   if (filter)
+   {
+-    if (mutt_display_string(d, mutt_get_translation(charset, Charset)) == -1)
++    if(mutt_is_utf8(charset))
++    {
++      CHARSET *chs = mutt_get_charset(Charset);
++      mutt_decode_utf8_string(d, chs);
++    }
++    else if (mutt_display_string(d, mutt_get_translation(charset, Charset)) == -1)
+     {
+-      pd = d;
+-      while (*pd)
++      for(pd = d; *pd; pd++)
+       {
+         if (!IsPrint (*pd))
+ 	  *pd = '?';
+-        pd++;
+       }
+     }
+   }
+

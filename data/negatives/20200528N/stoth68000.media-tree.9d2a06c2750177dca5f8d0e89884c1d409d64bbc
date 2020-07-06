@@ -1,0 +1,158 @@
+commit 9d2a06c2750177dca5f8d0e89884c1d409d64bbc
+Author: Alex Elder <elder@inktank.com>
+Date:   Fri Mar 8 13:35:36 2013 -0600
+
+    libceph: kill message trail
+    
+    The wart that is the ceph message trail can now be removed, because
+    its only user was the osd client, and the previous patch made that
+    no longer the case.
+    
+    The result allows write_partial_msg_pages() to be simplified
+    considerably.
+    
+    Signed-off-by: Alex Elder <elder@inktank.com>
+    Reviewed-by: Josh Durgin <josh.durgin@inktank.com>
+
+diff --git a/include/linux/ceph/messenger.h b/include/linux/ceph/messenger.h
+index b53b9ef65009..0e4536cc46f0 100644
+--- a/include/linux/ceph/messenger.h
++++ b/include/linux/ceph/messenger.h
+@@ -69,7 +69,6 @@ struct ceph_messenger {
+ #ifdef CONFIG_BLOCK
+ #define ceph_msg_has_bio(m)		((m)->b.type == CEPH_MSG_DATA_BIO)
+ #endif /* CONFIG_BLOCK */
+-#define ceph_msg_has_trail(m)		((m)->t.type == CEPH_MSG_DATA_PAGELIST)
+ 
+ enum ceph_msg_data_type {
+ 	CEPH_MSG_DATA_NONE,	/* message contains no data payload */
+@@ -155,7 +154,6 @@ struct ceph_msg {
+ #ifdef CONFIG_BLOCK
+ 	struct ceph_msg_data	b;	/* bio */
+ #endif /* CONFIG_BLOCK */
+-	struct ceph_msg_data	t;	/* trail */
+ 
+ 	struct ceph_connection *con;
+ 	struct list_head list_head;	/* links for connection lists */
+@@ -295,8 +293,6 @@ extern void ceph_msg_data_set_pages(struct ceph_msg *msg, struct page **pages,
+ extern void ceph_msg_data_set_pagelist(struct ceph_msg *msg,
+ 				struct ceph_pagelist *pagelist);
+ extern void ceph_msg_data_set_bio(struct ceph_msg *msg, struct bio *bio);
+-extern void ceph_msg_data_set_trail(struct ceph_msg *msg,
+-				struct ceph_pagelist *trail);
+ 
+ extern struct ceph_msg *ceph_msg_new(int type, int front_len, gfp_t flags,
+ 				     bool can_fail);
+diff --git a/net/ceph/messenger.c b/net/ceph/messenger.c
+index d611156808b3..ff58d3182754 100644
+--- a/net/ceph/messenger.c
++++ b/net/ceph/messenger.c
+@@ -1115,8 +1115,6 @@ static void prepare_message_data(struct ceph_msg *msg,
+ 		ceph_msg_data_cursor_init(&msg->p);
+ 	if (ceph_msg_has_pagelist(msg))
+ 		ceph_msg_data_cursor_init(&msg->l);
+-	if (ceph_msg_has_trail(msg))
+-		ceph_msg_data_cursor_init(&msg->t);
+ 
+ 	msg_pos->did_page_crc = false;
+ }
+@@ -1398,7 +1396,7 @@ static int write_partial_kvec(struct ceph_connection *con)
+ }
+ 
+ static void out_msg_pos_next(struct ceph_connection *con, struct page *page,
+-			size_t len, size_t sent, bool in_trail)
++			size_t len, size_t sent)
+ {
+ 	struct ceph_msg *msg = con->out_msg;
+ 	struct ceph_msg_pos *msg_pos = &con->out_msg_pos;
+@@ -1409,9 +1407,7 @@ static void out_msg_pos_next(struct ceph_connection *con, struct page *page,
+ 
+ 	msg_pos->data_pos += sent;
+ 	msg_pos->page_pos += sent;
+-	if (in_trail)
+-		need_crc = ceph_msg_data_advance(&msg->t, sent);
+-	else if (ceph_msg_has_pages(msg))
++	if (ceph_msg_has_pages(msg))
+ 		need_crc = ceph_msg_data_advance(&msg->p, sent);
+ 	else if (ceph_msg_has_pagelist(msg))
+ 		need_crc = ceph_msg_data_advance(&msg->l, sent);
+@@ -1481,14 +1477,6 @@ static int write_partial_message_data(struct ceph_connection *con)
+ 	bool do_datacrc = !con->msgr->nocrc;
+ 	int ret;
+ 	int total_max_write;
+-	bool in_trail = false;
+-	size_t trail_len = 0;
+-	size_t trail_off = data_len;
+-
+-	if (ceph_msg_has_trail(msg)) {
+-		trail_len = msg->t.pagelist->length;
+-		trail_off -= trail_len;
+-	}
+ 
+ 	dout("%s %p msg %p page %d offset %d\n", __func__,
+ 	     con, msg, msg_pos->page, msg_pos->page_pos);
+@@ -1508,16 +1496,9 @@ static int write_partial_message_data(struct ceph_connection *con)
+ 		bool use_cursor = false;
+ 		bool last_piece = true;	/* preserve existing behavior */
+ 
+-		in_trail = in_trail || msg_pos->data_pos >= trail_off;
+-		if (!in_trail)
+-			total_max_write = trail_off - msg_pos->data_pos;
++		total_max_write = data_len - msg_pos->data_pos;
+ 
+-		if (in_trail) {
+-			BUG_ON(!ceph_msg_has_trail(msg));
+-			use_cursor = true;
+-			page = ceph_msg_data_next(&msg->t, &page_offset,
+-							&length, &last_piece);
+-		} else if (ceph_msg_has_pages(msg)) {
++		if (ceph_msg_has_pages(msg)) {
+ 			use_cursor = true;
+ 			page = ceph_msg_data_next(&msg->p, &page_offset,
+ 							&length, &last_piece);
+@@ -1552,7 +1533,7 @@ static int write_partial_message_data(struct ceph_connection *con)
+ 		if (ret <= 0)
+ 			goto out;
+ 
+-		out_msg_pos_next(con, page, length, (size_t) ret, in_trail);
++		out_msg_pos_next(con, page, length, (size_t) ret);
+ 	}
+ 
+ 	dout("%s %p msg %p done\n", __func__, con, msg);
+@@ -3145,17 +3126,6 @@ void ceph_msg_data_set_bio(struct ceph_msg *msg, struct bio *bio)
+ }
+ EXPORT_SYMBOL(ceph_msg_data_set_bio);
+ 
+-void ceph_msg_data_set_trail(struct ceph_msg *msg, struct ceph_pagelist *trail)
+-{
+-	BUG_ON(!trail);
+-	BUG_ON(!trail->length);
+-	BUG_ON(msg->b.type != CEPH_MSG_DATA_NONE);
+-
+-	msg->t.type = CEPH_MSG_DATA_PAGELIST;
+-	msg->t.pagelist = trail;
+-}
+-EXPORT_SYMBOL(ceph_msg_data_set_trail);
+-
+ /*
+  * construct a new message with given type, size
+  * the new msg has a ref count of 1.
+@@ -3179,7 +3149,6 @@ struct ceph_msg *ceph_msg_new(int type, int front_len, gfp_t flags,
+ 	ceph_msg_data_init(&m->p);
+ 	ceph_msg_data_init(&m->l);
+ 	ceph_msg_data_init(&m->b);
+-	ceph_msg_data_init(&m->t);
+ 
+ 	/* front */
+ 	m->front_max = front_len;
+@@ -3345,9 +3314,6 @@ void ceph_msg_last_put(struct kref *kref)
+ 		m->l.pagelist = NULL;
+ 	}
+ 
+-	if (ceph_msg_has_trail(m))
+-		m->t.pagelist = NULL;
+-
+ 	if (m->pool)
+ 		ceph_msgpool_put(m->pool, m);
+ 	else
+

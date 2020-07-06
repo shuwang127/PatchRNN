@@ -1,0 +1,127 @@
+commit a1c2552dba788c2c5e71c5bf5bcf3971caf3dfa1
+Author: Arnaldo Carvalho de Melo <acme@redhat.com>
+Date:   Thu Jun 11 22:47:54 2015 -0300
+
+    trace: Beautify perf_event_open syscall
+    
+    Syswide tracing and then running 'stat' and 'trace':
+    
+     $ perf trace -e perf_event_open
+     1034.649 (0.019 ms): perf/6133 perf_event_open(attr_uptr: 0x36f0360, pid: 16134, cpu: -1, group_fd: -1, flags: FD_CLOEXEC) = -1 EINVAL Invalid argument
+     1034.670 (0.008 ms): perf/6133 perf_event_open(attr_uptr: 0x36f0360, pid: 16134, cpu: -1, group_fd: -1) = -1 EINVAL Invalid argument
+     1034.681 (0.007 ms): perf/6133 perf_event_open(attr_uptr: 0x36f0360, pid: 16134, cpu: -1, group_fd: -1) = -1 EINVAL Invalid argument
+     1034.692 (0.007 ms): perf/6133 perf_event_open(attr_uptr: 0x36f0360, pid: 16134, cpu: -1, group_fd: -1) = -1 EINVAL Invalid argument
+     9986.983 (0.014 ms): trace/6139 perf_event_open(attr_uptr: 0x7ffd9c629320, pid: -1, group_fd: -1, flags: FD_CLOEXEC) = 3
+     9987.026 (0.016 ms): trace/6139 perf_event_open(attr_uptr: 0x37c7e70, pid: -1, group_fd: -1, flags: FD_CLOEXEC) = 3
+     9987.041 (0.008 ms): trace/6139 perf_event_open(attr_uptr: 0x37c7e70, pid: -1, group_fd: -1, flags: FD_CLOEXEC) = 3
+     9987.489 (0.092 ms): trace/6139 perf_event_open(attr_uptr: 0x3795ee0, pid: 16140, group_fd: -1, flags: FD_CLOEXEC) = 3
+     9987.536 (0.044 ms): trace/6139 perf_event_open(attr_uptr: 0x3795ee0, pid: 16140, cpu: 1, group_fd: -1, flags: FD_CLOEXEC) = 4
+     9987.580 (0.041 ms): trace/6139 perf_event_open(attr_uptr: 0x3795ee0, pid: 16140, cpu: 2, group_fd: -1, flags: FD_CLOEXEC) = 5
+     9987.620 (0.037 ms): trace/6139 perf_event_open(attr_uptr: 0x3795ee0, pid: 16140, cpu: 3, group_fd: -1, flags: FD_CLOEXEC) = 7
+     9987.659 (0.035 ms): trace/6139 perf_event_open(attr_uptr: 0x37975d0, pid: 16140, group_fd: -1, flags: FD_CLOEXEC) = 8
+     9987.692 (0.031 ms): trace/6139 perf_event_open(attr_uptr: 0x37975d0, pid: 16140, cpu: 1, group_fd: -1, flags: FD_CLOEXEC) = 9
+     9987.727 (0.032 ms): trace/6139 perf_event_open(attr_uptr: 0x37975d0, pid: 16140, cpu: 2, group_fd: -1, flags: FD_CLOEXEC) = 10
+     9987.761 (0.031 ms): trace/6139 perf_event_open(attr_uptr: 0x37975d0, pid: 16140, cpu: 3, group_fd: -1, flags: FD_CLOEXEC) = 11
+    
+    Need to intercept perf_copy_attr() with a kprobe or with eBPF...
+    
+    Cc: Adrian Hunter <adrian.hunter@intel.com>
+    Cc: Borislav Petkov <bp@suse.de>
+    Cc: David Ahern <dsahern@gmail.com>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Jiri Olsa <jolsa@redhat.com>
+    Cc: Namhyung Kim <namhyung@kernel.org>
+    Link: http://lkml.kernel.org/n/tip-njb105hab2i3t5dexym9lskl@git.kernel.org
+    Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+
+diff --git a/tools/perf/builtin-trace.c b/tools/perf/builtin-trace.c
+index a05490d06374..4bf805b2fbf6 100644
+--- a/tools/perf/builtin-trace.c
++++ b/tools/perf/builtin-trace.c
+@@ -68,6 +68,23 @@
+ # define MSG_CMSG_CLOEXEC	0x40000000
+ #endif
+ 
++#ifndef PERF_FLAG_FD_NO_GROUP
++# define PERF_FLAG_FD_NO_GROUP		(1UL << 0)
++#endif
++
++#ifndef PERF_FLAG_FD_OUTPUT
++# define PERF_FLAG_FD_OUTPUT		(1UL << 1)
++#endif
++
++#ifndef PERF_FLAG_PID_CGROUP
++# define PERF_FLAG_PID_CGROUP		(1UL << 2) /* pid=cgroup id, per-cpu mode only */
++#endif
++
++#ifndef PERF_FLAG_FD_CLOEXEC
++# define PERF_FLAG_FD_CLOEXEC		(1UL << 3) /* O_CLOEXEC */
++#endif
++
++
+ struct tp_field {
+ 	int offset;
+ 	union {
+@@ -358,6 +375,14 @@ static size_t syscall_arg__scnprintf_hex(char *bf, size_t size,
+ 
+ #define SCA_HEX syscall_arg__scnprintf_hex
+ 
++static size_t syscall_arg__scnprintf_int(char *bf, size_t size,
++					 struct syscall_arg *arg)
++{
++	return scnprintf(bf, size, "%d", arg->val);
++}
++
++#define SCA_INT syscall_arg__scnprintf_int
++
+ static size_t syscall_arg__scnprintf_mmap_prot(char *bf, size_t size,
+ 					       struct syscall_arg *arg)
+ {
+@@ -810,6 +835,34 @@ static size_t syscall_arg__scnprintf_open_flags(char *bf, size_t size,
+ 
+ #define SCA_OPEN_FLAGS syscall_arg__scnprintf_open_flags
+ 
++static size_t syscall_arg__scnprintf_perf_flags(char *bf, size_t size,
++						struct syscall_arg *arg)
++{
++	int printed = 0, flags = arg->val;
++
++	if (flags == 0)
++		return 0;
++
++#define	P_FLAG(n) \
++	if (flags & PERF_FLAG_##n) { \
++		printed += scnprintf(bf + printed, size - printed, "%s%s", printed ? "|" : "", #n); \
++		flags &= ~PERF_FLAG_##n; \
++	}
++
++	P_FLAG(FD_NO_GROUP);
++	P_FLAG(FD_OUTPUT);
++	P_FLAG(PID_CGROUP);
++	P_FLAG(FD_CLOEXEC);
++#undef P_FLAG
++
++	if (flags)
++		printed += scnprintf(bf + printed, size - printed, "%s%#x", printed ? "|" : "", flags);
++
++	return printed;
++}
++
++#define SCA_PERF_FLAGS syscall_arg__scnprintf_perf_flags
++
+ static size_t syscall_arg__scnprintf_eventfd_flags(char *bf, size_t size,
+ 						   struct syscall_arg *arg)
+ {
+@@ -1077,6 +1130,11 @@ static struct syscall_fmt {
+ 	{ .name	    = "openat",	    .errmsg = true,
+ 	  .arg_scnprintf = { [0] = SCA_FDAT, /* dfd */
+ 			     [2] = SCA_OPEN_FLAGS, /* flags */ }, },
++	{ .name	    = "perf_event_open", .errmsg = true,
++	  .arg_scnprintf = { [1] = SCA_INT, /* pid */
++			     [2] = SCA_INT, /* cpu */
++			     [3] = SCA_FD,  /* group_fd */
++			     [4] = SCA_PERF_FLAGS,  /* flags */ }, },
+ 	{ .name	    = "pipe2",	    .errmsg = true,
+ 	  .arg_scnprintf = { [1] = SCA_PIPE_FLAGS, /* flags */ }, },
+ 	{ .name	    = "poll",	    .errmsg = true, .timeout = true, },
+

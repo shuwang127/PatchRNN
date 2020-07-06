@@ -1,0 +1,90 @@
+commit 78a4ee591acc1424945ecfba517e97dc979cfd3b
+Author: Daniel Mack <github@zonque.org>
+Date:   Fri Jul 8 04:29:35 2016 +0200
+
+    cgroup: fix memory cgroup limit regression on kernel 3.10 (#3673)
+    
+    Commit da4d897e ("core: add cgroup memory controller support on the unified
+    hierarchy (#3315)") changed the code in src/core/cgroup.c to always write
+    the real numeric value from the cgroup parameters to the
+    "memory.limit_in_bytes" attribute file.
+    
+    For parameters set to CGROUP_LIMIT_MAX, this results in the string
+    "18446744073709551615" being written into that file, which is UINT64_MAX.
+    Before that commit, CGROUP_LIMIT_MAX was special-cased to the string "-1".
+    
+    This causes a regression on CentOS 7, which is based on kernel 3.10, as the
+    value is interpreted as *signed* 64 bit, and clamped to 0:
+    
+    [root@n54 ~]# echo 18446744073709551615 >/sys/fs/cgroup/memory/user.slice/memory.limit_in_bytes
+    [root@n54 ~]# cat /sys/fs/cgroup/memory/user.slice/memory.limit_in_bytes
+    0
+    
+    [root@n54 ~]# echo -1 >/sys/fs/cgroup/memory/user.slice/memory.limit_in_bytes
+    [root@n54 ~]# cat /sys/fs/cgroup/memory/user.slice/memory.limit_in_bytes
+    9223372036854775807
+    
+    Hence, all units that are subject to the limits enforced by the memory
+    controller will crash immediately, even though they have no actual limit
+    set. This happens to for the user.slice, for instance:
+    
+    [  453.577153] Hardware name: SeaMicro SM15000-64-CC-AA-1Ox1/AMD Server CRB, BIOS Estoc.3.72.19.0018 08/19/2014
+    [  453.587024]  ffff880810c56780 00000000aae9501f ffff880813d7fcd0 ffffffff816360fc
+    [  453.594544]  ffff880813d7fd60 ffffffff8163109c ffff88080ffc5000 ffff880813d7fd28
+    [  453.602120]  ffffffff00000202 fffeefff00000000 0000000000000001 ffff880810c56c03
+    [  453.609680] Call Trace:
+    [  453.612156]  [<ffffffff816360fc>] dump_stack+0x19/0x1b
+    [  453.617324]  [<ffffffff8163109c>] dump_header+0x8e/0x214
+    [  453.622671]  [<ffffffff8116d20e>] oom_kill_process+0x24e/0x3b0
+    [  453.628559]  [<ffffffff81088dae>] ? has_capability_noaudit+0x1e/0x30
+    [  453.634969]  [<ffffffff811d4155>] mem_cgroup_oom_synchronize+0x575/0x5a0
+    [  453.641721]  [<ffffffff811d3520>] ? mem_cgroup_charge_common+0xc0/0xc0
+    [  453.648299]  [<ffffffff8116da84>] pagefault_out_of_memory+0x14/0x90
+    [  453.654621]  [<ffffffff8162f4cc>] mm_fault_error+0x68/0x12b
+    [  453.660233]  [<ffffffff81642012>] __do_page_fault+0x3e2/0x450
+    [  453.666017]  [<ffffffff816420a3>] do_page_fault+0x23/0x80
+    [  453.671467]  [<ffffffff8163e308>] page_fault+0x28/0x30
+    [  453.676656] Task in /user.slice/user-0.slice/user@0.service killed as a result of limit of /user.slice/user-0.slice/user@0.service
+    [  453.688477] memory: usage 0kB, limit 0kB, failcnt 7
+    [  453.693391] memory+swap: usage 0kB, limit 9007199254740991kB, failcnt 0
+    [  453.700039] kmem: usage 0kB, limit 9007199254740991kB, failcnt 0
+    [  453.706076] Memory cgroup stats for /user.slice/user-0.slice/user@0.service: cache:0KB rss:0KB rss_huge:0KB mapped_file:0KB swap:0KB inactive_anon:0KB active_anon:0KB inactive_file:0KB active_file:0KB unevictable:0KB
+    [  453.725702] [ pid ]   uid  tgid total_vm      rss nr_ptes swapents oom_score_adj name
+    [  453.733614] [ 2837]     0  2837    11950      899      23        0             0 (systemd)
+    [  453.741919] Memory cgroup out of memory: Kill process 2837 ((systemd)) score 1 or sacrifice child
+    [  453.750831] Killed process 2837 ((systemd)) total-vm:47800kB, anon-rss:3188kB, file-rss:408kB
+    
+    Fix this issue by special-casing the UINT64_MAX case again.
+
+diff --git a/src/core/cgroup.c b/src/core/cgroup.c
+index 932160d27..6e36e6b34 100644
+--- a/src/core/cgroup.c
++++ b/src/core/cgroup.c
+@@ -755,16 +755,20 @@ static void cgroup_context_apply(Unit *u, CGroupMask mask, ManagerState state) {
+                         cgroup_apply_unified_memory_limit(u, "memory.max", max);
+                 } else {
+                         char buf[DECIMAL_STR_MAX(uint64_t) + 1];
++                        uint64_t val = c->memory_limit;
+ 
+-                        if (c->memory_limit != CGROUP_LIMIT_MAX)
+-                                xsprintf(buf, "%" PRIu64 "\n", c->memory_limit);
+-                        else {
+-                                xsprintf(buf, "%" PRIu64 "\n", c->memory_max);
++                        if (val == CGROUP_LIMIT_MAX) {
++                                val = c->memory_max;
+ 
+-                                if (c->memory_max != CGROUP_LIMIT_MAX)
+-                                        log_cgroup_compat(u, "Applying MemoryMax %" PRIu64 " as MemoryLimit", c->memory_max);
++                                if (val != CGROUP_LIMIT_MAX)
++                                        log_cgroup_compat(u, "Applying MemoryMax %" PRIi64 " as MemoryLimit", c->memory_max);
+                         }
+ 
++                        if (val == CGROUP_LIMIT_MAX)
++                                strncpy(buf, "-1\n", sizeof(buf));
++                        else
++                                xsprintf(buf, "%" PRIu64 "\n", val);
++
+                         r = cg_set_attribute("memory", path, "memory.limit_in_bytes", buf);
+                         if (r < 0)
+                                 log_unit_full(u, IN_SET(r, -ENOENT, -EROFS, -EACCES) ? LOG_DEBUG : LOG_WARNING, r,
+

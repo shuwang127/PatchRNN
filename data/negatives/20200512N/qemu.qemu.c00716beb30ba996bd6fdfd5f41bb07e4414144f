@@ -1,0 +1,56 @@
+commit c00716beb30ba996bd6fdfd5f41bb07e4414144f
+Author: Eric Blake <eblake@redhat.com>
+Date:   Fri Jul 7 07:44:58 2017 -0500
+
+    block: Minimize raw use of bds->total_sectors
+    
+    bdrv_is_allocated_above() was relying on intermediate->total_sectors,
+    which is a field that can have stale contents depending on the value
+    of intermediate->has_variable_length.  An audit shows that we are safe
+    (we were first calling through bdrv_co_get_block_status() which in
+    turn calls bdrv_nb_sectors() and therefore just refreshed the current
+    length), but it's nicer to favor our accessor functions to avoid having
+    to repeat such an audit, even if it means refresh_total_sectors() is
+    called more frequently.
+    
+    Suggested-by: John Snow <jsnow@redhat.com>
+    Signed-off-by: Eric Blake <eblake@redhat.com>
+    Reviewed-by: Manos Pitsidianakis <el13635@mail.ntua.gr>
+    Reviewed-by: Jeff Cody <jcody@redhat.com>
+    Reviewed-by: John Snow <jsnow@redhat.com>
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+
+diff --git a/block/io.c b/block/io.c
+index 6656d7fe3e..aad7fd30a4 100644
+--- a/block/io.c
++++ b/block/io.c
+@@ -1947,6 +1947,7 @@ int bdrv_is_allocated_above(BlockDriverState *top,
+     intermediate = top;
+     while (intermediate && intermediate != base) {
+         int64_t pnum_inter;
++        int64_t size_inter;
+         int psectors_inter;
+ 
+         ret = bdrv_is_allocated(intermediate, sector_num * BDRV_SECTOR_SIZE,
+@@ -1962,15 +1963,12 @@ int bdrv_is_allocated_above(BlockDriverState *top,
+             return 1;
+         }
+ 
+-        /*
+-         * [sector_num, nb_sectors] is unallocated on top but intermediate
+-         * might have
+-         *
+-         * [sector_num+x, nr_sectors] allocated.
+-         */
++        size_inter = bdrv_nb_sectors(intermediate);
++        if (size_inter < 0) {
++            return size_inter;
++        }
+         if (n > psectors_inter &&
+-            (intermediate == top ||
+-             sector_num + psectors_inter < intermediate->total_sectors)) {
++            (intermediate == top || sector_num + psectors_inter < size_inter)) {
+             n = psectors_inter;
+         }
+ 
+

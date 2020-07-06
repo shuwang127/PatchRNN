@@ -1,0 +1,244 @@
+commit 2b5e5254072d0dc8831ab6e843a512a870e087d1
+Author: Bogdan Pintea <bogdan@iptego.com>
+Date:   Mon Mar 31 18:19:49 2008 +0000
+
+    New TM export - cancel_all_uacs() - to allow canceling all branches of a
+    transaction. (Closes issue #SER-253).
+    
+    Some error messages are corrected to reflect new function name.
+    
+    (Bits of code for the AS support also added; issue #SER-346 in the works.)
+
+diff --git a/modules/tm/t_cancel.c b/modules/tm/t_cancel.c
+index 8cdf4104e..ea480541f 100644
+--- a/modules/tm/t_cancel.c
++++ b/modules/tm/t_cancel.c
+@@ -45,6 +45,9 @@
+  */
+ 
+ #include <stdio.h> /* for FILE* in fifo_uac_cancel */
++#ifdef EXTRA_DEBUG
++#include <assert.h>
++#endif /* EXTRA_DEBUG */
+ 
+ #include "defs.h"
+ #include "config.h"
+@@ -106,6 +109,40 @@ int cancel_uacs( struct cell *t, branch_bm_t cancel_bm, int flags)
+ 	return ret;
+ }
+ 
++int cancel_all_uacs(struct cell *trans, int how)
++{
++	branch_bm_t cancel_bm;
++	int i,j;
++
++#ifdef EXTRA_DEBUG
++	assert(trans);
++#endif
++	DBG("Canceling T@%p [%u:%u]\n", trans, trans->hash_index, trans->label);
++	
++	cancel_bm=0;
++	which_cancel(trans, &cancel_bm);
++	 /* tell tm to cancel the call */
++	i=cancel_uacs(trans, cancel_bm, how);
++	
++	if (how & F_CANCEL_UNREF)
++#ifndef TM_DEL_UNREF
++	/* in case of 'too many' _buggy_ invocations, the ref count (a uint) might 
++	 * actually wrap around, possibly leaving the T leaking. */
++#warning "use of F_CANCEL_UNREF flag is unsafe without defining TM_DEL_UNREF"
++#endif
++		UNREF(trans);
++
++	/* count the still active branches */
++	if (! how) {
++		j=0;
++		while(i){
++			j++;
++			i&=i-1;
++		}
++		return j;
++	}
++	return 0;
++}
+ 
+ 
+ /* should be called directly only if one of the condition bellow is true:
+diff --git a/modules/tm/t_cancel.h b/modules/tm/t_cancel.h
+index 1327786d4..7e55980e5 100644
+--- a/modules/tm/t_cancel.h
++++ b/modules/tm/t_cancel.h
+@@ -71,14 +71,17 @@
+ 									if no provisional response was received;
+ 									F_CANCEL_B_FORCE_C, F_CANCEL_B_FAKE_REPLY
+ 									and F_CANCE_B_KILL take precedence */
++#define F_CANCEL_UNREF 16 /* unref the trans after canceling */
+ 
+ 
+ void which_cancel( struct cell *t, branch_bm_t *cancel_bm );
+ int cancel_uacs( struct cell *t, branch_bm_t cancel_bm, int flags );
++int cancel_all_uacs(struct cell *trans, int how);
+ int cancel_branch( struct cell *t, int branch, int flags );
+ 
+ typedef int(*cancel_uacs_f)( struct cell *t, branch_bm_t cancel_bm,
+ 								int flags );
++typedef int (*cancel_all_uacs_f)(struct cell *trans, int how);
+ 
+ 
+ 
+diff --git a/modules/tm/t_fwd.c b/modules/tm/t_fwd.c
+index 39b5ccc27..a82215488 100644
+--- a/modules/tm/t_fwd.c
++++ b/modules/tm/t_fwd.c
+@@ -119,9 +119,6 @@
+ #include "../../atomic_ops.h" /* membar_depends() */
+ #endif
+ 
+-/* cancel hop by hop */
+-#define E2E_CANCEL_HOP_BY_HOP
+-
+ static int goto_on_branch = 0, branch_route = 0;
+ 
+ void t_on_branch( unsigned int go_to )
+diff --git a/modules/tm/t_fwd.h b/modules/tm/t_fwd.h
+index d8423049c..f7d014611 100644
+--- a/modules/tm/t_fwd.h
++++ b/modules/tm/t_fwd.h
+@@ -41,6 +41,9 @@
+ #include "../../proxy.h"
+ #include "h_table.h"
+ 
++/* cancel hop by hop */
++#define E2E_CANCEL_HOP_BY_HOP
++
+ enum unmatched_cancel_t { UM_CANCEL_STATEFULL=0, UM_CANCEL_STATELESS,
+ 							UM_CANCEL_DROP };
+ 
+diff --git a/modules/tm/t_lookup.h b/modules/tm/t_lookup.h
+index 98ed979db..3ac599d0f 100644
+--- a/modules/tm/t_lookup.h
++++ b/modules/tm/t_lookup.h
+@@ -108,4 +108,14 @@ int t_set_max_lifetime(struct sip_msg* msg, unsigned int eol_inv,
+ 											unsigned int eol_noninv);
+ int t_reset_max_lifetime();
+ 
++#ifdef WITH_AS_SUPPORT
++/**
++ * Returns the hash coordinates of the transaction current CANCEL is targeting.
++ */
++int t_get_canceled_ident(struct sip_msg *msg, unsigned int *hash_index, 
++		unsigned int *label);
++typedef int (*t_get_canceled_ident_f)(struct sip_msg *msg, 
++		unsigned int *hash_index, unsigned int *label);
++#endif /* WITH_AS_SUPPORT */
++
+ #endif
+diff --git a/modules/tm/tm.c b/modules/tm/tm.c
+index 9272d48c5..1d00e707e 100644
+--- a/modules/tm/tm.c
++++ b/modules/tm/tm.c
+@@ -350,6 +350,12 @@ static cmd_export_t cmds[]={
+ 	{"t_unref",            (cmd_function)t_unref,           NO_SCRIPT,   0, 0},
+ 	{"run_failure_handlers", (cmd_function)run_failure_handlers, NO_SCRIPT,   0, 0},
+ 	{"cancel_uacs",        (cmd_function)cancel_uacs,       NO_SCRIPT,   0, 0},
++	{"cancel_all_uacs",    (cmd_function)cancel_all_uacs,        NO_SCRIPT,   0, 0},
++#ifdef WITH_AS_SUPPORT
++	{"ack_local_uac",      (cmd_function)ack_local_uac,     NO_SCRIPT,   0, 0},
++	{"t_get_canceled_ident",   (cmd_function)t_get_canceled_ident,  NO_SCRIPT,
++			0, 0},
++#endif
+ 	{0,0,0,0,0}
+ };
+ 
+diff --git a/modules/tm/tm_load.c b/modules/tm/tm_load.c
+index 98fdea1d2..7e72cb8a5 100644
+--- a/modules/tm/tm_load.c
++++ b/modules/tm/tm_load.c
+@@ -190,6 +190,11 @@ int load_tm( struct tm_binds *tmb)
+ 		LOG( L_ERR, LOAD_ERROR "'cancel_uacs' not found\n");
+ 		return -1;
+ 	}
++	if (! (tmb->cancel_all_uacs=(cancel_all_uacs_f)find_export(
++			"cancel_all_uacs", NO_SCRIPT, 0))) {
++		LOG( L_ERR, LOAD_ERROR "'cancel_all_uacs' not found\n");
++		return -1;
++	}
+ 
+ 	tmb->prepare_request_within = prepare_req_within;
+ 	tmb->send_prepared_request = send_prepared_request;
+@@ -198,6 +203,18 @@ int load_tm( struct tm_binds *tmb)
+ #ifdef DIALOG_CALLBACKS
+ 	tmb->register_new_dlg_cb=register_new_dlg_cb;
+ 	tmb->register_dlg_tmcb=register_dlg_tmcb;
++#endif
++#ifdef WITH_AS_SUPPORT
++	if (! (tmb->ack_local_uac=(ack_local_uac_f)find_export("ack_local_uac",
++			NO_SCRIPT, 0))) {
++		LOG( L_ERR, LOAD_ERROR "'ack_uac' not found\n");
++		return -1;
++	}
++	if (! (tmb->t_get_canceled_ident=(t_get_canceled_ident_f)find_export(
++			"t_get_canceled_ident", NO_SCRIPT, 0))) {
++		LOG( L_ERR, LOAD_ERROR "'t_get_canceled_ident' not found\n");
++		return -1;
++	}
+ #endif
+ 	return 1;
+ }
+diff --git a/modules/tm/tm_load.h b/modules/tm/tm_load.h
+index c488f27e7..0d0c4c5b7 100644
+--- a/modules/tm/tm_load.h
++++ b/modules/tm/tm_load.h
+@@ -108,6 +108,7 @@ struct tm_binds {
+ 	tunref_f           t_unref;
+ 	run_failure_handlers_f run_failure_handlers;
+ 	cancel_uacs_f      cancel_uacs;
++	cancel_all_uacs_f  cancel_all_uacs;
+ 	prepare_request_within_f  prepare_request_within;
+ 	send_prepared_request_f   send_prepared_request;
+ 	enum route_mode*   route_mode;
+@@ -119,6 +120,13 @@ struct tm_binds {
+ 	                    if no dlg callbacks are used/defined*/
+ 	void* reserved2;
+ #endif
++#ifdef WITH_AS_SUPPORT
++	ack_local_uac_f           ack_local_uac;
++	t_get_canceled_ident_f    t_get_canceled_ident;
++#else
++	void* reserved3;
++	void* reserved4;
++#endif
+ };
+ 
+ extern int tm_init;
+diff --git a/modules/tm/ut.h b/modules/tm/ut.h
+index 59b555ca4..f91f79105 100644
+--- a/modules/tm/ut.h
++++ b/modules/tm/ut.h
+@@ -297,21 +297,19 @@ inline static struct dest_info *uri2dst(struct dest_info* dst,
+ 				return dst; /* found a good one */
+ 			}
+ 		}while(dns_srv_handle_next(dns_h, err));
+-		LOG(L_ERR, "ERROR: uri2sock: no corresponding socket for \"%.*s\" "
+-					"af %d\n", host->len, ZSW(host->s), dst->to.s.sa_family);
++		ERR("no corresponding socket for \"%.*s\" af %d\n", host->len, 
++				ZSW(host->s), dst->to.s.sa_family);
+ 		/* try to continue */
+ 		return dst;
+ 	}
+ #endif
+ 	if (sip_hostport2su(&dst->to, host, parsed_uri.port_no, &dst->proto)!=0){
+-		LOG(L_ERR, "ERROR: uri2dst: failed to resolve \"%.*s\"\n",
+-					host->len, ZSW(host->s));
++		ERR("failed to resolve \"%.*s\"\n", host->len, ZSW(host->s));
+ 		return 0;
+ 	}
+ 	dst->send_sock = get_send_socket(msg, &dst->to, dst->proto);
+ 	if (dst->send_sock==0) {
+-		LOG(L_ERR, "ERROR: uri2sock: no corresponding socket for af %d\n", 
+-					dst->to.s.sa_family);
++		ERR("no corresponding socket for af %d\n", dst->to.s.sa_family);
+ 		/* ser_error = E_NO_SOCKET;*/
+ 		/* try to continue */
+ 	}
+

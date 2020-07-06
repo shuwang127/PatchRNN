@@ -1,0 +1,77 @@
+commit f501ed524b26ba1b739b7f7feb0a0e1496878769
+Author: Vladimir Zapolskiy <vzapolskiy@gmail.com>
+Date:   Wed Sep 22 13:05:13 2010 -0700
+
+    rtc: s3c: balance state changes of wakeup flag
+    
+    This change resolves a problem about unbalanced calls of
+    enable_irq_wakeup() and disable_irq_wakeup() for alarm interrupt.
+    
+    Bug reproduction:
+    
+    root@eb600:~# echo 0 > /sys/class/rtc/rtc0/wakealarm
+    
+    WARNING: at kernel/irq/manage.c:361 set_irq_wake+0x7c/0xe4()
+     Unbalanced IRQ 46 wake disable
+    Modules linked in:
+    [<c0025708>] (unwind_backtrace+0x0/0xd8) from [<c003358c>] (warn_slowpath_common+0x44/0x5c)
+    [<c003358c>] (warn_slowpath_common+0x44/0x5c) from [<c00335dc>] (warn_slowpath_fmt+0x24/0x30)
+    [<c00335dc>] (warn_slowpath_fmt+0x24/0x30) from [<c0058c20>] (set_irq_wake+0x7c/0xe4)
+    [<c0058c20>] (set_irq_wake+0x7c/0xe4) from [<c01b5e80>] (s3c_rtc_setalarm+0xa8/0xb8)
+    [<c01b5e80>] (s3c_rtc_setalarm+0xa8/0xb8) from [<c01b47a0>] (rtc_set_alarm+0x60/0x74)
+    [<c01b47a0>] (rtc_set_alarm+0x60/0x74) from [<c01b5a98>] (rtc_sysfs_set_wakealarm+0xc8/0xd8)
+    [<c01b5a98>] (rtc_sysfs_set_wakealarm+0xc8/0xd8) from [<c01891ec>] (dev_attr_store+0x20/0x24)
+    [<c01891ec>] (dev_attr_store+0x20/0x24) from [<c00be934>] (sysfs_write_file+0x104/0x13c)
+    [<c00be934>] (sysfs_write_file+0x104/0x13c) from [<c0080e7c>] (vfs_write+0xb0/0x158)
+    [<c0080e7c>] (vfs_write+0xb0/0x158) from [<c0080fcc>] (sys_write+0x3c/0x68)
+    [<c0080fcc>] (sys_write+0x3c/0x68) from [<c0020ec0>] (ret_fast_syscall+0x0/0x28)
+    
+    Signed-off-by: Vladimir Zapolskiy <vzapolskiy@gmail.com>
+    Cc: Alessandro Zummo <a.zummo@towertech.it>
+    Cc: Ben Dooks <ben@fluff.org.uk>
+    Cc: Atul Dahiya <atul.dahiya@samsung.com>
+    Cc: Taekgyun Ko <taeggyun.ko@samsung.com>
+    Cc: Kukjin Kim <kgene.kim@samsung.com>
+    Cc: <stable@kernel.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/rtc/rtc-s3c.c b/drivers/rtc/rtc-s3c.c
+index a0d3ec89d412..f57a87f4ae96 100644
+--- a/drivers/rtc/rtc-s3c.c
++++ b/drivers/rtc/rtc-s3c.c
+@@ -310,11 +310,6 @@ static int s3c_rtc_setalarm(struct device *dev, struct rtc_wkalrm *alrm)
+ 
+ 	s3c_rtc_setaie(alrm->enabled);
+ 
+-	if (alrm->enabled)
+-		enable_irq_wake(s3c_rtc_alarmno);
+-	else
+-		disable_irq_wake(s3c_rtc_alarmno);
+-
+ 	return 0;
+ }
+ 
+@@ -587,6 +582,10 @@ static int s3c_rtc_suspend(struct platform_device *pdev, pm_message_t state)
+ 		ticnt_en_save &= S3C64XX_RTCCON_TICEN;
+ 	}
+ 	s3c_rtc_enable(pdev, 0);
++
++	if (device_may_wakeup(&pdev->dev))
++		enable_irq_wake(s3c_rtc_alarmno);
++
+ 	return 0;
+ }
+ 
+@@ -600,6 +599,10 @@ static int s3c_rtc_resume(struct platform_device *pdev)
+ 		tmp = readb(s3c_rtc_base + S3C2410_RTCCON);
+ 		writeb(tmp | ticnt_en_save, s3c_rtc_base + S3C2410_RTCCON);
+ 	}
++
++	if (device_may_wakeup(&pdev->dev))
++		disable_irq_wake(s3c_rtc_alarmno);
++
+ 	return 0;
+ }
+ #else
+

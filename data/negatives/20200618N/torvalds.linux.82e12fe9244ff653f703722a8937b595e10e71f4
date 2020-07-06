@@ -1,0 +1,80 @@
+commit 82e12fe9244ff653f703722a8937b595e10e71f4
+Author: NeilBrown <neilb@suse.de>
+Date:   Tue Jun 16 11:03:07 2009 +1000
+
+    nfsd: don't take nfsd_mutex twice when setting number of threads.
+    
+    Currently when we write a number to 'threads' in nfsdfs,
+    we take the nfsd_mutex, update the number of threads, then take the
+    mutex again to read the number of threads.
+    
+    Mostly this isn't a big deal.  However if we are write '0', and
+    portmap happens to be dead, then we can get unpredictable behaviour.
+    If the nfsd threads all got killed quickly and the last thread is
+    waiting for portmap to respond, then the second time we take the mutex
+    we will block waiting for the last thread.
+    However if the nfsd threads didn't die quite that fast, then there
+    will be no contention when we try to take the mutex again.
+    
+    Unpredictability isn't fun, and waiting for the last thread to exit is
+    pointless, so avoid taking the lock twice.
+    To achieve this, get nfsd_svc return a non-negative number of active
+    threads when not returning a negative error.
+    
+    Signed-off-by: NeilBrown <neilb@suse.de>
+
+diff --git a/fs/nfsd/nfsctl.c b/fs/nfsd/nfsctl.c
+index 877e713a0fd6..1250fb978ac1 100644
+--- a/fs/nfsd/nfsctl.c
++++ b/fs/nfsd/nfsctl.c
+@@ -207,10 +207,14 @@ static struct file_operations pool_stats_operations = {
+ static ssize_t write_svc(struct file *file, char *buf, size_t size)
+ {
+ 	struct nfsctl_svc *data;
++	int err;
+ 	if (size < sizeof(*data))
+ 		return -EINVAL;
+ 	data = (struct nfsctl_svc*) buf;
+-	return nfsd_svc(data->svc_port, data->svc_nthreads);
++	err = nfsd_svc(data->svc_port, data->svc_nthreads);
++	if (err < 0)
++		return err;
++	return 0;
+ }
+ 
+ /**
+@@ -692,12 +696,12 @@ static ssize_t write_threads(struct file *file, char *buf, size_t size)
+ 		if (newthreads < 0)
+ 			return -EINVAL;
+ 		rv = nfsd_svc(NFS_PORT, newthreads);
+-		if (rv)
++		if (rv < 0)
+ 			return rv;
+-	}
++	} else
++		rv = nfsd_nrthreads();
+ 
+-	return scnprintf(buf, SIMPLE_TRANSACTION_LIMIT, "%d\n",
+-							nfsd_nrthreads());
++	return scnprintf(buf, SIMPLE_TRANSACTION_LIMIT, "%d\n", rv);
+ }
+ 
+ /**
+diff --git a/fs/nfsd/nfssvc.c b/fs/nfsd/nfssvc.c
+index cbba4a935786..209eaa0885d1 100644
+--- a/fs/nfsd/nfssvc.c
++++ b/fs/nfsd/nfssvc.c
+@@ -413,6 +413,12 @@ nfsd_svc(unsigned short port, int nrservs)
+ 		goto failure;
+ 
+ 	error = svc_set_num_threads(nfsd_serv, NULL, nrservs);
++	if (error == 0)
++		/* We are holding a reference to nfsd_serv which
++		 * we don't want to count in the return value,
++		 * so subtract 1
++		 */
++		error = nfsd_serv->sv_nrthreads - 1;
+  failure:
+ 	svc_destroy(nfsd_serv);		/* Release server */
+  out:
+

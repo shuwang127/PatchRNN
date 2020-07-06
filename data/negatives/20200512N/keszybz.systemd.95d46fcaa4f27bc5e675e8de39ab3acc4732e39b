@@ -1,0 +1,33 @@
+commit 95d46fcaa4f27bc5e675e8de39ab3acc4732e39b
+Author: Tom Gundersen <teg@jklm.no>
+Date:   Thu Nov 26 03:58:08 2015 +0100
+
+    resolved: bus - follow CNAME chains when resolving addresses
+    
+    It may be unexpected to find a CNAME record when doing a reverse lookup, as we
+    expect to find a PTR record directly. However, it is explicitly supported
+    according to <https://tools.ietf.org/html/rfc2181#section-10.2>, and there
+    seems to be no benefit to not supporting it.
+
+diff --git a/src/resolve/resolved-bus.c b/src/resolve/resolved-bus.c
+index a43aa59cc..da1b5014b 100644
+--- a/src/resolve/resolved-bus.c
++++ b/src/resolve/resolved-bus.c
+@@ -298,7 +298,15 @@ static void bus_method_resolve_address_complete(DnsQuery *q) {
+                 goto finish;
+         }
+ 
+-        /* We don't process CNAME for PTR lookups. */
++        r = dns_query_process_cname(q);
++        if (r == -ELOOP) {
++                r = sd_bus_reply_method_errorf(q->request, BUS_ERROR_CNAME_LOOP, "CNAME loop detected, or CNAME resolving disabled on '%s'", dns_question_name(q->question));
++                goto finish;
++        }
++        if (r < 0)
++                goto finish;
++        if (r > 0) /* This was a cname, and the query was restarted. */
++                return;
+ 
+         r = sd_bus_message_new_method_return(q->request, &reply);
+         if (r < 0)
+

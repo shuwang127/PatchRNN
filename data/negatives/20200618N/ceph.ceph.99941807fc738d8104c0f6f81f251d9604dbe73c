@@ -1,0 +1,63 @@
+commit 99941807fc738d8104c0f6f81f251d9604dbe73c
+Author: Sage Weil <sage@newdream.net>
+Date:   Tue Mar 16 10:11:21 2010 -0700
+
+    osd: do no index reqid for CLONE ops (or BACKLOG ops)
+    
+    We don't want to index the Log::Entry reqid for CLONE ops because
+    each CLONE is followed by a real op with the same reqid.. that's
+    the one that should get indexed.  Introduce a helper to keep
+    the logic consistent.
+
+diff --git a/src/osd/PG.cc b/src/osd/PG.cc
+index d240173e60..e88aed397c 100644
+--- a/src/osd/PG.cc
++++ b/src/osd/PG.cc
+@@ -696,8 +696,7 @@ ostream& PG::IndexedLog::print(ostream& out) const
+        p != log.end();
+        p++) {
+     out << *p << " " << (logged_object(p->soid) ? "indexed":"NOT INDEXED") << std::endl;
+-    //assert(logged_object(p->soid));
+-    assert(p->op == Entry::BACKLOG || logged_req(p->reqid));
++    assert(!p->reqid_is_indexed() || logged_req(p->reqid));
+   }
+   return out;
+ }
+diff --git a/src/osd/PG.h b/src/osd/PG.h
+index 8c7d230ff6..58304f2d7e 100644
+--- a/src/osd/PG.h
++++ b/src/osd/PG.h
+@@ -255,6 +255,8 @@ public:
+       bool is_backlog() const { return op == BACKLOG; }
+       bool is_update() const { return is_clone() || is_modify() || is_backlog(); }
+ 
++      bool reqid_is_indexed() const { return op != BACKLOG && op != CLONE; }
++
+       void encode(bufferlist &bl) const {
+ 	__u8 struct_v = 1;
+ 	::encode(struct_v, bl);
+@@ -401,7 +403,7 @@ public:
+       if (objects.count(e.soid) == 0 || 
+           objects[e.soid]->version < e.version)
+         objects[e.soid] = &e;
+-      if (e.op != Entry::BACKLOG)
++      if (e.reqid_is_indexed())
+ 	caller_ops.insert(e.reqid);
+     }
+     void unindex() {
+@@ -410,10 +412,12 @@ public:
+     }
+     void unindex(Entry& e) {
+       // NOTE: this only works if we remove from the _tail_ of the log!
+-      assert(e.op == Entry::BACKLOG || caller_ops.count(e.reqid));
+       if (objects.count(e.soid) && objects[e.soid]->version == e.version)
+         objects.erase(e.soid);
+-      caller_ops.erase(e.reqid);
++      if (e.reqid_is_indexed()) {
++	assert(caller_ops.count(e.reqid));
++	caller_ops.erase(e.reqid);
++      }
+     }
+ 
+ 
+

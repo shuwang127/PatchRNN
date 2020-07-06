@@ -1,0 +1,72 @@
+commit 5b9237f67c499fa4e20bb9bd29c7ce54afe79cb7
+Author: Andreas Färber <afaerber@suse.de>
+Date:   Fri Aug 30 18:28:37 2013 +0200
+
+    qom: Assert instance size in object_initialize_with_type()
+    
+    This catches objects initializing beyond allocated memory, e.g.,
+    when subtypes get extended with instance state of their own.
+    
+    Suggested-by: Peter Maydell <peter.maydell@linaro.org>
+    Signed-off-by: Andreas Färber <afaerber@suse.de>
+
+diff --git a/include/qom/object.h b/include/qom/object.h
+index 13847fb85b..1a7b71aba5 100644
+--- a/include/qom/object.h
++++ b/include/qom/object.h
+@@ -586,13 +586,14 @@ Object *object_new_with_type(Type type);
+ /**
+  * object_initialize_with_type:
+  * @data: A pointer to the memory to be used for the object.
++ * @size: The maximum size available at @data for the object.
+  * @type: The type of the object to instantiate.
+  *
+  * This function will initialize an object.  The memory for the object should
+  * have already been allocated.  The returned object has a reference count of 1,
+  * and will be finalized when the last reference is dropped.
+  */
+-void object_initialize_with_type(void *data, Type type);
++void object_initialize_with_type(void *data, size_t size, Type type);
+ 
+ /**
+  * object_initialize:
+diff --git a/qom/object.c b/qom/object.c
+index 1635422c38..e90e3827d9 100644
+--- a/qom/object.c
++++ b/qom/object.c
+@@ -311,7 +311,7 @@ static void object_post_init_with_type(Object *obj, TypeImpl *ti)
+     }
+ }
+ 
+-void object_initialize_with_type(void *data, TypeImpl *type)
++void object_initialize_with_type(void *data, size_t size, TypeImpl *type)
+ {
+     Object *obj = data;
+ 
+@@ -320,6 +320,7 @@ void object_initialize_with_type(void *data, TypeImpl *type)
+ 
+     g_assert(type->instance_size >= sizeof(Object));
+     g_assert(type->abstract == false);
++    g_assert(size >= type->instance_size);
+ 
+     memset(obj, 0, type->instance_size);
+     obj->class = type->class;
+@@ -333,7 +334,7 @@ void object_initialize(void *data, size_t size, const char *typename)
+ {
+     TypeImpl *type = type_get_by_name(typename);
+ 
+-    object_initialize_with_type(data, type);
++    object_initialize_with_type(data, size, type);
+ }
+ 
+ static inline bool object_property_is_child(ObjectProperty *prop)
+@@ -424,7 +425,7 @@ Object *object_new_with_type(Type type)
+     type_initialize(type);
+ 
+     obj = g_malloc(type->instance_size);
+-    object_initialize_with_type(obj, type);
++    object_initialize_with_type(obj, type->instance_size, type);
+     obj->free = g_free;
+ 
+     return obj;
+

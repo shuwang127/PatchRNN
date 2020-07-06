@@ -1,0 +1,80 @@
+commit 60ea68129942dc36cd1a3a9bdaec783369ee5a6d
+Author: Chuck Lever <chuck.lever@oracle.com>
+Date:   Thu Oct 17 14:13:47 2013 -0400
+
+    NFS: Migration support for RELEASE_LOCKOWNER
+    
+    Currently the Linux NFS client ignores the operation status code for
+    the RELEASE_LOCKOWNER operation.  Like NFSv3's UMNT operation,
+    RELEASE_LOCKOWNER is a courtesy to help servers manage their
+    resources, and the outcome is not consequential for the client.
+    
+    During a migration, a server may report NFS4ERR_LEASE_MOVED, in
+    which case the client really should retry, since typically
+    LEASE_MOVED has nothing to do with the current operation, but does
+    prevent it from going forward.
+    
+    Also, it's important for a client to respond as soon as possible to
+    a moved lease condition, since the client's lease could expire on
+    the destination without further action by the client.
+    
+    NFS4ERR_DELAY is not included in the list of valid status codes for
+    RELEASE_LOCKOWNER in RFC 3530bis.  However, rfc3530-migration-update
+    does permit migration-capable servers to return DELAY to clients,
+    but only in the context of an ongoing migration.  In this case the
+    server has frozen lock state in preparation for migration, and a
+    client retry would help the destination server purge unneeded state
+    once migration recovery is complete.
+    
+    Interestly, NFS4ERR_MOVED is not valid for RELEASE_LOCKOWNER, even
+    though lock owners can be migrated with Transparent State Migration.
+    
+    Note that RFC 3530bis section 9.5 includes RELEASE_LOCKOWNER in the
+    list of operations that renew a client's lease on the server if they
+    succeed.  Now that our client pays attention to the operation's
+    status code, we can note that renewal appropriately.
+    
+    Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/fs/nfs/nfs4proc.c b/fs/nfs/nfs4proc.c
+index 2564e1c89f56..9f2ccf7471ee 100644
+--- a/fs/nfs/nfs4proc.c
++++ b/fs/nfs/nfs4proc.c
+@@ -5800,6 +5800,7 @@ struct nfs_release_lockowner_data {
+ 	struct nfs_release_lockowner_args args;
+ 	struct nfs4_sequence_args seq_args;
+ 	struct nfs4_sequence_res seq_res;
++	unsigned long timestamp;
+ };
+ 
+ static void nfs4_release_lockowner_prepare(struct rpc_task *task, void *calldata)
+@@ -5807,12 +5808,27 @@ static void nfs4_release_lockowner_prepare(struct rpc_task *task, void *calldata
+ 	struct nfs_release_lockowner_data *data = calldata;
+ 	nfs40_setup_sequence(data->server,
+ 				&data->seq_args, &data->seq_res, task);
++	data->timestamp = jiffies;
+ }
+ 
+ static void nfs4_release_lockowner_done(struct rpc_task *task, void *calldata)
+ {
+ 	struct nfs_release_lockowner_data *data = calldata;
++	struct nfs_server *server = data->server;
++
+ 	nfs40_sequence_done(task, &data->seq_res);
++
++	switch (task->tk_status) {
++	case 0:
++		renew_lease(server, data->timestamp);
++		break;
++	case -NFS4ERR_STALE_CLIENTID:
++	case -NFS4ERR_EXPIRED:
++	case -NFS4ERR_LEASE_MOVED:
++	case -NFS4ERR_DELAY:
++		if (nfs4_async_handle_error(task, server, NULL) == -EAGAIN)
++			rpc_restart_call_prepare(task);
++	}
+ }
+ 
+ static void nfs4_release_lockowner_release(void *calldata)
+

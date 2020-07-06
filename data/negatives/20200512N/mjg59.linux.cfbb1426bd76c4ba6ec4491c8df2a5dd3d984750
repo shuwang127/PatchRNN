@@ -1,0 +1,34 @@
+commit cfbb1426bd76c4ba6ec4491c8df2a5dd3d984750
+Author: Jack Steiner <steiner@sgi.com>
+Date:   Thu Dec 22 13:45:41 2005 -0600
+
+    [IA64] Hole in IA64 TLB flushing from system threads
+    
+    I originally thought this was an bug only in the SN code, but I think I
+    also see a hole in the generic IA64 tlb code. (Separate patch was sent
+    for the SN problem).
+    
+    It looks like there is a bug in the TLB flushing code. During context switch,
+    kernel threads (kswapd, for example) inherit the mm of the task that was
+    previously running on the cpu. Normally, this is ok because the previous context
+    is still loaded into the RR registers. However, if the owner of the mm
+    migrates to another cpu, changes it's context number, and references a
+    page before kswapd issues a tlb_purge for that same page, the purge will be
+    done with a stale context number (& RR registers).
+    
+    Signed-off-by: Tony Luck <tony.luck@intel.com>
+
+diff --git a/arch/ia64/mm/tlb.c b/arch/ia64/mm/tlb.c
+index 41105d454423..6a4eec9113e8 100644
+--- a/arch/ia64/mm/tlb.c
++++ b/arch/ia64/mm/tlb.c
+@@ -90,7 +90,7 @@ ia64_global_tlb_purge (struct mm_struct *mm, unsigned long start,
+ {
+ 	static DEFINE_SPINLOCK(ptcg_lock);
+ 
+-	if (mm != current->active_mm) {
++	if (mm != current->active_mm || !current->mm) {
+ 		flush_tlb_all();
+ 		return;
+ 	}
+

@@ -1,0 +1,916 @@
+commit b60be3f2f8d094da79e04c6eda888f401b09dc39
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+Date:   Tue Nov 19 23:22:00 2002 +0000
+
+    Add an at-least-marginally-plausible method of estimating the number
+    of groups produced by GROUP BY.  This improves the accuracy of planning
+    estimates for grouped subselects, and is needed to check whether a
+    hashed aggregation plan risks memory overflow.
+
+diff --git a/src/backend/executor/nodeAgg.c b/src/backend/executor/nodeAgg.c
+index 5fa82ee9fa..0216f8ebde 100644
+--- a/src/backend/executor/nodeAgg.c
++++ b/src/backend/executor/nodeAgg.c
+@@ -45,7 +45,7 @@
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/executor/nodeAgg.c,v 1.95 2002/11/13 00:39:47 momjian Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/executor/nodeAgg.c,v 1.96 2002/11/19 23:21:57 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -619,6 +619,9 @@ lookup_hash_entry(Agg *node, TupleTableSlot *slot)
+ 		Datum		attr;
+ 		bool		isNull;
+ 
++		/* rotate hashkey left 1 bit at each step */
++		hashkey = (hashkey << 1) | ((hashkey & 0x80000000) ? 1 : 0);
++
+ 		attr = heap_getattr(tuple, att, tupdesc, &isNull);
+ 		if (isNull)
+ 			continue;			/* treat nulls as having hash key 0 */
+diff --git a/src/backend/nodes/copyfuncs.c b/src/backend/nodes/copyfuncs.c
+index 9dc29584e8..2c345b9f78 100644
+--- a/src/backend/nodes/copyfuncs.c
++++ b/src/backend/nodes/copyfuncs.c
+@@ -15,7 +15,7 @@
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/nodes/copyfuncs.c,v 1.218 2002/11/15 02:50:06 momjian Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/nodes/copyfuncs.c,v 1.219 2002/11/19 23:21:58 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -1865,8 +1865,8 @@ _copyQuery(Query *from)
+ 
+ 	/*
+ 	 * We do not copy the planner internal fields: base_rel_list,
+-	 * other_rel_list, join_rel_list, equi_key_list, query_pathkeys. Not
+-	 * entirely clear if this is right?
++	 * other_rel_list, join_rel_list, equi_key_list, query_pathkeys,
++	 * hasJoinRTEs.  Not entirely clear if this is right?
+ 	 */
+ 
+ 	return newnode;
+diff --git a/src/backend/nodes/equalfuncs.c b/src/backend/nodes/equalfuncs.c
+index 68e93e48b0..61e314ff18 100644
+--- a/src/backend/nodes/equalfuncs.c
++++ b/src/backend/nodes/equalfuncs.c
+@@ -20,7 +20,7 @@
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/nodes/equalfuncs.c,v 1.164 2002/11/15 02:50:06 momjian Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/nodes/equalfuncs.c,v 1.165 2002/11/19 23:21:58 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -628,9 +628,9 @@ _equalQuery(Query *a, Query *b)
+ 
+ 	/*
+ 	 * We do not check the internal-to-the-planner fields: base_rel_list,
+-	 * other_rel_list, join_rel_list, equi_key_list, query_pathkeys. They
+-	 * might not be set yet, and in any case they should be derivable from
+-	 * the other fields.
++	 * other_rel_list, join_rel_list, equi_key_list, query_pathkeys,
++	 * hasJoinRTEs.  They might not be set yet, and in any case they should
++	 * be derivable from the other fields.
+ 	 */
+ 	return true;
+ }
+diff --git a/src/backend/optimizer/plan/createplan.c b/src/backend/optimizer/plan/createplan.c
+index 717fcfa3ce..74e6f237b3 100644
+--- a/src/backend/optimizer/plan/createplan.c
++++ b/src/backend/optimizer/plan/createplan.c
+@@ -10,7 +10,7 @@
+  *
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/optimizer/plan/createplan.c,v 1.122 2002/11/15 02:36:53 tgl Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/optimizer/plan/createplan.c,v 1.123 2002/11/19 23:21:58 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -1684,7 +1684,8 @@ make_material(List *tlist, Plan *lefttree)
+ 
+ Agg *
+ make_agg(List *tlist, List *qual, AggStrategy aggstrategy,
+-		 int ngrp, AttrNumber *grpColIdx, Plan *lefttree)
++		 int ngrp, AttrNumber *grpColIdx, long numGroups, int numAggs,
++		 Plan *lefttree)
+ {
+ 	Agg		   *node = makeNode(Agg);
+ 	Plan	   *plan = &node->plan;
+@@ -1692,6 +1693,7 @@ make_agg(List *tlist, List *qual, AggStrategy aggstrategy,
+ 	node->aggstrategy = aggstrategy;
+ 	node->numCols = ngrp;
+ 	node->grpColIdx = grpColIdx;
++	node->numGroups = numGroups;
+ 
+ 	copy_plan_costsize(plan, lefttree);
+ 
+@@ -1699,15 +1701,11 @@ make_agg(List *tlist, List *qual, AggStrategy aggstrategy,
+ 	 * Charge one cpu_operator_cost per aggregate function per input
+ 	 * tuple.
+ 	 */
+-	plan->total_cost += cpu_operator_cost * plan->plan_rows *
+-		(length(pull_agg_clause((Node *) tlist)) +
+-		 length(pull_agg_clause((Node *) qual)));
++	plan->total_cost += cpu_operator_cost * plan->plan_rows * numAggs;
+ 
+ 	/*
+ 	 * We will produce a single output tuple if not grouping,
+-	 * and a tuple per group otherwise.  For now, estimate the number of
+-	 * groups as 10% of the number of tuples --- bogus, but how to do
+-	 * better?
++	 * and a tuple per group otherwise.
+ 	 */
+ 	if (aggstrategy == AGG_PLAIN)
+ 	{
+@@ -1716,10 +1714,7 @@ make_agg(List *tlist, List *qual, AggStrategy aggstrategy,
+ 	}
+ 	else
+ 	{
+-		plan->plan_rows *= 0.1;
+-		if (plan->plan_rows < 1)
+-			plan->plan_rows = 1;
+-		node->numGroups = (long) plan->plan_rows;
++		plan->plan_rows = numGroups;
+ 	}
+ 
+ 	plan->state = (EState *) NULL;
+@@ -1735,6 +1730,7 @@ Group *
+ make_group(List *tlist,
+ 		   int ngrp,
+ 		   AttrNumber *grpColIdx,
++		   double numGroups,
+ 		   Plan *lefttree)
+ {
+ 	Group	   *node = makeNode(Group);
+@@ -1748,13 +1744,8 @@ make_group(List *tlist,
+ 	 */
+ 	plan->total_cost += cpu_operator_cost * plan->plan_rows * ngrp;
+ 
+-	/*
+-	 * Estimate the number of groups as 10% of the number of tuples
+-	 * --- bogus, but how to do better?
+-	 */
+-	plan->plan_rows *= 0.1;
+-	if (plan->plan_rows < 1)
+-		plan->plan_rows = 1;
++	/* One output tuple per estimated result group */
++	plan->plan_rows = numGroups;
+ 
+ 	plan->state = (EState *) NULL;
+ 	plan->qual = NULL;
+@@ -1786,17 +1777,16 @@ make_unique(List *tlist, Plan *lefttree, List *distinctList)
+ 
+ 	/*
+ 	 * Charge one cpu_operator_cost per comparison per input tuple. We
+-	 * assume all columns get compared at most of the tuples.
++	 * assume all columns get compared at most of the tuples.  (XXX probably
++	 * this is an overestimate.)
+ 	 */
+ 	plan->total_cost += cpu_operator_cost * plan->plan_rows * numCols;
+ 
+ 	/*
+-	 * As for Group, we make the unsupported assumption that there will be
+-	 * 10% as many tuples out as in.
++	 * plan->plan_rows is left as a copy of the input subplan's plan_rows;
++	 * ie, we assume the filter removes nothing.  The caller must alter this
++	 * if he has a better idea.
+ 	 */
+-	plan->plan_rows *= 0.1;
+-	if (plan->plan_rows < 1)
+-		plan->plan_rows = 1;
+ 
+ 	plan->state = (EState *) NULL;
+ 	plan->targetlist = tlist;
+@@ -1850,8 +1840,8 @@ make_setop(SetOpCmd cmd, List *tlist, Plan *lefttree,
+ 	plan->total_cost += cpu_operator_cost * plan->plan_rows * numCols;
+ 
+ 	/*
+-	 * As for Group, we make the unsupported assumption that there will be
+-	 * 10% as many tuples out as in.
++	 * We make the unsupported assumption that there will be 10% as many
++	 * tuples out as in.  Any way to do better?
+ 	 */
+ 	plan->plan_rows *= 0.1;
+ 	if (plan->plan_rows < 1)
+diff --git a/src/backend/optimizer/plan/initsplan.c b/src/backend/optimizer/plan/initsplan.c
+index e06282c126..e43c52f6df 100644
+--- a/src/backend/optimizer/plan/initsplan.c
++++ b/src/backend/optimizer/plan/initsplan.c
+@@ -8,7 +8,7 @@
+  *
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/optimizer/plan/initsplan.c,v 1.75 2002/09/04 20:31:21 momjian Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/optimizer/plan/initsplan.c,v 1.76 2002/11/19 23:21:58 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -784,6 +784,71 @@ process_implied_equality(Query *root, Node *item1, Node *item2,
+ 							pull_varnos((Node *) clause));
+ }
+ 
++/*
++ * vars_known_equal
++ *	  Detect whether two Vars are known equal due to equijoin clauses.
++ *
++ * This is not completely accurate since we avoid adding redundant restriction
++ * clauses to individual base rels (see qual_is_redundant).  However, after
++ * the implied-equality-deduction phase, it is complete for Vars of different
++ * rels; that's sufficient for planned uses.
++ */
++bool
++vars_known_equal(Query *root, Var *var1, Var *var2)
++{
++	Index		irel1;
++	Index		irel2;
++	RelOptInfo *rel1;
++	List	   *restrictlist;
++	List	   *itm;
++
++	/*
++	 * Would need more work here if we wanted to check for known equality
++	 * of general clauses: there might be multiple base rels involved.
++	 */
++	Assert(IsA(var1, Var));
++	irel1 = var1->varno;
++	Assert(IsA(var2, Var));
++	irel2 = var2->varno;
++
++	/*
++	 * If both vars belong to same rel, we need to look at that rel's
++	 * baserestrictinfo list.  If different rels, each will have a
++	 * joininfo node for the other, and we can scan either list.
++	 */
++	rel1 = find_base_rel(root, irel1);
++	if (irel1 == irel2)
++		restrictlist = rel1->baserestrictinfo;
++	else
++	{
++		JoinInfo   *joininfo = find_joininfo_node(rel1,
++												  makeListi1(irel2));
++
++		restrictlist = joininfo->jinfo_restrictinfo;
++	}
++
++	/*
++	 * Scan to see if equality is known.
++	 */
++	foreach(itm, restrictlist)
++	{
++		RestrictInfo *restrictinfo = (RestrictInfo *) lfirst(itm);
++		Node	   *left,
++				   *right;
++
++		if (restrictinfo->mergejoinoperator == InvalidOid)
++			continue;			/* ignore non-mergejoinable clauses */
++		/* We now know the restrictinfo clause is a binary opclause */
++		left = (Node *) get_leftop(restrictinfo->clause);
++		right = (Node *) get_rightop(restrictinfo->clause);
++		if ((equal(var1, left) && equal(var2, right)) ||
++			(equal(var2, left) && equal(var1, right)))
++			return true;		/* found a matching clause */
++	}
++
++	return false;
++}
++
+ /*
+  * qual_is_redundant
+  *	  Detect whether an implied-equality qual that turns out to be a
+diff --git a/src/backend/optimizer/plan/planner.c b/src/backend/optimizer/plan/planner.c
+index ab51f0cedb..baccf2ffbd 100644
+--- a/src/backend/optimizer/plan/planner.c
++++ b/src/backend/optimizer/plan/planner.c
+@@ -8,14 +8,17 @@
+  *
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/optimizer/plan/planner.c,v 1.128 2002/11/14 19:00:36 tgl Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/optimizer/plan/planner.c,v 1.129 2002/11/19 23:21:59 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+ 
+ #include "postgres.h"
+ 
++#include <limits.h>
++
+ #include "catalog/pg_type.h"
++#include "miscadmin.h"
+ #include "nodes/makefuncs.h"
+ #ifdef OPTIMIZER_DEBUG
+ #include "nodes/print.h"
+@@ -35,6 +38,7 @@
+ #include "parser/parse_expr.h"
+ #include "rewrite/rewriteManip.h"
+ #include "utils/lsyscache.h"
++#include "utils/selfuncs.h"
+ 
+ 
+ /* Expression kind codes for preprocess_expression */
+@@ -160,6 +164,23 @@ subquery_planner(Query *parse, double tuple_fraction)
+ 	parse->jointree = (FromExpr *)
+ 		preprocess_jointree(parse, (Node *) parse->jointree);
+ 
++	/*
++	 * Detect whether any rangetable entries are RTE_JOIN kind; if not,
++	 * we can avoid the expense of doing flatten_join_alias_vars().
++	 * This must be done after we have done pull_up_subqueries, of course.
++	 */
++	parse->hasJoinRTEs = false;
++	foreach(lst, parse->rtable)
++	{
++		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lst);
++
++		if (rte->rtekind == RTE_JOIN)
++		{
++			parse->hasJoinRTEs = true;
++			break;
++		}
++	}
++
+ 	/*
+ 	 * Do expression preprocessing on targetlist and quals.
+ 	 */
+@@ -694,9 +715,6 @@ preprocess_jointree(Query *parse, Node *jtnode)
+ static Node *
+ preprocess_expression(Query *parse, Node *expr, int kind)
+ {
+-	bool		has_join_rtes;
+-	List	   *rt;
+-
+ 	/*
+ 	 * Simplify constant expressions.
+ 	 *
+@@ -737,22 +755,8 @@ preprocess_expression(Query *parse, Node *expr, int kind)
+ 	 * with base-relation variables, to allow quals to be pushed down. We
+ 	 * must do this after sublink processing, since it does not recurse
+ 	 * into sublinks.
+-	 *
+-	 * The flattening pass is expensive enough that it seems worthwhile to
+-	 * scan the rangetable to see if we can avoid it.
+ 	 */
+-	has_join_rtes = false;
+-	foreach(rt, parse->rtable)
+-	{
+-		RangeTblEntry *rte = lfirst(rt);
+-
+-		if (rte->rtekind == RTE_JOIN)
+-		{
+-			has_join_rtes = true;
+-			break;
+-		}
+-	}
+-	if (has_join_rtes)
++	if (parse->hasJoinRTEs)
+ 		expr = flatten_join_alias_vars(expr, parse->rtable, false);
+ 
+ 	return expr;
+@@ -931,6 +935,9 @@ grouping_planner(Query *parse, double tuple_fraction)
+ 		AttrNumber *groupColIdx = NULL;
+ 		Path	   *cheapest_path;
+ 		Path	   *sorted_path;
++		double		dNumGroups = 0;
++		long		numGroups = 0;
++		int			numAggs = 0;
+ 		bool		use_hashed_grouping = false;
+ 
+ 		/* Preprocess targetlist in case we are inside an INSERT/UPDATE. */
+@@ -1006,6 +1013,19 @@ grouping_planner(Query *parse, double tuple_fraction)
+ 		sort_pathkeys = make_pathkeys_for_sortclauses(parse->sortClause,
+ 													  tlist);
+ 
++		/*
++		 * Will need actual number of aggregates for estimating costs.
++		 * Also, it's possible that optimization has eliminated all
++		 * aggregates, and we may as well check for that here.
++		 */
++		if (parse->hasAggs)
++		{
++			numAggs = length(pull_agg_clause((Node *) tlist)) +
++				length(pull_agg_clause(parse->havingQual));
++			if (numAggs == 0)
++				parse->hasAggs = false;
++		}
++
+ 		/*
+ 		 * Figure out whether we need a sorted result from query_planner.
+ 		 *
+@@ -1215,6 +1235,14 @@ grouping_planner(Query *parse, double tuple_fraction)
+ 		 */
+ 		if (parse->groupClause)
+ 		{
++			/*
++			 * Always estimate the number of groups.
++			 */
++			dNumGroups = estimate_num_groups(parse,
++											 parse->groupClause,
++											 cheapest_path->parent->rows);
++			numGroups = (long) Min(dNumGroups, (double) LONG_MAX);
++
+ 			/*
+ 			 * Executor doesn't support hashed aggregation with DISTINCT
+ 			 * aggregates.  (Doing so would imply storing *all* the input
+@@ -1226,10 +1254,30 @@ grouping_planner(Query *parse, double tuple_fraction)
+ 				use_hashed_grouping = false;
+ 			else
+ 			{
+-#if 0							/* much more to do here */
+-				/* TEMPORARY HOTWIRE FOR TESTING */
+-				use_hashed_grouping = true;
++				/*
++				 * Use hashed grouping if (a) we think we can fit the
++				 * hashtable into SortMem, *and* (b) the estimated cost
++				 * is no more than doing it the other way.  While avoiding
++				 * the need for sorted input is usually a win, the fact
++				 * that the output won't be sorted may be a loss; so we
++				 * need to do an actual cost comparison.
++				 *
++				 * In most cases we have no good way to estimate the size of
++				 * the transition value needed by an aggregate; arbitrarily
++				 * assume it is 100 bytes.  Also set the overhead per hashtable
++				 * entry at 64 bytes.
++				 */
++				int		hashentrysize = cheapest_path->parent->width + 64 +
++					numAggs * 100;
++
++				if (hashentrysize * dNumGroups <= SortMem * 1024L)
++				{
++					/* much more to do here */
++#if 0
++					/* TEMPORARY HOTWIRE FOR TESTING */
++					use_hashed_grouping = true;
+ #endif
++				}
+ 			}
+ 		}
+ 
+@@ -1319,6 +1367,8 @@ grouping_planner(Query *parse, double tuple_fraction)
+ 											AGG_HASHED,
+ 											length(parse->groupClause),
+ 											groupColIdx,
++											numGroups,
++											numAggs,
+ 											result_plan);
+ 			/* Hashed aggregation produces randomly-ordered results */
+ 			current_pathkeys = NIL;
+@@ -1356,6 +1406,8 @@ grouping_planner(Query *parse, double tuple_fraction)
+ 											aggstrategy,
+ 											length(parse->groupClause),
+ 											groupColIdx,
++											numGroups,
++											numAggs,
+ 											result_plan);
+ 		}
+ 		else
+@@ -1387,6 +1439,7 @@ grouping_planner(Query *parse, double tuple_fraction)
+ 				result_plan = (Plan *) make_group(tlist,
+ 												  length(parse->groupClause),
+ 												  groupColIdx,
++												  dNumGroups,
+ 												  result_plan);
+ 			}
+ 		}
+@@ -1410,6 +1463,16 @@ grouping_planner(Query *parse, double tuple_fraction)
+ 	{
+ 		result_plan = (Plan *) make_unique(tlist, result_plan,
+ 										   parse->distinctClause);
++		/*
++		 * If there was grouping or aggregation, leave plan_rows as-is
++		 * (ie, assume the result was already mostly unique).  If not,
++		 * it's reasonable to assume the UNIQUE filter has effects
++		 * comparable to GROUP BY.
++		 */
++		if (!parse->groupClause && !parse->hasAggs)
++			result_plan->plan_rows = estimate_num_groups(parse,
++														 parse->distinctClause,
++														 result_plan->plan_rows);
+ 	}
+ 
+ 	/*
+diff --git a/src/backend/optimizer/plan/setrefs.c b/src/backend/optimizer/plan/setrefs.c
+index 66998b036f..4239d9c3c1 100644
+--- a/src/backend/optimizer/plan/setrefs.c
++++ b/src/backend/optimizer/plan/setrefs.c
+@@ -9,7 +9,7 @@
+  *
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/optimizer/plan/setrefs.c,v 1.81 2002/09/04 20:31:21 momjian Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/optimizer/plan/setrefs.c,v 1.82 2002/11/19 23:21:59 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -439,7 +439,14 @@ join_references_mutator(Node *node,
+ 			return (Node *) newvar;
+ 		}
+ 
+-		/* Perhaps it's a join alias that can be resolved to input vars? */
++		/* Return the Var unmodified, if it's for acceptable_rel */
++		if (var->varno == context->acceptable_rel)
++			return (Node *) copyObject(var);
++
++		/*
++		 * Perhaps it's a join alias that can be resolved to input vars?
++		 * We try this last since it's relatively slow.
++		 */
+ 		newnode = flatten_join_alias_vars((Node *) var,
+ 										  context->rtable,
+ 										  true);
+@@ -450,13 +457,8 @@ join_references_mutator(Node *node,
+ 			return newnode;
+ 		}
+ 
+-		/*
+-		 * No referent found for Var --- either raise an error, or return
+-		 * the Var unmodified if it's for acceptable_rel.
+-		 */
+-		if (var->varno != context->acceptable_rel)
+-			elog(ERROR, "join_references: variable not in subplan target lists");
+-		return (Node *) copyObject(var);
++		/* No referent found for Var */
++		elog(ERROR, "join_references: variable not in subplan target lists");
+ 	}
+ 	return expression_tree_mutator(node,
+ 								   join_references_mutator,
+diff --git a/src/backend/utils/adt/selfuncs.c b/src/backend/utils/adt/selfuncs.c
+index 936b9ad99c..23e012c64e 100644
+--- a/src/backend/utils/adt/selfuncs.c
++++ b/src/backend/utils/adt/selfuncs.c
+@@ -15,7 +15,7 @@
+  *
+  *
+  * IDENTIFICATION
+- *	  $Header: /cvsroot/pgsql/src/backend/utils/adt/selfuncs.c,v 1.120 2002/11/08 20:23:57 momjian Exp $
++ *	  $Header: /cvsroot/pgsql/src/backend/utils/adt/selfuncs.c,v 1.121 2002/11/19 23:21:59 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -85,7 +85,10 @@
+ #include "optimizer/cost.h"
+ #include "optimizer/pathnode.h"
+ #include "optimizer/plancat.h"
++#include "optimizer/planmain.h"
+ #include "optimizer/prep.h"
++#include "optimizer/tlist.h"
++#include "optimizer/var.h"
+ #include "parser/parse_func.h"
+ #include "parser/parse_oper.h"
+ #include "parser/parsetree.h"
+@@ -1809,6 +1812,251 @@ mergejoinscansel(Query *root, Node *clause,
+ 		*rightscan = 1.0;
+ }
+ 
++/*
++ * estimate_num_groups		- Estimate number of groups in a grouped query
++ *
++ * Given a query having a GROUP BY clause, estimate how many groups there
++ * will be --- ie, the number of distinct combinations of the GROUP BY
++ * expressions.
++ *
++ * This routine is also used to estimate the number of rows emitted by
++ * a DISTINCT filtering step; that is an isomorphic problem.  (Note:
++ * actually, we only use it for DISTINCT when there's no grouping or
++ * aggregation ahead of the DISTINCT.)
++ *
++ * Inputs:
++ *	root - the query
++ *	groupClauses - list of GroupClauses (or SortClauses for the DISTINCT
++ *		case, but those are equivalent structs)
++ *	input_rows - number of rows estimated to arrive at the group/unique
++ *		filter step
++ *
++ * Given the lack of any cross-correlation statistics in the system, it's
++ * impossible to do anything really trustworthy with GROUP BY conditions
++ * involving multiple Vars.  We should however avoid assuming the worst
++ * case (all possible cross-product terms actually appear as groups) since
++ * very often the grouped-by Vars are highly correlated.  Our current approach
++ * is as follows:
++ *	1.	Reduce the given expressions to a list of unique Vars used.  For
++ *		example, GROUP BY a, a + b is treated the same as GROUP BY a, b.
++ *		It is clearly correct not to count the same Var more than once.
++ *		It is also reasonable to treat f(x) the same as x: f() cannot
++ *		increase the number of distinct values (unless it is volatile,
++ *		which we consider unlikely for grouping), but it probably won't
++ *		reduce the number of distinct values much either.
++ *	2.	If the list contains Vars of different relations that are known equal
++ *		due to equijoin clauses, then drop all but one of the Vars from each
++ *		known-equal set, keeping the one with smallest estimated # of values
++ *		(since the extra values of the others can't appear in joined rows).
++ *		Note the reason we only consider Vars of different relations is that
++ *		if we considered ones of the same rel, we'd be double-counting the
++ *		restriction selectivity of the equality in the next step.
++ *	3.	For Vars within a single source rel, we multiply together the numbers
++ *		of values, clamp to the number of rows in the rel, and then multiply
++ *		by the selectivity of the restriction clauses for that rel.  The
++ *		initial product is probably too high (it's the worst case) but since
++ *		we can clamp to the rel's rows it won't be hugely bad.  Multiplying
++ *		by the restriction selectivity is effectively assuming that the
++ *		restriction clauses are independent of the grouping, which is a crummy
++ *		assumption, but it's hard to do better.
++ *	4.	If there are Vars from multiple rels, we repeat step 3 for each such
++ *		rel, and multiply the results together.
++ * Note that rels not containing grouped Vars are ignored completely, as are
++ * join clauses other than the equijoin clauses used in step 2.  Such rels
++ * cannot increase the number of groups, and we assume such clauses do not
++ * reduce the number either (somewhat bogus, but we don't have the info to
++ * do better).
++ */
++double
++estimate_num_groups(Query *root, List *groupClauses, double input_rows)
++{
++	List	   *allvars = NIL;
++	List	   *varinfos = NIL;
++	double		numdistinct;
++	List	   *l;
++	typedef struct {			/* varinfos is a List of these */
++		Var	   *var;
++		double	ndistinct;
++	} MyVarInfo;
++
++	/* We should not be called unless query has GROUP BY (or DISTINCT) */
++	Assert(groupClauses != NIL);
++
++	/* Step 1: get the unique Vars used */
++	foreach(l, groupClauses)
++	{
++		GroupClause *grpcl = (GroupClause *) lfirst(l);
++		Node	   *groupexpr = get_sortgroupclause_expr(grpcl,
++														 root->targetList);
++		List	   *varshere;
++
++		varshere = pull_var_clause(groupexpr, false);
++		/*
++		 * Replace any JOIN alias Vars with the underlying Vars.  (This
++		 * is not really right for FULL JOIN ...)
++		 */
++		if (root->hasJoinRTEs)
++		{
++			varshere = (List *) flatten_join_alias_vars((Node *) varshere,
++														root->rtable,
++														true);
++			varshere = pull_var_clause((Node *) varshere, false);
++		}
++		/*
++		 * If we find any variable-free GROUP BY item, then either it is
++		 * a constant (and we can ignore it) or it contains a volatile
++		 * function; in the latter case we punt and assume that each input
++		 * row will yield a distinct group.
++		 */
++		if (varshere == NIL)
++		{
++			if (contain_volatile_functions(groupexpr))
++				return input_rows;
++			continue;
++		}
++		allvars = nconc(allvars, varshere);
++	}
++
++	/* If now no Vars, we must have an all-constant GROUP BY list. */
++	if (allvars == NIL)
++		return 1.0;
++
++	/* Use set_union() to discard duplicates */
++	allvars = set_union(NIL, allvars);
++
++	/*
++	 * Step 2: acquire statistical estimate of number of distinct values
++	 * of each Var (total in its table, without regard for filtering).
++	 * Also, detect known-equal Vars and discard the ones we don't want.
++	 */
++	foreach(l, allvars)
++	{
++		Var	   *var = (Var *) lfirst(l);
++		Oid		relid = getrelid(var->varno, root->rtable);
++		HeapTuple	statsTuple = NULL;
++		Form_pg_statistic stats = NULL;
++		double ndistinct;
++		bool	keep = true;
++		List   *l2;
++
++		if (OidIsValid(relid))
++		{
++			statsTuple = SearchSysCache(STATRELATT,
++										ObjectIdGetDatum(relid),
++										Int16GetDatum(var->varattno),
++										0, 0);
++			if (HeapTupleIsValid(statsTuple))
++				stats = (Form_pg_statistic) GETSTRUCT(statsTuple);
++		}
++		ndistinct = get_att_numdistinct(root, var, stats);
++		if (HeapTupleIsValid(statsTuple))
++			ReleaseSysCache(statsTuple);
++
++		foreach(l2, varinfos)
++		{
++			MyVarInfo  *varinfo = (MyVarInfo *) lfirst(l2);
++
++			if (var->varno != varinfo->var->varno &&
++				vars_known_equal(root, var, varinfo->var))
++			{
++				/* Found a match */
++				if (varinfo->ndistinct <= ndistinct)
++				{
++					/* Keep older item, forget new one */
++					keep = false;
++					break;
++				}
++				else
++				{
++					/*
++					 * Delete the older item.  We assume lremove() will not
++					 * break the lnext link of the item...
++					 */
++					varinfos = lremove(varinfo, varinfos);
++				}
++			}
++		}
++
++		if (keep)
++		{
++			MyVarInfo  *varinfo = (MyVarInfo *) palloc(sizeof(MyVarInfo));
++
++			varinfo->var = var;
++			varinfo->ndistinct = ndistinct;
++			varinfos = lcons(varinfo, varinfos);
++		}
++	}
++
++	/*
++	 * Steps 3/4: group Vars by relation and estimate total numdistinct.
++	 *
++	 * For each iteration of the outer loop, we process the frontmost
++	 * Var in varinfos, plus all other Vars in the same relation.  We
++	 * remove these Vars from the newvarinfos list for the next iteration.
++	 * This is the easiest way to group Vars of same rel together.
++	 */
++	Assert(varinfos != NIL);
++	numdistinct = 1.0;
++
++	do
++	{
++		MyVarInfo  *varinfo1 = (MyVarInfo *) lfirst(varinfos);
++		RelOptInfo *rel = find_base_rel(root, varinfo1->var->varno);
++		double	reldistinct = varinfo1->ndistinct;
++		List   *newvarinfos = NIL;
++
++		/*
++		 * Get the largest numdistinct estimate of the Vars for this rel.
++		 * Also, construct new varinfos list of remaining Vars.
++		 */
++		foreach(l, lnext(varinfos))
++		{
++			MyVarInfo  *varinfo2 = (MyVarInfo *) lfirst(l);
++
++			if (varinfo2->var->varno == varinfo1->var->varno)
++			{
++				reldistinct *= varinfo2->ndistinct;
++			}
++			else
++			{
++				/* not time to process varinfo2 yet */
++				newvarinfos = lcons(varinfo2, newvarinfos);
++			}
++		}
++
++		/*
++		 * Clamp to size of rel, multiply by restriction selectivity.
++		 */
++		Assert(rel->reloptkind == RELOPT_BASEREL);
++		if (reldistinct > rel->tuples)
++			reldistinct = rel->tuples;
++		reldistinct *= rel->rows / rel->tuples;
++
++		/*
++		 * Update estimate of total distinct groups.
++		 */
++		numdistinct *= reldistinct;
++
++		varinfos = newvarinfos;
++	} while (varinfos != NIL);
++
++	/* Guard against out-of-range answers */
++	if (numdistinct > input_rows)
++		numdistinct = input_rows;
++	if (numdistinct < 1.0)
++		numdistinct = 1.0;
++
++	return numdistinct;
++}
++
++
++/*-------------------------------------------------------------------------
++ *
++ * Support routines
++ *
++ *-------------------------------------------------------------------------
++ */
++
+ /*
+  * get_var_maximum
+  *		Estimate the maximum value of the specified variable.
+@@ -3271,7 +3519,7 @@ pattern_selectivity(Const *patt, Pattern_Type ptype)
+ 
+ 
+ /*
+- * We want test whether the database's LC_COLLATE setting is safe for
++ * We want to test whether the database's LC_COLLATE setting is safe for
+  * LIKE/regexp index optimization.
+  *
+  * The key requirement here is that given a prefix string, say "foo",
+@@ -3284,7 +3532,7 @@ pattern_selectivity(Const *patt, Pattern_Type ptype)
+  *
+  * (In theory, locales other than C may be LIKE-safe so this function
+  * could be different from lc_collate_is_c(), but in a different
+- * theory, non-C locales are completely unpredicable so it's unlikely
++ * theory, non-C locales are completely unpredictable so it's unlikely
+  * to happen.)
+  *
+  * Be sure to maintain the correspondence with the code in initdb.
+diff --git a/src/include/nodes/parsenodes.h b/src/include/nodes/parsenodes.h
+index cd976cd1a1..92501196f9 100644
+--- a/src/include/nodes/parsenodes.h
++++ b/src/include/nodes/parsenodes.h
+@@ -7,7 +7,7 @@
+  * Portions Copyright (c) 1996-2002, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+- * $Id: parsenodes.h,v 1.215 2002/11/15 03:09:39 momjian Exp $
++ * $Id: parsenodes.h,v 1.216 2002/11/19 23:21:59 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -102,6 +102,7 @@ typedef struct Query
+ 	List	   *equi_key_list;	/* list of lists of equijoined
+ 								 * PathKeyItems */
+ 	List	   *query_pathkeys; /* desired pathkeys for query_planner() */
++	bool		hasJoinRTEs;	/* true if any RTEs are RTE_JOIN kind */
+ } Query;
+ 
+ 
+diff --git a/src/include/optimizer/planmain.h b/src/include/optimizer/planmain.h
+index c927d54074..bd4bcddd30 100644
+--- a/src/include/optimizer/planmain.h
++++ b/src/include/optimizer/planmain.h
+@@ -7,7 +7,7 @@
+  * Portions Copyright (c) 1996-2002, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+- * $Id: planmain.h,v 1.61 2002/11/06 00:00:45 tgl Exp $
++ * $Id: planmain.h,v 1.62 2002/11/19 23:22:00 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -35,8 +35,11 @@ extern Sort *make_sort(Query *root, List *tlist,
+ extern Sort *make_sort_from_pathkeys(Query *root, List *tlist,
+ 						Plan *lefttree, List *pathkeys);
+ extern Agg *make_agg(List *tlist, List *qual, AggStrategy aggstrategy,
+-					 int ngrp, AttrNumber *grpColIdx, Plan *lefttree);
+-extern Group *make_group(List *tlist, int ngrp, AttrNumber *grpColIdx,
++					 int ngrp, AttrNumber *grpColIdx,
++					 long numGroups, int numAggs,
++					 Plan *lefttree);
++extern Group *make_group(List *tlist,
++						 int ngrp, AttrNumber *grpColIdx, double numGroups,
+ 						 Plan *lefttree);
+ extern Material *make_material(List *tlist, Plan *lefttree);
+ extern Unique *make_unique(List *tlist, Plan *lefttree, List *distinctList);
+@@ -54,6 +57,7 @@ extern void build_base_rel_tlists(Query *root, List *tlist);
+ extern Relids distribute_quals_to_rels(Query *root, Node *jtnode);
+ extern void process_implied_equality(Query *root, Node *item1, Node *item2,
+ 						 Oid sortop1, Oid sortop2);
++extern bool vars_known_equal(Query *root, Var *var1, Var *var2);
+ 
+ /*
+  * prototypes for plan/setrefs.c
+diff --git a/src/include/utils/selfuncs.h b/src/include/utils/selfuncs.h
+index 8e73e61ffd..49f3bc7e00 100644
+--- a/src/include/utils/selfuncs.h
++++ b/src/include/utils/selfuncs.h
+@@ -8,7 +8,7 @@
+  * Portions Copyright (c) 1996-2002, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+- * $Id: selfuncs.h,v 1.9 2002/10/19 02:56:16 tgl Exp $
++ * $Id: selfuncs.h,v 1.10 2002/11/19 23:22:00 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -75,6 +75,9 @@ extern void mergejoinscansel(Query *root, Node *clause,
+ 				 Selectivity *leftscan,
+ 				 Selectivity *rightscan);
+ 
++extern double estimate_num_groups(Query *root, List *groupClauses,
++								  double input_rows);
++
+ extern Datum btcostestimate(PG_FUNCTION_ARGS);
+ extern Datum rtcostestimate(PG_FUNCTION_ARGS);
+ extern Datum hashcostestimate(PG_FUNCTION_ARGS);
+

@@ -1,0 +1,121 @@
+commit 95aac7b1cd224f568fb83937044cd303ff11b029
+Author: Shawn Bohrer <shawn.bohrer@gmail.com>
+Date:   Wed Oct 27 15:34:54 2010 -0700
+
+    epoll: make epoll_wait() use the hrtimer range feature
+    
+    This make epoll use hrtimers for the timeout value which prevents
+    epoll_wait() from timing out up to a millisecond early.
+    
+    This mirrors the behavior of select() and poll().
+    
+    Signed-off-by: Shawn Bohrer <shawn.bohrer@gmail.com>
+    Cc: Al Viro <viro@zeniv.linux.org.uk>
+    Acked-by: Davide Libenzi <davidel@xmailserver.org>
+    Cc: Thomas Gleixner <tglx@linutronix.de>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/eventpoll.c b/fs/eventpoll.c
+index 256bb7bb102a..8cf07242067d 100644
+--- a/fs/eventpoll.c
++++ b/fs/eventpoll.c
+@@ -77,9 +77,6 @@
+ /* Maximum number of nesting allowed inside epoll sets */
+ #define EP_MAX_NESTS 4
+ 
+-/* Maximum msec timeout value storeable in a long int */
+-#define EP_MAX_MSTIMEO min(1000ULL * MAX_SCHEDULE_TIMEOUT / HZ, (LONG_MAX - 999ULL) / HZ)
+-
+ #define EP_MAX_EVENTS (INT_MAX / sizeof(struct epoll_event))
+ 
+ #define EP_UNACTIVE_PTR ((void *) -1L)
+@@ -1117,18 +1114,22 @@ static int ep_send_events(struct eventpoll *ep,
+ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+ 		   int maxevents, long timeout)
+ {
+-	int res, eavail;
++	int res, eavail, timed_out = 0;
+ 	unsigned long flags;
+-	long jtimeout;
++	long slack;
+ 	wait_queue_t wait;
+-
+-	/*
+-	 * Calculate the timeout by checking for the "infinite" value (-1)
+-	 * and the overflow condition. The passed timeout is in milliseconds,
+-	 * that why (t * HZ) / 1000.
+-	 */
+-	jtimeout = (timeout < 0 || timeout >= EP_MAX_MSTIMEO) ?
+-		MAX_SCHEDULE_TIMEOUT : (timeout * HZ + 999) / 1000;
++	struct timespec end_time;
++	ktime_t expires, *to = NULL;
++
++	if (timeout > 0) {
++		ktime_get_ts(&end_time);
++		timespec_add_ns(&end_time, (u64)timeout * NSEC_PER_MSEC);
++		slack = select_estimate_accuracy(&end_time);
++		to = &expires;
++		*to = timespec_to_ktime(end_time);
++	} else if (timeout == 0) {
++		timed_out = 1;
++	}
+ 
+ retry:
+ 	spin_lock_irqsave(&ep->lock, flags);
+@@ -1150,7 +1151,7 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+ 			 * to TASK_INTERRUPTIBLE before doing the checks.
+ 			 */
+ 			set_current_state(TASK_INTERRUPTIBLE);
+-			if (!list_empty(&ep->rdllist) || !jtimeout)
++			if (!list_empty(&ep->rdllist) || timed_out)
+ 				break;
+ 			if (signal_pending(current)) {
+ 				res = -EINTR;
+@@ -1158,7 +1159,9 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+ 			}
+ 
+ 			spin_unlock_irqrestore(&ep->lock, flags);
+-			jtimeout = schedule_timeout(jtimeout);
++			if (!schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS))
++				timed_out = 1;
++
+ 			spin_lock_irqsave(&ep->lock, flags);
+ 		}
+ 		__remove_wait_queue(&ep->wq, &wait);
+@@ -1176,7 +1179,7 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+ 	 * more luck.
+ 	 */
+ 	if (!res && eavail &&
+-	    !(res = ep_send_events(ep, events, maxevents)) && jtimeout)
++	    !(res = ep_send_events(ep, events, maxevents)) && !timed_out)
+ 		goto retry;
+ 
+ 	return res;
+diff --git a/fs/select.c b/fs/select.c
+index 5f023f911202..b7b10aa30861 100644
+--- a/fs/select.c
++++ b/fs/select.c
+@@ -67,7 +67,7 @@ static long __estimate_accuracy(struct timespec *tv)
+ 	return slack;
+ }
+ 
+-static long select_estimate_accuracy(struct timespec *tv)
++long select_estimate_accuracy(struct timespec *tv)
+ {
+ 	unsigned long ret;
+ 	struct timespec now;
+diff --git a/include/linux/poll.h b/include/linux/poll.h
+index 600cc1fde64d..56e76af78102 100644
+--- a/include/linux/poll.h
++++ b/include/linux/poll.h
+@@ -73,6 +73,8 @@ extern void poll_initwait(struct poll_wqueues *pwq);
+ extern void poll_freewait(struct poll_wqueues *pwq);
+ extern int poll_schedule_timeout(struct poll_wqueues *pwq, int state,
+ 				 ktime_t *expires, unsigned long slack);
++extern long select_estimate_accuracy(struct timespec *tv);
++
+ 
+ static inline int poll_schedule(struct poll_wqueues *pwq, int state)
+ {
+

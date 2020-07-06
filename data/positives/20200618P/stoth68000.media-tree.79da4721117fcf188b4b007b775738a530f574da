@@ -1,0 +1,106 @@
+commit 79da4721117fcf188b4b007b775738a530f574da
+Author: Parag Warudkar <parag.warudkar@gmail.com>
+Date:   Wed Jan 30 13:31:59 2008 +0100
+
+    x86: fix DMI out of memory problems
+    
+    People with HP Desktops (including me) encounter couple of DMI errors
+    during boot - dmi_save_oem_strings_devices: out of memory and
+    dmi_string: out of memory.
+    
+    On some HP desktops the DMI data include OEM strings (type 11) out of
+    which only few are meaningful and most other are empty. DMI code
+    religiously creates copies of these 27 strings (65 bytes each in my
+    case) and goes OOM in dmi_string().
+    
+    If DMI_MAX_DATA is bumped up a little then it goes and fails in
+    dmi_save_oem_strings while allocating dmi_devices of sizeof(struct
+    dmi_device) corresponding to these strings.
+    
+    On x86_64 since we cannot use alloc_bootmem this early, the code uses a
+    static array of 2048 bytes (DMI_MAX_DATA) for allocating the memory DMI
+    needs. It does not survive the creation of empty strings and devices.
+    
+    Fix this by detecting and not newly allocating empty strings and instead
+    using a one statically defined dmi_empty_string.
+    
+    Also do not create a new struct dmi_device for each empty string - use
+    one statically define dmi_device with .name=dmi_empty_string and add
+    that to the dmi_devices list.
+    
+    On x64 this should stop the OOM with same current size of DMI_MAX_DATA
+    and on x86 this should save a good amount of (27*65 bytes +
+    27*sizeof(struct dmi_device) bootmem.
+    
+    Compile and boot tested on both 32-bit and 64-bit x86.
+    
+    Signed-off-by: Parag Warudkar <parag.warudkar@gmail.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/drivers/firmware/dmi_scan.c b/drivers/firmware/dmi_scan.c
+index 5e596a7e3601..0b24a1141009 100644
+--- a/drivers/firmware/dmi_scan.c
++++ b/drivers/firmware/dmi_scan.c
+@@ -8,6 +8,8 @@
+ #include <linux/slab.h>
+ #include <asm/dmi.h>
+ 
++static char dmi_empty_string[] = "        ";
++
+ static char * __init dmi_string(const struct dmi_header *dm, u8 s)
+ {
+ 	const u8 *bp = ((u8 *) dm) + dm->length;
+@@ -21,11 +23,16 @@ static char * __init dmi_string(const struct dmi_header *dm, u8 s)
+ 		}
+ 
+ 		if (*bp != 0) {
+-			str = dmi_alloc(strlen(bp) + 1);
++			size_t len = strlen(bp)+1;
++			size_t cmp_len = len > 8 ? 8 : len;
++
++			if (!memcmp(bp, dmi_empty_string, cmp_len))
++				return dmi_empty_string;
++			str = dmi_alloc(len);
+ 			if (str != NULL)
+ 				strcpy(str, bp);
+ 			else
+-				printk(KERN_ERR "dmi_string: out of memory.\n");
++				printk(KERN_ERR "dmi_string: cannot allocate %Zu bytes.\n", len);
+ 		}
+ 	}
+ 
+@@ -175,12 +182,23 @@ static void __init dmi_save_devices(const struct dmi_header *dm)
+ 	}
+ }
+ 
++static struct dmi_device empty_oem_string_dev = {
++	.name = dmi_empty_string,
++};
++
+ static void __init dmi_save_oem_strings_devices(const struct dmi_header *dm)
+ {
+ 	int i, count = *(u8 *)(dm + 1);
+ 	struct dmi_device *dev;
+ 
+ 	for (i = 1; i <= count; i++) {
++		char *devname = dmi_string(dm, i);
++
++		if (!strcmp(devname, dmi_empty_string)) {
++			list_add(&empty_oem_string_dev.list, &dmi_devices);
++			continue;
++		}
++
+ 		dev = dmi_alloc(sizeof(*dev));
+ 		if (!dev) {
+ 			printk(KERN_ERR
+@@ -189,7 +207,7 @@ static void __init dmi_save_oem_strings_devices(const struct dmi_header *dm)
+ 		}
+ 
+ 		dev->type = DMI_DEV_TYPE_OEM_STRING;
+-		dev->name = dmi_string(dm, i);
++		dev->name = devname;
+ 		dev->device_data = NULL;
+ 
+ 		list_add(&dev->list, &dmi_devices);
+

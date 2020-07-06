@@ -1,0 +1,41 @@
+commit b46413367961c2e8bd827e067a231be982aaeee2
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Mon Nov 21 17:25:37 2011 -0500
+
+    iio: fix a leak due to improper use of anon_inode_getfd()
+    
+    it can fail and in that case ->release() will *not* be called...
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/drivers/staging/iio/industrialio-core.c b/drivers/staging/iio/industrialio-core.c
+index 326e967d54ef..26564094e33b 100644
+--- a/drivers/staging/iio/industrialio-core.c
++++ b/drivers/staging/iio/industrialio-core.c
+@@ -242,6 +242,8 @@ static const struct file_operations iio_event_chrdev_fileops = {
+ 
+ static int iio_event_getfd(struct iio_dev *indio_dev)
+ {
++	int fd;
++
+ 	if (indio_dev->event_interface == NULL)
+ 		return -ENODEV;
+ 
+@@ -252,9 +254,15 @@ static int iio_event_getfd(struct iio_dev *indio_dev)
+ 		return -EBUSY;
+ 	}
+ 	mutex_unlock(&indio_dev->event_interface->event_list_lock);
+-	return anon_inode_getfd("iio:event",
++	fd = anon_inode_getfd("iio:event",
+ 				&iio_event_chrdev_fileops,
+ 				indio_dev->event_interface, O_RDONLY);
++	if (fd < 0) {
++		mutex_lock(&indio_dev->event_interface->event_list_lock);
++		clear_bit(IIO_BUSY_BIT_POS, &ev_int->flags);
++		mutex_unlock(&indio_dev->event_interface->event_list_lock);
++	}
++	return fd;
+ }
+ 
+ static int __init iio_init(void)
+

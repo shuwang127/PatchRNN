@@ -1,0 +1,171 @@
+commit 645985f2e06eed6ca87c6c63488815fd40e3839c
+Author: stan <stan@e3e1d417-86f3-4887-817a-d78f3d33393f>
+Date:   Wed Mar 5 17:14:17 2003 +0000
+
+    Added query option to zmu.
+    
+    
+    git-svn-id: http://svn.zoneminder.com/svn/zm/trunk@380 e3e1d417-86f3-4887-817a-d78f3d33393f
+
+diff --git a/src/zm.cpp b/src/zm.cpp
+index f409ba441..85511ba19 100644
+--- a/src/zm.cpp
++++ b/src/zm.cpp
+@@ -2139,3 +2139,65 @@ void Monitor::StreamImages( unsigned long idle, unsigned long refresh, FILE *fd
+ 		}
+ 	}
+ }
++
++bool Monitor::DumpSettings( char *output, bool verbose )
++{
++	output[0] = 0;
++
++	sprintf( output+strlen(output), "Id : %d\n", id );
++	sprintf( output+strlen(output), "Name : %s\n", name );
++	sprintf( output+strlen(output), "Device : %d\n", device );
++	sprintf( output+strlen(output), "Channel : %d\n", channel );
++	sprintf( output+strlen(output), "Format : %d\n", format );
++	sprintf( output+strlen(output), "Width : %d\n", width );
++	sprintf( output+strlen(output), "Height : %d\n", height );
++	sprintf( output+strlen(output), "Colour Depth : %d\n", 8*colours );
++	sprintf( output+strlen(output), "Label Format : %s\n", label_format );
++	sprintf( output+strlen(output), "Label Coord : %d,%d\n", label_coord.X(), label_coord.Y() );
++	sprintf( output+strlen(output), "Warmup Count : %d\n", warmup_count );
++	sprintf( output+strlen(output), "Pre Event Count : %d\n", pre_event_count );
++	sprintf( output+strlen(output), "Post Event Count : %d\n", post_event_count );
++	sprintf( output+strlen(output), "Alarm Frame Count : %d\n", alarm_frame_count );
++	sprintf( output+strlen(output), "Image Buffer Count : %d\n", image_buffer_count );
++	sprintf( output+strlen(output), "Reference Blend %%ge : %d\n", ref_blend_perc );
++	sprintf( output+strlen(output), "Function: %d - %s\n", function,
++		function==NONE?"None":(
++		function==ACTIVE?"Active":(
++		function==PASSIVE?"Passive":(
++		function==X10?"X10":"Unknown"
++	))));
++	sprintf( output+strlen(output), "Zones : %d\n", n_zones );
++	for ( int i = 0; i < n_zones; i++ )
++	{
++		zones[i]->DumpSettings( output+strlen(output), verbose );
++    }
++	return( true );
++}
++
++bool Zone::DumpSettings( char *output, bool verbose )
++{
++	output[0] = 0;
++
++	sprintf( output+strlen(output), "  Id : %d\n", id );
++	sprintf( output+strlen(output), "  Label : %s\n", label );
++	sprintf( output+strlen(output), "  Type: %d - %s\n", type,
++		type==ACTIVE?"Active":(
++		type==INCLUSIVE?"Inclusive":(
++		type==EXCLUSIVE?"Exclusive":(
++		type==INACTIVE?"Inactive":"Unknown"
++	))));
++	sprintf( output+strlen(output), "  Limits : %d,%d - %d,%d\n", limits.LoX(), limits.LoY(), limits.HiX(), limits.HiY() );
++	sprintf( output+strlen(output), "  Alarm RGB : %06x\n", alarm_rgb );
++	sprintf( output+strlen(output), "  Alarm Threshold : %d\n", alarm_threshold );
++	sprintf( output+strlen(output), "  Min Alarm Pixels : %d\n", min_alarm_pixels );
++	sprintf( output+strlen(output), "  Max Alarm Pixels : %d\n", max_alarm_pixels );
++	sprintf( output+strlen(output), "  Filter Box : %d,%d\n", filter_box.X(), filter_box.Y() );
++	sprintf( output+strlen(output), "  Min Filter Pixels : %d\n", min_filter_pixels );
++	sprintf( output+strlen(output), "  Max Filter Pixels : %d\n", max_filter_pixels );
++	sprintf( output+strlen(output), "  Min Blob Pixels : %d\n", min_blob_pixels );
++	sprintf( output+strlen(output), "  Max Blob Pixels : %d\n", max_blob_pixels );
++	sprintf( output+strlen(output), "  Min Blobs : %d\n", min_blobs );
++	sprintf( output+strlen(output), "  Max Blobs : %d\n", max_blobs );
++	return( true );
++}
++
+diff --git a/src/zm.h b/src/zm.h
+index eeb570469..17892e526 100644
+--- a/src/zm.h
++++ b/src/zm.h
+@@ -298,6 +298,7 @@ public:
+ 	}
+ 	void RecordStats( const Event *event );
+ 	static int Load( Monitor *monitor, Zone **&zones );
++	bool DumpSettings( char *output, bool verbose );
+ };
+ 
+ class Camera;
+@@ -635,6 +636,7 @@ public:
+ 	void ForceAlarm();
+ 	void CancelAlarm();
+ 
++	bool DumpSettings( char *output, bool verbose );
+ 	void DumpZoneImage();
+ 
+ 	inline void Capture()
+diff --git a/src/zmu.cpp b/src/zmu.cpp
+index 1b5caed74..ca84ce460 100644
+--- a/src/zmu.cpp
++++ b/src/zmu.cpp
+@@ -40,6 +40,7 @@ void Usage( int status=-1 )
+ 	fprintf( stderr, "  -z, --zones                    : Write last captured image overlaid with zones to <monitor_name>-Zones.jpg\n" );
+ 	fprintf( stderr, "  -a, --alarm                    : Force alarm in monitor, this will trigger recording until cancelled with -c\n" );
+ 	fprintf( stderr, "  -c, --cancel                   : Cancel a forced alarm in monitor, required after being enabled with -a\n" );
++	fprintf( stderr, "  -q, --query                    : Query the current settings for the monitors and zones\n" );
+ 	fprintf( stderr, "  -h, --help - This screen\n" );
+ 
+ 	exit( status );
+@@ -61,6 +62,7 @@ int main( int argc, char *argv[] )
+ 		{"zones", 0, 0, 'z'},
+ 		{"alarm", 0, 0, 'a'},
+ 		{"cancel", 0, 0, 'c'},
++		{"query", 0, 0, 'q'},
+ 		{"help", 0, 0, 'h'},
+ 		{0, 0, 0, 0}
+ 	};
+@@ -79,7 +81,8 @@ int main( int argc, char *argv[] )
+ 		FPS=0x0040,
+ 		ZONES=0x0080,
+ 		ALARM=0x0100,
+-		CANCEL=0x0200
++		CANCEL=0x0200,
++		QUERY=0x0400
+ 	} Function;
+ 	Function function = BOGUS;
+ 
+@@ -90,7 +93,7 @@ int main( int argc, char *argv[] )
+ 		int option_index = 0;
+ 		int opterr = 1;
+ 
+-		int c = getopt_long (argc, argv, "d:m:vsrwie::t::fzach", long_options, &option_index);
++		int c = getopt_long (argc, argv, "d:m:vsrwie::t::fzacqh", long_options, &option_index);
+ 		if (c == -1)
+ 		{
+ 			break;
+@@ -145,6 +148,9 @@ int main( int argc, char *argv[] )
+ 			case 'c':
+ 				function = Function(function | CANCEL);
+ 				break;
++			case 'q':
++				function = Function(function | QUERY);
++				break;
+ 			case 'h':
+ 				Usage( 0 );
+ 				break;
+@@ -203,7 +209,7 @@ int main( int argc, char *argv[] )
+ 	}
+ 	else
+ 	{
+-		Monitor *monitor = Monitor::Load( mon_id );
++		Monitor *monitor = Monitor::Load( mon_id, function&QUERY );
+ 
+ 		if ( monitor )
+ 		{
+@@ -318,6 +324,12 @@ int main( int argc, char *argv[] )
+ 					printf( "Cancelling alarm\n" );
+ 				monitor->CancelAlarm();
+ 			}
++			if ( function & QUERY )
++			{
++				char mon_string[1024] = "";
++				monitor->DumpSettings( mon_string, verbose );
++				printf( "%s\n", mon_string );
++			}
+ 			if ( have_output )
+ 			{
+ 				printf( "\n" );
+

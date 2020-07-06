@@ -1,0 +1,265 @@
+commit 14dc56b2a11bf6062b4240183ded356678c2d031
+Author: monty@mysql.com <>
+Date:   Thu Feb 19 22:04:31 2004 +0200
+
+    Fixed usage of strxnmov() in recent changesets
+
+diff --git a/libmysql/libmysql.c b/libmysql/libmysql.c
+index e9a3857a73c..1b98cb4af75 100644
+--- a/libmysql/libmysql.c
++++ b/libmysql/libmysql.c
+@@ -316,7 +316,7 @@ HANDLE create_named_pipe(NET *net, uint connect_timeout, char **arg_host,
+ 			 char **arg_unix_socket)
+ {
+   HANDLE hPipe=INVALID_HANDLE_VALUE;
+-  char szPipeName [ 1024 ];
++  char pipe_name[1024];
+   DWORD dwMode;
+   int i;
+   my_bool testing_named_pipes=0;
+@@ -327,13 +327,15 @@ HANDLE create_named_pipe(NET *net, uint connect_timeout, char **arg_host,
+   if (!host || !strcmp(host,LOCAL_HOST))
+     host=LOCAL_HOST_NAMEDPIPE;
+ 
+-  strxnmov(szPipeName, sizeof(szPipeName), "\\\\", host, "\\pipe\\",
+-                                           unix_socket, NullS);
++  
++  pipe_name[sizeof(pipe_name)-1]= 0;		/* Safety if too long string */
++  strxnmov(pipe_name, sizeof(pipe_name)-1, "\\\\", host, "\\pipe\\",
++	   unix_socket, NullS);
+   DBUG_PRINT("info",("Server name: '%s'.  Named Pipe: %s", host, unix_socket));
+ 
+   for (i=0 ; i < 100 ; i++)			/* Don't retry forever */
+   {
+-    if ((hPipe = CreateFile(szPipeName,
++    if ((hPipe = CreateFile(pipe_name,
+ 			    GENERIC_READ | GENERIC_WRITE,
+ 			    0,
+ 			    NULL,
+@@ -349,7 +351,7 @@ HANDLE create_named_pipe(NET *net, uint connect_timeout, char **arg_host,
+       return INVALID_HANDLE_VALUE;
+     }
+     /* wait for for an other instance */
+-    if (! WaitNamedPipe(szPipeName, connect_timeout*1000) )
++    if (! WaitNamedPipe(pipe_name, connect_timeout*1000) )
+     {
+       net->last_errno=CR_NAMEDPIPEWAIT_ERROR;
+       sprintf(net->last_error,ER(net->last_errno),host, unix_socket,
+diff --git a/mysys/mf_tempfile.c b/mysys/mf_tempfile.c
+index 187f459a8ab..14b8fdc430c 100644
+--- a/mysys/mf_tempfile.c
++++ b/mysys/mf_tempfile.c
+@@ -123,11 +123,12 @@ File create_temp_file(char *to, const char *dir, const char *prefix,
+     }
+ #ifdef OS2
+     /* changing environ variable doesn't work with VACPP */
+-    char  buffer[256];
+-    strxnmov(buffer, sizeof(buffer), "TMP=", dir);
++    char  buffer[256], *end;
++    buffer[sizeof[buffer)-1]= 0;
++    end= strxnmov(buffer, sizeof(buffer)-1, (char*) "TMP=", dir, NullS);
+     /* remove ending backslash */
+-    if (buffer[strlen(buffer)-1] == '\\')
+-       buffer[strlen(buffer)-1] = '\0';
++    if (end[-1] == '\\')
++      end[-1]= 0;
+     putenv(buffer);
+ #elif !defined(__NETWARE__)
+     old_env= (char**) environ;
+diff --git a/mysys/my_tempnam.c b/mysys/my_tempnam.c
+index 4cf483d22cf..b4f76727ee0 100644
+--- a/mysys/my_tempnam.c
++++ b/mysys/my_tempnam.c
+@@ -105,12 +105,13 @@ my_string my_tempnam(const char *dir, const char *pfx,
+   }
+ #ifdef OS2
+   /* changing environ variable doesn't work with VACPP */
+-  char  buffer[256];
+-  strxnmov(buffer, sizeof(buffer), "TMP=", dir);
++  char  buffer[256], *end;
++  buffer[sizeof[buffer)-1]= 0;
++  end= strxnmov(buffer, sizeof(buffer)-1, (char*) "TMP=", dir, NullS);
+   /* remove ending backslash */
+-  if (buffer[strlen(buffer)-1] == '\\')
+-     buffer[strlen(buffer)-1] = '\0';
+-  putenv( buffer);
++  if (end[-1] == '\\')
++    end[-1]= 0;
++  putenv(buffer);
+ #elif !defined(__NETWARE__)
+   old_env=(char**)environ;
+   if (dir)
+diff --git a/sql/log.cc b/sql/log.cc
+index c73673d3552..559d30f28ba 100644
+--- a/sql/log.cc
++++ b/sql/log.cc
+@@ -231,18 +231,21 @@ bool MYSQL_LOG::open(const char *log_name, enum_log_type log_type_arg,
+   }
+   case LOG_NEW:
+   {
++    uint len;
+     time_t skr=time(NULL);
+     struct tm tm_tmp;
++
+     localtime_r(&skr,&tm_tmp);
+-    my_snprintf(buff,sizeof(buff),"# %s, Version: %s at %02d%02d%02d %2d:%02d:%02d\n",
+-	    my_progname,server_version,
+-	    tm_tmp.tm_year % 100,
+-	    tm_tmp.tm_mon+1,
+-	    tm_tmp.tm_mday,
+-	    tm_tmp.tm_hour,
+-	    tm_tmp.tm_min,
+-	    tm_tmp.tm_sec);
+-    if (my_b_write(&log_file, (byte*) buff,(uint) strlen(buff)) ||
++    len= my_snprintf(buff,sizeof(buff),
++		     "# %s, Version: %s at %02d%02d%02d %2d:%02d:%02d\n",
++		     my_progname,server_version,
++		     tm_tmp.tm_year % 100,
++		     tm_tmp.tm_mon+1,
++		     tm_tmp.tm_mday,
++		     tm_tmp.tm_hour,
++		     tm_tmp.tm_min,
++		     tm_tmp.tm_sec);
++    if (my_b_write(&log_file, (byte*) buff, len) ||
+ 	flush_io_cache(&log_file))
+       goto err;
+     break;
+diff --git a/sql/mini_client.cc b/sql/mini_client.cc
+index abe51564c98..86d50dc9a0e 100644
+--- a/sql/mini_client.cc
++++ b/sql/mini_client.cc
+@@ -117,7 +117,7 @@ HANDLE create_named_pipe(NET *net, uint connect_timeout, char **arg_host,
+ 			 char **arg_unix_socket)
+ {
+   HANDLE hPipe=INVALID_HANDLE_VALUE;
+-  char szPipeName [512];
++  char pipe_name[512];
+   DWORD dwMode;
+   int i;
+   my_bool testing_named_pipes=0;
+@@ -126,14 +126,15 @@ HANDLE create_named_pipe(NET *net, uint connect_timeout, char **arg_host,
+   if (!host || !strcmp(host,LOCAL_HOST))
+     host=LOCAL_HOST_NAMEDPIPE;
+ 
+-  strxnmov(szPipeName, sizeof(szPipeName), "\\\\", host, "\\pipe\\",
+-                                           unix_socket, NullS);
++  pipe_name[sizeof(pipe_name)-1]= 0;		/* Safety if too long string */
++  strxnmov(pipe_name, sizeof(pipe_name)-1, "\\\\", host, "\\pipe\\",
++	   unix_socket, NullS);
+   DBUG_PRINT("info",("Server name: '%s'.  Named Pipe: %s",
+ 		     host, unix_socket));
+ 
+   for (i=0 ; i < 100 ; i++)			/* Don't retry forever */
+   {
+-    if ((hPipe = CreateFile(szPipeName,
++    if ((hPipe = CreateFile(pipe_name,
+ 			    GENERIC_READ | GENERIC_WRITE,
+ 			    0,
+ 			    NULL,
+@@ -149,7 +150,7 @@ HANDLE create_named_pipe(NET *net, uint connect_timeout, char **arg_host,
+       return INVALID_HANDLE_VALUE;
+     }
+     /* wait for for an other instance */
+-    if (! WaitNamedPipe(szPipeName, connect_timeout*1000) )
++    if (! WaitNamedPipe(pipe_name, connect_timeout*1000) )
+     {
+       net->last_errno=CR_NAMEDPIPEWAIT_ERROR;
+       sprintf(net->last_error,ER(net->last_errno),host, unix_socket,
+diff --git a/sql/mysqld.cc b/sql/mysqld.cc
+index 250bcb37d41..4484771d4ed 100644
+--- a/sql/mysqld.cc
++++ b/sql/mysqld.cc
+@@ -189,7 +189,7 @@ static const char* default_dbug_option=IF_WIN("d:t:i:O,\\mysqld.trace",
+ #endif
+ 
+ #ifdef __NT__
+-static char szPipeName [512];
++static char pipe_name[512];
+ static SECURITY_ATTRIBUTES saPipeSecurity;
+ static SECURITY_DESCRIPTOR sdPipeDescriptor;
+ static HANDLE hPipe = INVALID_HANDLE_VALUE;
+@@ -580,7 +580,7 @@ static void close_connections(void)
+     DBUG_PRINT( "quit", ("Closing named pipes") );
+      
+     /* Create connection to the handle named pipe handler to break the loop */
+-    if ((temp = CreateFile(szPipeName,
++    if ((temp = CreateFile(pipe_name,
+ 			   GENERIC_READ | GENERIC_WRITE,
+ 			   0,
+ 			   NULL,
+@@ -588,7 +588,7 @@ static void close_connections(void)
+ 			   0,
+ 			   NULL )) != INVALID_HANDLE_VALUE)
+     {
+-      WaitNamedPipe(szPipeName, 1000);
++      WaitNamedPipe(pipe_name, 1000);
+       DWORD dwMode = PIPE_READMODE_BYTE | PIPE_WAIT;
+       SetNamedPipeHandleState(temp, &dwMode, NULL, NULL);
+       CancelIo(temp);
+@@ -1173,12 +1173,14 @@ static void server_init(void)
+   if (Service.IsNT() && mysql_unix_port[0] && !opt_bootstrap &&
+       opt_enable_named_pipe)
+   {
+-    strxnmov(szPipeName, sizeof(szPipeName), "\\\\.\\pipe\\",
+-                                             unix_socket, NullS);
+-    ZeroMemory( &saPipeSecurity, sizeof(saPipeSecurity) );
+-    ZeroMemory( &sdPipeDescriptor, sizeof(sdPipeDescriptor) );
+-    if ( !InitializeSecurityDescriptor(&sdPipeDescriptor,
+-				       SECURITY_DESCRIPTOR_REVISION) )
++    
++    pipe_name[sizeof(pipe_name)-1]= 0;		/* Safety if too long string */
++    strxnmov(pipe_name, sizeof(pipe_name)-1, "\\\\.\\pipe\\",
++	     unix_socket, NullS);
++    bzero((char*) &saPipeSecurity, sizeof(saPipeSecurity) );
++    bzero((char*) &sdPipeDescriptor, sizeof(sdPipeDescriptor) );
++    if (!InitializeSecurityDescriptor(&sdPipeDescriptor,
++				      SECURITY_DESCRIPTOR_REVISION) )
+     {
+       sql_perror("Can't start server : Initialize security descriptor");
+       unireg_abort(1);
+@@ -1191,16 +1193,16 @@ static void server_init(void)
+     saPipeSecurity.nLength = sizeof( SECURITY_ATTRIBUTES );
+     saPipeSecurity.lpSecurityDescriptor = &sdPipeDescriptor;
+     saPipeSecurity.bInheritHandle = FALSE;
+-    if ((hPipe = CreateNamedPipe(szPipeName,
+-				 PIPE_ACCESS_DUPLEX,
+-				 PIPE_TYPE_BYTE |
+-				 PIPE_READMODE_BYTE |
+-				 PIPE_WAIT,
+-				 PIPE_UNLIMITED_INSTANCES,
+-				 (int) global_system_variables.net_buffer_length,
+-				 (int) global_system_variables.net_buffer_length,
+-				 NMPWAIT_USE_DEFAULT_WAIT,
+-				 &saPipeSecurity )) == INVALID_HANDLE_VALUE)
++    if ((hPipe= CreateNamedPipe(pipe_name,
++				PIPE_ACCESS_DUPLEX,
++				PIPE_TYPE_BYTE |
++				PIPE_READMODE_BYTE |
++				PIPE_WAIT,
++				PIPE_UNLIMITED_INSTANCES,
++				(int) global_system_variables.net_buffer_length,
++				(int) global_system_variables.net_buffer_length,
++				NMPWAIT_USE_DEFAULT_WAIT,
++				&saPipeSecurity)) == INVALID_HANDLE_VALUE)
+       {
+ 	LPVOID lpMsgBuf;
+ 	int error=GetLastError();
+@@ -3075,7 +3077,7 @@ extern "C" pthread_handler_decl(handle_connections_namedpipes,arg)
+     if (!fConnected)
+     {
+       CloseHandle( hPipe );
+-      if ((hPipe = CreateNamedPipe(szPipeName,
++      if ((hPipe = CreateNamedPipe(pipe_name,
+ 				   PIPE_ACCESS_DUPLEX,
+ 				   PIPE_TYPE_BYTE |
+ 				   PIPE_READMODE_BYTE |
+@@ -3093,7 +3095,7 @@ extern "C" pthread_handler_decl(handle_connections_namedpipes,arg)
+     }
+     hConnectedPipe = hPipe;
+     /* create new pipe for new connection */
+-    if ((hPipe = CreateNamedPipe(szPipeName,
++    if ((hPipe = CreateNamedPipe(pipe_name,
+ 				 PIPE_ACCESS_DUPLEX,
+ 				 PIPE_TYPE_BYTE |
+ 				 PIPE_READMODE_BYTE |
+

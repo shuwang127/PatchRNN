@@ -1,0 +1,68 @@
+commit 4f84e728dad84a366a2d183da03b7d92cb20fb23
+Author: Young Han Lee <cpumaker@gmail.com>
+Date:   Wed Feb 16 10:04:07 2011 +0900
+
+    aacdec: Reduce the size of buf_mdct.
+    
+    It was doubled in size for the LTP implementation. This brings it back
+    down to its original size.
+    (cherry picked from commit e22910b21a6c78b0159f98426b10c204f12bc15a)
+
+diff --git a/libavcodec/aac.h b/libavcodec/aac.h
+index a2bf70b001..73bc40843f 100644
+--- a/libavcodec/aac.h
++++ b/libavcodec/aac.h
+@@ -272,7 +272,7 @@ typedef struct {
+      * @defgroup temporary aligned temporary buffers (We do not want to have these on the stack.)
+      * @{
+      */
+-    DECLARE_ALIGNED(16, float, buf_mdct)[2048];
++    DECLARE_ALIGNED(16, float, buf_mdct)[1024];
+     /** @} */
+ 
+     /**
+diff --git a/libavcodec/aacdec.c b/libavcodec/aacdec.c
+index a362d6ad4e..81a94f2fd8 100644
+--- a/libavcodec/aacdec.c
++++ b/libavcodec/aacdec.c
+@@ -1763,8 +1763,8 @@ static void apply_ltp(AACContext *ac, SingleChannelElement *sce)
+     int i, sfb;
+ 
+     if (sce->ics.window_sequence[0] != EIGHT_SHORT_SEQUENCE) {
+-        float *predTime = ac->buf_mdct;
+-        float *predFreq = sce->ret;
++        float *predTime = sce->ret;
++        float *predFreq = ac->buf_mdct;
+         int16_t num_samples = 2048;
+ 
+         if (ltp->lag < 1024)
+@@ -1797,19 +1797,22 @@ static void update_ltp(AACContext *ac, SingleChannelElement *sce)
+     const float *swindow = ics->use_kb_window[0] ? ff_aac_kbd_short_128 : ff_sine_128;
+     int i;
+ 
+-    for (i = 0; i < 512; i++)
+-        ac->buf_mdct[1535 - i] = ac->buf_mdct[512 + i];
+-
+     if (ics->window_sequence[0] == EIGHT_SHORT_SEQUENCE) {
+         memcpy(saved_ltp,       saved, 512 * sizeof(float));
+         memset(saved_ltp + 576, 0,     448 * sizeof(float));
+-        ac->dsp.vector_fmul_reverse(saved_ltp + 448, ac->buf_mdct + 960,     swindow,     128);
++        ac->dsp.vector_fmul_reverse(saved_ltp + 448, ac->buf_mdct + 960,     &swindow[64],      64);
++        for (i = 0; i < 64; i++)
++            saved_ltp[i + 512] = ac->buf_mdct[1023 - i] * swindow[63 - i];
+     } else if (ics->window_sequence[0] == LONG_START_SEQUENCE) {
+         memcpy(saved_ltp,       ac->buf_mdct + 512, 448 * sizeof(float));
+         memset(saved_ltp + 576, 0,                  448 * sizeof(float));
+-        ac->dsp.vector_fmul_reverse(saved_ltp + 448, ac->buf_mdct + 960,     swindow,     128);
++        ac->dsp.vector_fmul_reverse(saved_ltp + 448, ac->buf_mdct + 960,     &swindow[64],      64);
++        for (i = 0; i < 64; i++)
++            saved_ltp[i + 512] = ac->buf_mdct[1023 - i] * swindow[63 - i];
+     } else { // LONG_STOP or ONLY_LONG
+-        ac->dsp.vector_fmul_reverse(saved_ltp,       ac->buf_mdct + 512,     lwindow,     1024);
++        ac->dsp.vector_fmul_reverse(saved_ltp,       ac->buf_mdct + 512,     &lwindow[512],     512);
++        for (i = 0; i < 512; i++)
++            saved_ltp[i + 512] = ac->buf_mdct[1023 - i] * lwindow[511 - i];
+     }
+ 
+     memcpy(sce->ltp_state, &sce->ltp_state[1024], 1024 * sizeof(int16_t));
+

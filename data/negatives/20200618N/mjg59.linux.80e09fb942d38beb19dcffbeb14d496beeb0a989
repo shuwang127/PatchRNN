@@ -1,0 +1,63 @@
+commit 80e09fb942d38beb19dcffbeb14d496beeb0a989
+Author: Christoph Hellwig <hch@lst.de>
+Date:   Mon Jun 8 10:03:58 2009 +0200
+
+    exofs: add ->sync_fs
+    
+    Add a ->sync_fs method for data integrity syncs, and reimplement
+    ->write_super ontop of it.
+    
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/exofs/super.c b/fs/exofs/super.c
+index 49e16af4e619..8216c5b77b53 100644
+--- a/fs/exofs/super.c
++++ b/fs/exofs/super.c
+@@ -200,18 +200,18 @@ static const struct export_operations exofs_export_ops;
+ /*
+  * Write the superblock to the OSD
+  */
+-static void exofs_write_super(struct super_block *sb)
++static int exofs_sync_fs(struct super_block *sb, int wait)
+ {
+ 	struct exofs_sb_info *sbi;
+ 	struct exofs_fscb *fscb;
+ 	struct osd_request *or;
+ 	struct osd_obj_id obj;
+-	int ret;
++	int ret = -ENOMEM;
+ 
+ 	fscb = kzalloc(sizeof(struct exofs_fscb), GFP_KERNEL);
+ 	if (!fscb) {
+ 		EXOFS_ERR("exofs_write_super: memory allocation failed.\n");
+-		return;
++		return -ENOMEM;
+ 	}
+ 
+ 	lock_super(sb);
+@@ -249,6 +249,15 @@ out:
+ 	unlock_kernel();
+ 	unlock_super(sb);
+ 	kfree(fscb);
++	return ret;
++}
++
++static void exofs_write_super(struct super_block *sb)
++{
++	if (!(sb->s_flags & MS_RDONLY))
++		exofs_sync_fs(sb, 1);
++	else
++		sb->s_dirt = 0;
+ }
+ 
+ /*
+@@ -493,6 +502,7 @@ static const struct super_operations exofs_sops = {
+ 	.delete_inode   = exofs_delete_inode,
+ 	.put_super      = exofs_put_super,
+ 	.write_super    = exofs_write_super,
++	.sync_fs	= exofs_sync_fs,
+ 	.statfs         = exofs_statfs,
+ };
+ 
+
