@@ -84,8 +84,22 @@ def ReadData():
     numLines = len(lines)  # get the line number.
     print(lines)
 
-    atLines = [i for i in range(numLines) if lines[i].startswith('@@ ')]
+    atLines = [i for i in range(numLines) if lines[i].startswith('@@ ')] # find all lines start with @@.
+    atLines.append(numLines)
     print(atLines)
+
+    diffLines = []
+    for nh in range(len(atLines) - 1):  # find all hunks.
+        print(atLines[nh], atLines[nh + 1])
+        hunk = []
+        for nl in range(atLines[nh] + 1, atLines[nh + 1]):
+            #print(lines[nl], end='')
+            if lines[nl].startswith('diff --git '):
+                break
+            else:
+                hunk.append(lines[nl])
+        print(hunk)
+
 
     return
 
