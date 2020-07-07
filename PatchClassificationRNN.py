@@ -21,7 +21,7 @@ def main():
     else:
         dataLoaded = np.load(tempPath + '/data.npy', allow_pickle=True)
 
-    print('s')
+    
 
     return
 
