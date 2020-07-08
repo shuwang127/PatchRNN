@@ -20,144 +20,23 @@ tempPath = rootPath + '/temp/'
 
 _DEBUG_ = 1
 
-
-class Tokenizer:
-    # creates the object, does the inital parse
-    def __init__(self, path):
-        self.index = clang.cindex.Index.create()
-        self.tu = self.index.parse(path)
-        self.path = self.extract_path(path)
-
-    # To output for split_functions, must have same path up to last two folders
-    def extract_path(self, path):
-        return "".join(path.split("/")[:-2])
-
-    # does futher processing on a literal token
-    def process_literal(self, literal):
-        cursor_kind = clang.cindex.CursorKind
-        kind = literal.cursor.kind
-
-        if kind == cursor_kind.INTEGER_LITERAL:
-            return ["NUM"]
-
-        if kind == cursor_kind.FLOATING_LITERAL:
-            return ["NUM"]
-
-        if kind == cursor_kind.IMAGINARY_LITERAL:
-            return ["NUM"]
-
-        if kind == cursor_kind.STRING_LITERAL:
-            return ["STRING"]
-
-        if kind == cursor_kind.CHARACTER_LITERAL:
-            return ["CHAR"]
-
-        if kind == cursor_kind.CXX_BOOL_LITERAL_EXPR:
-            return ["BOOL"]
-
-        # catch all other literals
-        return ["LITERAL"]
-
-    # filters out unwanted punctuation
-    def process_puntuation(self, punctuation):
-        spelling = punctuation.spelling
-
-        # ignore certain characters
-        if spelling in ["{", "}", "(", ")", ";"]:
-            return None
-
-        return [spelling]
-
-    # further processes and identifier token
-    def process_ident(self, ident):
-        # are we a "special" ident?
-        if ident.spelling in ["std", "cout", "cin", "vector", "pair", "string", "NULL", "size_t"]:
-            return [ident.spelling]
-
-        # are we a declaration?
-        if ident.cursor.kind.is_declaration():
-            return ["DEC"]
-
-        # are we a reference kind?
-        if ident.cursor.kind.is_reference():
-            return ["REF"]
-
-        # are we a variable use?
-        if ident.cursor.kind == clang.cindex.CursorKind.DECL_REF_EXPR:
-            return ["USE"]
-
-        # catch all others
-        return ["IDENT"]
-
-    # tokenizes the contents of a specific cursor
-    def full_tokenize_cursor(self, cursor):
-        tokens = cursor.get_tokens()
-
-        # return final tokens as a list
-        result = []
-
-        for token in tokens:
-            if token.kind.name == "COMMENT":
-                # ignore all comments
-                continue
-
-            if token.kind.name == "PUNCTUATION":
-                punct_or_none = self.process_puntuation(token)
-
-                # add only if not ignored
-                if punct_or_none != None:
-                    result += punct_or_none
-
-                continue
-
-            if token.kind.name == "LITERAL":
-                result += self.process_literal(token)
-                continue
-
-            if token.kind.name == "IDENTIFIER":
-                result += self.process_ident(token)
-                continue
-
-            if token.kind.name == "KEYWORD":
-                result += [token.spelling]
-
-        return result
-
-    # tokenizes the entire document
-    def full_tokenize(self):
-        cursor = self.tu.cursor
-        return self.full_tokenize_cursor(cursor)
-
-    # returns a list of function name / function / filename tuples
-    def split_functions(self, method_only):
-        results = []
-        cursor_kind = clang.cindex.CursorKind
-
-        # query all children for methods, and then tokenize each
-        cursor = self.tu.cursor
-        for c in cursor.get_children():
-            filename = c.location.file.name if c.location.file != None else "NONE"
-            extracted_path = self.extract_path(filename)
-
-            if (c.kind == cursor_kind.CXX_METHOD or (
-                    method_only == False and c.kind == cursor_kind.FUNCTION_DECL)) and extracted_path == self.path:
-                name = c.spelling
-                tokens = self.full_tokenize_cursor(c)
-                filename = filename.split("/")[-1]
-                results += [(name, tokens, filename)]
-
-        return results
-
-
 def main():
     # load data.
-    if not os.path.exists(tempPath + '/data.npy') | (not _DEBUG_):
+    if (not os.path.exists(tempPath + '/data.npy')) | (not _DEBUG_):
         dataLoaded = ReadData()
     else:
         dataLoaded = np.load(tempPath + '/data.npy', allow_pickle=True)
 
-    props = GetDiffProps(dataLoaded)
-    # get vocab, dict, preweights, mapping
+    # get the diff file properties.
+    if (not os.path.exists(tempPath + '/props.npy')) | (not _DEBUG_):
+        props = GetDiffProps(dataLoaded)
+    else:
+        props = np.load(tempPath + '/props.npy', allow_pickle=True)
+
+    # GetWordDict (vocab, maxLen, dict)
+    # GetEmbedding
+    # GetMapping
+    # TextRNN
 
     return
 
@@ -244,13 +123,18 @@ def ReadData():
 
         return diffLines
 
+    # create temp folder.
+    if not os.path.exists(tempPath):
+        os.mkdir(tempPath)
+    fp = open(tempPath + 'filelist.txt', 'w')
+
     # initialize data.
     dataLoaded = []
-
     # read security patch data.
     for root, ds, fs in os.walk(sDatPath):
         for file in fs:
             filename = os.path.join(root, file).replace('\\', '/')
+            fp.write(filename)
             commitMsg = ReadCommitMsg(filename)
             diffLines = ReadDiffLines(filename)
             dataLoaded.append([commitMsg, diffLines, 1])
@@ -259,6 +143,7 @@ def ReadData():
     for root, ds, fs in os.walk(pDatPath):
         for file in fs:
             filename = os.path.join(root, file).replace('\\', '/')
+            fp.write(filename)
             commitMsg = ReadCommitMsg(filename)
             diffLines = ReadDiffLines(filename)
             dataLoaded.append([commitMsg, diffLines, 1])
@@ -267,9 +152,11 @@ def ReadData():
     for root, ds, fs in os.walk(nDatPath):
         for file in fs:
             filename = os.path.join(root, file).replace('\\', '/')
+            fp.write(filename)
             commitMsg = ReadCommitMsg(filename)
             diffLines = ReadDiffLines(filename)
             dataLoaded.append([commitMsg, diffLines, 0])
+    fp.close()
 
     #print(len(dataLoaded))
     #print(len(dataLoaded[0]))
@@ -282,8 +169,6 @@ def ReadData():
     # diffHunk = dataLoaded[i][1][j]
 
     # save dataLoaded.
-    if not os.path.exists(tempPath):
-        os.mkdir(tempPath)
     if not os.path.exists(tempPath + '/data.npy'):
         np.save(tempPath + '/data.npy', dataLoaded, allow_pickle=True)
 
@@ -304,6 +189,9 @@ def GetDiffProps(data):
         :param line:
         :return:
         '''
+        # remove non-ascii
+        line = line.encode("ascii", "ignore").decode()
+
         # defination.
         tokenClass = [clang.cindex.TokenKind.KEYWORD,      # 1
                       clang.cindex.TokenKind.IDENTIFIER,   # 2
@@ -392,6 +280,7 @@ def GetDiffProps(data):
         prop = [tk, tkT, dfT, label]
         #print(prop)
         props.append(prop)
+        print(n)
 
     # save dataLoaded.
     if not os.path.exists(tempPath):
