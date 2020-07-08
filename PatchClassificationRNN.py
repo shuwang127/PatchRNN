@@ -144,7 +144,7 @@ def ReadData():
     for root, ds, fs in os.walk(sDatPath):
         for file in fs:
             filename = os.path.join(root, file).replace('\\', '/')
-            fp.write(filename)
+            fp.write(filename + '\n')
             commitMsg = ReadCommitMsg(filename)
             diffLines = ReadDiffLines(filename)
             data.append([commitMsg, diffLines, 1])
@@ -153,7 +153,7 @@ def ReadData():
     for root, ds, fs in os.walk(pDatPath):
         for file in fs:
             filename = os.path.join(root, file).replace('\\', '/')
-            fp.write(filename)
+            fp.write(filename + '\n')
             commitMsg = ReadCommitMsg(filename)
             diffLines = ReadDiffLines(filename)
             data.append([commitMsg, diffLines, 1])
@@ -162,7 +162,7 @@ def ReadData():
     for root, ds, fs in os.walk(nDatPath):
         for file in fs:
             filename = os.path.join(root, file).replace('\\', '/')
-            fp.write(filename)
+            fp.write(filename + '\n')
             commitMsg = ReadCommitMsg(filename)
             diffLines = ReadDiffLines(filename)
             data.append([commitMsg, diffLines, 0])
