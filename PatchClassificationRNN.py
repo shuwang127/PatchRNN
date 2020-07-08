@@ -156,7 +156,7 @@ def main():
     else:
         dataLoaded = np.load(tempPath + '/data.npy', allow_pickle=True)
 
-    CreateDiffVocab(dataLoaded)
+    props = GetDiffProps(dataLoaded)
     # get vocab, dict, preweights, mapping
 
     return
@@ -289,26 +289,21 @@ def ReadData():
 
     return dataLoaded
 
-def CreateDiffVocab(data):
+def GetDiffProps(data):
+    '''
+    Get the properties of the code in diff files.
+    :param data: [[[line, , ], [[line, , ], [line, , ], ...], 0/1], ...]
+    :return: props - [[[tokens], [nums], [nums], 0/1], ...]
+    '''
     def RemoveSign(line):
         return ' ' + line[1:] if (line[0] == '+') or (line[0] == '-') else line
 
-    def GetString(lines):
-        lineStr = ''
-        lineStrB = ''
-        lineStrA = ''
-        for hunk in lines:
-            for line in hunk:
-                # all lines.
-                lineStr += RemoveSign(line)
-                # all Before lines.
-                lineStrB += RemoveSign(line) if line[0] != '+' else ''
-                # all After lines.
-                lineStrA += RemoveSign(line) if line[0] != '-' else ''
-
-        return lineStr, lineStrB, lineStrA
-
     def GetClangTokens(line):
+        '''
+        Get the tokens of a line with the Clang tool.
+        :param line:
+        :return:
+        '''
         # defination.
         tokenClass = [clang.cindex.TokenKind.KEYWORD,      # 1
                       clang.cindex.TokenKind.IDENTIFIER,   # 2
@@ -342,6 +337,42 @@ def CreateDiffVocab(data):
         tokens = tknzr.tokenize(RemoveSign(line))
         return tokens
 
+    def GetString(lines):
+        lineStr = ''
+        lineStrB = ''
+        lineStrA = ''
+        for hunk in lines:
+            for line in hunk:
+                # all lines.
+                lineStr += RemoveSign(line)
+                # all Before lines.
+                lineStrB += RemoveSign(line) if line[0] != '+' else ''
+                # all After lines.
+                lineStrA += RemoveSign(line) if line[0] != '-' else ''
+
+        return lineStr, lineStrB, lineStrA
+
+    def GetDiffTokens(lines):
+        # initialize.
+        tokens = []
+        tokenTypes = []
+        diffTypes = []
+
+        # for each line of lines.
+        for hunk in lines:
+            for line in hunk:
+                #print(line, end='')
+                tk, tkT, dfT = GetClangTokens(line)
+                tokens.extend(tk)
+                tokenTypes.extend(tkT)
+                diffTypes.extend(dfT)
+                #print('-----------------------------------------------------------------------')
+        #print(tokens)
+        #print(tokenTypes)
+        #print(diffTypes)
+
+        return tokens, tokenTypes, diffTypes
+
     #lines = data[0][1]
     #print(lines)
     #hunk = data[0][1][0]
@@ -351,26 +382,24 @@ def CreateDiffVocab(data):
 
     # for each sample data[n].
     numData = len(data)
+    props = []
     for n in range(numData):
+        # get the lines of the diff file.
         diffLines = data[n][1]
+        # properties.
+        tk, tkT, dfT = GetDiffTokens(diffLines)
+        label = data[n][2]
+        prop = [tk, tkT, dfT, label]
+        #print(prop)
+        props.append(prop)
 
+    # save dataLoaded.
+    if not os.path.exists(tempPath):
+        os.mkdir(tempPath)
+    if not os.path.exists(tempPath + '/props.npy'):
+        np.save(tempPath + '/props.npy', props, allow_pickle=True)
 
-    lines = data[0][1]
-    for hunk in lines:
-        for line in hunk:
-            print(line, end='')
-            #tokens = GetWordTokens(line)
-            #print(tokens)
-            tokens, tokenTypes, diffTypes = GetClangTokens(line)
-            print(tokens)
-            print(tokenTypes)
-            print(diffTypes)
-            print('-----------------------------------------------------------------------')
-
-
-
-
-    return
+    return props
 
 if __name__ == '__main__':
     main()
