@@ -33,6 +33,8 @@ def main():
     else:
         props = np.load(tempPath + '/props.npy', allow_pickle=True)
 
+    print(props[0])
+
     # GetWordDict (vocab, maxLen, dict)
     # GetEmbedding
     # GetMapping
