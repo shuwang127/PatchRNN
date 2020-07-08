@@ -5,12 +5,10 @@
 import os
 import numpy as np
 from nltk.tokenize import TweetTokenizer
-from nltk import word_tokenize
-import tokenize
 import clang.cindex
 import clang.enumerations
-import csv
 
+# file path.
 rootPath = './'
 dataPath = rootPath + '/data/'
 sDatPath = dataPath + '/security_patch/'
@@ -18,6 +16,10 @@ pDatPath = dataPath + '/positives/'
 nDatPath = dataPath + '/negatives/'
 tempPath = rootPath + '/temp/'
 
+# hyperparameters.
+_DiffEmbedDim_ = 128
+
+# control
 _DEBUG_ = 1
 
 def main():
@@ -26,17 +28,22 @@ def main():
         dataLoaded = ReadData()
     else:
         dataLoaded = np.load(tempPath + '/data.npy', allow_pickle=True)
+        print('[INFO] <ReadData> Load the raw data from ' + tempPath + '/data.npy.')
 
     # get the diff file properties.
     if (not os.path.exists(tempPath + '/props.npy')) | (not _DEBUG_):
-        props = GetDiffProps(dataLoaded)
+        diffProps = GetDiffProps(dataLoaded)
     else:
-        props = np.load(tempPath + '/props.npy', allow_pickle=True)
+        diffProps = np.load(tempPath + '/props.npy', allow_pickle=True)
+        print('[INFO] <GetDiffProps> Load the diff property data from ' + tempPath + '/props.npy.')
 
-    print(props[0])
+    # get the diff maxLen, dictionary (vocabulary).
+    diffVocab, diffMaxLen = GetDiffVocab(diffProps)
+    diffDict = GetDiffDict(diffVocab)
 
-    # GetWordDict (vocab, maxLen, dict)
     # GetEmbedding
+    diffPreWeights = GetDiffEmbed(diffDict, _DiffEmbedDim_)
+
     # GetMapping
     # TextRNN
 
@@ -131,7 +138,7 @@ def ReadData():
     fp = open(tempPath + 'filelist.txt', 'w')
 
     # initialize data.
-    dataLoaded = []
+    data = []
     # read security patch data.
     for root, ds, fs in os.walk(sDatPath):
         for file in fs:
@@ -139,7 +146,7 @@ def ReadData():
             fp.write(filename)
             commitMsg = ReadCommitMsg(filename)
             diffLines = ReadDiffLines(filename)
-            dataLoaded.append([commitMsg, diffLines, 1])
+            data.append([commitMsg, diffLines, 1])
 
     # read positive data.
     for root, ds, fs in os.walk(pDatPath):
@@ -148,7 +155,7 @@ def ReadData():
             fp.write(filename)
             commitMsg = ReadCommitMsg(filename)
             diffLines = ReadDiffLines(filename)
-            dataLoaded.append([commitMsg, diffLines, 1])
+            data.append([commitMsg, diffLines, 1])
 
     # read negative data.
     for root, ds, fs in os.walk(nDatPath):
@@ -157,7 +164,7 @@ def ReadData():
             fp.write(filename)
             commitMsg = ReadCommitMsg(filename)
             diffLines = ReadDiffLines(filename)
-            dataLoaded.append([commitMsg, diffLines, 0])
+            data.append([commitMsg, diffLines, 0])
     fp.close()
 
     #print(len(dataLoaded))
@@ -172,9 +179,10 @@ def ReadData():
 
     # save dataLoaded.
     if not os.path.exists(tempPath + '/data.npy'):
-        np.save(tempPath + '/data.npy', dataLoaded, allow_pickle=True)
+        np.save(tempPath + '/data.npy', data, allow_pickle=True)
+        print('[INFO] <ReadData> Save the raw data to ' + tempPath + '/data.npy.')
 
-    return dataLoaded
+    return data
 
 def GetDiffProps(data):
     '''
@@ -289,8 +297,51 @@ def GetDiffProps(data):
         os.mkdir(tempPath)
     if not os.path.exists(tempPath + '/props.npy'):
         np.save(tempPath + '/props.npy', props, allow_pickle=True)
+        print('[INFO] <GetDiffProps> Save the diff property data to ' + tempPath + '/props.npy.')
 
     return props
+
+def GetDiffVocab(props):
+    # get the whole tokens and the max diff length.
+    tokens = []
+    maxLen = 0
+
+    # for each sample.
+    for item in props:
+        tokens.extend(item[0])
+        maxLen = len(item[0]) if (len(item[0]) > maxLen) else maxLen
+
+    # remove duplicates and get vocabulary.
+    vocab = {}.fromkeys(tokens)
+    vocab = list(vocab.keys())
+
+    # print.
+    print('[INFO] <GetDiffVocab> There are ' + str(len(vocab)) + ' diff vocabulary tokens. (except \'<pad>\')')
+    print('[INFO] <GetDiffVocab> The max diff length is ' + str(maxLen) + ' (tokens).')
+
+    return vocab, maxLen
+
+def GetDiffDict(vocab):
+    # get token dict from vocabulary.
+    tokenDict = {token: index for index, token in enumerate(vocab)}
+    tokenDict['<pad>'] = len(tokenDict)
+
+    # print.
+    print('[INFO] <GetDiffDict> Create dictionary for ' + str(len(tokenDict)) + ' diff vocabulary tokens. (with \'<pad>\')')
+
+    return tokenDict
+
+def GetDiffEmbed(tokenDict, embedSize):
+    # number of the vocabulary tokens.
+    numTokens = len(tokenDict)
+    # initialize the pre-trained weights for embedding layer.
+    preWeights = np.zeros((numTokens, embedSize))
+    for index in range(numTokens):
+        preWeights[index] = np.random.normal(size=(embedSize,))
+    print('[INFO] Create pre-trained embedding weights with ' + str(len(preWeights)) + ' * ' + str(len(preWeights[0])) + '.')
+
+    return preWeights
+
 
 if __name__ == '__main__':
     main()
