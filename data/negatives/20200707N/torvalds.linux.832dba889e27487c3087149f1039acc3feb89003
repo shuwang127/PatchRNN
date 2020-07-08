@@ -1,0 +1,64 @@
+commit 832dba889e27487c3087149f1039acc3feb89003
+Author: Patrik Jakobsson <patrik.jakobsson@linux.intel.com>
+Date:   Thu Feb 18 17:21:11 2016 +0200
+
+    drm/i915/gen9: Check for DC state mismatch
+    
+    The DMC can incorrectly run off and allow DC states on it's own. We
+    don't know the root-cause for this yet but this patch makes it more
+    visible.
+    
+    Reviewed-by: Mika Kuoppala <mika.kuoppala@intel.com>
+    Signed-off-by: Patrik Jakobsson <patrik.jakobsson@linux.intel.com>
+    Signed-off-by: Imre Deak <imre.deak@intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/1455808874-22089-2-git-send-email-mika.kuoppala@intel.com
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 6644c2e354c1..9cbcb5d80b3c 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -746,6 +746,7 @@ struct intel_csr {
+ 	uint32_t mmio_count;
+ 	i915_reg_t mmioaddr[8];
+ 	uint32_t mmiodata[8];
++	uint32_t dc_state;
+ };
+ 
+ #define DEV_INFO_FOR_EACH_FLAG(func, sep) \
+diff --git a/drivers/gpu/drm/i915/intel_csr.c b/drivers/gpu/drm/i915/intel_csr.c
+index 2a7ec3141c8d..b453fccfa25d 100644
+--- a/drivers/gpu/drm/i915/intel_csr.c
++++ b/drivers/gpu/drm/i915/intel_csr.c
+@@ -243,6 +243,8 @@ void intel_csr_load_program(struct drm_i915_private *dev_priv)
+ 		I915_WRITE(dev_priv->csr.mmioaddr[i],
+ 			   dev_priv->csr.mmiodata[i]);
+ 	}
++
++	dev_priv->csr.dc_state = 0;
+ }
+ 
+ static uint32_t *parse_csr_fw(struct drm_i915_private *dev_priv,
+diff --git a/drivers/gpu/drm/i915/intel_runtime_pm.c b/drivers/gpu/drm/i915/intel_runtime_pm.c
+index a2e367cf99a2..8b9290fdb3b2 100644
+--- a/drivers/gpu/drm/i915/intel_runtime_pm.c
++++ b/drivers/gpu/drm/i915/intel_runtime_pm.c
+@@ -494,10 +494,18 @@ static void gen9_set_dc_state(struct drm_i915_private *dev_priv, uint32_t state)
+ 	val = I915_READ(DC_STATE_EN);
+ 	DRM_DEBUG_KMS("Setting DC state from %02x to %02x\n",
+ 		      val & mask, state);
++
++	/* Check if DMC is ignoring our DC state requests */
++	if ((val & mask) != dev_priv->csr.dc_state)
++		DRM_ERROR("DC state mismatch (0x%x -> 0x%x)\n",
++			  dev_priv->csr.dc_state, val & mask);
++
+ 	val &= ~mask;
+ 	val |= state;
+ 	I915_WRITE(DC_STATE_EN, val);
+ 	POSTING_READ(DC_STATE_EN);
++
++	dev_priv->csr.dc_state = val & mask;
+ }
+ 
+ void bxt_enable_dc9(struct drm_i915_private *dev_priv)
+

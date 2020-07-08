@@ -1,0 +1,87 @@
+commit ebab89909e0dc716282d5e7f6e73a3155fe66d4a
+Author: Anton Altaparmakov <aia21@cam.ac.uk>
+Date:   Sat Nov 3 07:38:59 2007 +0000
+
+    NTFS: Fix read regression.
+    
+    The regression was caused by:
+            commit[a32ea1e1f925399e0d81ca3f7394a44a6dafa12c] Fix read/truncate race
+    
+    This causes ntfs_readpage() to be called for a zero i_size inode, which
+    failed when the file was compressed and non-resident.
+    
+    Thanks a lot to Mike Galbraith for reporting the issue and tracking down
+    the commit that caused the regression.
+    
+    Looking into it I found three bugs which the patch fixes.
+    
+    Signed-off-by: Anton Altaparmakov <aia21@cantab.net>
+    Tested-by:  Mike Galbraith <efault@gmx.de>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/ntfs/aops.c b/fs/ntfs/aops.c
+index cfdc7900d271..ad87cb01299b 100644
+--- a/fs/ntfs/aops.c
++++ b/fs/ntfs/aops.c
+@@ -405,6 +405,15 @@ static int ntfs_readpage(struct file *file, struct page *page)
+ 
+ retry_readpage:
+ 	BUG_ON(!PageLocked(page));
++	vi = page->mapping->host;
++	i_size = i_size_read(vi);
++	/* Is the page fully outside i_size? (truncate in progress) */
++	if (unlikely(page->index >= (i_size + PAGE_CACHE_SIZE - 1) >>
++			PAGE_CACHE_SHIFT)) {
++		zero_user_page(page, 0, PAGE_CACHE_SIZE, KM_USER0);
++		ntfs_debug("Read outside i_size - truncated?");
++		goto done;
++	}
+ 	/*
+ 	 * This can potentially happen because we clear PageUptodate() during
+ 	 * ntfs_writepage() of MstProtected() attributes.
+@@ -413,7 +422,6 @@ static int ntfs_readpage(struct file *file, struct page *page)
+ 		unlock_page(page);
+ 		return 0;
+ 	}
+-	vi = page->mapping->host;
+ 	ni = NTFS_I(vi);
+ 	/*
+ 	 * Only $DATA attributes can be encrypted and only unnamed $DATA
+diff --git a/fs/ntfs/attrib.c b/fs/ntfs/attrib.c
+index 92dabdcf2b80..50d3b0c258e3 100644
+--- a/fs/ntfs/attrib.c
++++ b/fs/ntfs/attrib.c
+@@ -179,10 +179,7 @@ int ntfs_map_runlist_nolock(ntfs_inode *ni, VCN vcn, ntfs_attr_search_ctx *ctx)
+ 	 * ntfs_mapping_pairs_decompress() fails.
+ 	 */
+ 	end_vcn = sle64_to_cpu(a->data.non_resident.highest_vcn) + 1;
+-	if (!a->data.non_resident.lowest_vcn && end_vcn == 1)
+-		end_vcn = sle64_to_cpu(a->data.non_resident.allocated_size) >>
+-				ni->vol->cluster_size_bits;
+-	if (unlikely(vcn >= end_vcn)) {
++	if (unlikely(vcn && vcn >= end_vcn)) {
+ 		err = -ENOENT;
+ 		goto err_out;
+ 	}
+diff --git a/fs/ntfs/compress.c b/fs/ntfs/compress.c
+index d98daf59e0b6..d1619d05eb23 100644
+--- a/fs/ntfs/compress.c
++++ b/fs/ntfs/compress.c
+@@ -561,6 +561,16 @@ int ntfs_read_compressed_block(struct page *page)
+ 	read_unlock_irqrestore(&ni->size_lock, flags);
+ 	max_page = ((i_size + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT) -
+ 			offset;
++	/* Is the page fully outside i_size? (truncate in progress) */
++	if (xpage >= max_page) {
++		kfree(bhs);
++		kfree(pages);
++		zero_user_page(page, 0, PAGE_CACHE_SIZE, KM_USER0);
++		ntfs_debug("Compressed read outside i_size - truncated?");
++		SetPageUptodate(page);
++		unlock_page(page);
++		return 0;
++	}
+ 	if (nr_pages < max_page)
+ 		max_page = nr_pages;
+ 	for (i = 0; i < max_page; i++, offset++) {
+

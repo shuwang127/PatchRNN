@@ -1,0 +1,46 @@
+commit d21b11ba95f722dc8cd017ca7f74b778ffc1c001
+Author: marko <>
+Date:   Tue Mar 28 07:57:47 2006 +0000
+
+    branches/zip: Fix two bugs.
+    
+    page_zip_decompress(): Pass size = d_stream.avail_in + 1
+    to page_zip_apply_log(), since the terminating NUL byte is not included
+    in the space reserved for the compressed data stream.
+    
+    page_zip_clear_rec(): Clear also node pointer fields.
+
+diff --git a/page/page0zip.c b/page/page0zip.c
+index 25af0826b4d..612bb3ecdc6 100644
+--- a/page/page0zip.c
++++ b/page/page0zip.c
+@@ -1705,8 +1705,8 @@ zlib_done:
+ 		const byte*	mod_log_ptr;
+ 		mod_log_ptr = page_zip_apply_log(
+ 				page_zip->data + page_zip->m_start,
+-				d_stream.avail_in, recs, n_dense, trx_id_col,
+-				heap_status, index, offsets);
++				d_stream.avail_in + 1, recs, n_dense,
++				trx_id_col, heap_status, index, offsets);
+ 
+ 		if (UNIV_UNLIKELY(!mod_log_ptr)) {
+ 			goto err_exit;
+@@ -2326,7 +2326,16 @@ page_zip_clear_rec(
+ 		the decompressor depend on the extra bytes. */
+ 		memset(rec, 0, rec_offs_data_size(offsets));
+ 
+-		if (page_is_leaf(page) && dict_index_is_clust(index)) {
++		if (!page_is_leaf(page)) {
++			/* Clear node_ptr on the compressed page. */
++			byte*	storage	= page_zip->data + page_zip->size
++					- (page_dir_get_n_heap(page) - 2)
++					* PAGE_ZIP_DIR_SLOT_SIZE;
++
++			memset(storage - (heap_no - 1) * REC_NODE_PTR_SIZE,
++				0, REC_NODE_PTR_SIZE);
++		}
++		else if (dict_index_is_clust(index)) {
+ 			/* Clear trx_id and roll_ptr on the compressed page. */
+ 			byte*	storage	= page_zip->data + page_zip->size
+ 					- (page_dir_get_n_heap(page) - 2)
+

@@ -1,0 +1,42 @@
+commit 0552f73b9a81d39d50b71a5c06cf36efff80b6fd
+Author: Laurent Vivier <Laurent.Vivier@bull.net>
+Date:   Thu Oct 18 15:19:01 2007 +0200
+
+    KVM: Move kvm_guest_exit() after local_irq_enable()
+    
+    We need to make sure that the timer interrupt happens before we clear
+    PF_VCPU, so the accounting code actually sees guest mode.
+    
+    http://lkml.org/lkml/2007/10/15/114
+    
+    Signed-off-by: Laurent Vivier <Laurent.Vivier@bull.net>
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/drivers/kvm/kvm_main.c b/drivers/kvm/kvm_main.c
+index af2d288c881d..8c458f262872 100644
+--- a/drivers/kvm/kvm_main.c
++++ b/drivers/kvm/kvm_main.c
+@@ -2054,12 +2054,21 @@ again:
+ 
+ 	kvm_x86_ops->run(vcpu, kvm_run);
+ 
+-	kvm_guest_exit();
+ 	vcpu->guest_mode = 0;
+ 	local_irq_enable();
+ 
+ 	++vcpu->stat.exits;
+ 
++	/*
++	 * We must have an instruction between local_irq_enable() and
++	 * kvm_guest_exit(), so the timer interrupt isn't delayed by
++	 * the interrupt shadow.  The stat.exits increment will do nicely.
++	 * But we need to prevent reordering, hence this barrier():
++	 */
++	barrier();
++
++	kvm_guest_exit();
++
+ 	preempt_enable();
+ 
+ 	/*
+

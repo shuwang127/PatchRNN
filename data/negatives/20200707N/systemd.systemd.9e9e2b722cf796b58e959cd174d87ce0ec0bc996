@@ -1,0 +1,54 @@
+commit 9e9e2b722cf796b58e959cd174d87ce0ec0bc996
+Author: Michal Schmidt <mschmidt@redhat.com>
+Date:   Fri Mar 1 14:47:46 2013 +0100
+
+    core: fix running jobs counters after reload/reexec
+    
+    All active units will call unit_notify() during coldplug, so we just
+    make sure we're counting from zero again and get the correct result for
+    n_on_console.
+    
+    For n_running_jobs we likewise reset it to zero and then count
+    the running jobs as we encounter them in deserialization.
+
+diff --git a/src/core/manager.c b/src/core/manager.c
+index 5527e9d42..42423985b 100644
+--- a/src/core/manager.c
++++ b/src/core/manager.c
+@@ -678,6 +678,9 @@ static void manager_clear_jobs_and_units(Manager *m) {
+ 
+         assert(hashmap_isempty(m->jobs));
+         assert(hashmap_isempty(m->units));
++
++        m->n_on_console = 0;
++        m->n_running_jobs = 0;
+ }
+ 
+ void manager_free(Manager *m) {
+diff --git a/src/core/unit.c b/src/core/unit.c
+index 601be60ed..2f0ac00fc 100644
+--- a/src/core/unit.c
++++ b/src/core/unit.c
+@@ -1360,11 +1360,6 @@ void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, bool reload_su
+         if (UNIT_IS_INACTIVE_OR_FAILED(os) != UNIT_IS_INACTIVE_OR_FAILED(ns)) {
+                 ExecContext *ec = unit_get_exec_context(u);
+                 if (ec && exec_context_may_touch_console(ec)) {
+-                        /* XXX The counter may get out of sync if the admin edits
+-                         * TTY-related unit file properties and issues a daemon-reload
+-                         * while the unit is active. No big deal though, because
+-                         * it influences only the printing of boot/shutdown
+-                         * status messages. */
+                         if (UNIT_IS_INACTIVE_OR_FAILED(ns))
+                                 m->n_on_console--;
+                         else
+@@ -2446,6 +2441,9 @@ int unit_deserialize(Unit *u, FILE *f, FDSet *fds) {
+                                         return r;
+                                 }
+ 
++                                if (j->state == JOB_RUNNING)
++                                        u->manager->n_running_jobs++;
++
+                                 r = job_install_deserialized(j);
+                                 if (r < 0) {
+                                         hashmap_remove(u->manager->jobs, UINT32_TO_PTR(j->id));
+

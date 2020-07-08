@@ -1,0 +1,44 @@
+commit 7c81c71730456845e6212dccbf00098faa66740f
+Author: Daniel Borkmann <daniel@iogearbox.net>
+Date:   Wed Aug 8 19:23:14 2018 +0200
+
+    bpf, sockmap: fix leak in bpf_tcp_sendmsg wait for mem path
+    
+    In bpf_tcp_sendmsg() the sk_alloc_sg() may fail. In the case of
+    ENOMEM, it may also mean that we've partially filled the scatterlist
+    entries with pages. Later jumping to sk_stream_wait_memory()
+    we could further fail with an error for several reasons, however
+    we miss to call free_start_sg() if the local sk_msg_buff was used.
+    
+    Fixes: 4f738adba30a ("bpf: create tcp_bpf_ulp allowing BPF to monitor socket TX/RX data")
+    Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+    Acked-by: John Fastabend <john.fastabend@gmail.com>
+    Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+
+diff --git a/kernel/bpf/sockmap.c b/kernel/bpf/sockmap.c
+index f7360c4d7250..c4d75c52b4fc 100644
+--- a/kernel/bpf/sockmap.c
++++ b/kernel/bpf/sockmap.c
+@@ -1048,7 +1048,7 @@ static int bpf_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+ 	timeo = sock_sndtimeo(sk, msg->msg_flags & MSG_DONTWAIT);
+ 
+ 	while (msg_data_left(msg)) {
+-		struct sk_msg_buff *m;
++		struct sk_msg_buff *m = NULL;
+ 		bool enospc = false;
+ 		int copy;
+ 
+@@ -1116,8 +1116,11 @@ static int bpf_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+ 		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
+ wait_for_memory:
+ 		err = sk_stream_wait_memory(sk, &timeo);
+-		if (err)
++		if (err) {
++			if (m && m != psock->cork)
++				free_start_sg(sk, m);
+ 			goto out_err;
++		}
+ 	}
+ out_err:
+ 	if (err < 0)
+

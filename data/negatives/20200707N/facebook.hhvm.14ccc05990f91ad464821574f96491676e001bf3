@@ -1,0 +1,94 @@
+commit 14ccc05990f91ad464821574f96491676e001bf3
+Author: myang <myang@fb.com>
+Date:   Tue Sep 6 20:48:41 2011 -0700
+
+    [Fix] Fix assertion failure
+    
+    Summary:
+    <?php
+    if (true) {
+    class A {
+    private $a = 1;
+    }
+    class B extends A {
+    public $a;
+    function f() { $this->a = 2; }
+    }
+    } else {
+    class A {
+    protected $a = 1;
+    }
+    class B extends A {
+    public $a;
+    function f() { $this->a = 2; }
+    }
+    }
+    $obj = new B;
+    $obj->f();
+    var_dump($obj);
+    Compile and run with DEBUG=1, Assertion `!exists(k)' failed.
+    The assertion failed because the property name already exists. This can happen
+    for an overriden property, where the name is first set to null_variant to
+    occupy the slot for correct iteration order, then set again to the right value.
+    Fixed by using lvalAt which does not assume the key is new. New test added.
+    
+    Test Plan:
+    make fast_tests
+    make slow_tests
+    
+    Reviewers: mwilliams, qigao
+    
+    Reviewed By: mwilliams
+    
+    CC: hphp-diffs@lists, ps, mwilliams
+    
+    Differential Revision: 319212
+    
+    Task ID: 701501
+
+diff --git a/src/runtime/base/object_data.cpp b/src/runtime/base/object_data.cpp
+index 9ffe86b5ae..8945d113dd 100644
+--- a/src/runtime/base/object_data.cpp
++++ b/src/runtime/base/object_data.cpp
+@@ -979,7 +979,7 @@ void ObjectData::o_getArray(Array &props, bool pubOnly /* = false */) const {
+     for (ArrayIter it(o_properties); !it.end(); it.next()) {
+       Variant key = it.first();
+       CVarRef value = it.secondRef();
+-      props.addLval(key, true).setWithRef(value);
++      props.lvalAt(key, AccessFlags::Key).setWithRef(value);
+     }
+   }
+ }
+diff --git a/src/test/test_code_run.cpp b/src/test/test_code_run.cpp
+index b69a84a006..5c5d966931 100644
+--- a/src/test/test_code_run.cpp
++++ b/src/test/test_code_run.cpp
+@@ -12098,6 +12098,27 @@ bool TestCodeRun::TestRedeclaredClasses() {
+        "}"
+        "test();");
+ 
++  MVCR("<?php "
++       "if (true) {"
++       "  class A {"
++       "    private $a = 1;"
++       "  }"
++       "  class B extends A {"
++       "    public $a;"
++       "    function f() { $this->a = 2; }"
++       "  }"
++       "} else {"
++       "  class A {"
++       "    protected $a = 1;"
++       "  }"
++       "  class B extends A {"
++       "    public $a;"
++       "    function f() { $this->a = 2; }"
++       "  }"
++       "}"
++       "$obj = new B;"
++       "$obj->f();"
++       "var_dump($obj);");
+   return true;
+ }
+ 
+

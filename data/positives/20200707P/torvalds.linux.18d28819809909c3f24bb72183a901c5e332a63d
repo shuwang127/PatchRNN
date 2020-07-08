@@ -1,0 +1,77 @@
+commit 18d28819809909c3f24bb72183a901c5e332a63d
+Author: Johannes Thumshirn <jthumshirn@suse.de>
+Date:   Tue May 3 09:46:22 2016 +0200
+
+    mcb: Correctly initialize the bus's device
+    
+    The mcb bus' device member wasn't correctly initialized and thus wasn't placed
+    correctly into the driver model.
+    
+    Signed-off-by: Johannes Thumshirn <jthumshirn@suse.de>
+    Reviewed-by: Andreas Werner <andreas.werner@men.de>
+    Tested-by: Andreas Werner <andreas.werner@men.de>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/mcb/mcb-core.c b/drivers/mcb/mcb-core.c
+index a4be451074e5..1e336cc56751 100644
+--- a/drivers/mcb/mcb-core.c
++++ b/drivers/mcb/mcb-core.c
+@@ -187,6 +187,7 @@ struct mcb_bus *mcb_alloc_bus(struct device *carrier)
+ {
+ 	struct mcb_bus *bus;
+ 	int bus_nr;
++	int rc;
+ 
+ 	bus = kzalloc(sizeof(struct mcb_bus), GFP_KERNEL);
+ 	if (!bus)
+@@ -194,14 +195,26 @@ struct mcb_bus *mcb_alloc_bus(struct device *carrier)
+ 
+ 	bus_nr = ida_simple_get(&mcb_ida, 0, 0, GFP_KERNEL);
+ 	if (bus_nr < 0) {
+-		kfree(bus);
+-		return ERR_PTR(bus_nr);
++		rc = bus_nr;
++		goto err_free;
+ 	}
+ 
+-	INIT_LIST_HEAD(&bus->children);
+ 	bus->bus_nr = bus_nr;
+ 	bus->carrier = carrier;
++
++	device_initialize(&bus->dev);
++	bus->dev.parent = carrier;
++	bus->dev.bus = &mcb_bus_type;
++
++	dev_set_name(&bus->dev, "mcb:%d", bus_nr);
++	rc = device_add(&bus->dev);
++	if (rc)
++		goto err_free;
++
+ 	return bus;
++err_free:
++	kfree(bus);
++	return ERR_PTR(rc);
+ }
+ EXPORT_SYMBOL_GPL(mcb_alloc_bus);
+ 
+diff --git a/include/linux/mcb.h b/include/linux/mcb.h
+index ed06e15a36aa..3efafbca166d 100644
+--- a/include/linux/mcb.h
++++ b/include/linux/mcb.h
+@@ -21,13 +21,12 @@ struct mcb_device;
+ /**
+  * struct mcb_bus - MEN Chameleon Bus
+  *
+- * @dev: pointer to carrier device
+- * @children: the child busses
++ * @dev: bus device
++ * @carrier: pointer to carrier device
+  * @bus_nr: mcb bus number
+  * @get_irq: callback to get IRQ number
+  */
+ struct mcb_bus {
+-	struct list_head children;
+ 	struct device dev;
+ 	struct device *carrier;
+ 	int bus_nr;
+

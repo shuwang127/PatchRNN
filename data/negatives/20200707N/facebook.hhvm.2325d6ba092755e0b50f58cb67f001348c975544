@@ -1,0 +1,46 @@
+commit 2325d6ba092755e0b50f58cb67f001348c975544
+Author: Jordan DeLong <jdelong@fb.com>
+Date:   Sun Feb 2 15:25:34 2014 -0800
+
+    Only rename builtins that aren't C++ builtins to __builtin_name
+    
+    It looks like the only case in systemlib that does this
+    fallback stuff is array_map.  (I believe array_filter used to.)  Since
+    this function was detecting that situation by trying to look up loaded
+    functions, it would rename every function if you call it a second time
+    to create the UnitEmitter again (which I need for HHBBC).  This way
+    fixes that, but leaves the dependency on the hhas system being loaded
+    before the native func one.
+    
+    Reviewed By: @markw65
+    
+    Differential Revision: D1155030
+
+diff --git a/hphp/compiler/analysis/emitter.cpp b/hphp/compiler/analysis/emitter.cpp
+index 52ce088b31..bd998ad97e 100644
+--- a/hphp/compiler/analysis/emitter.cpp
++++ b/hphp/compiler/analysis/emitter.cpp
+@@ -8628,11 +8628,18 @@ emitHHBCNativeFuncUnit(const HhbcExtFuncInfo* builtinFuncs,
+         !RuntimeOption::EnableZendCompat) {
+       continue;
+     }
+-    if (Unit::lookupFunc(name)) {
+-      // already provided by systemlib, rename to allow the php
+-      // version to delegate if necessary
+-      name = makeStaticString("__builtin_" + name->toCPPString());
++
++    // We already provide array_map by the hhas systemlib.  Rename
++    // because that hhas implementation delegates back to the C++
++    // implementation for some edge cases.  This works for any
++    // similarly defined function (already defined not as a builtin),
++    // and requires that the hhas systemlib is already loaded.
++    if (auto const existing = Unit::lookupFunc(name)) {
++      if (!existing->isCPPBuiltin()) {
++        name = makeStaticString("__builtin_" + name->toCPPString());
++      }
+     }
++
+     FuncEmitter* fe = ue->newFuncEmitter(name);
+     Offset base = ue->bcPos();
+     fe->setBuiltinFunc(mi, bif, nif, base);
+

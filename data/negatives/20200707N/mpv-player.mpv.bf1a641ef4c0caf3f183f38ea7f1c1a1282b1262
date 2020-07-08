@@ -1,0 +1,117 @@
+commit bf1a641ef4c0caf3f183f38ea7f1c1a1282b1262
+Author: arpi <arpi@b3059339-0415-0410-9bf9-f77b7e298cf2>
+Date:   Tue Jan 8 01:13:22 2002 +0000
+
+    various small streaming fixes by Alban Bedel <albeu@free.fr>
+    
+    
+    git-svn-id: svn://svn.mplayerhq.hu/mplayer/trunk@4042 b3059339-0415-0410-9bf9-f77b7e298cf2
+
+diff --git a/libmpdemux/asf_streaming.c b/libmpdemux/asf_streaming.c
+index 4d864c8e6d..ad70db9464 100644
+--- a/libmpdemux/asf_streaming.c
++++ b/libmpdemux/asf_streaming.c
+@@ -214,7 +214,7 @@ int
+ asf_http_streaming_read( int fd, char *buffer, int size, streaming_ctrl_t *streaming_ctrl ) {
+   static ASF_stream_chunck_t chunk;
+   int read,chunk_size = 0;
+-  static int rest = 0, drop_chunk = 0, waiting = 0;
++  static int rest = 0, drop_chunk = 0, waiting = 0,eof= 0;
+   asf_http_streaming_ctrl_t *asf_http_ctrl = (asf_http_streaming_ctrl_t*)streaming_ctrl->data;
+ 
+   while(1) {
+@@ -224,8 +224,9 @@ asf_http_streaming_read( int fd, char *buffer, int size, streaming_ctrl_t *strea
+ 	int r = nop_streaming_read( fd, ((char*)&chunk) + read, 
+ 				    sizeof(ASF_stream_chunck_t)-read, 
+ 				    streaming_ctrl );
+-	if(r < 0){
+-	  printf("End of stream without a full chunk header\n");
++	if(r <= 0){
++	  if( r < 0) 
++	    printf("Error while reading chunk header\n");
+ 	  return -1;
+ 	}
+ 	read += r;
+@@ -260,8 +261,9 @@ asf_http_streaming_read( int fd, char *buffer, int size, streaming_ctrl_t *strea
+       }
+       while(read < chunk_size) {
+ 	int got = nop_streaming_read( fd,buffer+read,chunk_size-read,streaming_ctrl );
+-	if(got < 0) {
+-	  printf("Error while reading chunk EOF ?\n");
++	if(got <= 0) {
++	  if(got < 0)
++	    printf("Error while reading chunk\n");
+ 	  return -1;
+ 	}
+ 	read += got;
+@@ -610,18 +612,15 @@ printf("read: %d\n", i );
+ 				}
+ 				break;
+ 			case ASF_Redirector_e:
+-				url_next = asf_http_ASX_redirect( http_hdr );
+-				if( url_next==NULL ) {
+-					printf("Failed to parse ASX file\n");
+-					close(fd);
+-					http_free( http_hdr );
+-					return -1;
+-				}
+-				url_free( stream->streaming_ctrl->url );
+-				stream->streaming_ctrl->url = url_next;
+-				url = url_next;
+-				done = 0;
+-				break;
++			  if( http_hdr->body_size>0 ) {
++			    if( streaming_bufferize( stream->streaming_ctrl, http_hdr->body, http_hdr->body_size )<0 ) {
++			      http_free( http_hdr );
++			      return -1;
++			    }
++			  }
++			  stream->type = STREAMTYPE_PLAYLIST;
++			  done = 1;
++			  break;
+ 			case ASF_Unknown_e:
+ 			default:
+ 				printf("Unknown ASF streaming type\n");
+@@ -633,7 +632,7 @@ printf("read: %d\n", i );
+ 	} while(!done);
+ 
+ 	stream->fd= fd;
+-	if( streaming_type==ASF_PlainText_e ) {
++	if( streaming_type==ASF_PlainText_e || streaming_type==ASF_Redirector_e ) {
+ 		stream->streaming_ctrl->streaming_read = nop_streaming_read;
+ 		stream->streaming_ctrl->streaming_seek = nop_streaming_seek;
+ 	} else {
+diff --git a/libmpdemux/network.c b/libmpdemux/network.c
+index 63a726ea2c..17b42226be 100644
+--- a/libmpdemux/network.c
++++ b/libmpdemux/network.c
+@@ -147,7 +147,7 @@ connect2Server(char *host, int port) {
+ 			return -1;
+ 		}
+ 	}
+-	tv.tv_sec = 5;	// 5 seconds timeout on connection
++	tv.tv_sec = 15;	// 15 seconds timeout on connection
+ 	tv.tv_usec = 0;	
+ 	FD_ZERO( &set );
+ 	FD_SET( socket_server_fd, &set );
+@@ -569,12 +569,17 @@ streaming_start(stream_t *stream, URL_t *url, int demuxer_type) {
+ 	}
+ 	
+ 	stream->streaming_ctrl->url = url_copy(url);
+-//	stream->streaming_ctrl->demuxer_type = demuxer_type;
+-	stream->fd = -1;
++//	stream->streaming_ctrl->demuxer_type = demuxer_type;	
+ 
+ 	// For RTP streams, we usually don't know the stream type until we open it.
+ 	if( !strcmp( url->protocol, "rtp"))
+ 	{
++		if(stream->fd >= 0) 
++		{
++			if(close(stream->fd) < 0)
++				printf("streaming_start : Closing socket %d failed %s\n",stream->fd,strerror(errno));
++		}
++		stream->fd = -1;
+ 		stream->fd = rtp_streaming_start( stream );
+ 	}
+ 	// For connection-oriented streams, we can usually determine the streaming type.
+

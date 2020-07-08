@@ -1,0 +1,50 @@
+commit 86532d8b167e71e24da8b564348b52977b76d15f
+Author: Cornelia Huck <cornelia.huck@de.ibm.com>
+Date:   Mon Jan 19 13:45:31 2009 +0100
+
+    async: Handle kthread_run() return codes.
+    
+    If we fail to create the manager thread, fall back to non-fastboot.
+    If we fail to create an async thread, try again after waiting for
+    a bit.
+    
+    Signed-off-by: Cornelia Huck <cornelia.huck@de.ibm.com>
+    Signed-off-by: Arjan van de Ven <arjan@linux.intel.com>
+
+diff --git a/kernel/async.c b/kernel/async.c
+index 0c90d500ab68..078d5ed150d1 100644
+--- a/kernel/async.c
++++ b/kernel/async.c
+@@ -54,6 +54,7 @@ asynchronous and synchronous parts of the kernel.
+ #include <linux/sched.h>
+ #include <linux/init.h>
+ #include <linux/kthread.h>
++#include <linux/delay.h>
+ #include <asm/atomic.h>
+ 
+ static async_cookie_t next_cookie = 1;
+@@ -319,7 +320,11 @@ static int async_manager_thread(void *unused)
+ 		ec = atomic_read(&entry_count);
+ 
+ 		while (tc < ec && tc < MAX_THREADS) {
+-			kthread_run(async_thread, NULL, "async/%i", tc);
++			if (IS_ERR(kthread_run(async_thread, NULL, "async/%i",
++					       tc))) {
++				msleep(100);
++				continue;
++			}
+ 			atomic_inc(&thread_count);
+ 			tc++;
+ 		}
+@@ -334,7 +339,9 @@ static int async_manager_thread(void *unused)
+ static int __init async_init(void)
+ {
+ 	if (async_enabled)
+-		kthread_run(async_manager_thread, NULL, "async/mgr");
++		if (IS_ERR(kthread_run(async_manager_thread, NULL,
++				       "async/mgr")))
++			async_enabled = 0;
+ 	return 0;
+ }
+ 
+

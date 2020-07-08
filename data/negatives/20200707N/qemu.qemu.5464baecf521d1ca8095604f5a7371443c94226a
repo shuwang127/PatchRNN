@@ -1,0 +1,46 @@
+commit 5464baecf521d1ca8095604f5a7371443c94226a
+Author: Tom Musta <tommusta@gmail.com>
+Date:   Tue Aug 12 13:53:34 2014 -0500
+
+    linux-user: Properly Handle semun Structure In Cross-Endian Situations
+    
+    The semun union used in the semctl system call contains both an int (val) and
+    pointers.  In cross-endian situations on 64 bit targets, the value passed to
+    semctl is an 8 byte (abi_long) value and thus does not have the 4-byte val
+    field in the correct location.  In order to rectify this, the other half
+    of the union must be accessed.  This is achieved in code by performing
+    a byte swap on the entire 8 byte union, followed by a 4-byte swap of the
+    first half.
+    
+    Also, eliminate an extraneous (dead) line of code that sets target_su.val in
+    the IPC_SET/IPC_GET case.
+    
+    Signed-off-by: Tom Musta <tommusta@gmail.com>
+    Signed-off-by: Riku Voipio <riku.voipio@linaro.org>
+
+diff --git a/linux-user/syscall.c b/linux-user/syscall.c
+index 08fdd94014..39ab4c7942 100644
+--- a/linux-user/syscall.c
++++ b/linux-user/syscall.c
+@@ -2652,9 +2652,18 @@ static inline abi_long do_semctl(int semid, int semnum, int cmd,
+     switch( cmd ) {
+ 	case GETVAL:
+ 	case SETVAL:
+-            arg.val = tswap32(target_su.val);
++            /* In 64 bit cross-endian situations, we will erroneously pick up
++             * the wrong half of the union for the "val" element.  To rectify
++             * this, the entire 8-byte structure is byteswapped, followed by
++	     * a swap of the 4 byte val field. In other cases, the data is
++	     * already in proper host byte order. */
++	    if (sizeof(target_su.val) != (sizeof(target_su.buf))) {
++		target_su.buf = tswapal(target_su.buf);
++		arg.val = tswap32(target_su.val);
++	    } else {
++		arg.val = target_su.val;
++	    }
+             ret = get_errno(semctl(semid, semnum, cmd, arg));
+-            target_su.val = tswap32(arg.val);
+             break;
+ 	case GETALL:
+ 	case SETALL:
+

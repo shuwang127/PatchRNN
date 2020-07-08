@@ -1,0 +1,110 @@
+commit 9e5bcd610ffcedf5e485e78a72762810b25c7f25
+Author: Yisheng Xie <xieyisheng1@huawei.com>
+Date:   Fri Feb 24 14:57:29 2017 -0800
+
+    mm/migration: make isolate_movable_page() return int type
+    
+    Patch series "HWPOISON: soft offlining for non-lru movable page", v6.
+    
+    After Minchan's commit bda807d44454 ("mm: migrate: support non-lru
+    movable page migration"), some type of non-lru page like zsmalloc and
+    virtio-balloon page also support migration.
+    
+    Therefore, we can:
+    
+    1) soft offlining no-lru movable pages, which means when memory
+       corrected errors occur on a non-lru movable page, we can stop to use
+       it by migrating data onto another page and disable the original
+       (maybe half-broken) one.
+    
+    2) enable memory hotplug for non-lru movable pages, i.e. we may offline
+       blocks, which include such pages, by using non-lru page migration.
+    
+    This patchset is heavily dependent on non-lru movable page migration.
+    
+    This patch (of 4):
+    
+    Change the return type of isolate_movable_page() from bool to int.  It
+    will return 0 when isolate movable page successfully, and return -EBUSY
+    when it isolates failed.
+    
+    There is no functional change within this patch but prepare for later
+    patch.
+    
+    [xieyisheng1@huawei.com: v6]
+      Link: http://lkml.kernel.org/r/1486108770-630-2-git-send-email-xieyisheng1@huawei.com
+    Link: http://lkml.kernel.org/r/1485867981-16037-2-git-send-email-ysxie@foxmail.com
+    Signed-off-by: Yisheng Xie <xieyisheng1@huawei.com>
+    Suggested-by: Michal Hocko <mhocko@kernel.org>
+    Acked-by: Minchan Kim <minchan@kernel.org>
+    Cc: Andi Kleen <ak@linux.intel.com>
+    Cc: Hanjun Guo <guohanjun@huawei.com>
+    Cc: Johannes Weiner <hannes@cmpxchg.org>
+    Cc: Joonsoo Kim <iamjoonsoo.kim@lge.com>
+    Cc: Mel Gorman <mgorman@techsingularity.net>
+    Cc: Naoya Horiguchi <n-horiguchi@ah.jp.nec.com>
+    Cc: Reza Arbab <arbab@linux.vnet.ibm.com>
+    Cc: Taku Izumi <izumi.taku@jp.fujitsu.com>
+    Cc: Vitaly Kuznetsov <vkuznets@redhat.com>
+    Cc: Vlastimil Babka <vbabka@suse.cz>
+    Cc: Xishi Qiu <qiuxishi@huawei.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/linux/migrate.h b/include/linux/migrate.h
+index ae8d475a9385..43d5deb0c4cc 100644
+--- a/include/linux/migrate.h
++++ b/include/linux/migrate.h
+@@ -37,7 +37,7 @@ extern int migrate_page(struct address_space *,
+ 			struct page *, struct page *, enum migrate_mode);
+ extern int migrate_pages(struct list_head *l, new_page_t new, free_page_t free,
+ 		unsigned long private, enum migrate_mode mode, int reason);
+-extern bool isolate_movable_page(struct page *page, isolate_mode_t mode);
++extern int isolate_movable_page(struct page *page, isolate_mode_t mode);
+ extern void putback_movable_page(struct page *page);
+ 
+ extern int migrate_prep(void);
+diff --git a/mm/compaction.c b/mm/compaction.c
+index 0aa2757399ee..0fdfde016ee2 100644
+--- a/mm/compaction.c
++++ b/mm/compaction.c
+@@ -802,7 +802,7 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
+ 					locked = false;
+ 				}
+ 
+-				if (isolate_movable_page(page, isolate_mode))
++				if (!isolate_movable_page(page, isolate_mode))
+ 					goto isolate_success;
+ 			}
+ 
+diff --git a/mm/migrate.c b/mm/migrate.c
+index 87f4d0f81819..6807174e0715 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -74,7 +74,7 @@ int migrate_prep_local(void)
+ 	return 0;
+ }
+ 
+-bool isolate_movable_page(struct page *page, isolate_mode_t mode)
++int isolate_movable_page(struct page *page, isolate_mode_t mode)
+ {
+ 	struct address_space *mapping;
+ 
+@@ -125,14 +125,14 @@ bool isolate_movable_page(struct page *page, isolate_mode_t mode)
+ 	__SetPageIsolated(page);
+ 	unlock_page(page);
+ 
+-	return true;
++	return 0;
+ 
+ out_no_isolated:
+ 	unlock_page(page);
+ out_putpage:
+ 	put_page(page);
+ out:
+-	return false;
++	return -EBUSY;
+ }
+ 
+ /* It should be called on page which is PG_movable */
+

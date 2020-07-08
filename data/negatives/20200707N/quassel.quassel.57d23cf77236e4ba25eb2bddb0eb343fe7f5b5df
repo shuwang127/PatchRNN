@@ -1,0 +1,417 @@
+commit 57d23cf77236e4ba25eb2bddb0eb343fe7f5b5df
+Author: Sebastian Goth <seezer@roath.org>
+Date:   Sun Sep 13 13:38:52 2009 +0200
+
+    Pimp my netsplit detection
+    
+    - Don't fail on ipv6
+     - Don't fail on manual reconnects
+     - Don't fail on too many bad assumptions
+     Fixes #787
+
+diff --git a/src/core/ircserverhandler.cpp b/src/core/ircserverhandler.cpp
+index b03b0d71..6dfb8383 100644
+--- a/src/core/ircserverhandler.cpp
++++ b/src/core/ircserverhandler.cpp
+@@ -39,6 +39,8 @@ IrcServerHandler::IrcServerHandler(CoreNetwork *parent)
+ }
+ 
+ IrcServerHandler::~IrcServerHandler() {
++  if(!_netsplits.empty())
++    qDeleteAll(_netsplits);
+ }
+ 
+ /*! Handle a raw message string sent by the server. We try to find a suitable handler, otherwise we call a default handler. */
+@@ -263,8 +265,20 @@ void IrcServerHandler::handleMode(const QString &prefix, const QList<QByteArray>
+         // user channel modes (op, voice, etc...)
+         if(paramOffset < params.count()) {
+           IrcUser *ircUser = network()->ircUser(params[paramOffset]);
+-          if(add)
+-            channel->addUserMode(ircUser, QString(modes[c]));
++          if(add) {
++            bool handledByNetsplit = false;
++            if(!_netsplits.empty()) {
++              foreach(Netsplit* n, _netsplits) {
++                handledByNetsplit = n->userAlreadyJoined(ircUser->hostmask(), channel->name());
++                if(handledByNetsplit) {
++                  n->addMode(ircUser->hostmask(), channel->name(), QString(modes[c]));
++                  break;
++                }
++              }
++            }
++            if(!handledByNetsplit)
++              channel->addUserMode(ircUser, QString(modes[c]));
++          }
+           else
+             channel->removeUserMode(ircUser, QString(modes[c]));
+         } else {
+@@ -481,8 +495,12 @@ void IrcServerHandler::handleQuit(const QString &prefix, const QList<QByteArray>
+     if(!_netsplits.contains(msg)) {
+       n = new Netsplit();
+       connect(n, SIGNAL(finished()), this, SLOT(handleNetsplitFinished()));
+-      connect(n, SIGNAL(netsplitJoin(QString,QStringList,QString)), this, SLOT(handleNetsplitJoin(QString,QStringList,QString)));
+-      connect(n, SIGNAL(netsplitQuit(QString,QStringList,QString)), this, SLOT(handleNetsplitQuit(QString,QStringList,QString)));
++      connect(n, SIGNAL(netsplitJoin(const QString&, const QStringList&, const QStringList&, const QString&)),
++              this, SLOT(handleNetsplitJoin(const QString&, const QStringList&, const QStringList&, const QString&)));
++      connect(n, SIGNAL(netsplitQuit(const QString&, const QStringList&, const QString&)),
++              this, SLOT(handleNetsplitQuit(const QString&, const QStringList&, const QString&)));
++      connect(n, SIGNAL(earlyJoin(const QString&, const QStringList&, const QStringList&)),
++              this, SLOT(handleEarlyNetsplitJoin(const QString&, const QStringList&, const QStringList&)));
+       _netsplits.insert(msg, n);
+     }
+     else {
+@@ -1047,21 +1065,32 @@ void IrcServerHandler::handle433(const QString &prefix, const QList<QByteArray>
+ 
+ /* Handle signals from Netsplit objects  */
+ 
+-void IrcServerHandler::handleNetsplitJoin(const QString &channel, const QStringList &users, const QString& quitMessage)
++void IrcServerHandler::handleNetsplitJoin(const QString &channel, const QStringList &users, const QStringList &modes, const QString& quitMessage)
+ {
+-  QString msg = users.join(":").append(':').append(quitMessage);
+-  emit displayMsg(Message::NetsplitJoin, BufferInfo::ChannelBuffer, channel, msg);
++  IrcChannel *ircChannel = network()->ircChannel(channel);
++  if(!ircChannel) {
++    return;
++  }
++  QList<IrcUser *> ircUsers;
++  QStringList newModes = modes;
+ 
+   foreach(QString user, users) {
+-    IrcUser *iu = network()->ircUser(nickFromMask(user));
++    IrcUser *iu = network()->updateNickFromMask(user);
+     if(iu)
+-      iu->joinChannel(channel);
++      ircUsers.append(iu);
++    else {
++      newModes.removeAt(users.indexOf(user));
++    }
+   }
++
++  QString msg = users.join("#:#").append("#:#").append(quitMessage);
++  emit displayMsg(Message::NetsplitJoin, BufferInfo::ChannelBuffer, channel, msg);
++  ircChannel->joinIrcUsers(ircUsers, newModes);
+ }
+ 
+ void IrcServerHandler::handleNetsplitQuit(const QString &channel, const QStringList &users, const QString& quitMessage)
+ {
+-  QString msg = users.join(":").append(':').append(quitMessage);
++  QString msg = users.join("#:#").append("#:#").append(quitMessage);
+   emit displayMsg(Message::NetsplitQuit, BufferInfo::ChannelBuffer, channel, msg);
+   foreach(QString user, users) {
+     IrcUser *iu = network()->ircUser(nickFromMask(user));
+@@ -1070,6 +1099,27 @@ void IrcServerHandler::handleNetsplitQuit(const QString &channel, const QStringL
+   }
+ }
+ 
++void IrcServerHandler::handleEarlyNetsplitJoin(const QString &channel, const QStringList &users, const QStringList &modes) {
++  IrcChannel *ircChannel = network()->ircChannel(channel);
++  if(!ircChannel) {
++    qDebug() << "handleEarlyNetsplitJoin(): channel " << channel << " invalid";
++    return;
++  }
++  QList<IrcUser *> ircUsers;
++  QStringList newModes = modes;
++
++  foreach(QString user, users) {
++    IrcUser *iu = network()->updateNickFromMask(user);
++    if(iu) {
++      ircUsers.append(iu);
++      emit displayMsg(Message::Join, BufferInfo::ChannelBuffer, channel, channel, user);
++    }
++    else {
++      newModes.removeAt(users.indexOf(user));
++    }
++  }
++  ircChannel->joinIrcUsers(ircUsers, newModes);
++}
+ void IrcServerHandler::handleNetsplitFinished()
+ {
+   Netsplit* n = qobject_cast<Netsplit*>(sender());
+diff --git a/src/core/ircserverhandler.h b/src/core/ircserverhandler.h
+index f035eb9a..0d725f6e 100644
+--- a/src/core/ircserverhandler.h
++++ b/src/core/ircserverhandler.h
+@@ -87,9 +87,10 @@ private slots:
+   /** This slot handles a bulk-join after a netsplit is over
+     * \param channel The channel the users joined
+     * \param users   The list of users that joind the channel
++    * \param modes   The list of modes the users get set
+     * \param quitMessage The message we received when the netsplit occured
+     */
+-  void handleNetsplitJoin(const QString &channel, const QStringList &users, const QString &quitMessage);
++  void handleNetsplitJoin(const QString &channel, const QStringList &users, const QStringList &modes, const QString &quitMessage);
+ 
+   //! Quits after a netsplit
+   /** This slot handles a bulk-quit after a netsplit occured
+@@ -104,6 +105,8 @@ private slots:
+     */
+   void handleNetsplitFinished();
+ 
++  void handleEarlyNetsplitJoin(const QString &channel, const QStringList &users, const QStringList &modes);
++
+ private:
+   void tryNextNick(const QString &errnick, bool erroneus = false);
+   bool checkParamCount(const QString &methodName, const QList<QByteArray> &params, int minParams);
+diff --git a/src/core/netsplit.cpp b/src/core/netsplit.cpp
+index d824d9b4..fd49a7d4 100644
+--- a/src/core/netsplit.cpp
++++ b/src/core/netsplit.cpp
+@@ -19,11 +19,12 @@
+  ***************************************************************************/
+ 
+ #include "netsplit.h"
++#include "util.h"
+ 
+ #include <QRegExp>
+ 
+ Netsplit::Netsplit()
+-    : _quitMsg(""), _sentQuit(false)
++    : _quitMsg(""), _sentQuit(false), _joinCounter(0), _quitCounter(0)
+ {
+   _discardTimer.setSingleShot(true);
+   _joinTimer.setSingleShot(true);
+@@ -45,8 +46,9 @@ void Netsplit::userQuit(const QString &sender, const QStringList &channels, cons
+   foreach(QString channel, channels) {
+     _quits[channel].append(sender);
+   }
+-  // now let's wait 5s to finish the netsplit-quit
+-  _quitTimer.start(5000);
++  _quitCounter++;
++  // now let's wait 10s to finish the netsplit-quit
++  _quitTimer.start(10000);
+ }
+ 
+ bool Netsplit::userJoined(const QString &sender, const QString &channel) {
+@@ -54,19 +56,49 @@ bool Netsplit::userJoined(const QString &sender, const QString &channel) {
+     return false;
+ 
+   QStringList &users = _quits[channel];
+-  int idx = users.indexOf(sender);
+-  if(idx == -1)
++
++  QStringList::iterator userIter;
++  const QString senderNick = nickFromMask(sender);
++  for(userIter = users.begin(); userIter != users.end(); ++userIter) {
++    if(nickFromMask(*userIter) == senderNick)
++      break;
++  }
++  if(userIter == users.end())
+     return false;
+ 
+-  _joins[channel].append(users.takeAt(idx));
++  _joins[channel].first.append(*userIter);
++  _joins[channel].second.append(QString());
++
++  users.erase(userIter);
++
+   if(users.empty())
+     _quits.remove(channel);
+ 
+-  // now let's wait 5s to finish the netsplit-join
+-  _joinTimer.start(5000);
++  _joinCounter++;
++
++  if(_quits.empty()) // all users joined already - no need to wait
++    _joinTimer.start(0);
++  else // wait 30s to finish the netsplit-join
++    _joinTimer.start(30000);
++
+   return true;
+ }
+ 
++bool Netsplit::userAlreadyJoined(const QString &sender, const QString &channel) {
++  if(_joins.value(channel).first.contains(sender))
++    return true;
++  return false;
++}
++
++void Netsplit::addMode(const QString &sender, const QString &channel, const QString &mode) {
++  if(!_joins.contains(channel))
++    return;
++  int idx = _joins.value(channel).first.indexOf(sender);
++  if(idx == -1)
++    return;
++  _joins[channel].second[idx].append(mode);
++}
++
+ bool Netsplit::isNetsplit(const QString &quitMessage)
+ {
+   // check if we find some common chars that disqualify the netsplit as such
+@@ -88,9 +120,34 @@ void Netsplit::joinTimeout()
+     _quitTimer.stop();
+     quitTimeout();
+   }
+-  QHash<QString, QStringList>::iterator it;
++
++  QHash<QString, QPair<QStringList, QStringList> >::iterator it;
++
++  /*
++    Try to catch server jumpers.
++    If we have too few joins for a netsplit-quit,
++    we assume that the users manually changed servers and join them
++    without ending the netsplit.
++    A netsplit is assumed over only if at least 1/3 of all quits had their corresponding
++    join again.
++  */
++  if(_joinCounter < _quitCounter/3) {
++    for(it = _joins.begin(); it != _joins.end(); ++it)
++      emit earlyJoin(it.key(), it.value().first, it.value().second);
++
++    // we don't care about those anymore
++    _joins.clear();
++
++    // restart the timer with 5min timeout
++    // This might happen a few times if netsplit lasts longer.
++    // As soon as another user joins, the timer is set to a shorter timeout again.
++    _joinTimer.start(300000);
++    return;
++  }
++
++  // send netsplitJoin for every recorded channel
+   for(it = _joins.begin(); it != _joins.end(); ++it)
+-    emit netsplitJoin(it.key(), it.value(),_quitMsg);
++    emit netsplitJoin(it.key(), it.value().first, it.value().second ,_quitMsg);
+   _joins.clear();
+   _discardTimer.stop();
+   emit finished();
+@@ -98,8 +155,19 @@ void Netsplit::joinTimeout()
+ 
+ void Netsplit::quitTimeout()
+ {
+-  QHash<QString, QStringList>::iterator it;
+-  for(it = _quits.begin(); it != _quits.end(); ++it)
+-    emit netsplitQuit(it.key(), it.value(),_quitMsg);
++  // send netsplitQuit for every recorded channel
++  QHash<QString, QStringList>::iterator channelIter;
++  for(channelIter = _quits.begin(); channelIter != _quits.end(); ++channelIter) {
++
++    QStringList usersToSend;
++
++    foreach(QString user, channelIter.value()) {
++      if(!_quitsWithMessageSent.value(channelIter.key()).contains(user)) {
++        usersToSend << user;
++        _quitsWithMessageSent[channelIter.key()].append(user);
++      }
++    }
++    emit netsplitQuit(channelIter.key(), usersToSend, _quitMsg);
++  }
+   _sentQuit = true;
+ }
+diff --git a/src/core/netsplit.h b/src/core/netsplit.h
+index d9b2cf22..e7e644b8 100644
+--- a/src/core/netsplit.h
++++ b/src/core/netsplit.h
+@@ -24,6 +24,7 @@
+ #include <QObject>
+ #include <QTimer>
+ #include <QHash>
++#include <QPair>
+ #include <QStringList>
+ 
+ class Netsplit : public QObject
+@@ -48,11 +49,30 @@ public:
+ 
+     *
+     * \param sender   The sender string of the joined user
+-    * \param channels The channels that user shares with us
++    * \param channel The channel that user shares with us
+     * \return true if user was found in the netsplit
+     */
+   bool userJoined(const QString &sender, const QString &channel);
+ 
++  //! Check if user has joined since netsplit
++  /** This method shows if a user has already joined after being hit by netsplit
++    * \note The method doesn't check if the user was recorded in the netsplit!
++    *
++    * \param sender   The sender string of the user
++    * \param channel  The channel the user shares with us
++    * \return true if user joined after a netsplit
++    */
++  bool userAlreadyJoined(const QString &sender, const QString &channel);
++
++  //! Add mode to user
++  /** Use this method to buffer userspecific channel modes until netsplitJoin is emitted.
++    *
++    * \param sender   The sender string of the user
++    * \param channel  The channel the user shares with us
++    * \return true if user joined after a netsplit
++    */
++  void addMode(const QString &sender, const QString &channel, const QString &mode);
++
+   //! Check if a string matches the criteria for a netsplit
+   /** \param quitMessage The message to be checked
+     * \return true if the message is a netsplit
+@@ -61,17 +81,26 @@ public:
+ 
+ signals:
+   //! A bulk-join of netsplitted users timed out
+-  /** Whenever _joinTimer() times out, we consider the bulk-join to be finished and emit that signal
+-    * for every channel
++  /** Whenever the internal join-timer times out, we consider the bulk-join to be finished and emit that signal
++    * for every channel. This is the end of a netsplit.
+     * \param channel The IRC channel
+     * \param users   A list of all users that joined that channel
++    * \param modes   A list of all modes the users got set after joining again
+     * \param quitMessage The Quitmessage and thus the servers that got split
+     */
+-  void netsplitJoin(const QString &channel, const QStringList &users, const QString &quitMessage);
++  void netsplitJoin(const QString &channel, const QStringList &users, const QStringList &modes, const QString &quitMessage);
++
++  //! A (probably bulk-) join of netsplitted users.
++  /** If users hit by the split joined before the netsplit is considered over, join the users with a normal join.
++    * \param channel The IRC channel
++    * \param users   A list of all users that joined that channel
++    * \param modes   A list of all modes the users got set after joining again
++    */
++  void earlyJoin(const QString &channel, const QStringList &users, const QStringList &modes);
+ 
+   //! A bulk-quit of netsplitted users timed out
+-  /** Whenever _quitTimer() times out, we consider the bulk-quit to be finished and emit that signal
+-    * for every channel
++  /** Whenever the internal quit-timer times out, we consider the bulk-quit to be finished and emit that signal
++    * for every channel.
+     * \param channel The IRC channel
+     * \param users   A list of all users that quitted in that channel
+     * \param quitMessage The Quitmessage and thus the servers that got split
+@@ -91,12 +120,17 @@ private slots:
+ 
+ private:
+   QString _quitMsg;
+-  QHash<QString, QStringList> _joins;
++  // key: channel name
++  // value: senderstring, list of modes
++  QHash<QString, QPair<QStringList, QStringList> > _joins;
+   QHash<QString, QStringList> _quits;
++  QHash<QString, QStringList> _quitsWithMessageSent;
+   bool _sentQuit;
+   QTimer _joinTimer;
+   QTimer _quitTimer;
+   QTimer _discardTimer;
++  int _joinCounter;
++  int _quitCounter;
+ };
+ 
+ #endif // NETSPLIT_H
+diff --git a/src/uisupport/uistyle.cpp b/src/uisupport/uistyle.cpp
+index 41c50a6d..e81f9077 100644
+--- a/src/uisupport/uistyle.cpp
++++ b/src/uisupport/uistyle.cpp
+@@ -616,7 +616,7 @@ void UiStyle::StyledMessage::style() const {
+       //: Topic Message
+       t = tr("%1").arg(txt); break;
+     case Message::NetsplitJoin: {
+-      QStringList users = txt.split(":");
++      QStringList users = txt.split("#:#");
+       QStringList servers = users.takeLast().split(" ");
+ 
+       for(int i = 0; i < users.count() && i < maxNetsplitNicks; i++)
+@@ -630,7 +630,7 @@ void UiStyle::StyledMessage::style() const {
+       }
+       break;
+     case Message::NetsplitQuit: {
+-      QStringList users = txt.split(":");
++      QStringList users = txt.split("#:#");
+       QStringList servers = users.takeLast().split(" ");
+ 
+       for(int i = 0; i < users.count() && i < maxNetsplitNicks; i++)
+

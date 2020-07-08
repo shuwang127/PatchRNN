@@ -1,0 +1,130 @@
+commit cc612dbcbe81e77ca9f009ec39a5dc3ea7ff51a1
+Author: Serge Martin <edb@sigluy.net>
+Date:   Sun Sep 24 13:47:18 2006 +0000
+
+    fix the green game bug.
+    
+    note that game still be displaying in green as long as host don't set
+    the new controller.
+    
+    empty slot won't be shown as available now.
+
+diff --git a/src/playturn.cpp b/src/playturn.cpp
+index fb62dfaf80..39bb44da9c 100644
+--- a/src/playturn.cpp
++++ b/src/playturn.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include "game_config.hpp"
+ #include "gettext.hpp"
++#include "preferences.hpp"
+ #include "replay.hpp"
+ #include "show_dialog.hpp"
+ #include "sound.hpp"
+@@ -214,9 +215,19 @@ turn_info::PROCESS_DATA_RESULT turn_info::process_network_data(const config& cfg
+ 		switch(action) {
+ 			case 0:
+ 				teams_[side].make_ai();
++				{
++				config cfg;
++				cfg.values["side"] = lexical_cast<std::string>(side+1);
++				network::send_data(cfg);
++				}
+ 				return PROCESS_RESTART_TURN;
+ 			case 1:
+ 				teams_[side].make_human();
++				{
++				config cfg;
++				cfg.values["side"] = lexical_cast<std::string>(side+1);
++				network::send_data(cfg);
++				}
+ 				return PROCESS_RESTART_TURN;
+ 			default:
+ 				if (action > 2) {
+diff --git a/src/server/game.cpp b/src/server/game.cpp
+index 0148e767b8..18fa3df4fd 100644
+--- a/src/server/game.cpp
++++ b/src/server/game.cpp
+@@ -358,7 +358,7 @@ const std::string& game::transfer_side_control(const config& cfg)
+ 	}
+ 
+ 	//get the socket of the player that issued the command
+-	bool host = false; //we need to save this information before the player is erased 
++	bool host = false; //we need to save this information before the player is erased
+ 	network::connection sock;
+ 	bool foundCommandPlayer = false;
+ 	std::multimap<network::connection, size_t>::iterator oldside;
+@@ -455,37 +455,29 @@ const std::string& game::transfer_side_control(const config& cfg)
+ 		players_.push_back(*i);
+ 		observers_.erase(i);
+ 	}
++
+ 	static const std::string success = "";
+ 	return success;
+ }
+ 
+-size_t game::available_slots() const
+-{
+-	size_t n_sides = level_.get_children("side").size();
+-	size_t available_slots = 0;
+-	for(int s = 0; s < n_sides; ++s) {
+-		if(! sides_taken_[s]) {
+-			available_slots++;
+-		}
+-	}
+-
+-	return available_slots;
+-}
+-
+ bool game::describe_slots()
+ {
+ 	if(description() == NULL)
+ 		return false;
+ 
+-	const int val = int(available_slots());
++	int available_slots = 0;
+ 	char buf[50];
+ 	int num_sides = level_.get_children("side").size();
+-	for(config::child_list::const_iterator it = level_.get_children("side").begin(); it != level_.get_children("side").end(); ++it) {
+-		if((**it)["allow_player"] == "no") {
++	int i = 0;
++	for(config::child_list::const_iterator it = level_.get_children("side").begin(); it != level_.get_children("side").end(); ++it, ++i) {
++		if((**it)["allow_player"] == "no" or (**it)["no_leader"] == "yes") {
+ 			num_sides--;
++		} else {
++			if(!sides_taken_[i])
++			available_slots++;
+ 		}
+ 	}
+-	snprintf(buf,sizeof(buf),"%d/%d",val,num_sides);
++	snprintf(buf,sizeof(buf), "%d/%d", available_slots, num_sides);
+ 
+ 	if(buf != (*description())["slots"]) {
+ 		description()->values["slots"] = buf;
+diff --git a/src/server/game.hpp b/src/server/game.hpp
+index 2cfb86b43b..ef7fb959e3 100644
+--- a/src/server/game.hpp
++++ b/src/server/game.hpp
+@@ -56,8 +56,6 @@ public:
+ 
+ 	const std::string& transfer_side_control(const config& cfg);
+ 
+-	size_t available_slots() const;
+-
+ 	//function to set the description to the number of slots
+ 	//returns true if the number of slots has changed
+ 	bool describe_slots();
+diff --git a/src/server/server.cpp b/src/server/server.cpp
+index 0f4fdfda4c..505a8bf6a3 100644
+--- a/src/server/server.cpp
++++ b/src/server/server.cpp
+@@ -980,7 +980,7 @@ void server::process_data_from_player_in_game(const network::connection sock, co
+ 	//if the owner is banning someone from the game
+ 	if(g->is_owner(sock) && (data.child("ban") != NULL || data.child("kick") != NULL)) {
+ 		std::string name;
+-		bool ban;
++		bool ban = false;;
+ 		if (data.child("ban") != NULL) {
+ 			const config& u = *data.child("ban");
+ 			name = u["username"];
+

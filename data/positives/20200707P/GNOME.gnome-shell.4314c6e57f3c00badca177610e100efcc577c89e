@@ -1,0 +1,195 @@
+commit 4314c6e57f3c00badca177610e100efcc577c89e
+Author: Colin Walters <walters@verbum.org>
+Date:   Tue Jun 16 11:55:14 2009 -0400
+
+    Close memory leaks in ShellAppMonitor, ShellAppSystem, ShellTextureCache
+    
+    Unref'ing the GdkPixbuf is particularly critical.  Some smaller fixes
+    also included.
+
+diff --git a/src/shell-app-monitor.c b/src/shell-app-monitor.c
+index 95c7a264e..7a7cd58d7 100644
+--- a/src/shell-app-monitor.c
++++ b/src/shell-app-monitor.c
+@@ -812,13 +812,11 @@ restore_from_file (ShellAppMonitor *monitor)
+               /* FIXME: do something if conversion fails! */
+               /* like: errno = NULL; ... if (errno) { g_free (line); goto out; } */
+             }
+-          else if (error)
++          else
+             {
+               g_free (line);
+               goto out;
+             }
+-          else /* End of file */
+-            goto out;
+         }
+       /* Line is about an app.
+        * If no activity was provided yet, just skip */
+diff --git a/src/shell-app-system.c b/src/shell-app-system.c
+index 0605b71ee..739d7dc7b 100644
+--- a/src/shell-app-system.c
++++ b/src/shell-app-system.c
+@@ -145,13 +145,13 @@ reread_directories (ShellAppSystem *self, GSList **cache, GMenuTree *tree)
+               shell_entry->icon = g_strdup (gmenu_tree_directory_get_icon (dir));
+ 
+               *cache = g_slist_prepend (*cache, shell_entry);
+-
+-              gmenu_tree_item_unref (dir);
+             }
+             break;
+           default:
+             break;
+         }
++
++      gmenu_tree_item_unref (item);
+     }
+   *cache = g_slist_reverse (*cache);
+ 
+@@ -260,13 +260,18 @@ shell_app_system_get_applications_for_menu (ShellAppSystem *monitor,
+ {
+   char *path;
+   GMenuTreeDirectory *menu_entry;
++  GSList *apps;
+ 
+   path = g_strdup_printf ("/%s", menu);
+   menu_entry = gmenu_tree_get_directory_from_path (monitor->priv->apps_tree, path);
+   g_free (path);
+   g_assert (menu_entry != NULL);
+ 
+-  return gather_entries_recurse (monitor, NULL, menu_entry);
++  apps = gather_entries_recurse (monitor, NULL, menu_entry);
++
++  gmenu_tree_item_unref (menu_entry);
++
++  return apps;
+ }
+ 
+ /**
+diff --git a/src/shell-global.c b/src/shell-global.c
+index f6e2af969..950ac8c33 100644
+--- a/src/shell-global.c
++++ b/src/shell-global.c
+@@ -421,7 +421,6 @@ shell_get_categories_for_desktop_file(const char *desktop_file_name)
+     const char * const *search_dirs;
+     char **categories = NULL;
+     GSList *categories_list = NULL; 
+-    char *full_path = NULL;   
+     GError *error = NULL;
+     gsize len;  
+     int i; 
+@@ -429,7 +428,7 @@ shell_get_categories_for_desktop_file(const char *desktop_file_name)
+     key_file = g_key_file_new (); 
+     search_dirs = get_applications_search_path();
+    
+-    g_key_file_load_from_dirs (key_file, desktop_file_name, (const char **)search_dirs, &full_path, 0, &error);
++    g_key_file_load_from_dirs (key_file, desktop_file_name, (const char **)search_dirs, NULL, 0, &error);
+ 
+     if (error != NULL) 
+       {
+diff --git a/src/shell-texture-cache.c b/src/shell-texture-cache.c
+index c5930877f..5af4cb0a0 100644
+--- a/src/shell-texture-cache.c
++++ b/src/shell-texture-cache.c
+@@ -188,6 +188,22 @@ typedef struct {
+   int height;
+ } Dimensions;
+ 
++static void
++icon_lookup_data_destroy (gpointer p)
++{
++  AsyncIconLookupData *data = p;
++
++  if (data->icon)
++    {
++      g_object_unref (data->icon);
++      gtk_icon_info_free (data->icon_info);
++    }
++  else if (data->uri)
++    g_free (data->uri);
++
++  g_free (data);
++}
++
+ /**
+  * on_image_size_prepared:
+  *
+@@ -321,7 +337,7 @@ load_pixbuf_thread (GSimpleAsyncResult *result,
+   AsyncIconLookupData *data;
+   GError *error = NULL;
+ 
+-  data = g_simple_async_result_get_op_res_gpointer (result);
++  data = g_object_get_data (result, "load_icon_pixbuf_async");
+ 
+   if (data->uri)
+     pixbuf = impl_load_pixbuf_file (data->uri, data->width, data->height, &error);
+@@ -336,27 +352,10 @@ load_pixbuf_thread (GSimpleAsyncResult *result,
+       return;
+     }
+ 
+-
+   g_simple_async_result_set_op_res_gpointer (result, g_object_ref (pixbuf),
+                                              g_object_unref);
+ }
+ 
+-static void
+-icon_lookup_data_destroy (gpointer p)
+-{
+-  AsyncIconLookupData *data = p;
+-
+-  if (data->icon)
+-    {
+-      g_object_unref (data->icon);
+-      gtk_icon_info_free (data->icon_info);
+-    }
+-  else if (data->uri)
+-    g_free (data->uri);
+-
+-  g_free (data);
+-}
+-
+ /**
+  * load_icon_pixbuf_async:
+  *
+@@ -383,8 +382,10 @@ load_icon_pixbuf_async (ShellTextureCache    *cache,
+ 
+   result = g_simple_async_result_new (G_OBJECT (cache), callback, user_data, load_icon_pixbuf_async);
+ 
+-  g_simple_async_result_set_op_res_gpointer (result, data, icon_lookup_data_destroy);
++  g_object_set_data_full (result, "load_icon_pixbuf_async", data, icon_lookup_data_destroy);
+   g_simple_async_result_run_in_thread (result, load_pixbuf_thread, G_PRIORITY_DEFAULT, cancellable);
++
++  g_object_unref (result);
+ }
+ 
+ static void
+@@ -407,8 +408,10 @@ load_uri_pixbuf_async (ShellTextureCache *cache,
+ 
+   result = g_simple_async_result_new (G_OBJECT (cache), callback, user_data, load_uri_pixbuf_async);
+ 
+-  g_simple_async_result_set_op_res_gpointer (result, data, icon_lookup_data_destroy);
++  g_object_set_data_full (result, "load_uri_pixbuf_async", data, icon_lookup_data_destroy);
+   g_simple_async_result_run_in_thread (result, load_pixbuf_thread, G_PRIORITY_DEFAULT, cancellable);
++
++  g_object_unref (result);
+ }
+ 
+ static GdkPixbuf *
+@@ -464,6 +467,8 @@ on_pixbuf_loaded (GObject      *source,
+ 
+   texdata = pixbuf_to_cogl_handle (pixbuf);
+ 
++  g_object_unref (pixbuf);
++
+   if (data->icon)
+     {
+       gpointer orig_key, value;
+@@ -619,6 +624,7 @@ shell_texture_cache_load_uri_sync (ShellTextureCache *cache,
+ 
+   texture = CLUTTER_TEXTURE (clutter_texture_new ());
+   texdata = pixbuf_to_cogl_handle (pixbuf);
++  g_object_unref (pixbuf);
+   clutter_texture_set_cogl_texture (texture, texdata);
+ 
+   return CLUTTER_ACTOR (texture);
+

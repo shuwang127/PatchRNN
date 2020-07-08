@@ -1,0 +1,128 @@
+commit cd8ba7cd9be0192348c2836cb6645d9b2cd2bfd2
+Author: Mike Travis <travis@sgi.com>
+Date:   Wed Mar 26 14:23:49 2008 -0700
+
+    sched: add new set_cpus_allowed_ptr function
+    
+    Add a new function that accepts a pointer to the "newly allowed cpus"
+    cpumask argument.
+    
+    int set_cpus_allowed_ptr(struct task_struct *p, const cpumask_t *new_mask)
+    
+    The current set_cpus_allowed() function is modified to use the above
+    but this does not result in an ABI change.  And with some compiler
+    optimization help, it may not introduce any additional overhead.
+    
+    Additionally, to enforce the read only nature of the new_mask arg, the
+    "const" property is migrated to sub-functions called by set_cpus_allowed.
+    This silences compiler warnings.
+    
+    Signed-off-by: Mike Travis <travis@sgi.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 383502dfda17..79c025c3b627 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -889,7 +889,8 @@ struct sched_class {
+ 	void (*set_curr_task) (struct rq *rq);
+ 	void (*task_tick) (struct rq *rq, struct task_struct *p, int queued);
+ 	void (*task_new) (struct rq *rq, struct task_struct *p);
+-	void (*set_cpus_allowed)(struct task_struct *p, cpumask_t *newmask);
++	void (*set_cpus_allowed)(struct task_struct *p,
++				 const cpumask_t *newmask);
+ 
+ 	void (*join_domain)(struct rq *rq);
+ 	void (*leave_domain)(struct rq *rq);
+@@ -1502,15 +1503,21 @@ static inline void put_task_struct(struct task_struct *t)
+ #define used_math() tsk_used_math(current)
+ 
+ #ifdef CONFIG_SMP
+-extern int set_cpus_allowed(struct task_struct *p, cpumask_t new_mask);
++extern int set_cpus_allowed_ptr(struct task_struct *p,
++				const cpumask_t *new_mask);
+ #else
+-static inline int set_cpus_allowed(struct task_struct *p, cpumask_t new_mask)
++static inline int set_cpus_allowed_ptr(struct task_struct *p,
++				       const cpumask_t *new_mask)
+ {
+-	if (!cpu_isset(0, new_mask))
++	if (!cpu_isset(0, *new_mask))
+ 		return -EINVAL;
+ 	return 0;
+ }
+ #endif
++static inline int set_cpus_allowed(struct task_struct *p, cpumask_t new_mask)
++{
++	return set_cpus_allowed_ptr(p, &new_mask);
++}
+ 
+ extern unsigned long long sched_clock(void);
+ 
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 6ab0fcbf26e9..521b89b01480 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -5486,7 +5486,7 @@ static inline void sched_init_granularity(void)
+  * task must not exit() & deallocate itself prematurely. The
+  * call is not atomic; no spinlocks may be held.
+  */
+-int set_cpus_allowed(struct task_struct *p, cpumask_t new_mask)
++int set_cpus_allowed_ptr(struct task_struct *p, const cpumask_t *new_mask)
+ {
+ 	struct migration_req req;
+ 	unsigned long flags;
+@@ -5494,23 +5494,23 @@ int set_cpus_allowed(struct task_struct *p, cpumask_t new_mask)
+ 	int ret = 0;
+ 
+ 	rq = task_rq_lock(p, &flags);
+-	if (!cpus_intersects(new_mask, cpu_online_map)) {
++	if (!cpus_intersects(*new_mask, cpu_online_map)) {
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+ 
+ 	if (p->sched_class->set_cpus_allowed)
+-		p->sched_class->set_cpus_allowed(p, &new_mask);
++		p->sched_class->set_cpus_allowed(p, new_mask);
+ 	else {
+-		p->cpus_allowed = new_mask;
+-		p->rt.nr_cpus_allowed = cpus_weight(new_mask);
++		p->cpus_allowed = *new_mask;
++		p->rt.nr_cpus_allowed = cpus_weight(*new_mask);
+ 	}
+ 
+ 	/* Can the task run on the task's current CPU? If so, we're done */
+-	if (cpu_isset(task_cpu(p), new_mask))
++	if (cpu_isset(task_cpu(p), *new_mask))
+ 		goto out;
+ 
+-	if (migrate_task(p, any_online_cpu(new_mask), &req)) {
++	if (migrate_task(p, any_online_cpu(*new_mask), &req)) {
+ 		/* Need help from migration thread: drop lock and wait. */
+ 		task_rq_unlock(rq, &flags);
+ 		wake_up_process(rq->migration_thread);
+@@ -5523,7 +5523,7 @@ int set_cpus_allowed(struct task_struct *p, cpumask_t new_mask)
+ 
+ 	return ret;
+ }
+-EXPORT_SYMBOL_GPL(set_cpus_allowed);
++EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
+ 
+ /*
+  * Move (not current) task off this cpu, onto dest cpu. We're doing
+diff --git a/kernel/sched_rt.c b/kernel/sched_rt.c
+index 6928ded24da1..8ff824565e06 100644
+--- a/kernel/sched_rt.c
++++ b/kernel/sched_rt.c
+@@ -1123,7 +1123,8 @@ move_one_task_rt(struct rq *this_rq, int this_cpu, struct rq *busiest,
+ 	return 0;
+ }
+ 
+-static void set_cpus_allowed_rt(struct task_struct *p, cpumask_t *new_mask)
++static void set_cpus_allowed_rt(struct task_struct *p,
++				const cpumask_t *new_mask)
+ {
+ 	int weight = cpus_weight(*new_mask);
+ 
+

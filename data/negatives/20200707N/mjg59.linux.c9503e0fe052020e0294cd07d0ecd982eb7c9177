@@ -1,0 +1,44 @@
+commit c9503e0fe052020e0294cd07d0ecd982eb7c9177
+Author: Anton Blanchard <anton@samba.org>
+Date:   Mon Apr 27 05:42:24 2009 -0700
+
+    ipv4: Limit size of route cache hash table
+    
+    Right now we have no upper limit on the size of the route cache hash table.
+    On a 128GB POWER6 box it ends up as 32MB:
+    
+        IP route cache hash table entries: 4194304 (order: 9, 33554432 bytes)
+    
+    It would be nice to cap this for memory consumption reasons, but a massive
+    hashtable also causes a significant spike when measuring OS jitter.
+    
+    With a 32MB hashtable and 4 million entries, rt_worker_func is taking
+    5 ms to complete. On another system with more memory it's taking 14 ms.
+    Even though rt_worker_func does call cond_sched() to limit its impact,
+    in an HPC environment we want to keep all sources of OS jitter to a minimum.
+    
+    With the patch applied we limit the number of entries to 512k which
+    can still be overriden by using the rt_entries boot option:
+    
+        IP route cache hash table entries: 524288 (order: 6, 4194304 bytes)
+    
+    With this patch rt_worker_func now takes 0.460 ms on the same system.
+    
+    Signed-off-by: Anton Blanchard <anton@samba.org>
+    Acked-by: Eric Dumazet <dada1@cosmosbay.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv4/route.c b/net/ipv4/route.c
+index c40debe51b38..c4c60e9f068a 100644
+--- a/net/ipv4/route.c
++++ b/net/ipv4/route.c
+@@ -3397,7 +3397,7 @@ int __init ip_rt_init(void)
+ 					0,
+ 					&rt_hash_log,
+ 					&rt_hash_mask,
+-					0);
++					rhash_entries ? 0 : 512 * 1024);
+ 	memset(rt_hash_table, 0, (rt_hash_mask + 1) * sizeof(struct rt_hash_bucket));
+ 	rt_hash_lock_init();
+ 
+

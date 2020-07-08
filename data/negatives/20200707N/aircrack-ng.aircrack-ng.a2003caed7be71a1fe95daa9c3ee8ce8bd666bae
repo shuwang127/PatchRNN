@@ -1,0 +1,108 @@
+commit a2003caed7be71a1fe95daa9c3ee8ce8bd666bae
+Author: Thomas d'Otreppe <tdotreppe@aircrack-ng.org>
+Date:   Tue Mar 31 03:50:59 2015 +0000
+
+    Add -C options support for cygwin (7673adc). Merge partial pull request #23 from https://github.com/aircrack-ng/aircrack-ng/pull/23. Patch by Kelvin You <weyou.dev@gmail.com>
+    
+    git-svn-id: http://svn.aircrack-ng.org/trunk@2506 28c6078b-6c39-48e3-add9-af49d547ecab
+
+diff --git a/src/osdep/cygwin.c b/src/osdep/cygwin.c
+index c514393e..a6ee80ae 100644
+--- a/src/osdep/cygwin.c
++++ b/src/osdep/cygwin.c
+@@ -47,6 +47,7 @@ struct priv_cygwin {
+ 	volatile int	pc_running;
+ 	int		pc_pipe[2]; /* reader -> parent */
+ 	int		pc_channel;
++	int		pc_frequency;
+ 	struct wif	*pc_wi;
+ 	int		pc_did_init;
+ 
+@@ -55,6 +56,7 @@ struct priv_cygwin {
+ 
+ 	int		(*pc_init)(char *param);
+ 	int		(*pc_set_chan)(int chan);
++	int		(*pc_set_freq)(int freq);
+ 	int		(*pc_inject)(void *buf, int len, struct tx_info *ti);
+ 	int		(*pc_sniff)(void *buf, int len, struct rx_info *ri);
+ 	int		(*pc_get_mac)(void *mac);
+@@ -157,6 +159,7 @@ static int do_cygwin_open(struct wif *wi, char *iface)
+ 
+ 		priv->pc_init		= dlsym(lib, xstr(CYGWIN_DLL_INIT));
+ 		priv->pc_set_chan	= dlsym(lib, xstr(CYGWIN_DLL_SET_CHAN));
++		priv->pc_set_freq	= dlsym(lib, xstr(CYGWIN_DLL_SET_FREQ));
+ 		priv->pc_get_mac	= dlsym(lib, xstr(CYGWIN_DLL_GET_MAC));
+ 		priv->pc_set_mac	= dlsym(lib, xstr(CYGWIN_DLL_SET_MAC));
+ 		priv->pc_close		= dlsym(lib, xstr(CYGWIN_DLL_CLOSE));
+@@ -247,6 +250,23 @@ static int cygwin_set_channel(struct wif *wi, int chan)
+ 	return 0;
+ }
+ 
++/**
++ * Change frequency
++ * @param freq Frequency
++ * @return 0 if successful, -1 if it failed
++ */
++static int cygwin_set_freq(struct wif *wi, int freq)
++{
++	struct priv_cygwin *priv = wi_priv(wi);
++
++	if (!priv->pc_set_freq || priv->pc_set_freq(freq) == -1)
++		return -1;
++
++	priv->pc_frequency = freq;
++	return 0;
++}
++
++
+ /**
+  * Capture a packet
+  * @param buf Buffer for the packet (has to be already allocated)
+@@ -301,6 +321,13 @@ static int cygwin_get_channel(struct wif *wi)
+ 	return pc->pc_channel;
+ }
+ 
++static int cygwin_get_freq(struct wif *wi)
++{
++	struct priv_cygwin *pc = wi_priv(wi);
++
++	return pc->pc_frequency;
++}
++
+ int cygwin_read_reader(int fd, int plen, void *dst, int len)
+ {
+ 	/* packet */
+@@ -465,6 +492,11 @@ static void *cygwin_reader(void *arg)
+ 
+ 	while (priv->pc_running) {
+ 		/* read one packet */
++
++		/* a potential problem: the cygwin_read_packet will never return
++		 * if there no packet sniffered, so the thread cannot be closed
++		 * correctly.
++		 */
+ 		len = cygwin_read_packet(priv, buf, sizeof(buf), &ri);
+ 		if (len == -1)
+ 			break;
+@@ -501,6 +533,8 @@ static struct wif *cygwin_open(char *iface)
+ 	wi->wi_write		= cygwin_write;
+ 	wi->wi_set_channel	= cygwin_set_channel;
+ 	wi->wi_get_channel	= cygwin_get_channel;
++	wi->wi_set_freq		= cygwin_set_freq;
++	wi->wi_get_freq		= cygwin_get_freq;
+ 	wi->wi_close		= cygwin_close;
+ 	wi->wi_fd		= cygwin_fd;
+ 	wi->wi_get_mac		= cygwin_get_mac;
+diff --git a/src/osdep/cygwin.h b/src/osdep/cygwin.h
+index 3a9a86f5..595da261 100644
+--- a/src/osdep/cygwin.h
++++ b/src/osdep/cygwin.h
+@@ -22,6 +22,7 @@
+ // DLL function that have to be exported
+ #define CYGWIN_DLL_INIT		cygwin_init
+ #define CYGWIN_DLL_SET_CHAN	cygwin_set_chan
++#define CYGWIN_DLL_SET_FREQ   cygwin_set_freq
+ #define CYGWIN_DLL_INJECT	cygwin_inject
+ #define CYGWIN_DLL_SNIFF	cygwin_sniff
+ #define CYGWIN_DLL_GET_MAC	cygwin_get_mac
+

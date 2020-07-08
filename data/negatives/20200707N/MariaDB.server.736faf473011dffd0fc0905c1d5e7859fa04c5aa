@@ -1,0 +1,74 @@
+commit 736faf473011dffd0fc0905c1d5e7859fa04c5aa
+Author: andrey@lmy004. <>
+Date:   Wed Feb 1 20:35:16 2006 +0100
+
+    fix for bug #12744 (MYSQL_STMT operations cause seg fault after connection reset)
+
+diff --git a/libmysql/libmysql.c b/libmysql/libmysql.c
+index 921f042922a..498881aa947 100644
+--- a/libmysql/libmysql.c
++++ b/libmysql/libmysql.c
+@@ -4628,6 +4628,12 @@ my_bool STDCALL mysql_stmt_reset(MYSQL_STMT *stmt)
+   /* If statement hasnt been prepared there is nothing to reset */
+   if ((int) stmt->state < (int) MYSQL_STMT_PREPARE_DONE)
+     DBUG_RETURN(0);
++  if (!stmt->mysql)
++  {
++    /* mysql can be reset in mysql_close called from mysql_reconnect */
++    set_stmt_error(stmt, CR_SERVER_LOST, unknown_sqlstate);
++    DBUG_RETURN(1);  
++  }
+ 
+   mysql= stmt->mysql->last_used_con;
+   int4store(buff, stmt->stmt_id);		/* Send stmt id to server */
+diff --git a/tests/mysql_client_test.c b/tests/mysql_client_test.c
+index 91c2ab9205d..dbc2f582466 100644
+--- a/tests/mysql_client_test.c
++++ b/tests/mysql_client_test.c
+@@ -11706,6 +11706,37 @@ static void test_bug12001()
+   DIE_UNLESS(res==1);
+ }
+ 
++static void test_bug12744()
++{
++  MYSQL_STMT *prep_stmt = NULL;
++  int rc;
++  myheader("test_bug12744");
++	
++  prep_stmt= mysql_stmt_init(mysql);
++  rc= mysql_stmt_prepare(prep_stmt, "SELECT 1", 8);
++  DIE_UNLESS(rc==0);
++  
++  rc= mysql_kill(mysql, mysql_thread_id(mysql));
++  DIE_UNLESS(rc==0);
++
++  if (rc= mysql_stmt_execute(prep_stmt))
++  {
++    if (rc= mysql_stmt_reset(prep_stmt))
++      printf("OK!\n");
++    else
++    {
++      printf("Error!");
++      DIE_UNLESS(1==0);      
++    }
++  }
++  else
++  {
++    fprintf(stderr, "expected error but no error occured\n");
++    DIE_UNLESS(1==0);
++  }
++  rc= mysql_stmt_close(prep_stmt);
++}
++
+ /*
+   Bug#11718: query with function, join and order by returns wrong type
+ */
+@@ -12054,6 +12085,7 @@ static struct my_tests_st my_tests[]= {
+   { "test_bug8378", test_bug8378 },
+   { "test_bug9735", test_bug9735 },
+   { "test_bug11183", test_bug11183 },
++  { "test_bug12744", test_bug12744 },
+   { "test_bug12001", test_bug12001 },
+   { "test_bug11718", test_bug11718 },
+   { "test_bug12925", test_bug12925 },
+

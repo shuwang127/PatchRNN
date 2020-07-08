@@ -1,0 +1,97 @@
+commit 7253a33434245ee8243897559188186df65f3611
+Author: Chandra Seetharaman <sekharan@us.ibm.com>
+Date:   Wed Oct 1 14:39:27 2008 +0100
+
+    dm mpath: add missing path switching locking
+    
+    Moving the path activation to workqueue along with scsi_dh patches introduced
+    a race. It is due to the fact that the current_pgpath (in the multipath data
+    structure) can be modified if changes happen in any of the paths leading to
+    the lun. If the changes lead to current_pgpath being set to NULL, then it
+    leads to the invalid access which results in the panic below.
+    
+    This patch fixes that by storing the pgpath to activate in the multipath data
+    structure and properly protecting it.
+    
+    Note that if activate_path is called twice in succession with different pgpath,
+    with the second one being called before the first one is done, then activate
+    path will be called twice for the second pgpath, which is fine.
+    
+    Unable to handle kernel paging request for data at address 0x00000020
+    Faulting instruction address: 0xd000000000aa1844
+    cpu 0x1: Vector: 300 (Data Access) at [c00000006b987a80]
+        pc: d000000000aa1844: .activate_path+0x30/0x218 [dm_multipath]
+        lr: c000000000087a2c: .run_workqueue+0x114/0x204
+        sp: c00000006b987d00
+       msr: 8000000000009032
+       dar: 20
+     dsisr: 40000000
+      current = 0xc0000000676bb3f0
+      paca    = 0xc0000000006f3680
+        pid   = 2528, comm = kmpath_handlerd
+    enter ? for help
+    [c00000006b987da0] c000000000087a2c .run_workqueue+0x114/0x204
+    [c00000006b987e40] c000000000088b58 .worker_thread+0x120/0x144
+    [c00000006b987f00] c00000000008ca70 .kthread+0x78/0xc4
+    [c00000006b987f90] c000000000027cc8 .kernel_thread+0x4c/0x68
+    
+    Signed-off-by: Chandra Seetharaman <sekharan@us.ibm.com>
+    Signed-off-by: Alasdair G Kergon <agk@redhat.com>
+
+diff --git a/drivers/md/dm-mpath.c b/drivers/md/dm-mpath.c
+index 71dd65aa31b6..c2fcf28b4c70 100644
+--- a/drivers/md/dm-mpath.c
++++ b/drivers/md/dm-mpath.c
+@@ -63,6 +63,7 @@ struct multipath {
+ 
+ 	const char *hw_handler_name;
+ 	struct work_struct activate_path;
++	struct pgpath *pgpath_to_activate;
+ 	unsigned nr_priority_groups;
+ 	struct list_head priority_groups;
+ 	unsigned pg_init_required;	/* pg_init needs calling? */
+@@ -146,6 +147,7 @@ static struct priority_group *alloc_priority_group(void)
+ 
+ static void free_pgpaths(struct list_head *pgpaths, struct dm_target *ti)
+ {
++	unsigned long flags;
+ 	struct pgpath *pgpath, *tmp;
+ 	struct multipath *m = ti->private;
+ 
+@@ -154,6 +156,10 @@ static void free_pgpaths(struct list_head *pgpaths, struct dm_target *ti)
+ 		if (m->hw_handler_name)
+ 			scsi_dh_detach(bdev_get_queue(pgpath->path.dev->bdev));
+ 		dm_put_device(ti, pgpath->path.dev);
++		spin_lock_irqsave(&m->lock, flags);
++		if (m->pgpath_to_activate == pgpath)
++			m->pgpath_to_activate = NULL;
++		spin_unlock_irqrestore(&m->lock, flags);
+ 		free_pgpath(pgpath);
+ 	}
+ }
+@@ -421,6 +427,7 @@ static void process_queued_ios(struct work_struct *work)
+ 		__choose_pgpath(m);
+ 
+ 	pgpath = m->current_pgpath;
++	m->pgpath_to_activate = m->current_pgpath;
+ 
+ 	if ((pgpath && !m->queue_io) ||
+ 	    (!pgpath && !m->queue_if_no_path))
+@@ -1093,8 +1100,15 @@ static void activate_path(struct work_struct *work)
+ 	int ret;
+ 	struct multipath *m =
+ 		container_of(work, struct multipath, activate_path);
+-	struct dm_path *path = &m->current_pgpath->path;
++	struct dm_path *path;
++	unsigned long flags;
+ 
++	spin_lock_irqsave(&m->lock, flags);
++	path = &m->pgpath_to_activate->path;
++	m->pgpath_to_activate = NULL;
++	spin_unlock_irqrestore(&m->lock, flags);
++	if (!path)
++		return;
+ 	ret = scsi_dh_activate(bdev_get_queue(path->dev->bdev));
+ 	pg_init_done(path, ret);
+ }
+

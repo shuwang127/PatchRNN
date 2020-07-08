@@ -1,0 +1,87 @@
+commit 25051b5a5aff0bb71435421b4b80279b789fa0dc
+Author: Scott Wood <scottwood@freescale.com>
+Date:   Tue Nov 8 18:23:23 2011 -0600
+
+    KVM: PPC: Move prepare_to_enter call site into subarch code
+    
+    This function should be called with interrupts disabled, to avoid
+    a race where an exception is delivered after we check, but the
+    resched kick is received before we disable interrupts (and thus doesn't
+    actually trigger the exit code that would recheck exceptions).
+    
+    booke already does this properly in the lightweight exit case, but
+    not on initial entry.
+    
+    For now, move the call of prepare_to_enter into subarch-specific code so
+    that booke can do the right thing here.  Ideally book3s would do the same
+    thing, but I'm having a hard time seeing where it does any interrupt
+    disabling of this sort (plus it has several additional call sites), so
+    I'm deferring the book3s fix to someone more familiar with that code.
+    book3s behavior should be unchanged by this patch.
+    
+    Signed-off-by: Scott Wood <scottwood@freescale.com>
+    Signed-off-by: Alexander Graf <agraf@suse.de>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/powerpc/kvm/book3s_hv.c b/arch/powerpc/kvm/book3s_hv.c
+index 536adee59c07..b1e3b9c1326a 100644
+--- a/arch/powerpc/kvm/book3s_hv.c
++++ b/arch/powerpc/kvm/book3s_hv.c
+@@ -836,6 +836,8 @@ int kvmppc_vcpu_run(struct kvm_run *run, struct kvm_vcpu *vcpu)
+ 		return -EINVAL;
+ 	}
+ 
++	kvmppc_core_prepare_to_enter(vcpu);
++
+ 	/* No need to go into the guest when all we'll do is come back out */
+ 	if (signal_pending(current)) {
+ 		run->exit_reason = KVM_EXIT_INTR;
+diff --git a/arch/powerpc/kvm/book3s_pr.c b/arch/powerpc/kvm/book3s_pr.c
+index f3628581fb7c..203a7b7b58b9 100644
+--- a/arch/powerpc/kvm/book3s_pr.c
++++ b/arch/powerpc/kvm/book3s_pr.c
+@@ -929,6 +929,8 @@ int kvmppc_vcpu_run(struct kvm_run *kvm_run, struct kvm_vcpu *vcpu)
+ 		return -EINVAL;
+ 	}
+ 
++	kvmppc_core_prepare_to_enter(vcpu);
++
+ 	/* No need to go into the guest when all we do is going out */
+ 	if (signal_pending(current)) {
+ 		kvm_run->exit_reason = KVM_EXIT_INTR;
+diff --git a/arch/powerpc/kvm/booke.c b/arch/powerpc/kvm/booke.c
+index e082e348c882..feaefc433276 100644
+--- a/arch/powerpc/kvm/booke.c
++++ b/arch/powerpc/kvm/booke.c
+@@ -295,6 +295,8 @@ void kvmppc_core_prepare_to_enter(struct kvm_vcpu *vcpu)
+ 	unsigned long old_pending = vcpu->arch.pending_exceptions;
+ 	unsigned int priority;
+ 
++	WARN_ON_ONCE(!irqs_disabled());
++
+ 	priority = __ffs(*pending);
+ 	while (priority <= BOOKE_IRQPRIO_MAX) {
+ 		if (kvmppc_booke_irqprio_deliver(vcpu, priority))
+@@ -323,6 +325,8 @@ int kvmppc_vcpu_run(struct kvm_run *kvm_run, struct kvm_vcpu *vcpu)
+ 
+ 	local_irq_disable();
+ 
++	kvmppc_core_prepare_to_enter(vcpu);
++
+ 	if (signal_pending(current)) {
+ 		kvm_run->exit_reason = KVM_EXIT_INTR;
+ 		ret = -EINTR;
+diff --git a/arch/powerpc/kvm/powerpc.c b/arch/powerpc/kvm/powerpc.c
+index 6186ec0d939b..7411bdd8ff6f 100644
+--- a/arch/powerpc/kvm/powerpc.c
++++ b/arch/powerpc/kvm/powerpc.c
+@@ -559,8 +559,6 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ 		vcpu->arch.hcall_needed = 0;
+ 	}
+ 
+-	kvmppc_core_prepare_to_enter(vcpu);
+-
+ 	r = kvmppc_vcpu_run(run, vcpu);
+ 
+ 	if (vcpu->sigset_active)
+

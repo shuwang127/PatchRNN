@@ -1,0 +1,937 @@
+commit f80b848d3f830eb6dba50123e04385173fa4540b
+Author: Sage Weil <sage@redhat.com>
+Date:   Thu May 24 13:57:17 2018 -0500
+
+    auth/cephx: add authorizer challenge
+    
+    Allow the accepting side of a connection to reject an initial authorizer
+    with a random challenge.  The connecting side then has to respond with an
+    updated authorizer proving they are able to decrypt the service's challenge
+    and that the new authorizer was produced for this specific connection
+    instance.
+    
+    The accepting side requires this challenge and response unconditionally
+    if the client side advertises they have the feature bit.  Servers wishing
+    to require this improved level of authentication simply have to require
+    the appropriate feature.
+    
+    Signed-off-by: Sage Weil <sage@redhat.com>
+
+diff --git a/src/auth/Auth.h b/src/auth/Auth.h
+index 9b8601192b..672f0fda1e 100644
+--- a/src/auth/Auth.h
++++ b/src/auth/Auth.h
+@@ -142,6 +142,11 @@ struct AuthAuthorizer {
+   explicit AuthAuthorizer(__u32 p) : protocol(p) {}
+   virtual ~AuthAuthorizer() {}
+   virtual bool verify_reply(bufferlist::const_iterator& reply) = 0;
++  virtual bool add_challenge(CephContext *cct, bufferlist& challenge) = 0;
++};
++
++struct AuthAuthorizerChallenge {
++  virtual ~AuthAuthorizerChallenge() {}
+ };
+ 
+ 
+diff --git a/src/auth/AuthAuthorizeHandler.h b/src/auth/AuthAuthorizeHandler.h
+index c53d049fa0..f6a0e68c95 100644
+--- a/src/auth/AuthAuthorizeHandler.h
++++ b/src/auth/AuthAuthorizeHandler.h
+@@ -34,7 +34,9 @@ struct AuthAuthorizeHandler {
+   virtual bool verify_authorizer(CephContext *cct, KeyStore *keys,
+ 				 bufferlist& authorizer_data, bufferlist& authorizer_reply,
+                                  EntityName& entity_name, uint64_t& global_id,
+-				 AuthCapsInfo& caps_info, CryptoKey& session_key, uint64_t *auid = NULL) = 0;
++				 AuthCapsInfo& caps_info, CryptoKey& session_key,
++				 uint64_t *auid,
++				 std::unique_ptr<AuthAuthorizerChallenge> *challenge) = 0;
+   virtual int authorizer_session_crypto() = 0;
+ };
+ 
+diff --git a/src/auth/cephx/CephxAuthorizeHandler.cc b/src/auth/cephx/CephxAuthorizeHandler.cc
+index ced50fddda..e589ff4ee7 100644
+--- a/src/auth/cephx/CephxAuthorizeHandler.cc
++++ b/src/auth/cephx/CephxAuthorizeHandler.cc
+@@ -6,9 +6,12 @@
+ 
+ 
+ 
+-bool CephxAuthorizeHandler::verify_authorizer(CephContext *cct, KeyStore *keys,
+-					      bufferlist& authorizer_data, bufferlist& authorizer_reply,
+-                                              EntityName& entity_name, uint64_t& global_id, AuthCapsInfo& caps_info, CryptoKey& session_key,  uint64_t *auid)
++bool CephxAuthorizeHandler::verify_authorizer(
++  CephContext *cct, KeyStore *keys,
++  bufferlist& authorizer_data, bufferlist& authorizer_reply,
++  EntityName& entity_name, uint64_t& global_id, AuthCapsInfo& caps_info,
++  CryptoKey& session_key, uint64_t *auid,
++  std::unique_ptr<AuthAuthorizerChallenge> *challenge)
+ {
+   auto iter = authorizer_data.cbegin();
+ 
+@@ -19,7 +22,8 @@ bool CephxAuthorizeHandler::verify_authorizer(CephContext *cct, KeyStore *keys,
+ 
+   CephXServiceTicketInfo auth_ticket_info;
+ 
+-  bool isvalid = cephx_verify_authorizer(cct, keys, iter, auth_ticket_info, authorizer_reply);
++  bool isvalid = cephx_verify_authorizer(cct, keys, iter, auth_ticket_info, challenge,
++					 authorizer_reply);
+ 
+   if (isvalid) {
+     caps_info = auth_ticket_info.ticket.caps;
+diff --git a/src/auth/cephx/CephxAuthorizeHandler.h b/src/auth/cephx/CephxAuthorizeHandler.h
+index 7246b80c71..8fa40aa712 100644
+--- a/src/auth/cephx/CephxAuthorizeHandler.h
++++ b/src/auth/cephx/CephxAuthorizeHandler.h
+@@ -23,7 +23,8 @@ struct CephxAuthorizeHandler : public AuthAuthorizeHandler {
+   bool verify_authorizer(CephContext *cct, KeyStore *keys,
+ 			 bufferlist& authorizer_data, bufferlist& authorizer_reply,
+                          EntityName& entity_name, uint64_t& global_id,
+-			 AuthCapsInfo& caps_info, CryptoKey& session_key, uint64_t *auid = NULL) override;
++			 AuthCapsInfo& caps_info, CryptoKey& session_key, uint64_t *auid,
++			 std::unique_ptr<AuthAuthorizerChallenge> *challenge) override;
+   int authorizer_session_crypto() override;
+ };
+ 
+diff --git a/src/auth/cephx/CephxProtocol.cc b/src/auth/cephx/CephxProtocol.cc
+index cf103e9f29..b8a62dbb73 100644
+--- a/src/auth/cephx/CephxProtocol.cc
++++ b/src/auth/cephx/CephxProtocol.cc
+@@ -304,6 +304,7 @@ CephXAuthorizer *CephXTicketHandler::build_authorizer(uint64_t global_id) const
+   encode(service_id, a->bl);
+ 
+   encode(ticket, a->bl);
++  a->base_bl = a->bl;
+ 
+   CephXAuthorize msg;
+   msg.nonce = a->nonce;
+@@ -390,7 +391,9 @@ bool cephx_decode_ticket(CephContext *cct, KeyStore *keys, uint32_t service_id,
+  */
+ bool cephx_verify_authorizer(CephContext *cct, KeyStore *keys,
+ 			     bufferlist::const_iterator& indata,
+-			     CephXServiceTicketInfo& ticket_info, bufferlist& reply_bl)
++			     CephXServiceTicketInfo& ticket_info,
++			     std::unique_ptr<AuthAuthorizerChallenge> *challenge,
++			     bufferlist& reply_bl)
+ {
+   __u8 authorizer_v;
+   uint32_t service_id;
+@@ -457,6 +460,30 @@ bool cephx_verify_authorizer(CephContext *cct, KeyStore *keys,
+     return false;
+   }
+ 
++  if (challenge) {
++    auto *c = static_cast<CephXAuthorizeChallenge*>(challenge->get());
++    if (!auth_msg.have_challenge || !c) {
++      c = new CephXAuthorizeChallenge;
++      challenge->reset(c);
++      cct->random()->get_bytes((char*)&c->server_challenge, sizeof(c->server_challenge));
++      ldout(cct,10) << __func__ << " adding server_challenge " << c->server_challenge
++		    << dendl;
++
++      encode_encrypt_enc_bl(cct, *c, ticket_info.session_key, reply_bl, error);
++      if (!error.empty()) {
++	ldout(cct, 10) << "verify_authorizer: encode_encrypt error: " << error << dendl;
++	return false;
++      }
++      return false;
++    }
++    ldout(cct, 10) << __func__ << " got server_challenge+1 "
++		   << auth_msg.server_challenge_plus_one
++		   << " expecting " << c->server_challenge + 1 << dendl;
++    if (c->server_challenge + 1 != auth_msg.server_challenge_plus_one) {
++      return false;
++    }
++  }
++
+   /*
+    * Reply authorizer:
+    *  {timestamp + 1}^session_key
+@@ -493,3 +520,31 @@ bool CephXAuthorizer::verify_reply(bufferlist::const_iterator& indata)
+   return true;
+ }
+ 
++bool CephXAuthorizer::add_challenge(CephContext *cct, bufferlist& challenge)
++{
++  bl = base_bl;
++
++  CephXAuthorize msg;
++  msg.nonce = nonce;
++
++  auto p = challenge.begin();
++  if (!p.end()) {
++    std::string error;
++    CephXAuthorizeChallenge ch;
++    decode_decrypt_enc_bl(cct, ch, session_key, challenge, error);
++    if (!error.empty()) {
++      ldout(cct, 0) << "failed to decrypt challenge (" << challenge.length() << " bytes): "
++		    << error << dendl;
++      return false;
++    }
++    msg.have_challenge = true;
++    msg.server_challenge_plus_one = ch.server_challenge + 1;
++  }
++
++  std::string error;
++  if (encode_encrypt(cct, msg, session_key, bl, error)) {
++    ldout(cct, 0) << __func__ << " failed to encrypt authorizer: " << error << dendl;
++    return false;
++  }
++  return true;
++}
+diff --git a/src/auth/cephx/CephxProtocol.h b/src/auth/cephx/CephxProtocol.h
+index 055a233cba..16135ec11f 100644
+--- a/src/auth/cephx/CephxProtocol.h
++++ b/src/auth/cephx/CephxProtocol.h
+@@ -289,12 +289,14 @@ private:
+   CephContext *cct;
+ public:
+   uint64_t nonce;
++  bufferlist base_bl;
+ 
+   explicit CephXAuthorizer(CephContext *cct_)
+     : AuthAuthorizer(CEPH_AUTH_CEPHX), cct(cct_), nonce(0) {}
+ 
+   bool build_authorizer();
+   bool verify_reply(bufferlist::const_iterator& reply) override;
++  bool add_challenge(CephContext *cct, bufferlist& challenge) override;
+ };
+ 
+ 
+@@ -404,19 +406,44 @@ struct CephXServiceTicketInfo {
+ };
+ WRITE_CLASS_ENCODER(CephXServiceTicketInfo)
+ 
++struct CephXAuthorizeChallenge : public AuthAuthorizerChallenge {
++  uint64_t server_challenge;
++  void encode(bufferlist& bl) const {
++    using ceph::encode;
++    __u8 struct_v = 1;
++    encode(struct_v, bl);
++    encode(server_challenge, bl);
++  }
++  void decode(bufferlist::const_iterator& bl) {
++    using ceph::decode;
++    __u8 struct_v;
++    decode(struct_v, bl);
++    decode(server_challenge, bl);
++  }
++};
++WRITE_CLASS_ENCODER(CephXAuthorizeChallenge)
++
+ struct CephXAuthorize {
+   uint64_t nonce;
++  bool have_challenge = false;
++  uint64_t server_challenge_plus_one = 0;
+   void encode(bufferlist& bl) const {
+     using ceph::encode;
+-    __u8 struct_v = 1;
++    __u8 struct_v = 2;
+     encode(struct_v, bl);
+     encode(nonce, bl);
++    encode(have_challenge, bl);
++    encode(server_challenge_plus_one, bl);
+   }
+   void decode(bufferlist::const_iterator& bl) {
+     using ceph::decode;
+     __u8 struct_v;
+     decode(struct_v, bl);
+     decode(nonce, bl);
++    if (struct_v >= 2) {
++      decode(have_challenge, bl);
++      decode(server_challenge_plus_one, bl);
++    }
+   }
+ };
+ WRITE_CLASS_ENCODER(CephXAuthorize)
+@@ -431,9 +458,12 @@ bool cephx_decode_ticket(CephContext *cct, KeyStore *keys,
+ /*
+  * Verify authorizer and generate reply authorizer
+  */
+-extern bool cephx_verify_authorizer(CephContext *cct, KeyStore *keys,
+-				    bufferlist::const_iterator& indata,
+-				    CephXServiceTicketInfo& ticket_info, bufferlist& reply_bl);
++extern bool cephx_verify_authorizer(
++  CephContext *cct, KeyStore *keys,
++  bufferlist::const_iterator& indata,
++  CephXServiceTicketInfo& ticket_info,
++  std::unique_ptr<AuthAuthorizerChallenge> *challenge,
++  bufferlist& reply_bl);
+ 
+ 
+ 
+diff --git a/src/auth/cephx/CephxServiceHandler.cc b/src/auth/cephx/CephxServiceHandler.cc
+index acd9fa64b7..ea2d852cae 100644
+--- a/src/auth/cephx/CephxServiceHandler.cc
++++ b/src/auth/cephx/CephxServiceHandler.cc
+@@ -153,7 +153,9 @@ int CephxServiceHandler::handle_request(bufferlist::const_iterator& indata, buff
+ 
+       bufferlist tmp_bl;
+       CephXServiceTicketInfo auth_ticket_info;
+-      if (!cephx_verify_authorizer(cct, key_server, indata, auth_ticket_info, tmp_bl)) {
++      // note: no challenge here.
++      if (!cephx_verify_authorizer(cct, key_server, indata, auth_ticket_info, nullptr,
++				   tmp_bl)) {
+         ret = -EPERM;
+ 	break;
+       }
+diff --git a/src/auth/none/AuthNoneAuthorizeHandler.cc b/src/auth/none/AuthNoneAuthorizeHandler.cc
+index 298d21bd2a..d7e42c1b9a 100644
+--- a/src/auth/none/AuthNoneAuthorizeHandler.cc
++++ b/src/auth/none/AuthNoneAuthorizeHandler.cc
+@@ -17,10 +17,13 @@
+ 
+ #define dout_subsys ceph_subsys_auth
+ 
+-bool AuthNoneAuthorizeHandler::verify_authorizer(CephContext *cct, KeyStore *keys,
+-						 bufferlist& authorizer_data, bufferlist& authorizer_reply,
+-						 EntityName& entity_name, uint64_t& global_id, AuthCapsInfo& caps_info, CryptoKey& session_key,
+-uint64_t *auid)
++bool AuthNoneAuthorizeHandler::verify_authorizer(
++  CephContext *cct, KeyStore *keys,
++  bufferlist& authorizer_data, bufferlist& authorizer_reply,
++  EntityName& entity_name, uint64_t& global_id, AuthCapsInfo& caps_info,
++  CryptoKey& session_key,
++  uint64_t *auid,
++  std::unique_ptr<AuthAuthorizerChallenge> *challenge)
+ {
+   auto iter = authorizer_data.cbegin();
+ 
+diff --git a/src/auth/none/AuthNoneAuthorizeHandler.h b/src/auth/none/AuthNoneAuthorizeHandler.h
+index b531cfb773..0ce542bf67 100644
+--- a/src/auth/none/AuthNoneAuthorizeHandler.h
++++ b/src/auth/none/AuthNoneAuthorizeHandler.h
+@@ -23,7 +23,8 @@ struct AuthNoneAuthorizeHandler : public AuthAuthorizeHandler {
+   bool verify_authorizer(CephContext *cct, KeyStore *keys,
+ 			 bufferlist& authorizer_data, bufferlist& authorizer_reply,
+                          EntityName& entity_name, uint64_t& global_id,
+-			 AuthCapsInfo& caps_info, CryptoKey& session_key, uint64_t *auid=NULL) override;
++			 AuthCapsInfo& caps_info, CryptoKey& session_key, uint64_t *auid,
++			 std::unique_ptr<AuthAuthorizerChallenge> *challenge) override;
+   int authorizer_session_crypto() override;
+ };
+ 
+diff --git a/src/auth/none/AuthNoneProtocol.h b/src/auth/none/AuthNoneProtocol.h
+index 9664422a6c..64865355ea 100644
+--- a/src/auth/none/AuthNoneProtocol.h
++++ b/src/auth/none/AuthNoneProtocol.h
+@@ -17,6 +17,8 @@
+ 
+ #include "auth/Auth.h"
+ 
++class CephContext;
++
+ struct AuthNoneAuthorizer : public AuthAuthorizer {
+   AuthNoneAuthorizer() : AuthAuthorizer(CEPH_AUTH_NONE) { }
+   bool build_authorizer(const EntityName &ename, uint64_t global_id) {
+@@ -27,6 +29,7 @@ struct AuthNoneAuthorizer : public AuthAuthorizer {
+     return 0;
+   }
+   bool verify_reply(bufferlist::const_iterator& reply) override { return true; }
++  bool add_challenge(CephContext *cct, bufferlist& ch) override { return true; }
+ };
+ 
+ #endif
+diff --git a/src/auth/unknown/AuthUnknownAuthorizeHandler.cc b/src/auth/unknown/AuthUnknownAuthorizeHandler.cc
+index 62cb638874..90e00ef579 100644
+--- a/src/auth/unknown/AuthUnknownAuthorizeHandler.cc
++++ b/src/auth/unknown/AuthUnknownAuthorizeHandler.cc
+@@ -14,10 +14,13 @@
+ 
+ #include "AuthUnknownAuthorizeHandler.h"
+ 
+-bool AuthUnknownAuthorizeHandler::verify_authorizer(CephContext *cct, KeyStore *keys,
+-						 bufferlist& authorizer_data, bufferlist& authorizer_reply,
+-						 EntityName& entity_name, uint64_t& global_id, AuthCapsInfo& caps_info, CryptoKey& session_key,
+-uint64_t *auid)
++bool AuthUnknownAuthorizeHandler::verify_authorizer(
++  CephContext *cct, KeyStore *keys,
++  bufferlist& authorizer_data, bufferlist& authorizer_reply,
++  EntityName& entity_name, uint64_t& global_id, AuthCapsInfo& caps_info,
++  CryptoKey& session_key,
++  uint64_t *auid,
++  std::unique_ptr<AuthAuthorizerChallenge> *challenge)
+ {
+   // For unknown authorizers, there's nothing to verify.  They're "OK" by definition.  PLR
+ 
+diff --git a/src/auth/unknown/AuthUnknownAuthorizeHandler.h b/src/auth/unknown/AuthUnknownAuthorizeHandler.h
+index 9795ebfe9b..e052af5def 100644
+--- a/src/auth/unknown/AuthUnknownAuthorizeHandler.h
++++ b/src/auth/unknown/AuthUnknownAuthorizeHandler.h
+@@ -23,7 +23,8 @@ struct AuthUnknownAuthorizeHandler : public AuthAuthorizeHandler {
+   bool verify_authorizer(CephContext *cct, KeyStore *keys,
+ 			 bufferlist& authorizer_data, bufferlist& authorizer_reply,
+                          EntityName& entity_name, uint64_t& global_id,
+-			 AuthCapsInfo& caps_info, CryptoKey& session_key, uint64_t *auid=NULL) override;
++			 AuthCapsInfo& caps_info, CryptoKey& session_key, uint64_t *auid,
++			 std::unique_ptr<AuthAuthorizerChallenge> *challenge) override;
+   int authorizer_session_crypto() override;
+ };
+ 
+diff --git a/src/include/msgr.h b/src/include/msgr.h
+index 1953eb28b4..62582b0bca 100644
+--- a/src/include/msgr.h
++++ b/src/include/msgr.h
+@@ -93,7 +93,7 @@ struct ceph_entity_inst {
+ #define CEPH_MSGR_TAG_SEQ           13 /* 64-bit int follows with seen seq number */
+ #define CEPH_MSGR_TAG_KEEPALIVE2     14
+ #define CEPH_MSGR_TAG_KEEPALIVE2_ACK 15  /* keepalive reply */
+-
++#define CEPH_MSGR_TAG_CHALLENGE_AUTHORIZER 16  /* ceph v2 doing server challenge */
+ 
+ /*
+  * connection negotiation
+diff --git a/src/mds/MDSDaemon.cc b/src/mds/MDSDaemon.cc
+index 847a9ea716..d1021afb64 100644
+--- a/src/mds/MDSDaemon.cc
++++ b/src/mds/MDSDaemon.cc
+@@ -1295,7 +1295,8 @@ bool MDSDaemon::ms_handle_refused(Connection *con)
+ 
+ bool MDSDaemon::ms_verify_authorizer(Connection *con, int peer_type,
+ 			       int protocol, bufferlist& authorizer_data, bufferlist& authorizer_reply,
+-			       bool& is_valid, CryptoKey& session_key)
++				     bool& is_valid, CryptoKey& session_key,
++				     std::unique_ptr<AuthAuthorizerChallenge> *challenge)
+ {
+   Mutex::Locker l(mds_lock);
+   if (stopping) {
+@@ -1327,7 +1328,7 @@ bool MDSDaemon::ms_verify_authorizer(Connection *con, int peer_type,
+     is_valid = authorize_handler->verify_authorizer(
+       cct, keys,
+       authorizer_data, authorizer_reply, name, global_id, caps_info,
+-      session_key);
++      session_key, nullptr, challenge);
+   } else {
+     dout(10) << __func__ << " no rotating_keys (yet), denied" << dendl;
+     is_valid = false;
+diff --git a/src/mds/MDSDaemon.h b/src/mds/MDSDaemon.h
+index b9d331971c..75cb176698 100644
+--- a/src/mds/MDSDaemon.h
++++ b/src/mds/MDSDaemon.h
+@@ -108,7 +108,8 @@ class MDSDaemon : public Dispatcher, public md_config_obs_t {
+   bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool force_new) override;
+   bool ms_verify_authorizer(Connection *con, int peer_type,
+ 			       int protocol, bufferlist& authorizer_data, bufferlist& authorizer_reply,
+-			       bool& isvalid, CryptoKey& session_key) override;
++			    bool& isvalid, CryptoKey& session_key,
++			    std::unique_ptr<AuthAuthorizerChallenge> *challenge) override;
+   void ms_handle_accept(Connection *con) override;
+   void ms_handle_connect(Connection *con) override;
+   bool ms_handle_reset(Connection *con) override;
+diff --git a/src/mgr/DaemonServer.cc b/src/mgr/DaemonServer.cc
+index 8337b34d90..322e7d6e3a 100644
+--- a/src/mgr/DaemonServer.cc
++++ b/src/mgr/DaemonServer.cc
+@@ -144,13 +144,15 @@ entity_addr_t DaemonServer::get_myaddr() const
+ }
+ 
+ 
+-bool DaemonServer::ms_verify_authorizer(Connection *con,
+-    int peer_type,
+-    int protocol,
+-    ceph::bufferlist& authorizer_data,
+-    ceph::bufferlist& authorizer_reply,
+-    bool& is_valid,
+-    CryptoKey& session_key)
++bool DaemonServer::ms_verify_authorizer(
++  Connection *con,
++  int peer_type,
++  int protocol,
++  ceph::bufferlist& authorizer_data,
++  ceph::bufferlist& authorizer_reply,
++  bool& is_valid,
++  CryptoKey& session_key,
++  std::unique_ptr<AuthAuthorizerChallenge> *challenge)
+ {
+   AuthAuthorizeHandler *handler = nullptr;
+   if (peer_type == CEPH_ENTITY_TYPE_OSD ||
+@@ -178,7 +180,9 @@ bool DaemonServer::ms_verify_authorizer(Connection *con,
+       authorizer_data,
+       authorizer_reply, s->entity_name,
+       s->global_id, caps_info,
+-      session_key);
++      session_key,
++      nullptr,
++      challenge);
+   } else {
+     dout(10) << __func__ << " no rotating_keys (yet), denied" << dendl;
+     is_valid = false;
+diff --git a/src/mgr/DaemonServer.h b/src/mgr/DaemonServer.h
+index 7972a1d847..9fb4cca71d 100644
+--- a/src/mgr/DaemonServer.h
++++ b/src/mgr/DaemonServer.h
+@@ -124,13 +124,15 @@ public:
+   bool ms_handle_refused(Connection *con) override;
+   bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer,
+                          bool force_new) override;
+-  bool ms_verify_authorizer(Connection *con,
+-      int peer_type,
+-      int protocol,
+-      ceph::bufferlist& authorizer,
+-      ceph::bufferlist& authorizer_reply,
+-      bool& isvalid,
+-      CryptoKey& session_key) override;
++  bool ms_verify_authorizer(
++    Connection *con,
++    int peer_type,
++    int protocol,
++    ceph::bufferlist& authorizer,
++    ceph::bufferlist& authorizer_reply,
++    bool& isvalid,
++    CryptoKey& session_key,
++    std::unique_ptr<AuthAuthorizerChallenge> *challenge) override;
+ 
+   bool handle_open(MMgrOpen *m);
+   bool handle_close(MMgrClose *m);
+diff --git a/src/mon/Monitor.cc b/src/mon/Monitor.cc
+index a8ecb2eebf..9d31e19031 100644
+--- a/src/mon/Monitor.cc
++++ b/src/mon/Monitor.cc
+@@ -5780,7 +5780,8 @@ bool Monitor::ms_get_authorizer(int service_id, AuthAuthorizer **authorizer,
+ bool Monitor::ms_verify_authorizer(Connection *con, int peer_type,
+ 				   int protocol, bufferlist& authorizer_data,
+ 				   bufferlist& authorizer_reply,
+-				   bool& isvalid, CryptoKey& session_key)
++				   bool& isvalid, CryptoKey& session_key,
++				   std::unique_ptr<AuthAuthorizerChallenge> *challenge)
+ {
+   dout(10) << "ms_verify_authorizer " << con->get_peer_addr()
+ 	   << " " << ceph_entity_type_name(peer_type)
+@@ -5799,7 +5800,7 @@ bool Monitor::ms_verify_authorizer(Connection *con, int peer_type,
+       
+       if (authorizer_data.length()) {
+ 	bool ret = cephx_verify_authorizer(g_ceph_context, &keyring, iter,
+-					  auth_ticket_info, authorizer_reply);
++					   auth_ticket_info, challenge, authorizer_reply);
+ 	if (ret) {
+ 	  session_key = auth_ticket_info.session_key;
+ 	  isvalid = true;
+diff --git a/src/mon/Monitor.h b/src/mon/Monitor.h
+index 1acf69cc31..d4b11830e4 100644
+--- a/src/mon/Monitor.h
++++ b/src/mon/Monitor.h
+@@ -887,7 +887,8 @@ public:
+   bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool force_new) override;
+   bool ms_verify_authorizer(Connection *con, int peer_type,
+ 			    int protocol, bufferlist& authorizer_data, bufferlist& authorizer_reply,
+-			    bool& isvalid, CryptoKey& session_key) override;
++			    bool& isvalid, CryptoKey& session_key,
++			    std::unique_ptr<AuthAuthorizerChallenge> *challenge) override;
+   bool ms_handle_reset(Connection *con) override;
+   void ms_handle_remote_reset(Connection *con) override {}
+   bool ms_handle_refused(Connection *con) override;
+diff --git a/src/msg/Dispatcher.h b/src/msg/Dispatcher.h
+index 774ca40513..faab248d60 100644
+--- a/src/msg/Dispatcher.h
++++ b/src/msg/Dispatcher.h
+@@ -16,6 +16,7 @@
+ #ifndef CEPH_DISPATCHER_H
+ #define CEPH_DISPATCHER_H
+ 
++#include <memory>
+ #include "include/buffer_fwd.h"
+ #include "include/assert.h"
+ 
+@@ -25,6 +26,7 @@ class Connection;
+ class AuthAuthorizer;
+ class CryptoKey;
+ class CephContext;
++class AuthAuthorizerChallenge;
+ 
+ class Dispatcher {
+ public:
+@@ -203,7 +205,10 @@ public:
+ 				    ceph::bufferlist& authorizer,
+ 				    ceph::bufferlist& authorizer_reply,
+ 				    bool& isvalid,
+-				    CryptoKey& session_key) { return false; }
++				    CryptoKey& session_key,
++				    std::unique_ptr<AuthAuthorizerChallenge> *challenge) {
++    return false;
++  }
+   /**
+    * @} //Authentication
+    */
+diff --git a/src/msg/Messenger.h b/src/msg/Messenger.h
+index eb35417803..1feb0adc01 100644
+--- a/src/msg/Messenger.h
++++ b/src/msg/Messenger.h
+@@ -805,11 +805,13 @@ public:
+    */
+   bool ms_deliver_verify_authorizer(Connection *con, int peer_type,
+ 				    int protocol, bufferlist& authorizer, bufferlist& authorizer_reply,
+-				    bool& isvalid, CryptoKey& session_key) {
++				    bool& isvalid, CryptoKey& session_key,
++				    std::unique_ptr<AuthAuthorizerChallenge> *challenge) {
+     for (list<Dispatcher*>::iterator p = dispatchers.begin();
+ 	 p != dispatchers.end();
+ 	 ++p) {
+-      if ((*p)->ms_verify_authorizer(con, peer_type, protocol, authorizer, authorizer_reply, isvalid, session_key))
++      if ((*p)->ms_verify_authorizer(con, peer_type, protocol, authorizer, authorizer_reply,
++				     isvalid, session_key, challenge))
+ 	return true;
+     }
+     return false;
+diff --git a/src/msg/async/AsyncConnection.cc b/src/msg/async/AsyncConnection.cc
+index 4036fba9b9..77955af23f 100644
+--- a/src/msg/async/AsyncConnection.cc
++++ b/src/msg/async/AsyncConnection.cc
+@@ -128,7 +128,8 @@ AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQu
+     recv_start(0), recv_end(0),
+     last_active(ceph::coarse_mono_clock::now()),
+     inactive_timeout_us(cct->_conf->ms_tcp_read_timeout*1000*1000),
+-    msg_left(0), cur_msg_size(0), got_bad_auth(false), authorizer(NULL), replacing(false),
++    msg_left(0), cur_msg_size(0), got_bad_auth(false),
++    authorizer(NULL), replacing(false),
+     is_reset_from_peer(false), once_ready(false), state_buffer(NULL), state_offset(0),
+     worker(w), center(&w->center)
+ {
+@@ -1010,8 +1011,7 @@ ssize_t AsyncConnection::_process_connection()
+ 
+     case STATE_CONNECTING_SEND_CONNECT_MSG:
+       {
+-        if (!got_bad_auth) {
+-          delete authorizer;
++        if (!authorizer) {
+           authorizer = async_msgr->get_authorizer(peer_type, false);
+         }
+         bufferlist bl;
+@@ -1091,6 +1091,14 @@ ssize_t AsyncConnection::_process_connection()
+           }
+ 
+           authorizer_reply.append(state_buffer, connect_reply.authorizer_len);
++
++	  if (connect_reply.tag == CEPH_MSGR_TAG_CHALLENGE_AUTHORIZER) {
++	    ldout(async_msgr->cct,10) << __func__ << " connect got auth challenge" << dendl;
++	    authorizer->add_challenge(async_msgr->cct, authorizer_reply);
++	    state = STATE_CONNECTING_SEND_CONNECT_MSG;
++	    break;
++	  }
++
+           auto iter = authorizer_reply.cbegin();
+           if (authorizer && !authorizer->verify_reply(iter)) {
+             ldout(async_msgr->cct, 0) << __func__ << " failed verifying authorize reply" << dendl;
+@@ -1508,12 +1516,26 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
+   lock.unlock();
+ 
+   bool authorizer_valid;
+-  if (!async_msgr->verify_authorizer(this, peer_type, connect.authorizer_protocol, authorizer_bl,
+-                               authorizer_reply, authorizer_valid, session_key) || !authorizer_valid) {
++  bool need_challenge = HAVE_FEATURE(connect.features, CEPHX_V2);
++  bool had_challenge = (bool)authorizer_challenge;
++  if (!async_msgr->verify_authorizer(
++	this, peer_type, connect.authorizer_protocol, authorizer_bl,
++	authorizer_reply, authorizer_valid, session_key,
++	need_challenge ? &authorizer_challenge : nullptr) ||
++      !authorizer_valid) {
+     lock.lock();
+-    ldout(async_msgr->cct,0) << __func__ << ": got bad authorizer" << dendl;
++    char tag;
++    if (need_challenge && !had_challenge && authorizer_challenge) {
++      ldout(async_msgr->cct,0) << __func__ << ": challenging authorizer"
++			       << dendl;
++      assert(authorizer_reply.length());
++      tag = CEPH_MSGR_TAG_CHALLENGE_AUTHORIZER;
++    } else {
++      ldout(async_msgr->cct,0) << __func__ << ": got bad authorizer" << dendl;
++      tag = CEPH_MSGR_TAG_BADAUTHORIZER;
++    }
+     session_security.reset();
+-    return _reply_accept(CEPH_MSGR_TAG_BADAUTHORIZER, connect, reply, authorizer_reply);
++    return _reply_accept(tag, connect, reply, authorizer_reply);
+   }
+ 
+   // We've verified the authorizer for this AsyncConnection, so set up the session security structure.  PLR
+@@ -1711,6 +1733,8 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
+     // there shouldn't exist any buffer
+     assert(recv_start == recv_end);
+ 
++    existing->authorizer_challenge.reset();
++
+     auto deactivate_existing = std::bind(
+         [existing, new_worker, new_center, connect, reply, authorizer_reply](ConnectedSocket &cs) mutable {
+       // we need to delete time event in original thread
+diff --git a/src/msg/async/AsyncConnection.h b/src/msg/async/AsyncConnection.h
+index 0a3da9ddcc..a8455853bf 100644
+--- a/src/msg/async/AsyncConnection.h
++++ b/src/msg/async/AsyncConnection.h
+@@ -368,6 +368,7 @@ class AsyncConnection : public Connection {
+   Worker *worker;
+   EventCenter *center;
+   ceph::shared_ptr<AuthSessionHandler> session_security;
++  std::unique_ptr<AuthAuthorizerChallenge> authorizer_challenge; // accept side
+ 
+  public:
+   // used by eventcallback
+diff --git a/src/msg/async/AsyncMessenger.h b/src/msg/async/AsyncMessenger.h
+index a07ed4c69c..64f2e610ab 100644
+--- a/src/msg/async/AsyncMessenger.h
++++ b/src/msg/async/AsyncMessenger.h
+@@ -383,9 +383,10 @@ public:
+    * This wraps ms_deliver_verify_authorizer; we use it for AsyncConnection.
+    */
+   bool verify_authorizer(Connection *con, int peer_type, int protocol, bufferlist& auth, bufferlist& auth_reply,
+-                         bool& isvalid, CryptoKey& session_key) {
++                         bool& isvalid, CryptoKey& session_key,
++			 std::unique_ptr<AuthAuthorizerChallenge> *challenge) {
+     return ms_deliver_verify_authorizer(con, peer_type, protocol, auth,
+-                                        auth_reply, isvalid, session_key);
++                                        auth_reply, isvalid, session_key, challenge);
+   }
+   /**
+    * Increment the global sequence for this AsyncMessenger and return it.
+diff --git a/src/msg/simple/Pipe.cc b/src/msg/simple/Pipe.cc
+index ff35b038bd..6ae12eef89 100644
+--- a/src/msg/simple/Pipe.cc
++++ b/src/msg/simple/Pipe.cc
+@@ -351,6 +351,10 @@ int Pipe::accept()
+   // used for reading in the remote acked seq on connect
+   uint64_t newly_acked_seq = 0;
+ 
++  bool need_challenge = false;
++  bool had_challenge = false;
++  std::unique_ptr<AuthAuthorizerChallenge> authorizer_challenge;
++
+   recv_reset();
+ 
+   set_socket_options();
+@@ -515,14 +519,27 @@ int Pipe::accept()
+ 
+     pipe_lock.Unlock();
+ 
+-    if (!msgr->verify_authorizer(connection_state.get(), peer_type, connect.authorizer_protocol, authorizer,
+-				 authorizer_reply, authorizer_valid, session_key) ||
++    need_challenge = HAVE_FEATURE(connect.features, CEPHX_V2);
++    had_challenge = (bool)authorizer_challenge;
++    authorizer_reply.clear();
++    if (!msgr->verify_authorizer(
++	  connection_state.get(), peer_type, connect.authorizer_protocol, authorizer,
++	  authorizer_reply, authorizer_valid, session_key,
++	  need_challenge ? &authorizer_challenge : nullptr) ||
+ 	!authorizer_valid) {
+-      ldout(msgr->cct,0) << "accept: got bad authorizer" << dendl;
+       pipe_lock.Lock();
+       if (state != STATE_ACCEPTING)
+ 	goto shutting_down_msgr_unlocked;
+-      reply.tag = CEPH_MSGR_TAG_BADAUTHORIZER;
++      if (!had_challenge && need_challenge && authorizer_challenge) {
++	ldout(msgr->cct,0) << "accept: challenging authorizer "
++			   << authorizer_reply.length()
++			   << " bytes" << dendl;
++	assert(authorizer_reply.length());
++	reply.tag = CEPH_MSGR_TAG_CHALLENGE_AUTHORIZER;
++      } else {
++	ldout(msgr->cct,0) << "accept: got bad authorizer" << dendl;
++	reply.tag = CEPH_MSGR_TAG_BADAUTHORIZER;
++      }
+       session_security.reset();
+       goto reply;
+     } 
+@@ -1128,8 +1145,9 @@ int Pipe::connect()
+ 
+ 
+   while (1) {
+-    delete authorizer;
+-    authorizer = msgr->get_authorizer(peer_type, false);
++    if (!authorizer) {
++      authorizer = msgr->get_authorizer(peer_type, false);
++    }
+     bufferlist authorizer_reply;
+ 
+     ceph_msg_connect connect;
+@@ -1196,6 +1214,13 @@ int Pipe::connect()
+       authorizer_reply.push_back(bp);
+     }
+ 
++    if (reply.tag == CEPH_MSGR_TAG_CHALLENGE_AUTHORIZER) {
++      authorizer->add_challenge(msgr->cct, authorizer_reply);
++      ldout(msgr->cct,10) << " got authorizer challenge, " << authorizer_reply.length()
++			  << " bytes" << dendl;
++      continue;
++    }
++
+     if (authorizer) {
+       auto iter = authorizer_reply.cbegin();
+       if (!authorizer->verify_reply(iter)) {
+diff --git a/src/msg/simple/SimpleMessenger.cc b/src/msg/simple/SimpleMessenger.cc
+index 4918c52a7a..18fbd7e218 100644
+--- a/src/msg/simple/SimpleMessenger.cc
++++ b/src/msg/simple/SimpleMessenger.cc
+@@ -413,9 +413,12 @@ AuthAuthorizer *SimpleMessenger::get_authorizer(int peer_type, bool force_new)
+ 
+ bool SimpleMessenger::verify_authorizer(Connection *con, int peer_type,
+ 					int protocol, bufferlist& authorizer, bufferlist& authorizer_reply,
+-					bool& isvalid,CryptoKey& session_key)
++					bool& isvalid,CryptoKey& session_key,
++					std::unique_ptr<AuthAuthorizerChallenge> *challenge)
+ {
+-  return ms_deliver_verify_authorizer(con, peer_type, protocol, authorizer, authorizer_reply, isvalid,session_key);
++  return ms_deliver_verify_authorizer(con, peer_type, protocol, authorizer, authorizer_reply,
++				      isvalid, session_key,
++				      challenge);
+ }
+ 
+ ConnectionRef SimpleMessenger::get_connection(const entity_inst_t& dest)
+diff --git a/src/msg/simple/SimpleMessenger.h b/src/msg/simple/SimpleMessenger.h
+index 93597a70a5..cbde220765 100644
+--- a/src/msg/simple/SimpleMessenger.h
++++ b/src/msg/simple/SimpleMessenger.h
+@@ -347,8 +347,10 @@ public:
+   /**
+    * This wraps ms_deliver_verify_authorizer; we use it for Pipe.
+    */
+-  bool verify_authorizer(Connection *con, int peer_type, int protocol, bufferlist& auth, bufferlist& auth_reply,
+-                         bool& isvalid,CryptoKey& session_key);
++  bool verify_authorizer(Connection *con, int peer_type, int protocol, bufferlist& auth,
++			 bufferlist& auth_reply,
++                         bool& isvalid,CryptoKey& session_key,
++			 std::unique_ptr<AuthAuthorizerChallenge> *challenge);
+   /**
+    * Increment the global sequence for this SimpleMessenger and return it.
+    * This is for the connect protocol, although it doesn't hurt if somebody
+diff --git a/src/osd/OSD.cc b/src/osd/OSD.cc
+index 53318b2663..a9a2f42f89 100644
+--- a/src/osd/OSD.cc
++++ b/src/osd/OSD.cc
+@@ -6539,9 +6539,11 @@ bool OSD::ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool for
+ }
+ 
+ 
+-bool OSD::ms_verify_authorizer(Connection *con, int peer_type,
+-			       int protocol, bufferlist& authorizer_data, bufferlist& authorizer_reply,
+-			       bool& isvalid, CryptoKey& session_key)
++bool OSD::ms_verify_authorizer(
++  Connection *con, int peer_type,
++  int protocol, bufferlist& authorizer_data, bufferlist& authorizer_reply,
++  bool& isvalid, CryptoKey& session_key,
++  std::unique_ptr<AuthAuthorizerChallenge> *challenge)
+ {
+   AuthAuthorizeHandler *authorize_handler = 0;
+   switch (peer_type) {
+@@ -6573,7 +6575,7 @@ bool OSD::ms_verify_authorizer(Connection *con, int peer_type,
+     isvalid = authorize_handler->verify_authorizer(
+       cct, keys,
+       authorizer_data, authorizer_reply, name, global_id, caps_info, session_key,
+-      &auid);
++      &auid, challenge);
+   } else {
+     dout(10) << __func__ << " no rotating_keys (yet), denied" << dendl;
+     isvalid = false;
+diff --git a/src/osd/OSD.h b/src/osd/OSD.h
+index 0ebe5ecd2e..17988685f7 100644
+--- a/src/osd/OSD.h
++++ b/src/osd/OSD.h
+@@ -1622,7 +1622,8 @@ public:
+     }
+     bool ms_verify_authorizer(Connection *con, int peer_type,
+ 			      int protocol, bufferlist& authorizer_data, bufferlist& authorizer_reply,
+-			      bool& isvalid, CryptoKey& session_key) override {
++			      bool& isvalid, CryptoKey& session_key,
++			      std::unique_ptr<AuthAuthorizerChallenge> *challenge) override {
+       isvalid = true;
+       return true;
+     }
+@@ -2130,7 +2131,8 @@ private:
+   bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool force_new) override;
+   bool ms_verify_authorizer(Connection *con, int peer_type,
+ 			    int protocol, bufferlist& authorizer, bufferlist& authorizer_reply,
+-			    bool& isvalid, CryptoKey& session_key) override;
++			    bool& isvalid, CryptoKey& session_key,
++			    std::unique_ptr<AuthAuthorizerChallenge> *challenge) override;
+   void ms_handle_connect(Connection *con) override;
+   void ms_handle_fast_connect(Connection *con) override;
+   void ms_handle_fast_accept(Connection *con) override;
+diff --git a/src/test/messenger/simple_dispatcher.h b/src/test/messenger/simple_dispatcher.h
+index c5345d662d..8b84ff4b6d 100644
+--- a/src/test/messenger/simple_dispatcher.h
++++ b/src/test/messenger/simple_dispatcher.h
+@@ -113,9 +113,10 @@ public:
+    * authorizer, false otherwise.
+    */
+   bool ms_verify_authorizer(Connection *con, int peer_type,
+-				    int protocol, bufferlist& authorizer,
+-				    bufferlist& authorizer_reply,
+-				    bool& isvalid, CryptoKey& session_key) override {
++			    int protocol, bufferlist& authorizer,
++			    bufferlist& authorizer_reply,
++			    bool& isvalid, CryptoKey& session_key,
++			    std::unique_ptr<AuthAuthorizerChallenge> *challenge) override {
+     /* always succeed */
+     isvalid = true;
+     return true;
+diff --git a/src/test/messenger/xio_dispatcher.h b/src/test/messenger/xio_dispatcher.h
+index 3b59108071..495fa3a752 100644
+--- a/src/test/messenger/xio_dispatcher.h
++++ b/src/test/messenger/xio_dispatcher.h
+@@ -115,7 +115,8 @@ public:
+   virtual bool ms_verify_authorizer(Connection *con, int peer_type,
+ 				    int protocol, bufferlist& authorizer,
+ 				    bufferlist& authorizer_reply,
+-				    bool& isvalid, CryptoKey& session_key) {
++				    bool& isvalid, CryptoKey& session_key,
++				    std::unique_ptr<AuthAuthorizerChallenge> *challenge) {
+     /* always succeed */
+     isvalid = true;
+     return true;
+diff --git a/src/test/msgr/perf_msgr_client.cc b/src/test/msgr/perf_msgr_client.cc
+index b7c66ea793..1442b05784 100644
+--- a/src/test/msgr/perf_msgr_client.cc
++++ b/src/test/msgr/perf_msgr_client.cc
+@@ -58,7 +58,8 @@ class MessengerClient {
+     bool ms_handle_refused(Connection *con) override { return false; }
+     bool ms_verify_authorizer(Connection *con, int peer_type, int protocol,
+                               bufferlist& authorizer, bufferlist& authorizer_reply,
+-                              bool& isvalid, CryptoKey& session_key) override {
++                              bool& isvalid, CryptoKey& session_key,
++			      std::unique_ptr<AuthAuthorizerChallenge> *challenge) override {
+       isvalid = true;
+       return true;
+     }
+diff --git a/src/test/msgr/perf_msgr_server.cc b/src/test/msgr/perf_msgr_server.cc
+index 87ebb6116a..7df732853d 100644
+--- a/src/test/msgr/perf_msgr_server.cc
++++ b/src/test/msgr/perf_msgr_server.cc
+@@ -100,7 +100,8 @@ class ServerDispatcher : public Dispatcher {
+   }
+   bool ms_verify_authorizer(Connection *con, int peer_type, int protocol,
+                             bufferlist& authorizer, bufferlist& authorizer_reply,
+-                            bool& isvalid, CryptoKey& session_key) override {
++                            bool& isvalid, CryptoKey& session_key,
++			    std::unique_ptr<AuthAuthorizerChallenge> *challenge) override {
+     isvalid = true;
+     return true;
+   }
+diff --git a/src/test/msgr/test_msgr.cc b/src/test/msgr/test_msgr.cc
+index a027aa6fcc..07887717b3 100644
+--- a/src/test/msgr/test_msgr.cc
++++ b/src/test/msgr/test_msgr.cc
+@@ -203,7 +203,8 @@ class FakeDispatcher : public Dispatcher {
+ 
+   bool ms_verify_authorizer(Connection *con, int peer_type, int protocol,
+                             bufferlist& authorizer, bufferlist& authorizer_reply,
+-                            bool& isvalid, CryptoKey& session_key) override {
++                            bool& isvalid, CryptoKey& session_key,
++			    std::unique_ptr<AuthAuthorizerChallenge> *challenge) override {
+     isvalid = true;
+     return true;
+   }
+@@ -893,7 +894,8 @@ class SyntheticDispatcher : public Dispatcher {
+ 
+   bool ms_verify_authorizer(Connection *con, int peer_type, int protocol,
+                             bufferlist& authorizer, bufferlist& authorizer_reply,
+-                            bool& isvalid, CryptoKey& session_key) override {
++                            bool& isvalid, CryptoKey& session_key,
++			    std::unique_ptr<AuthAuthorizerChallenge> *challenge) override {
+     isvalid = true;
+     return true;
+   }
+@@ -1436,7 +1438,8 @@ class MarkdownDispatcher : public Dispatcher {
+   }
+   bool ms_verify_authorizer(Connection *con, int peer_type, int protocol,
+                             bufferlist& authorizer, bufferlist& authorizer_reply,
+-                            bool& isvalid, CryptoKey& session_key) override {
++                            bool& isvalid, CryptoKey& session_key,
++			    std::unique_ptr<AuthAuthorizerChallenge> *challenge) override {
+     isvalid = true;
+     return true;
+   }
+

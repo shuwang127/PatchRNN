@@ -1,0 +1,67 @@
+commit a08c7c68f702e2a2797a4035b6c0a756c4886c26
+Author: Brian Rogers <brian@xyzw.org>
+Date:   Wed Sep 22 08:06:43 2010 -0300
+
+    V4L/DVB: ir-core: Fix null dereferences in the protocols sysfs interface
+    
+    For some cards, ir_dev->props and ir_dev->raw are both NULL. These cards are
+    using built-in IR decoding instead of raw, and can't easily be made to switch
+    protocols.
+    
+    So upon reading /sys/class/rc/rc?/protocols on such a card, return 'builtin' as
+    the supported and enabled protocol. Return -EINVAL on any attempts to change
+    the protocol. And most important of all, don't crash.
+    
+    Signed-off-by: Brian Rogers <brian@xyzw.org>
+    Acked-by: Jarod Wilson <jarod@redhat.com>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+
+diff --git a/drivers/media/IR/ir-sysfs.c b/drivers/media/IR/ir-sysfs.c
+index 96dafc425c8e..46d42467f9b4 100644
+--- a/drivers/media/IR/ir-sysfs.c
++++ b/drivers/media/IR/ir-sysfs.c
+@@ -67,13 +67,14 @@ static ssize_t show_protocols(struct device *d,
+ 	char *tmp = buf;
+ 	int i;
+ 
+-	if (ir_dev->props->driver_type == RC_DRIVER_SCANCODE) {
++	if (ir_dev->props && ir_dev->props->driver_type == RC_DRIVER_SCANCODE) {
+ 		enabled = ir_dev->rc_tab.ir_type;
+ 		allowed = ir_dev->props->allowed_protos;
+-	} else {
++	} else if (ir_dev->raw) {
+ 		enabled = ir_dev->raw->enabled_protocols;
+ 		allowed = ir_raw_get_allowed_protocols();
+-	}
++	} else
++		return sprintf(tmp, "[builtin]\n");
+ 
+ 	IR_dprintk(1, "allowed - 0x%llx, enabled - 0x%llx\n",
+ 		   (long long)allowed,
+@@ -121,10 +122,14 @@ static ssize_t store_protocols(struct device *d,
+ 	int rc, i, count = 0;
+ 	unsigned long flags;
+ 
+-	if (ir_dev->props->driver_type == RC_DRIVER_SCANCODE)
++	if (ir_dev->props && ir_dev->props->driver_type == RC_DRIVER_SCANCODE)
+ 		type = ir_dev->rc_tab.ir_type;
+-	else
++	else if (ir_dev->raw)
+ 		type = ir_dev->raw->enabled_protocols;
++	else {
++		IR_dprintk(1, "Protocol switching not supported\n");
++		return -EINVAL;
++	}
+ 
+ 	while ((tmp = strsep((char **) &data, " \n")) != NULL) {
+ 		if (!*tmp)
+@@ -185,7 +190,7 @@ static ssize_t store_protocols(struct device *d,
+ 		}
+ 	}
+ 
+-	if (ir_dev->props->driver_type == RC_DRIVER_SCANCODE) {
++	if (ir_dev->props && ir_dev->props->driver_type == RC_DRIVER_SCANCODE) {
+ 		spin_lock_irqsave(&ir_dev->rc_tab.lock, flags);
+ 		ir_dev->rc_tab.ir_type = type;
+ 		spin_unlock_irqrestore(&ir_dev->rc_tab.lock, flags);
+

@@ -1,0 +1,68 @@
+commit 4fec7ad5f637159525265a45f66482cf8817b45f
+Author: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+Date:   Thu Mar 10 23:45:19 2016 +0100
+
+    intel_pstate: Do not skip samples partially
+    
+    If the current value of MPERF or the current value of TSC is the
+    same as the previous one, respectively, intel_pstate_sample() bails
+    out early and skips the sample.
+    
+    However, intel_pstate_adjust_busy_pstate() is still called in that
+    case which is not correct, so modify intel_pstate_sample() to
+    return a bool value indicating whether or not the sample has been
+    taken and use it to decide whether or not to call
+    intel_pstate_adjust_busy_pstate().
+    
+    While at it, remove redundant parentheses from the MPERF/TSC
+    check in intel_pstate_sample().
+    
+    Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+    Acked-by: Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>
+
+diff --git a/drivers/cpufreq/intel_pstate.c b/drivers/cpufreq/intel_pstate.c
+index 4acb904908d1..cb5607495816 100644
+--- a/drivers/cpufreq/intel_pstate.c
++++ b/drivers/cpufreq/intel_pstate.c
+@@ -884,7 +884,7 @@ static inline void intel_pstate_calc_busy(struct cpudata *cpu)
+ 	sample->core_pct_busy = (int32_t)core_pct;
+ }
+ 
+-static inline void intel_pstate_sample(struct cpudata *cpu, u64 time)
++static inline bool intel_pstate_sample(struct cpudata *cpu, u64 time)
+ {
+ 	u64 aperf, mperf;
+ 	unsigned long flags;
+@@ -894,9 +894,9 @@ static inline void intel_pstate_sample(struct cpudata *cpu, u64 time)
+ 	rdmsrl(MSR_IA32_APERF, aperf);
+ 	rdmsrl(MSR_IA32_MPERF, mperf);
+ 	tsc = rdtsc();
+-	if ((cpu->prev_mperf == mperf) || (cpu->prev_tsc == tsc)) {
++	if (cpu->prev_mperf == mperf || cpu->prev_tsc == tsc) {
+ 		local_irq_restore(flags);
+-		return;
++		return false;
+ 	}
+ 	local_irq_restore(flags);
+ 
+@@ -912,6 +912,7 @@ static inline void intel_pstate_sample(struct cpudata *cpu, u64 time)
+ 	cpu->prev_aperf = aperf;
+ 	cpu->prev_mperf = mperf;
+ 	cpu->prev_tsc = tsc;
++	return true;
+ }
+ 
+ static inline int32_t get_avg_frequency(struct cpudata *cpu)
+@@ -1025,8 +1026,9 @@ static void intel_pstate_update_util(struct update_util_data *data, u64 time,
+ 	u64 delta_ns = time - cpu->sample.time;
+ 
+ 	if ((s64)delta_ns >= pid_params.sample_rate_ns) {
+-		intel_pstate_sample(cpu, time);
+-		if (!hwp_active)
++		bool sample_taken = intel_pstate_sample(cpu, time);
++
++		if (sample_taken && !hwp_active)
+ 			intel_pstate_adjust_busy_pstate(cpu);
+ 	}
+ }
+

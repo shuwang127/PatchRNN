@@ -1,0 +1,51 @@
+commit 61c3702863be9e9f1ef12ed5a5b17bae6cdfac0b
+Author: Mark Bloch <markb@mellanox.com>
+Date:   Thu Oct 27 16:36:29 2016 +0300
+
+    IB/core: Add missing check for addr_resolve callback return value
+    
+    When calling rdma_resolve_ip inside rdma_addr_find_l2_eth_by_grh,
+    the return status of the request was ignored in the callback function
+    causing a successful return and an empty dmac.
+    
+    Signed-off-by: Mark Bloch <markb@mellanox.com>
+    Signed-off-by: Alex Vesker <valex@mellanox.com>
+    Reviewed-by: Or Gerlitz <ogerlitz@mellanox.com>
+    Signed-off-by: Leon Romanovsky <leon@kernel.org>
+    Signed-off-by: Doug Ledford <dledford@redhat.com>
+
+diff --git a/drivers/infiniband/core/addr.c b/drivers/infiniband/core/addr.c
+index b136d3acc5bd..0f58f46dbad7 100644
+--- a/drivers/infiniband/core/addr.c
++++ b/drivers/infiniband/core/addr.c
+@@ -699,13 +699,16 @@ EXPORT_SYMBOL(rdma_addr_cancel);
+ struct resolve_cb_context {
+ 	struct rdma_dev_addr *addr;
+ 	struct completion comp;
++	int status;
+ };
+ 
+ static void resolve_cb(int status, struct sockaddr *src_addr,
+ 	     struct rdma_dev_addr *addr, void *context)
+ {
+-	memcpy(((struct resolve_cb_context *)context)->addr, addr, sizeof(struct
+-				rdma_dev_addr));
++	if (!status)
++		memcpy(((struct resolve_cb_context *)context)->addr,
++		       addr, sizeof(struct rdma_dev_addr));
++	((struct resolve_cb_context *)context)->status = status;
+ 	complete(&((struct resolve_cb_context *)context)->comp);
+ }
+ 
+@@ -743,6 +746,10 @@ int rdma_addr_find_l2_eth_by_grh(const union ib_gid *sgid,
+ 
+ 	wait_for_completion(&ctx.comp);
+ 
++	ret = ctx.status;
++	if (ret)
++		return ret;
++
+ 	memcpy(dmac, dev_addr.dst_dev_addr, ETH_ALEN);
+ 	dev = dev_get_by_index(&init_net, dev_addr.bound_dev_if);
+ 	if (!dev)
+

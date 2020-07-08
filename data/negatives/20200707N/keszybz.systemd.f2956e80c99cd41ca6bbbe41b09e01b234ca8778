@@ -1,0 +1,36 @@
+commit f2956e80c99cd41ca6bbbe41b09e01b234ca8778
+Author: Michal Schmidt <mschmidt@redhat.com>
+Date:   Sat Jan 26 00:16:13 2013 +0100
+
+    nspawn: assume stdout is always writable if it does not support epoll
+    
+    stdout can be redirected to a regular file. Regular files don't support epoll.
+    nspawn failed with: "Failed to register fds in epoll: Operation not permitted".
+    
+    If stdout does not support epoll, assume it's always writable.
+
+diff --git a/src/nspawn/nspawn.c b/src/nspawn/nspawn.c
+index 62dc20d82..4c8737132 100644
+--- a/src/nspawn/nspawn.c
++++ b/src/nspawn/nspawn.c
+@@ -885,8 +885,17 @@ static int process_pty(int master, pid_t pid, sigset_t *mask) {
+         signal_ev.events = EPOLLIN;
+         signal_ev.data.fd = signal_fd;
+ 
+-        if (epoll_ctl(ep, EPOLL_CTL_ADD, STDOUT_FILENO, &stdout_ev) < 0 ||
+-            epoll_ctl(ep, EPOLL_CTL_ADD, master, &master_ev) < 0 ||
++        if (epoll_ctl(ep, EPOLL_CTL_ADD, STDOUT_FILENO, &stdout_ev) < 0) {
++                if (errno != EPERM) {
++                        log_error("Failed to register stdout in epoll: %m");
++                        r = -errno;
++                        goto finish;
++                }
++                /* stdout without epoll support. Likely redirected to regular file. */
++                stdout_writable = true;
++        }
++
++        if (epoll_ctl(ep, EPOLL_CTL_ADD, master, &master_ev) < 0 ||
+             epoll_ctl(ep, EPOLL_CTL_ADD, signal_fd, &signal_ev) < 0) {
+                 log_error("Failed to register fds in epoll: %m");
+                 r = -errno;
+

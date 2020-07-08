@@ -1,0 +1,186 @@
+commit a7c43a648cbc3240de4432685a510e815cad8ce8
+Author: Lauri Aalto <laalto@iki.fi>
+Date:   Thu Sep 4 06:39:10 2008 +0000
+
+    Refactored raptor_www internals to use v2 raptor_world functions.
+    
+    (raptor_www_new_v2,raptor_www_new_with_connection_v2): New API functions that take in raptor_world param.
+    
+    (raptor_www_s): Internal struct gains world param.
+
+diff --git a/src/raptor.h b/src/raptor.h
+index 77319380..407be0c7 100644
+--- a/src/raptor.h
++++ b/src/raptor.h
+@@ -1189,8 +1189,12 @@ void raptor_www_no_www_library_init_finish(void);
+ RAPTOR_API
+ raptor_www *raptor_www_new(void);
+ RAPTOR_API
++raptor_www *raptor_www_new_v2(raptor_world* world);
++RAPTOR_API
+ raptor_www *raptor_www_new_with_connection(void* connection);
+ RAPTOR_API
++raptor_www *raptor_www_new_with_connection_v2(raptor_world* world, void* connection);
++RAPTOR_API
+ void raptor_www_free(raptor_www *www);
+ RAPTOR_API
+ void raptor_www_set_user_agent(raptor_www *www, const char *user_agent);
+diff --git a/src/raptor_internal.h b/src/raptor_internal.h
+index e7a0d34e..48481032 100644
+--- a/src/raptor_internal.h
++++ b/src/raptor_internal.h
+@@ -804,6 +804,7 @@ int raptor_utf8_is_nfc(const unsigned char *input, size_t length);
+ 
+ /* WWW library state */
+ struct  raptor_www_s {
++  raptor_world* world;
+   char *type;
+   int free_type;
+   int total_bytes;
+diff --git a/src/raptor_www.c b/src/raptor_www.c
+index 9d378b95..82f98b8c 100644
+--- a/src/raptor_www.c
++++ b/src/raptor_www.c
+@@ -126,7 +126,6 @@ raptor_www_finish(void)
+ }
+ 
+ 
+-
+ /**
+  * raptor_www_new_with_connection:
+  * @connection: external WWW connection object.
+@@ -137,16 +136,41 @@ raptor_www_finish(void)
+  * when raptor is compiled with libcurl suppport. Otherwise the
+  * @connection is ignored.  This allows such things as setting
+  * up special flags on the curl handle before passing into the constructor.
++ *
++ * raptor_init() MUST have been called before calling this function.
++ * Use raptor_www_new_with_connection_v2() if using raptor_world APIs.
+  * 
+  * Return value: a new #raptor_www object or NULL on failure.
+  **/
+ raptor_www* 
+ raptor_www_new_with_connection(void *connection)
++{
++  return raptor_www_new_with_connection_v2(raptor_world_instance(), connection);
++}
++
++
++/**
++ * raptor_www_new_with_connection_v2:
++ * @world: raptor_world object
++ * @connection: external WWW connection object.
++ * 
++ * Constructor - create a new #raptor_www object over an existing WWW connection.
++ *
++ * At present this only works with a libcurl CURL handle object
++ * when raptor is compiled with libcurl suppport. Otherwise the
++ * @connection is ignored.  This allows such things as setting
++ * up special flags on the curl handle before passing into the constructor.
++ * 
++ * Return value: a new #raptor_www object or NULL on failure.
++ **/
++raptor_www* 
++raptor_www_new_with_connection_v2(raptor_world* world, void *connection)
+ {
+   raptor_www* www=(raptor_www* )RAPTOR_CALLOC(www, 1, sizeof(raptor_www));
+   if(!www)
+     return NULL;
+-  
++
++  www->world=world;  
+   www->type=NULL;
+   www->free_type=1; /* default is to free content type */
+   www->total_bytes=0;
+@@ -170,7 +194,7 @@ raptor_www_new_with_connection(void *connection)
+ #endif
+ 
+   www->error_handlers.locator=&www->locator;
+-  raptor_error_handlers_init(&www->error_handlers);
++  raptor_error_handlers_init_v2(world, &www->error_handlers);
+ 
+   return www;
+ }
+@@ -180,13 +204,31 @@ raptor_www_new_with_connection(void *connection)
+  * raptor_www_new:
+  * 
+  * Constructor - create a new #raptor_www object.
++ *
++ * raptor_init() MUST have been called before calling this function.
++ * Use raptor_www_new_v2() if using raptor_world APIs.
+  * 
+  * Return value: a new #raptor_www or NULL on failure.
+  **/
+ raptor_www*
+ raptor_www_new(void)
+ {
+-  return raptor_www_new_with_connection(NULL);
++  return raptor_www_new_v2(raptor_world_instance());
++}
++
++
++/**
++ * raptor_www_new_v2:
++ * @world: raptor_world object
++ * 
++ * Constructor - create a new #raptor_www object.
++ * 
++ * Return value: a new #raptor_www or NULL on failure.
++ **/
++raptor_www*
++raptor_www_new_v2(raptor_world* world)
++{
++  return raptor_www_new_with_connection_v2(world, NULL);
+ }
+ 
+ 
+@@ -237,10 +279,10 @@ raptor_www_free(raptor_www* www)
+ #endif
+ 
+   if(www->uri)
+-    raptor_free_uri(www->uri);
++    raptor_free_uri_v2(www->world, www->uri);
+ 
+   if(www->final_uri)
+-    raptor_free_uri(www->final_uri);
++    raptor_free_uri_v2(www->world, www->final_uri);
+ 
+   RAPTOR_FREE(www, www);
+ }
+@@ -541,7 +583,7 @@ raptor_www_error(raptor_www* www, const char *message, ...)
+ 
+   va_start(arguments, message);
+ 
+-  raptor_log_error_varargs(www->error_handlers.world,
++  raptor_log_error_varargs(www->world,
+                            RAPTOR_LOG_LEVEL_ERROR,
+                            www->error_handlers.handlers[RAPTOR_LOG_LEVEL_ERROR].handler,
+                            www->error_handlers.handlers[RAPTOR_LOG_LEVEL_ERROR].user_data,
+@@ -583,7 +625,7 @@ raptor_www_file_fetch(raptor_www* www)
+ {
+   char *filename;
+   FILE *fh;
+-  unsigned char *uri_string=raptor_uri_as_string(www->uri);
++  unsigned char *uri_string=raptor_uri_as_string_v2(www->world, www->uri);
+ #if defined(HAVE_UNISTD_H) && defined(HAVE_SYS_STAT_H)
+   struct stat buf;
+ #endif
+@@ -653,7 +695,7 @@ raptor_www_fetch(raptor_www *www, raptor_uri *uri)
+   status=raptor_www_file_fetch(www);
+ #else
+ 
+-  if(raptor_uri_uri_string_is_file_uri(raptor_uri_as_string(www->uri)))
++  if(raptor_uri_uri_string_is_file_uri(raptor_uri_as_string_v2(www->world, www->uri)))
+     status=raptor_www_file_fetch(www);
+   else {
+ #ifdef RAPTOR_WWW_LIBCURL
+@@ -768,7 +810,7 @@ raptor_www_fetch_to_string(raptor_www *www, raptor_uri *uri,
+ raptor_uri*
+ raptor_www_get_final_uri(raptor_www* www) 
+ {
+-  return www->final_uri ? raptor_uri_copy(www->final_uri) : NULL;
++  return www->final_uri ? raptor_uri_copy_v2(www->world, www->final_uri) : NULL;
+ }
+ 
+ 
+

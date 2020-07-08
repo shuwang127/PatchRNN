@@ -1,0 +1,116 @@
+commit 6e5fc85e54ba17d2c383de791f9cfe3878ec26d6
+Author: Roberto De Ioris <roberto@unbit.it>
+Date:   Sun Nov 25 17:29:41 2012 +0100
+
+    uwsgi_cache_del now takes flags
+
+diff --git a/core/cache.c b/core/cache.c
+index 80871857..a4e51bda 100644
+--- a/core/cache.c
++++ b/core/cache.c
+@@ -193,7 +193,7 @@ char *uwsgi_cache_get(char *key, uint16_t keylen, uint64_t * valsize) {
+ 	return NULL;
+ }
+ 
+-int uwsgi_cache_del(char *key, uint16_t keylen, uint64_t index) {
++int uwsgi_cache_del(char *key, uint16_t keylen, uint64_t index, uint16_t flags) {
+ 
+ 	struct uwsgi_cache_item *uci;
+ 	int ret = -1;
+@@ -641,7 +641,7 @@ void *cache_sweeper_loop(void *noarg) {
+                         uwsgi_wlock(uwsgi.cache_lock);
+                         if (uwsgi.cache_items[i].expires) {
+                                 if (uwsgi.cache_items[i].expires < (uint64_t) uwsgi.current_time) {
+-                                        uwsgi_cache_del(NULL, 0, i);
++                                        uwsgi_cache_del(NULL, 0, i, 0);
+                                         freed_items++;
+                                 }
+                         }
+diff --git a/core/utils.c b/core/utils.c
+index 174c9dbf..7d25d90a 100644
+--- a/core/utils.c
++++ b/core/utils.c
+@@ -4339,7 +4339,7 @@ SSL_SESSION *uwsgi_ssl_session_get_cb(SSL *ssl, unsigned char *key, int keylen,
+ 
+ void uwsgi_ssl_session_remove_cb(SSL_CTX *ctx, SSL_SESSION *sess) {
+ 	uwsgi_wlock(uwsgi.cache_lock);
+-        if (uwsgi_cache_del((char *) sess->session_id, sess->session_id_length, 0)) {
++        if (uwsgi_cache_del((char *) sess->session_id, sess->session_id_length, 0, 0)) {
+ 		if (uwsgi.ssl_verbose) {
+                         uwsgi_log("[uwsgi-ssl] error removing cache item\n");
+                 }
+diff --git a/plugins/cache/cache.c b/plugins/cache/cache.c
+index a160288f..9dec2d45 100644
+--- a/plugins/cache/cache.c
++++ b/plugins/cache/cache.c
+@@ -63,7 +63,7 @@ int uwsgi_cache_request(struct wsgi_request *wsgi_req) {
+                 case 2:
+                         // del
+                         if (wsgi_req->uh.pktsize > 0) {
+-                                uwsgi_cache_del(wsgi_req->buffer, wsgi_req->uh.pktsize, 0);
++                                uwsgi_cache_del(wsgi_req->buffer, wsgi_req->uh.pktsize, 0, 0);
+                         }
+                         break;
+                 case 3:
+diff --git a/plugins/php/php_plugin.c b/plugins/php/php_plugin.c
+index 099715e7..cdec8573 100644
+--- a/plugins/php/php_plugin.c
++++ b/plugins/php/php_plugin.c
+@@ -381,7 +381,7 @@ PHP_FUNCTION(uwsgi_cache_del) {
+         }
+ 
+ 	uwsgi_wlock(uwsgi.cache_lock);
+-        if (uwsgi_cache_del(key, keylen, 0)) {
++        if (uwsgi_cache_del(key, keylen, 0, 0)) {
+                 uwsgi_rwunlock(uwsgi.cache_lock);
+ 		RETURN_TRUE;
+         }
+diff --git a/plugins/python/uwsgi_pymodule.c b/plugins/python/uwsgi_pymodule.c
+index 2f20c3d9..e9ba4cb4 100644
+--- a/plugins/python/uwsgi_pymodule.c
++++ b/plugins/python/uwsgi_pymodule.c
+@@ -3277,7 +3277,7 @@ PyObject *py_uwsgi_cache_clear(PyObject * self, PyObject * args) {
+         for (i = 1; i < uwsgi.cache_max_items; i++) {
+ 		UWSGI_RELEASE_GIL
+                 uwsgi_wlock(uwsgi.cache_lock);
+-                uwsgi_cache_del(NULL, 0, i);
++                uwsgi_cache_del(NULL, 0, i, 0);
+                 uwsgi_rwunlock(uwsgi.cache_lock);
+ 		UWSGI_GET_GIL
+ 	}
+@@ -3305,7 +3305,7 @@ PyObject *py_uwsgi_cache_del(PyObject * self, PyObject * args) {
+ 	else if (uwsgi.cache_max_items) {
+ 		UWSGI_RELEASE_GIL
+ 		uwsgi_wlock(uwsgi.cache_lock);
+-		if (uwsgi_cache_del(key, keylen, 0)) {
++		if (uwsgi_cache_del(key, keylen, 0, 0)) {
+ 			uwsgi_rwunlock(uwsgi.cache_lock);
+ 			UWSGI_GET_GIL
+ 			Py_INCREF(Py_None);
+diff --git a/plugins/rack/rack_api.c b/plugins/rack/rack_api.c
+index 1436ad85..a3e6b005 100644
+--- a/plugins/rack/rack_api.c
++++ b/plugins/rack/rack_api.c
+@@ -348,7 +348,7 @@ VALUE rack_uwsgi_cache_del(VALUE *class, VALUE rbkey) {
+ 	size_t keylen = RSTRING_LEN(rbkey);
+ 	
+         uwsgi_wlock(uwsgi.cache_lock);
+-        if (uwsgi_cache_del(key, keylen, 0)) {
++        if (uwsgi_cache_del(key, keylen, 0, 0)) {
+         	uwsgi_rwunlock(uwsgi.cache_lock);
+ 		return Qfalse;
+         }
+diff --git a/uwsgi.h b/uwsgi.h
+index e0694981..ef227c98 100644
+--- a/uwsgi.h
++++ b/uwsgi.h
+@@ -2419,7 +2419,7 @@ ssize_t uwsgi_send_message(int, uint8_t, uint8_t, char *, uint16_t, int, ssize_t
+ char *uwsgi_cluster_best_node(void);
+ 
+ int uwsgi_cache_set(char *, uint16_t, char *, uint64_t, uint64_t, uint16_t);
+-int uwsgi_cache_del(char *, uint16_t, uint64_t);
++int uwsgi_cache_del(char *, uint16_t, uint64_t, uint16_t);
+ char *uwsgi_cache_get(char *, uint16_t, uint64_t *);
+ uint32_t uwsgi_cache_exists(char *, uint16_t);
+ 
+

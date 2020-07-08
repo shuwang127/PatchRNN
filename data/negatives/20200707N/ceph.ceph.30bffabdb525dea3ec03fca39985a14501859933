@@ -1,0 +1,68 @@
+commit 30bffabdb525dea3ec03fca39985a14501859933
+Author: Sage Weil <sage.weil@dreamhost.com>
+Date:   Thu Mar 31 18:07:18 2011 -0700
+
+    mds: try find_ino_dir if find_ino_peers fails for lookuphash
+    
+    Signed-off-by: Sage Weil <sage.weil@dreamhost.com>
+
+diff --git a/src/mds/Server.cc b/src/mds/Server.cc
+index 97fa764f2d..58be7106f6 100644
+--- a/src/mds/Server.cc
++++ b/src/mds/Server.cc
+@@ -2113,15 +2113,39 @@ void Server::handle_client_lookup_hash(MDRequest *mdr)
+   reply_request(mdr, reply, in, in->get_parent_dn());
+ }
+ 
++struct C_MDS_LookupHash2 : public Context {
++  Server *server;
++  MDRequest *mdr;
++  C_MDS_LookupHash2(Server *s, MDRequest *r) : server(s), mdr(r) {}
++  void finish(int r) {
++    server->_lookup_hash_2(mdr, r);
++  }
++};
++
+ void Server::_lookup_hash(MDRequest *mdr, int r)
+ {
+   dout(10) << "_lookup_hash " << mdr << " r=" << r << dendl;
+-  if (r < 0) {
+-    reply_request(mdr, r);
++  if (r == 0) {
++    dispatch_client_request(mdr);
+     return;
+   }
+ 
+-  dispatch_client_request(mdr);
++  // okay fine, try the dir object then!
++  mdcache->find_ino_dir(mdr->client_request->get_filepath2().get_ino(), new C_MDS_LookupHash2(this, mdr));
++}
++
++void Server::_lookup_hash_2(MDRequest *mdr, int r)
++{
++  dout(10) << "_lookup_hash_2 " << mdr << " r=" << r << dendl;
++  if (r == 0) {
++    dispatch_client_request(mdr);
++    return;
++  }
++
++  // give up
++  if (r == -ENOENT || r == -ENODATA)
++    r = -ESTALE;
++  reply_request(mdr, r);
+ }
+ 
+ 
+diff --git a/src/mds/Server.h b/src/mds/Server.h
+index 104d559a9a..d35813458d 100644
+--- a/src/mds/Server.h
++++ b/src/mds/Server.h
+@@ -138,6 +138,7 @@ public:
+   void handle_client_lookup_parent(MDRequest *mdr);
+   void handle_client_lookup_hash(MDRequest *mdr);
+   void _lookup_hash(MDRequest *mdr, int r);
++  void _lookup_hash_2(MDRequest *mdr, int r);
+   void handle_client_readdir(MDRequest *mdr);
+   void handle_client_file_setlock(MDRequest *mdr);
+   void handle_client_file_readlock(MDRequest *mdr);
+

@@ -1,0 +1,63 @@
+commit 913b9d0f75b53077ebd3ea8ae99e32b6a3a2d059
+Author: Alex Malyshev <alexanderm@fb.com>
+Date:   Mon Nov 9 23:31:17 2015 -0800
+
+    Don't emit struct arrays for collection initializers
+    
+    Summary: Right now, HashCollection holds onto a MixedArray and it assumes the array it is
+    constructed with is a MixedArray.  This crashes when we pass it a StructArray.
+    We could make the HashCollection ctor escalate the StructArray to a MixedArray,
+    but that's just wasted work at runtime.  Make the frontend emit a MixedArray
+    always for arrays being used for map/set initializers.
+    
+    Change the array emission logic to emit NewStructArray regardless of the value
+    of RuntimeOption::DisableStructArray.  The VM already knows to check the option
+    and will create a mixed array when struct arrays are disabled.
+    
+    Reviewed By: swtaarrs
+    
+    Differential Revision: D2616409
+    
+    fb-gh-sync-id: 1674b06fcfb1434089fe745e2b629e763b2cc331
+
+diff --git a/hphp/compiler/analysis/emitter.cpp b/hphp/compiler/analysis/emitter.cpp
+index f60cf497d5..219033ebeb 100644
+--- a/hphp/compiler/analysis/emitter.cpp
++++ b/hphp/compiler/analysis/emitter.cpp
+@@ -9074,9 +9074,7 @@ void EmitterVisitor::emitArrayInit(Emitter& e, ExpressionListPtr el,
+     return;
+   }
+ 
+-  bool allowPacked = !ct ||
+-    ct == CollectionType::Vector ||
+-    ct == CollectionType::ImmVector;
++  auto const allowPacked = !ct || isVectorCollection(*ct);
+ 
+   int nElms;
+   if (allowPacked && isPackedInit(el, &nElms)) {
+@@ -9089,10 +9087,11 @@ void EmitterVisitor::emitArrayInit(Emitter& e, ExpressionListPtr el,
+     return;
+   }
+ 
+-  // If `RuntimeOption::EvalDisableStructArray`, MakeStructArray actually makes
+-  // a mixed array, which can be used to initialize Map/Set.
+-  bool allowStruct = !ct ||
+-    (RuntimeOption::EvalDisableStructArray && !allowPacked);
++  // Don't emit struct arrays for a collection initializers.  HashCollection
++  // can't handle that yet.  Also ignore RuntimeOption::DisableStructArray here.
++  // The VM can handle the NewStructArray bytecode when struct arrays are
++  // disabled.
++  auto const allowStruct = !ct;
+   std::vector<std::string> keys;
+   if (allowStruct && isStructInit(el, keys)) {
+     for (int i = 0, n = keys.size(); i < n; i++) {
+@@ -9105,7 +9104,7 @@ void EmitterVisitor::emitArrayInit(Emitter& e, ExpressionListPtr el,
+   }
+ 
+   auto capacityHint = MixedArray::SmallSize;
+-  int capacity = el->getCount();
++  auto const capacity = el->getCount();
+   if (capacity > 0) capacityHint = capacity;
+   if (allowPacked && isPackedInit(el, &nElms, false /* ignore size */)) {
+     e.NewArray(capacityHint);
+

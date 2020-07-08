@@ -1,0 +1,81 @@
+commit 1e7e5a9048b30c57ba1ddaa6cdf59b21b65cde99
+Author: Martin Hicks <mort@sgi.com>
+Date:   Tue Jun 21 17:14:43 2005 -0700
+
+    [PATCH] VM: rate limit early reclaim
+    
+    When early zone reclaim is turned on the LRU is scanned more frequently when a
+    zone is low on memory.  This limits when the zone reclaim can be called by
+    skipping the scan if another thread (either via kswapd or sync reclaim) is
+    already reclaiming from the zone.
+    
+    Signed-off-by: Martin Hicks <mort@sgi.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index dfc2452ccb10..18fed8b67943 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -149,6 +149,8 @@ struct zone {
+ 	 * as it fails a watermark_ok() in __alloc_pages?
+ 	 */
+ 	int			reclaim_pages;
++	/* A count of how many reclaimers are scanning this zone */
++	atomic_t		reclaim_in_progress;
+ 
+ 	/*
+ 	 * prev_priority holds the scanning priority for this zone.  It is
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index a9da20bc2ed0..2019c1b19254 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -1738,6 +1738,7 @@ static void __init free_area_init_core(struct pglist_data *pgdat,
+ 		zone->nr_scan_inactive = 0;
+ 		zone->nr_active = 0;
+ 		zone->nr_inactive = 0;
++		atomic_set(&zone->reclaim_in_progress, -1);
+ 		if (!size)
+ 			continue;
+ 
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 7da846960d8a..24da725a30f0 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -900,7 +900,9 @@ shrink_caches(struct zone **zones, struct scan_control *sc)
+ 		if (zone->all_unreclaimable && sc->priority != DEF_PRIORITY)
+ 			continue;	/* Let kswapd poll it */
+ 
++		atomic_inc(&zone->reclaim_in_progress);
+ 		shrink_zone(zone, sc);
++		atomic_dec(&zone->reclaim_in_progress);
+ 	}
+ }
+  
+@@ -1111,7 +1113,9 @@ static int balance_pgdat(pg_data_t *pgdat, int nr_pages, int order)
+ 			sc.nr_reclaimed = 0;
+ 			sc.priority = priority;
+ 			sc.swap_cluster_max = nr_pages? nr_pages : SWAP_CLUSTER_MAX;
++			atomic_inc(&zone->reclaim_in_progress);
+ 			shrink_zone(zone, &sc);
++			atomic_dec(&zone->reclaim_in_progress);
+ 			reclaim_state->reclaimed_slab = 0;
+ 			nr_slab = shrink_slab(sc.nr_scanned, GFP_KERNEL,
+ 						lru_pages);
+@@ -1354,9 +1358,15 @@ int zone_reclaim(struct zone *zone, unsigned int gfp_mask, unsigned int order)
+ 	else
+ 		sc.swap_cluster_max = SWAP_CLUSTER_MAX;
+ 
++	/* Don't reclaim the zone if there are other reclaimers active */
++	if (!atomic_inc_and_test(&zone->reclaim_in_progress))
++		goto out;
++
+ 	shrink_zone(zone, &sc);
+ 	total_reclaimed = sc.nr_reclaimed;
+ 
++ out:
++	atomic_dec(&zone->reclaim_in_progress);
+ 	return total_reclaimed;
+ }
+ 
+

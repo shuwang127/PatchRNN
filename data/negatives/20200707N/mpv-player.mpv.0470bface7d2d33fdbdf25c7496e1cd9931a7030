@@ -1,0 +1,416 @@
+commit 0470bface7d2d33fdbdf25c7496e1cd9931a7030
+Author: anders <anders@b3059339-0415-0410-9bf9-f77b7e298cf2>
+Date:   Sun Nov 25 14:29:54 2001 +0000
+
+    Changes to audio out plugin, first plugin added
+    
+    
+    git-svn-id: svn://svn.mplayerhq.hu/mplayer/trunk@3108 b3059339-0415-0410-9bf9-f77b7e298cf2
+
+diff --git a/cfg-mplayer.h b/cfg-mplayer.h
+index 2acc3da62c..0ce55ab9e9 100644
+--- a/cfg-mplayer.h
++++ b/cfg-mplayer.h
+@@ -68,6 +68,8 @@ extern char * skinName;
+ extern int use_old_pp;
+ #endif
+ 
++// From audio plugins
++extern int pl_delay_len;
+ 
+ /* from libvo/aspect.c */
+ extern float monitor_aspect;
+@@ -93,7 +95,10 @@ struct config conf[]={
+ 	{"o", "Option -o has been renamed to -vo (video-out), use -vo !\n",
+             CONF_TYPE_PRINT, CONF_NOCFG, 0, 0},
+ 	{"vo", &video_driver, CONF_TYPE_STRING, 0, 0, 0},
++	// -----options related to audio and audio plugins-------
+ 	{"ao", &audio_driver, CONF_TYPE_STRING, 0, 0, 0},
++	{"aop", &audio_plugins, CONF_TYPE_STRING, 0, 0, 0},
++	{"aop_delay", &pl_delay_len, CONF_TYPE_INT, CONF_MIN, 0, 0},
+ //	{"dsp", &dsp, CONF_TYPE_STRING, CONF_NOCFG, 0, 0},
+ 	{"dsp", "Use -ao oss:dsp_path!\n", CONF_TYPE_PRINT, CONF_NOCFG, 0, 0},
+         {"mixer", &mixer_device, CONF_TYPE_STRING, 0, 0, 0},
+diff --git a/libao2/ao_plugin.c b/libao2/ao_plugin.c
+index 9bf8d9b5c7..56e500e2ac 100644
+--- a/libao2/ao_plugin.c
++++ b/libao2/ao_plugin.c
+@@ -18,24 +18,98 @@ static ao_info_t info =
+ 
+ LIBAO_EXTERN(plugin)
+ 
+-#define plugin(i) (ao_plugin_local_data.ao_plugins[i])
+-#define driver() (ao_plugin_local_data.ao_driver)
++#define plugin(i) (ao_plugin_local_data.plugins[i])
++#define driver() (ao_plugin_local_data.driver)
+ 
+-/* local data */
++#define NPL 2 //Number of PLugins
++
++extern ao_plugin_functions_t audio_plugin_delay;
++
++// local data 
+ typedef struct ao_plugin_local_data_s
+ {
+-  ao_plugin_functions_t** ao_plugins; /* List of all plugins */
+-  ao_functions_t* ao_driver;          /* ao driver used by ao_plugin */
++  char* cfg_plugins;           // List of plugins read from cfg-file
++  ao_functions_t* driver;      // Output driver set in mplayer.c
++  ao_plugin_functions_t** plugins;               // List of used plugins
++  ao_plugin_functions_t* available_plugins[NPL]; // List of abailabel plugins
+ } ao_plugin_local_data_t;
+ 
+-ao_plugin_local_data_t ao_plugin_local_data;
++ao_plugin_local_data_t ao_plugin_local_data={
++  NULL,
++  NULL,
++  NULL,
++  {
++    &audio_plugin_delay,
++    NULL
++  }
++};
+ 
+-/* gloabal data */
++// gloabal data 
+ ao_plugin_data_t ao_plugin_data;
++  
+ 
+ // to set/get/query special features/parameters
+ static int control(int cmd,int arg){
+-  return driver()->control(cmd,arg);
++  switch(cmd){
++  case AOCONTROL_SET_PLUGIN_DRIVER:
++    ao_plugin_local_data.driver=(ao_functions_t*)arg;
++    return CONTROL_OK;
++  case AOCONTROL_SET_PLUGIN_LIST:
++    ao_plugin_local_data.cfg_plugins=(char*)arg;
++    return CONTROL_OK;
++  default:
++    return driver()->control(cmd,arg);
++  }
++  return CONTROL_UNKNOWN;
++}
++
++// Recursive function for adding plugins
++// return 1 for success and 0 for error
++int add_plugin(int i,char* cfg){
++  int cnt=0;
++  // Find end of plugin name
++  while((cfg[cnt]!=',')&&(cfg[cnt]!='\0')&&(cnt<100)) cnt++;
++  if(cnt >= 100)
++    return 0;
++
++  // Is this the last itteration or just another plugin
++  if(cfg[cnt]=='\0'){
++    ao_plugin_local_data.plugins=malloc((i+1)*sizeof(ao_plugin_functions_t*));
++    if(ao_plugin_local_data.plugins){
++      ao_plugin_local_data.plugins[i+1]=NULL;
++      // Find the plugin matching the cfg string name
++      cnt=0;
++      while(ao_plugin_local_data.available_plugins[cnt] && cnt<20){
++	if(0==strcmp(ao_plugin_local_data.available_plugins[cnt]->info->short_name,cfg)){
++	  ao_plugin_local_data.plugins[i]=ao_plugin_local_data.available_plugins[cnt];
++	  return 1;
++	}
++	cnt++;
++      }
++      printf("[plugin]: Invalid plugin: %s \n",cfg);
++      return 0;
++    }
++    else 
++      return 0;
++  } else {
++    cfg[cnt]='\0';
++    if(add_plugin(i+1,&cfg[cnt+1])){
++      cnt=0;
++      // Find the plugin matching the cfg string name
++      while(ao_plugin_local_data.available_plugins[cnt] && cnt < 20){
++	if(0==strcmp(ao_plugin_local_data.available_plugins[cnt]->info->short_name,cfg)){
++	  ao_plugin_local_data.plugins[i]=ao_plugin_local_data.available_plugins[cnt];
++	  return 1;
++	}
++	cnt++;
++      }
++      printf("[plugin]: Invalid plugin: %s \n",cfg);
++      return 0;
++    }
++    else 
++      return 0;
++  }	
++  return 0; // Will never happen...
+ }
+ 
+ // open & setup audio device and plugins
+@@ -43,11 +117,12 @@ static int control(int cmd,int arg){
+ static int init(int rate,int channels,int format,int flags){
+   int ok=1;
+ 
+-  /* FIXME these are cfg file parameters */
++  /* Create list of plugins from cfg option */
+   int i=0; 
+-  ao_plugin_local_data.ao_plugins=malloc((i+1)*sizeof(ao_plugin_functions_t*));
+-  plugin(i)=NULL;
+-  ao_plugin_local_data.ao_driver=audio_out_drivers[1];
++  if(ao_plugin_local_data.cfg_plugins){
++    if(!add_plugin(i,ao_plugin_local_data.cfg_plugins))
++      return 0;
++  }
+ 
+   /* Set input parameters and itterate through plugins each plugin
+      changes the parameters according to its output */
+@@ -64,15 +139,23 @@ static int init(int rate,int channels,int format,int flags){
+   
+   if(!ok) return 0;
+ 
++  // This should never happen but check anyway 
++  if(NULL==ao_plugin_local_data.driver)
++    return 0;
++  
+   ok = driver()->init(ao_plugin_data.rate,
+-			ao_plugin_data.channels,
+-			ao_plugin_data.format,
+-			flags);
++		      ao_plugin_data.channels,
++		      ao_plugin_data.format,
++		      flags);
+   if(!ok) return 0;
+ 
+   /* Now that the driver is initialized we can calculate and set the
+      input and output buffers for each plugin */
+   ao_plugin_data.len=driver()->get_space();
++  while((i>0) && ok)
++    ok=plugin(--i)->control(AOCONTROL_PLUGIN_SET_LEN,ao_plugin_data.len);
++
++  if(!ok) return 0;
+ 
+   return 1;
+ }
+@@ -83,8 +166,8 @@ static void uninit(){
+   driver()->uninit();
+   while(plugin(i))
+     plugin(i++)->uninit();
+-  if(ao_plugin_local_data.ao_plugins)
+-    free(ao_plugin_local_data.ao_plugins);
++  if(ao_plugin_local_data.plugins)
++    free(ao_plugin_local_data.plugins);
+ }
+ 
+ // stop playing and empty buffers (for seeking/pause)
+diff --git a/libao2/audio_out.h b/libao2/audio_out.h
+index ff55b94452..4ac4929155 100644
+--- a/libao2/audio_out.h
++++ b/libao2/audio_out.h
+@@ -59,8 +59,12 @@ extern ao_functions_t* audio_out_drivers[];
+ #define AOCONTROL_QUERY_FORMAT 3 /* test for availabilty of a format */
+ #define AOCONTROL_GET_VOLUME 4
+ #define AOCONTROL_SET_VOLUME 5
++#define AOCONTROL_SET_PLUGIN_DRIVER 6
++#define AOCONTROL_SET_PLUGIN_LIST 7
+ 
+ typedef struct ao_control_vol_s {
+ 	float left;
+ 	float right;
+ } ao_control_vol_t;
++
++
+diff --git a/libao2/audio_plugin.h b/libao2/audio_plugin.h
+index 22bbdfd14c..7dac4cc624 100644
+--- a/libao2/audio_plugin.h
++++ b/libao2/audio_plugin.h
+@@ -18,10 +18,14 @@ typedef struct ao_plugin_data_s
+   int channels;	    /* setup number of channels */
+   int format;	    /* setup format */
+   double sz_mult;   /* Buffer size multiplier */
+-  double sz_fix;    /* Fix extra buffer size */
++  double sz_fix;    /* Fix (as in static) extra buffer size */
+   float delay_mult; /* Delay multiplier */
+   float delay_fix;  /* Fix delay */
+ }ao_plugin_data_t;
+ 
+ extern ao_plugin_data_t ao_plugin_data;
+ 
++//List of plugins 
++
++
++#define AOCONTROL_PLUGIN_SET_LEN 1
+diff --git a/libao2/audio_plugin_internal.h b/libao2/audio_plugin_internal.h
+index b928ccf95b..c23f8e6f45 100644
+--- a/libao2/audio_plugin_internal.h
++++ b/libao2/audio_plugin_internal.h
+@@ -1,11 +1,11 @@
+ // prototypes:
+ static int control(int cmd,int arg);
+-static int init(float*);
++static int init();
+ static void uninit();
+ static void reset();
+-static int play(void* data,int len,int flags);
++static int play();
+ 
+-#define LIBAO_PLUGIN_EXTERN(x) ao_functions_t audio_out_##x =\
++#define LIBAO_PLUGIN_EXTERN(x) ao_functions_t audio_plugin_##x =\
+ {\
+ 	&info,\
+ 	control,\
+diff --git a/libao2/pl_delay.c b/libao2/pl_delay.c
+new file mode 100644
+index 0000000000..07c571164a
+--- /dev/null
++++ b/libao2/pl_delay.c
+@@ -0,0 +1,120 @@
++/* This is a null audio out plugin it doesnt't really do anything
++   useful but serves an example of how audio plugins work. It delays
++   the output signal by the nuber of samples set by aop_delay n
++   where n is the number of bytes.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++
++#include "audio_out.h"
++#include "audio_plugin.h"
++#include "audio_plugin_internal.h"
++#include "afmt.h"
++
++static ao_info_t info =
++{
++        "Null audio plugin",
++        "delay",
++        "Anders",
++        ""
++};
++
++LIBAO_PLUGIN_EXTERN(delay)
++
++// local data
++typedef struct pl_delay_s
++{
++  void* data;       // local audio data block
++  void* delay; 	    // data block used for delaying audio signal
++  int len;          // local buffer length
++  int rate;         // local data rate
++  int channels;     // local number of channels
++  int format;       // local format
++
++} pl_delay_t;
++
++static pl_delay_t pl_delay={NULL,NULL,0,0,0,0};
++
++// global data
++int pl_delay_len=0; // number of samples to delay sound output set from cmd line
++
++// to set/get/query special features/parameters
++static int control(int cmd,int arg){
++  switch(cmd){
++  case AOCONTROL_PLUGIN_SET_LEN:
++    if(pl_delay.data) 
++      uninit();
++    pl_delay.len = arg;
++    pl_delay.data=(void*)malloc(arg);
++    return CONTROL_OK;
++  }
++  return -1;
++}
++
++// open & setup audio device
++// return: 1=success 0=fail
++static int init(){
++  int i=0;
++  float time_delay; // The number of tsamples this plugin delays the output data
++  /* if the output format of any of the below parameters differs from
++     what is give it should be changed. See ao_plugin init() */
++  pl_delay.rate=ao_plugin_data.rate;
++  pl_delay.channels=ao_plugin_data.channels+1; //0=mono 1=stereo
++  pl_delay.format=ao_plugin_data.format;
++
++  // Tell ao_plugin how much this plugin adds to the overall time delay
++  time_delay=-1*(float)pl_delay_len/((float)pl_delay.channels*(float)pl_delay.rate);
++  if(pl_delay.format != AFMT_U8 && pl_delay.format != AFMT_S8)
++    time_delay/=2;
++  ao_plugin_data.delay_fix+=time_delay;
++
++  pl_delay.delay=(void*)malloc(pl_delay_len);
++  if(!pl_delay.delay)
++    return 0;
++  for(i=0;i<pl_delay_len;i++)
++    ((char*)pl_delay.delay)[i]=0;
++  printf("[pl_delay] Output sound delayed by %i bytes\n",pl_delay_len);
++  return 1;
++}
++
++// close plugin
++static void uninit(){
++  if(pl_delay.delay) 
++    free(pl_delay.delay);
++  if(pl_delay.data) 
++    free(pl_delay.data);
++  pl_delay_len=0;
++}
++
++// empty buffers
++static void reset(){
++  int i = 0;
++  for(i=0;i<pl_delay.len;i++)
++    ((char*)pl_delay.data)[i]=0;
++  for(i=0;i<pl_delay_len;i++)
++    ((char*)pl_delay.delay)[i]=0;
++}
++
++// processes 'ao_plugin_data.len' bytes of 'data'
++// called for every block of data
++static int play(){
++  int i=0;
++  int j=0;
++  int k=0;
++  // Copy end of prev block to begining of buffer
++  for(i=0;i<pl_delay_len;i++,j++)
++    ((char*)pl_delay.data)[j]=((char*)pl_delay.delay)[i];
++  // Copy current block except end
++  for(i=0;i<ao_plugin_data.len-pl_delay_len;i++,j++,k++)
++    ((char*)pl_delay.data)[j]=((char*)ao_plugin_data.data)[k];
++  // Save away end of current block for next call
++  for(i=0;i<pl_delay_len;i++,k++)
++    ((char*)pl_delay.delay)[i]=((char*)ao_plugin_data.data)[k];
++  // Set output data block
++  ao_plugin_data.data=pl_delay.data;
++  return 1;
++}
++
++
++
+diff --git a/mplayer.c b/mplayer.c
+index cd6375274b..e24958f70a 100644
+--- a/mplayer.c
++++ b/mplayer.c
+@@ -216,6 +216,7 @@ static int play_n_frames=-1;
+ // screen info:
+ char* video_driver=NULL; //"mga"; // default
+ char* audio_driver=NULL;
++char* audio_plugins=NULL;
+ static int fullscreen=0;
+ static int vidmode=0;
+ static int softzoom=0;
+@@ -757,7 +758,20 @@ play_next_file:
+     mp_msg(MSGT_CPLAYER,MSGL_FATAL,MSGTR_InvalidAOdriver,audio_driver);
+     exit_player(MSGTR_Exit_error);
+   }
+-/*DSP!!  if(dsp) audio_out->control(AOCONTROL_SET_DEVICE,(int)dsp);*/
++  /* Initailize audio plugin interface if used */
++  if(audio_plugins){
++    for (i=0; audio_out_drivers[i] != NULL; i++){
++      const ao_info_t *info = audio_out_drivers[i]->info;
++      if(strcmp(info->short_name,"plugin") == 0){
++	audio_out_drivers[i]->control(AOCONTROL_SET_PLUGIN_DRIVER,(int)audio_out);
++	audio_out_drivers[i]->control(AOCONTROL_SET_PLUGIN_LIST,(int)audio_plugins);
++	audio_out = audio_out_drivers[i];
++	break;
++      }
++    }
++  }
++
++    
+ 
+   current_module="spudec";
+   vo_spudec=spudec_new();
+

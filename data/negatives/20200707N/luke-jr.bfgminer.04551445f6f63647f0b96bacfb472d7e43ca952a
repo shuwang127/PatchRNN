@@ -1,0 +1,43 @@
+commit 04551445f6f63647f0b96bacfb472d7e43ca952a
+Author: Con Kolivas <kernel@kolivas.org>
+Date:   Sat Sep 29 00:23:27 2012 +1000
+
+    Cope with pools being removed in the stratum thread.
+
+diff --git a/cgminer.c b/cgminer.c
+index 6a8e0950..94731219 100644
+--- a/cgminer.c
++++ b/cgminer.c
+@@ -3978,9 +3978,13 @@ static void *stratum_thread(void *userdata)
+ 			pool->stratum_active = pool->stratum_auth = false;
+ 			applog(LOG_WARNING, "Stratum connection to pool %d interrupted", pool->pool_no);
+ 			pool->getfail_occasions++;
+-			if (!initiate_stratum(pool) || !auth_stratum(pool)) {
+-				pool_died(pool);
+-				break;
++			total_go++;
++			while (!initiate_stratum(pool) || !auth_stratum(pool)) {
++				if (!pool->idle)
++					pool_died(pool);
++				if (pool->removed)
++					goto out;
++				sleep(5);
+ 			}
+ 		}
+ 		s = recv_line(pool->sock);
+@@ -3989,8 +3993,14 @@ static void *stratum_thread(void *userdata)
+ 		if (!parse_stratum(pool, s)) /* Create message queues here */
+ 			applog(LOG_INFO, "Unknown stratum msg: %s", s);
+ 		free(s);
++
++		if (unlikely(pool->removed)) {
++			CLOSESOCKET(pool->sock);
++			goto out;
++		}
+ 	}
+ 
++out:
+ 	return NULL;
+ }
+ 
+

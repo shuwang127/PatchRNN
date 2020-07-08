@@ -1,0 +1,178 @@
+commit 88301e5adab65f6750f66af284be410c4369d0c1
+Author: Praveenkumar Hulakund <praveenkumar.hulakund@oracle.com>
+Date:   Fri Nov 24 10:20:34 2017 +0100
+
+    Bug#25586773 - INCORRECT BEHAVIOR FOR CREATE TABLE SELECT IN A LOOP IN SP
+    
+    For the SQL statements in the stored routine, while resolving the
+    statement (on first execution or on re-parse trigger) memory is
+    allocated on the permanent mem-root. After executing the statement
+    for the first time a state of the statement query arena
+    is changed to STMT_EXECUTED. Subsequent execution uses execution
+    mem-root which is freed at the end of the execution.
+    
+    But for CREATE TABLE ... SELECT(CTS), state of the statement query
+    arena is never changed to the STMT_EXECUTED. Allocation in the
+    subsequent execution goes to the permanent mem-root. Hence the
+    memory growth or leak is observed.
+    
+    Why query arena state is not switched for CTS?
+    ==============================================
+    For the CTS, existence of the table being created is checked
+    while executing the statement. If table already exists then error
+    (or warning with IF TABLE EXISTS clause) is reported.
+    In the subsequent execution allocation(when table does not exists)
+    for items being created goes to permanent mem-root(as statement
+    query arena state is set STMT_INITIALIZED_FOR_SP always). So the
+    next execution will have valid pointers to refer.
+    
+    If state of query arena is set to the STMT_EXECUTED after first
+    execution then state is changed even when table exists error or
+    warning is reported. In this case subsequent execution uses
+    execution mem-root to allocate items. This memory is freed at
+    the end of the execution. So the next execution of routine refers
+    to invalid pointers.
+    
+    To avoid any issues related to invalid pointer reference(e.g.
+    bug19897405) the state of the statement query arena is set to
+    STMT_INITIALIZED_FOR_SP always for CTS by patch for bug25053286.
+    
+    Fix:
+    ==============================================
+    For the CTS in the stored routine, special handling is required
+    for the case of table exists error or warning.
+    
+    In case of table exists error or warning, the statement arena
+    is set to STMT_INITIALIZED_FOR_SP. With this change, next
+    execution uses permanent mem-root while resolving the statement
+    (this change fixes invalid pointer reference issues
+     e.g. bug19897405).
+    If the execution is successful then statement query arena is
+    changed to the STMT_EXECUTED. So on the subsequent execution of
+    the CTS, memory is allocated in the execution mem-root (this
+    change fixes memory growth or leak issue).
+    
+    Additional changes for  mysql-8.0 and mysql-trunk:
+    --------------------------------------------------
+    As part of this patch, code is modified to check the SP statement
+    execution state instead of error codes or flags while setting
+    the statement query arena state.
+    
+    Modification is made so that, SP statement query arena state
+    is not changed when error occurs in the statement parsing,
+    table opening and preparation phase. Query arena state is
+    changed to STMT_EXECUTED when error occurs in the execution
+    phase (or when execution succeeds). If "table exists" error
+    during execution phase of CTS then the state of the
+    statement query arena is set to STMT_INITIALIZED_FOR_SP,
+    as if statement must be reprepared.
+
+diff --git a/sql/sp_instr.cc b/sql/sp_instr.cc
+index 5fc40854809..664426ac137 100644
+--- a/sql/sp_instr.cc
++++ b/sql/sp_instr.cc
+@@ -266,6 +266,35 @@ static bool subst_spvars(THD *thd, sp_instr *instr, LEX_STRING *query_str)
+ // sp_lex_instr implementation.
+ ///////////////////////////////////////////////////////////////////////////
+ 
++class SP_instr_error_handler : public Internal_error_handler
++{
++public:
++  SP_instr_error_handler()
++    : cts_table_exists_error(false)
++  {}
++
++  virtual bool handle_condition(THD *thd,
++                                uint sql_errno,
++                                const char*,
++                                Sql_condition::enum_warning_level,
++                                const char*,
++                                Sql_condition **)
++  {
++    /*
++      Check if the "table exists" error or warning reported for the
++      CREATE TABLE ... SELECT statement.
++    */
++    if (thd->lex && thd->lex->sql_command == SQLCOM_CREATE_TABLE &&
++        thd->lex->select_lex.item_list.elements > 0 &&
++        sql_errno == ER_TABLE_EXISTS_ERROR)
++      cts_table_exists_error= true;
++
++    return false;
++  }
++
++  bool cts_table_exists_error;
++};
++
+ 
+ bool sp_lex_instr::reset_lex_and_exec_core(THD *thd,
+                                            uint *nextp,
+@@ -327,6 +356,9 @@ bool sp_lex_instr::reset_lex_and_exec_core(THD *thd,
+ 
+   reinit_stmt_before_use(thd, m_lex);
+ 
++  SP_instr_error_handler sp_instr_error_handler;
++  thd->push_internal_handler(&sp_instr_error_handler);
++
+   /* Open tables if needed. */
+ 
+   if (open_tables)
+@@ -400,6 +432,9 @@ bool sp_lex_instr::reset_lex_and_exec_core(THD *thd,
+     DBUG_PRINT("info",("exec_core returned: %d", rc));
+   }
+ 
++  // Pop SP_instr_error_handler error handler.
++  thd->pop_internal_handler();
++
+   if (m_lex->query_tables_own_last)
+   {
+     /*
+@@ -438,7 +473,8 @@ bool sp_lex_instr::reset_lex_and_exec_core(THD *thd,
+     See Query_arena->state definition for explanation.
+ 
+     Some special handling of CREATE TABLE .... SELECT in an SP is required. The
+-    state is always set to STMT_INITIALIZED_FOR_SP in such a case.
++    state is set to STMT_INITIALIZED_FOR_SP even in case of "table exists"
++    error situation.
+ 
+     Why is this necessary? A useful pointer would be to note how
+     PREPARE/EXECUTE uses functions like select_like_stmt_test to implement
+@@ -454,12 +490,10 @@ bool sp_lex_instr::reset_lex_and_exec_core(THD *thd,
+   */
+ 
+   bool reprepare_error=
+-    rc && thd->get_stmt_da()->sql_errno() == ER_NEED_REPREPARE;
+-  bool is_create_table_select=
+-    thd->lex && thd->lex->sql_command == SQLCOM_CREATE_TABLE &&
+-    thd->lex->select_lex.item_list.elements > 0;
++    rc && thd->is_error() &&
++    thd->get_stmt_da()->sql_errno() == ER_NEED_REPREPARE;
+ 
+-  if (reprepare_error || is_create_table_select)
++  if (reprepare_error || sp_instr_error_handler.cts_table_exists_error)
+     thd->stmt_arena->state= Query_arena::STMT_INITIALIZED_FOR_SP;
+   else if (!rc || !thd->is_error() ||
+            (thd->get_stmt_da()->sql_errno() != ER_CANT_REOPEN_TABLE &&
+diff --git a/sql/table.cc b/sql/table.cc
+index f9f533c0563..fe3c9ea0cbe 100644
+--- a/sql/table.cc
++++ b/sql/table.cc
+@@ -1,5 +1,5 @@
+ /*
+-   Copyright (c) 2000, 2016, Oracle and/or its affiliates. All rights reserved.
++   Copyright (c) 2000, 2017, Oracle and/or its affiliates. All rights reserved.
+ 
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+@@ -4201,7 +4201,9 @@ bool TABLE_LIST::prep_check_option(THD *thd, uint8 check_opt_type)
+ 
+ void TABLE_LIST::hide_view_error(THD *thd)
+ {
+-  if (thd->killed || thd->get_internal_handler())
++  if (thd->killed ||
++      (thd->lex->sql_command == SQLCOM_SHOW_CREATE &&
++       thd->get_internal_handler()))
+     return;
+   /* Hide "Unknown column" or "Unknown function" error */
+   DBUG_ASSERT(thd->is_error());
+

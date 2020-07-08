@@ -1,0 +1,60 @@
+commit a1706ac4c0201ea0143dc0db0659001b26ceeabb
+Author: Jens Axboe <jaxboe@fusionio.com>
+Date:   Mon May 30 07:42:51 2011 +0200
+
+    Revert "block: Remove extra discard_alignment from hd_struct."
+    
+    It was not a good idea to start dereferencing disk->queue from
+    the fs sysfs strategy for displaying discard alignment. We ran
+    into first a NULL pointer deref, and after fixing that we sometimes
+    see unvalid disk->queue pointer values.
+    
+    Since discard is the only one of the bunch actually looking into
+    the queue, just revert the change.
+    
+    This reverts commit 23ceb5b7719e9276d4fa72a3ecf94dd396755276.
+    
+    Conflicts:
+            fs/partitions/check.c
+
+diff --git a/fs/partitions/check.c b/fs/partitions/check.c
+index f82e762eeca2..d545e97d99c3 100644
+--- a/fs/partitions/check.c
++++ b/fs/partitions/check.c
+@@ -255,13 +255,7 @@ ssize_t part_discard_alignment_show(struct device *dev,
+ 				   struct device_attribute *attr, char *buf)
+ {
+ 	struct hd_struct *p = dev_to_part(dev);
+-	struct gendisk *disk = dev_to_disk(dev);
+-	unsigned int alignment = 0;
+-
+-	if (disk->queue)
+-		alignment = queue_limit_discard_alignment(&disk->queue->limits,
+-								p->start_sect);
+-	return sprintf(buf, "%u\n", alignment);
++	return sprintf(buf, "%u\n", p->discard_alignment);
+ }
+ 
+ ssize_t part_stat_show(struct device *dev,
+@@ -455,6 +449,8 @@ struct hd_struct *add_partition(struct gendisk *disk, int partno,
+ 	p->start_sect = start;
+ 	p->alignment_offset =
+ 		queue_limit_alignment_offset(&disk->queue->limits, start);
++	p->discard_alignment =
++		queue_limit_discard_alignment(&disk->queue->limits, start);
+ 	p->nr_sects = len;
+ 	p->partno = partno;
+ 	p->policy = get_disk_ro(disk);
+diff --git a/include/linux/genhd.h b/include/linux/genhd.h
+index b78956b3c2e7..300d7582006e 100644
+--- a/include/linux/genhd.h
++++ b/include/linux/genhd.h
+@@ -100,6 +100,7 @@ struct hd_struct {
+ 	sector_t start_sect;
+ 	sector_t nr_sects;
+ 	sector_t alignment_offset;
++	unsigned int discard_alignment;
+ 	struct device __dev;
+ 	struct kobject *holder_dir;
+ 	int policy, partno;
+

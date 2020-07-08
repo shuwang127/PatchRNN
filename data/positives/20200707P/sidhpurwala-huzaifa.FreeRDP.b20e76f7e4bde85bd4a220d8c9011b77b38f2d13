@@ -1,0 +1,159 @@
+commit b20e76f7e4bde85bd4a220d8c9011b77b38f2d13
+Author: Marc-André Moreau <marcandre.moreau@gmail.com>
+Date:   Sat Jan 7 21:57:42 2012 -0500
+
+    xfreerdp-server: basic mouse input
+
+diff --git a/server/X11/xf_encode.c b/server/X11/xf_encode.c
+index 30352da8..508648c1 100644
+--- a/server/X11/xf_encode.c
++++ b/server/X11/xf_encode.c
+@@ -21,9 +21,14 @@
+ 
+ #include "xf_encode.h"
+ 
+-XImage* xf_snapshot(xfInfo* xfi, int x, int y, int width, int height)
++XImage* xf_snapshot(xfPeerContext* xfp, int x, int y, int width, int height)
+ {
+ 	XImage* image;
++	xfInfo* xfi = xfp->info;
++
++	pthread_mutex_lock(&(xfp->mutex));
+ 	image = XGetImage(xfi->display, RootWindow(xfi->display, xfi->number), x, y, width, height, AllPlanes, ZPixmap);
++	pthread_mutex_unlock(&(xfp->mutex));
++
+ 	return image;
+ }
+diff --git a/server/X11/xf_encode.h b/server/X11/xf_encode.h
+index 9b1b5f9f..18031afa 100644
+--- a/server/X11/xf_encode.h
++++ b/server/X11/xf_encode.h
+@@ -20,8 +20,11 @@
+ #ifndef __XF_ENCODE_H
+ #define __XF_ENCODE_H
+ 
++#include <pthread.h>
+ #include "xfreerdp.h"
+ 
+-XImage* xf_snapshot(xfInfo* xfi, int x, int y, int width, int height);
++#include "xf_peer.h"
++
++XImage* xf_snapshot(xfPeerContext* xfp, int x, int y, int width, int height);
+ 
+ #endif /* __XF_ENCODE_H */
+diff --git a/server/X11/xf_peer.c b/server/X11/xf_peer.c
+index 1f49dd3a..60644466 100644
+--- a/server/X11/xf_peer.c
++++ b/server/X11/xf_peer.c
+@@ -233,6 +233,8 @@ void xf_peer_init(freerdp_peer* client)
+ 	xfp->hdc->hwnd->count = 32;
+ 	xfp->hdc->hwnd->cinvalid = (HGDI_RGN) malloc(sizeof(GDI_RGN) * xfp->hdc->hwnd->count);
+ 	xfp->hdc->hwnd->ninvalid = 0;
++
++	pthread_mutex_init(&(xfp->mutex), NULL);
+ }
+ 
+ STREAM* xf_peer_stream_init(xfPeerContext* context)
+@@ -302,6 +304,8 @@ void* xf_monitor_graphics(void* param)
+ 
+ 	while (1)
+ 	{
++		pthread_mutex_lock(&(xfp->mutex));
++
+ 		while (XPending(xfi->display))
+ 		{
+ 			memset(&xevent, 0, sizeof(xevent));
+@@ -347,6 +351,7 @@ void* xf_monitor_graphics(void* param)
+ 			stopwatch_start(xfp->stopwatch);
+ 
+ 			region = xfp->hdc->hwnd->invalid;
++			pthread_mutex_unlock(&(xfp->mutex));
+ 
+ 			xf_signal_event(xfp);
+ 
+@@ -355,8 +360,11 @@ void* xf_monitor_graphics(void* param)
+ 				freerdp_usleep(33);
+ 			}
+ 		}
+-
+-		freerdp_usleep(33);
++		else
++		{
++			pthread_mutex_unlock(&(xfp->mutex));
++			freerdp_usleep(33);
++		}
+ 	}
+ 
+ 	return NULL;
+@@ -465,7 +473,7 @@ void xf_peer_rfx_update(freerdp_peer* client, int x, int y, int width, int heigh
+ 
+ 	s = xf_peer_stream_init(xfp);
+ 
+-	image = xf_snapshot(xfi, x, y, width, height);
++	image = xf_snapshot(xfp, x, y, width, height);
+ 
+ 	freerdp_image_convert((uint8*) image->data, xfp->capture_buffer, width, height, 32, 24, xfi->clrconv);
+ 
+@@ -638,20 +646,45 @@ void xf_peer_unicode_keyboard_event(rdpInput* input, uint16 code)
+ 
+ void xf_peer_mouse_event(rdpInput* input, uint16 flags, uint16 x, uint16 y)
+ {
++	int button = 0;
++	boolean down = false;
++	xfPeerContext* xfp = (xfPeerContext*) input->context;
++	xfInfo* xfi = xfp->info;
++
++	pthread_mutex_lock(&(xfp->mutex));
+ #ifdef WITH_XTEST
+-	//xfInfo* xfi = ((xfPeerContext*) input->context)->info;
+-	//XTestFakeMotionEvent(xfi->display, 0, x, y, CurrentTime);
++
++	if (flags & PTR_FLAGS_MOVE)
++		XTestFakeMotionEvent(xfi->display, 0, x, y, CurrentTime);
++
++	if (flags & PTR_FLAGS_BUTTON1)
++		button = 1;
++	else if (flags & PTR_FLAGS_BUTTON2)
++		button = 2;
++	else if (flags & PTR_FLAGS_BUTTON3)
++		button = 3;
++
++	if (flags & PTR_FLAGS_DOWN)
++		down = true;
++
++	if (button != 0)
++		XTestFakeButtonEvent(xfi->display, button, down, CurrentTime);
+ #endif
++	pthread_mutex_unlock(&(xfp->mutex));
+ 
+ 	printf("Client sent a mouse event (flags:0x%X pos:%d,%d)\n", flags, x, y);
+ }
+ 
+ void xf_peer_extended_mouse_event(rdpInput* input, uint16 flags, uint16 x, uint16 y)
+ {
++	xfPeerContext* xfp = (xfPeerContext*) input->context;
++	xfInfo* xfi = xfp->info;
++
++	pthread_mutex_lock(&(xfp->mutex));
+ #ifdef WITH_XTEST
+-	//xfInfo* xfi = ((xfPeerContext*) input->context)->info;
+-	//XTestFakeMotionEvent(xfi->display, 0, x, y, CurrentTime);
++	XTestFakeMotionEvent(xfi->display, 0, x, y, CurrentTime);
+ #endif
++	pthread_mutex_unlock(&(xfp->mutex));
+ 
+ 	printf("Client sent an extended mouse event (flags:0x%X pos:%d,%d)\n", flags, x, y);
+ }
+diff --git a/server/X11/xf_peer.h b/server/X11/xf_peer.h
+index 0a412c55..e1b774a0 100644
+--- a/server/X11/xf_peer.h
++++ b/server/X11/xf_peer.h
+@@ -44,6 +44,7 @@ struct xf_peer_context
+ 	pthread_t thread;
+ 	int activations;
+ 	STOPWATCH* stopwatch;
++	pthread_mutex_t mutex;
+ };
+ typedef struct xf_peer_context xfPeerContext;
+ 
+

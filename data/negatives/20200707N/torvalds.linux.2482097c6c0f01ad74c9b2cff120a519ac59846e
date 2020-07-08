@@ -1,0 +1,152 @@
+commit 2482097c6c0f01ad74c9b2cff120a519ac59846e
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Wed Jun 7 09:42:39 2017 +0100
+
+    posix-timers: Move compat_timer_create() to native, get rid of set_fs()
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+    Cc: John Stultz <john.stultz@linaro.org>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Link: http://lkml.kernel.org/r/20170607084241.28657-14-viro@ZenIV.linux.org.uk
+
+diff --git a/kernel/compat.c b/kernel/compat.c
+index 582c38bfdf60..4544eb63edfa 100644
+--- a/kernel/compat.c
++++ b/kernel/compat.c
+@@ -580,24 +580,6 @@ int put_compat_itimerspec(struct compat_itimerspec __user *dst,
+ 	return 0;
+ }
+ 
+-COMPAT_SYSCALL_DEFINE3(timer_create, clockid_t, which_clock,
+-		       struct compat_sigevent __user *, timer_event_spec,
+-		       timer_t __user *, created_timer_id)
+-{
+-	struct sigevent __user *event = NULL;
+-
+-	if (timer_event_spec) {
+-		struct sigevent kevent;
+-
+-		event = compat_alloc_user_space(sizeof(*event));
+-		if (get_compat_sigevent(&kevent, timer_event_spec) ||
+-		    copy_to_user(event, &kevent, sizeof(*event)))
+-			return -EFAULT;
+-	}
+-
+-	return sys_timer_create(which_clock, event, created_timer_id);
+-}
+-
+ /*
+  * We currently only need the following fields from the sigevent
+  * structure: sigev_value, sigev_signo, sig_notify and (sometimes
+diff --git a/kernel/time/posix-stubs.c b/kernel/time/posix-stubs.c
+index a375c31cb352..38f3b20efa29 100644
+--- a/kernel/time/posix-stubs.c
++++ b/kernel/time/posix-stubs.c
+@@ -41,6 +41,7 @@ SYS_NI(setitimer);
+ #ifdef __ARCH_WANT_SYS_ALARM
+ SYS_NI(alarm);
+ #endif
++COMPAT_SYS_NI(timer_create);
+ COMPAT_SYS_NI(clock_adjtime);
+ COMPAT_SYS_NI(timer_settime);
+ COMPAT_SYS_NI(timer_gettime);
+diff --git a/kernel/time/posix-timers.c b/kernel/time/posix-timers.c
+index 61a5fb91a3c7..c9f45a84fb8b 100644
+--- a/kernel/time/posix-timers.c
++++ b/kernel/time/posix-timers.c
+@@ -490,15 +490,12 @@ static int common_timer_create(struct k_itimer *new_timer)
+ }
+ 
+ /* Create a POSIX.1b interval timer. */
+-
+-SYSCALL_DEFINE3(timer_create, const clockid_t, which_clock,
+-		struct sigevent __user *, timer_event_spec,
+-		timer_t __user *, created_timer_id)
++static int do_timer_create(clockid_t which_clock, struct sigevent *event,
++			   timer_t __user *created_timer_id)
+ {
+ 	const struct k_clock *kc = clockid_to_kclock(which_clock);
+ 	struct k_itimer *new_timer;
+ 	int error, new_timer_id;
+-	sigevent_t event;
+ 	int it_id_set = IT_ID_NOT_SET;
+ 
+ 	if (!kc)
+@@ -523,29 +520,25 @@ SYSCALL_DEFINE3(timer_create, const clockid_t, which_clock,
+ 	new_timer->kclock = kc;
+ 	new_timer->it_overrun = -1;
+ 
+-	if (timer_event_spec) {
+-		if (copy_from_user(&event, timer_event_spec, sizeof (event))) {
+-			error = -EFAULT;
+-			goto out;
+-		}
++	if (event) {
+ 		rcu_read_lock();
+-		new_timer->it_pid = get_pid(good_sigevent(&event));
++		new_timer->it_pid = get_pid(good_sigevent(event));
+ 		rcu_read_unlock();
+ 		if (!new_timer->it_pid) {
+ 			error = -EINVAL;
+ 			goto out;
+ 		}
++		new_timer->it_sigev_notify     = event->sigev_notify;
++		new_timer->sigq->info.si_signo = event->sigev_signo;
++		new_timer->sigq->info.si_value = event->sigev_value;
+ 	} else {
+-		memset(&event.sigev_value, 0, sizeof(event.sigev_value));
+-		event.sigev_notify = SIGEV_SIGNAL;
+-		event.sigev_signo = SIGALRM;
+-		event.sigev_value.sival_int = new_timer->it_id;
++		new_timer->it_sigev_notify     = SIGEV_SIGNAL;
++		new_timer->sigq->info.si_signo = SIGALRM;
++		memset(&new_timer->sigq->info.si_value, 0, sizeof(sigval_t));
++		new_timer->sigq->info.si_value.sival_int = new_timer->it_id;
+ 		new_timer->it_pid = get_pid(task_tgid(current));
+ 	}
+ 
+-	new_timer->it_sigev_notify     = event.sigev_notify;
+-	new_timer->sigq->info.si_signo = event.sigev_signo;
+-	new_timer->sigq->info.si_value = event.sigev_value;
+ 	new_timer->sigq->info.si_tid   = new_timer->it_id;
+ 	new_timer->sigq->info.si_code  = SI_TIMER;
+ 
+@@ -576,6 +569,36 @@ SYSCALL_DEFINE3(timer_create, const clockid_t, which_clock,
+ 	return error;
+ }
+ 
++SYSCALL_DEFINE3(timer_create, const clockid_t, which_clock,
++		struct sigevent __user *, timer_event_spec,
++		timer_t __user *, created_timer_id)
++{
++	if (timer_event_spec) {
++		sigevent_t event;
++
++		if (copy_from_user(&event, timer_event_spec, sizeof (event)))
++			return -EFAULT;
++		return do_timer_create(which_clock, &event, created_timer_id);
++	}
++	return do_timer_create(which_clock, NULL, created_timer_id);
++}
++
++#ifdef CONFIG_COMPAT
++COMPAT_SYSCALL_DEFINE3(timer_create, clockid_t, which_clock,
++		       struct compat_sigevent __user *, timer_event_spec,
++		       timer_t __user *, created_timer_id)
++{
++	if (timer_event_spec) {
++		sigevent_t event;
++
++		if (get_compat_sigevent(&event, timer_event_spec))
++			return -EFAULT;
++		return do_timer_create(which_clock, &event, created_timer_id);
++	}
++	return do_timer_create(which_clock, NULL, created_timer_id);
++}
++#endif
++
+ /*
+  * Locking issues: We need to protect the result of the id look up until
+  * we get the timer locked down so it is not deleted under us.  The
+

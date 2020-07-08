@@ -1,0 +1,293 @@
+commit 4f335a3d7fda4b4a0efd4568ac61d036098d951a
+Author: Tom Lane <tgl@sss.pgh.pa.us>
+Date:   Fri Nov 17 18:00:15 2006 +0000
+
+    Repair two related errors in heap_lock_tuple: it was failing to recognize
+    cases where we already hold the desired lock "indirectly", either via
+    membership in a MultiXact or because the lock was originally taken by a
+    different subtransaction of the current transaction.  These cases must be
+    accounted for to avoid needless deadlocks and/or inappropriate replacement of
+    an exclusive lock with a shared lock.  Per report from Clarence Gardner and
+    subsequent investigation.
+
+diff --git a/src/backend/access/heap/heapam.c b/src/backend/access/heap/heapam.c
+index 12775cc2db..581f5194c4 100644
+--- a/src/backend/access/heap/heapam.c
++++ b/src/backend/access/heap/heapam.c
+@@ -8,7 +8,7 @@
+  *
+  *
+  * IDENTIFICATION
+- *	  $PostgreSQL: pgsql/src/backend/access/heap/heapam.c,v 1.221 2006/11/05 22:42:07 tgl Exp $
++ *	  $PostgreSQL: pgsql/src/backend/access/heap/heapam.c,v 1.222 2006/11/17 18:00:14 tgl Exp $
+  *
+  *
+  * INTERFACE ROUTINES
+@@ -2359,6 +2359,8 @@ heap_lock_tuple(Relation relation, HeapTuple tuple, Buffer *buffer,
+ 	ItemId		lp;
+ 	PageHeader	dp;
+ 	TransactionId xid;
++	TransactionId xmax;
++	uint16		old_infomask;
+ 	uint16		new_infomask;
+ 	LOCKMODE	tuple_lock_type;
+ 	bool		have_tuple_lock = false;
+@@ -2395,6 +2397,25 @@ l3:
+ 
+ 		LockBuffer(*buffer, BUFFER_LOCK_UNLOCK);
+ 
++		/*
++		 * If we wish to acquire share lock, and the tuple is already
++		 * share-locked by a multixact that includes any subtransaction of the
++		 * current top transaction, then we effectively hold the desired lock
++		 * already.  We *must* succeed without trying to take the tuple lock,
++		 * else we will deadlock against anyone waiting to acquire exclusive
++		 * lock.  We don't need to make any state changes in this case.
++		 */
++		if (mode == LockTupleShared &&
++			(infomask & HEAP_XMAX_IS_MULTI) &&
++			MultiXactIdIsCurrent((MultiXactId) xwait))
++		{
++			Assert(infomask & HEAP_XMAX_SHARED_LOCK);
++			/* Probably can't hold tuple lock here, but may as well check */
++			if (have_tuple_lock)
++				UnlockTuple(relation, tid, tuple_lock_type);
++			return HeapTupleMayBeUpdated;
++		}
++
+ 		/*
+ 		 * Acquire tuple lock to establish our priority for the tuple.
+ 		 * LockTuple will release us when we are next-in-line for the tuple.
+@@ -2532,6 +2553,35 @@ l3:
+ 		return result;
+ 	}
+ 
++	/*
++	 * We might already hold the desired lock (or stronger), possibly under
++	 * a different subtransaction of the current top transaction.  If so,
++	 * there is no need to change state or issue a WAL record.  We already
++	 * handled the case where this is true for xmax being a MultiXactId,
++	 * so now check for cases where it is a plain TransactionId.
++	 *
++	 * Note in particular that this covers the case where we already hold
++	 * exclusive lock on the tuple and the caller only wants shared lock.
++	 * It would certainly not do to give up the exclusive lock.
++	 */
++	xmax = HeapTupleHeaderGetXmax(tuple->t_data);
++	old_infomask = tuple->t_data->t_infomask;
++
++	if (!(old_infomask & (HEAP_XMAX_INVALID |
++						  HEAP_XMAX_COMMITTED |
++						  HEAP_XMAX_IS_MULTI)) &&
++		(mode == LockTupleShared ?
++		 (old_infomask & HEAP_IS_LOCKED) :
++		 (old_infomask & HEAP_XMAX_EXCL_LOCK)) &&
++		TransactionIdIsCurrentTransactionId(xmax))
++	{
++		LockBuffer(*buffer, BUFFER_LOCK_UNLOCK);
++		/* Probably can't hold tuple lock here, but may as well check */
++		if (have_tuple_lock)
++			UnlockTuple(relation, tid, tuple_lock_type);
++		return HeapTupleMayBeUpdated;
++	}
++
+ 	/*
+ 	 * Compute the new xmax and infomask to store into the tuple.  Note we do
+ 	 * not modify the tuple just yet, because that would leave it in the wrong
+@@ -2539,19 +2589,14 @@ l3:
+ 	 */
+ 	xid = GetCurrentTransactionId();
+ 
+-	new_infomask = tuple->t_data->t_infomask;
+-
+-	new_infomask &= ~(HEAP_XMAX_COMMITTED |
+-					  HEAP_XMAX_INVALID |
+-					  HEAP_XMAX_IS_MULTI |
+-					  HEAP_IS_LOCKED |
+-					  HEAP_MOVED);
++	new_infomask = old_infomask & ~(HEAP_XMAX_COMMITTED |
++									HEAP_XMAX_INVALID |
++									HEAP_XMAX_IS_MULTI |
++									HEAP_IS_LOCKED |
++									HEAP_MOVED);
+ 
+ 	if (mode == LockTupleShared)
+ 	{
+-		TransactionId xmax = HeapTupleHeaderGetXmax(tuple->t_data);
+-		uint16		old_infomask = tuple->t_data->t_infomask;
+-
+ 		/*
+ 		 * If this is the first acquisition of a shared lock in the current
+ 		 * transaction, set my per-backend OldestMemberMXactId setting. We can
+@@ -2592,32 +2637,13 @@ l3:
+ 			}
+ 			else if (TransactionIdIsInProgress(xmax))
+ 			{
+-				if (TransactionIdEquals(xmax, xid))
+-				{
+-					/*
+-					 * If the old locker is ourselves, we'll just mark the
+-					 * tuple again with our own TransactionId.	However we
+-					 * have to consider the possibility that we had exclusive
+-					 * rather than shared lock before --- if so, be careful to
+-					 * preserve the exclusivity of the lock.
+-					 */
+-					if (!(old_infomask & HEAP_XMAX_SHARED_LOCK))
+-					{
+-						new_infomask &= ~HEAP_XMAX_SHARED_LOCK;
+-						new_infomask |= HEAP_XMAX_EXCL_LOCK;
+-						mode = LockTupleExclusive;
+-					}
+-				}
+-				else
+-				{
+-					/*
+-					 * If the Xmax is a valid TransactionId, then we need to
+-					 * create a new MultiXactId that includes both the old
+-					 * locker and our own TransactionId.
+-					 */
+-					xid = MultiXactIdCreate(xmax, xid);
+-					new_infomask |= HEAP_XMAX_IS_MULTI;
+-				}
++				/*
++				 * If the XMAX is a valid TransactionId, then we need to
++				 * create a new MultiXactId that includes both the old
++				 * locker and our own TransactionId.
++				 */
++				xid = MultiXactIdCreate(xmax, xid);
++				new_infomask |= HEAP_XMAX_IS_MULTI;
+ 			}
+ 			else
+ 			{
+diff --git a/src/backend/access/transam/multixact.c b/src/backend/access/transam/multixact.c
+index 167d65fd2d..80cb5bae3f 100644
+--- a/src/backend/access/transam/multixact.c
++++ b/src/backend/access/transam/multixact.c
+@@ -42,7 +42,7 @@
+  * Portions Copyright (c) 1996-2006, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+- * $PostgreSQL: pgsql/src/backend/access/transam/multixact.c,v 1.21 2006/10/04 00:29:49 momjian Exp $
++ * $PostgreSQL: pgsql/src/backend/access/transam/multixact.c,v 1.22 2006/11/17 18:00:15 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -366,7 +366,6 @@ bool
+ MultiXactIdIsRunning(MultiXactId multi)
+ {
+ 	TransactionId *members;
+-	TransactionId myXid;
+ 	int			nmembers;
+ 	int			i;
+ 
+@@ -380,12 +379,14 @@ MultiXactIdIsRunning(MultiXactId multi)
+ 		return false;
+ 	}
+ 
+-	/* checking for myself is cheap */
+-	myXid = GetTopTransactionId();
+-
++	/*
++	 * Checking for myself is cheap compared to looking in shared memory,
++	 * so first do the equivalent of MultiXactIdIsCurrent().  This is not
++	 * needed for correctness, it's just a fast path.
++	 */
+ 	for (i = 0; i < nmembers; i++)
+ 	{
+-		if (TransactionIdEquals(members[i], myXid))
++		if (TransactionIdIsCurrentTransactionId(members[i]))
+ 		{
+ 			debug_elog3(DEBUG2, "IsRunning: I (%d) am running!", i);
+ 			pfree(members);
+@@ -416,6 +417,44 @@ MultiXactIdIsRunning(MultiXactId multi)
+ 	return false;
+ }
+ 
++/*
++ * MultiXactIdIsCurrent
++ *		Returns true if the current transaction is a member of the MultiXactId.
++ *
++ * We return true if any live subtransaction of the current top-level
++ * transaction is a member.  This is appropriate for the same reason that a
++ * lock held by any such subtransaction is globally equivalent to a lock
++ * held by the current subtransaction: no such lock could be released without
++ * aborting this subtransaction, and hence releasing its locks.  So it's not
++ * necessary to add the current subxact to the MultiXact separately.
++ */
++bool
++MultiXactIdIsCurrent(MultiXactId multi)
++{
++	bool		result = false;
++	TransactionId *members;
++	int			nmembers;
++	int			i;
++
++	nmembers = GetMultiXactIdMembers(multi, &members);
++
++	if (nmembers < 0)
++		return false;
++
++	for (i = 0; i < nmembers; i++)
++	{
++		if (TransactionIdIsCurrentTransactionId(members[i]))
++		{
++			result = true;
++			break;
++		}
++	}
++
++	pfree(members);
++
++	return result;
++}
++
+ /*
+  * MultiXactIdSetOldestMember
+  *		Save the oldest MultiXactId this transaction could be a member of.
+diff --git a/src/backend/utils/time/tqual.c b/src/backend/utils/time/tqual.c
+index 2bdb6d9e71..a9434f5cc7 100644
+--- a/src/backend/utils/time/tqual.c
++++ b/src/backend/utils/time/tqual.c
+@@ -32,7 +32,7 @@
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+  * IDENTIFICATION
+- *	  $PostgreSQL: pgsql/src/backend/utils/time/tqual.c,v 1.99 2006/11/05 22:42:09 tgl Exp $
++ *	  $PostgreSQL: pgsql/src/backend/utils/time/tqual.c,v 1.100 2006/11/17 18:00:15 tgl Exp $
+  *
+  *-------------------------------------------------------------------------
+  */
+@@ -511,7 +511,10 @@ HeapTupleSatisfiesToast(HeapTupleHeader tuple, Buffer buffer)
+  *	HeapTupleUpdated: The tuple was updated by a committed transaction.
+  *
+  *	HeapTupleBeingUpdated: The tuple is being updated by an in-progress
+- *	transaction other than the current transaction.
++ *	transaction other than the current transaction.  (Note: this includes
++ *	the case where the tuple is share-locked by a MultiXact, even if the
++ *	MultiXact includes the current transaction.  Callers that want to
++ *	distinguish that case must test for it themselves.)
+  */
+ HTSU_Result
+ HeapTupleSatisfiesUpdate(HeapTupleHeader tuple, CommandId curcid,
+diff --git a/src/include/access/multixact.h b/src/include/access/multixact.h
+index b98c5fd80b..208226916b 100644
+--- a/src/include/access/multixact.h
++++ b/src/include/access/multixact.h
+@@ -6,7 +6,7 @@
+  * Portions Copyright (c) 1996-2006, PostgreSQL Global Development Group
+  * Portions Copyright (c) 1994, Regents of the University of California
+  *
+- * $PostgreSQL: pgsql/src/include/access/multixact.h,v 1.10 2006/03/24 04:32:13 tgl Exp $
++ * $PostgreSQL: pgsql/src/include/access/multixact.h,v 1.11 2006/11/17 18:00:15 tgl Exp $
+  */
+ #ifndef MULTIXACT_H
+ #define MULTIXACT_H
+@@ -45,6 +45,7 @@ typedef struct xl_multixact_create
+ extern MultiXactId MultiXactIdCreate(TransactionId xid1, TransactionId xid2);
+ extern MultiXactId MultiXactIdExpand(MultiXactId multi, TransactionId xid);
+ extern bool MultiXactIdIsRunning(MultiXactId multi);
++extern bool MultiXactIdIsCurrent(MultiXactId multi);
+ extern void MultiXactIdWait(MultiXactId multi);
+ extern bool ConditionalMultiXactIdWait(MultiXactId multi);
+ extern void MultiXactIdSetOldestMember(void);
+

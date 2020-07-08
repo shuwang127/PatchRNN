@@ -1,0 +1,81 @@
+commit 419eaa8f8d2025bae98c23bdedb434d6dbb025b8
+Author: Evgeny Vereshchagin <evvers@ya.ru>
+Date:   Tue Jan 24 05:11:59 2017 +0300
+
+    sd-network: fix memleak in dhcp6_option_parse_domainname (#5114)
+    
+    The simplest way to reproduce:
+    ```diff
+    diff --git a/src/libsystemd-network/test-dhcp6-client.c b/src/libsystemd-network/test-dhcp6-client.c
+    index bd289fa..7b0a5ef 100644
+    --- a/src/libsystemd-network/test-dhcp6-client.c
+    +++ b/src/libsystemd-network/test-dhcp6-client.c
+    @@ -168,7 +168,7 @@ static uint8_t msg_advertise[198] = {
+             0x00, 0x17, 0x00, 0x10, 0x20, 0x01, 0x0d, 0xb8,
+             0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0x00, 0x00, 0x01, 0x00, 0x18, 0x00, 0x0b,
+    -        0x03, 0x6c, 0x61, 0x62, 0x05, 0x69, 0x6e, 0x74,
+    +        0x01, 0x6c, 0x01, 0x62, 0x00, 0x0a, 0x6e, 0x74,
+             0x72, 0x61, 0x00, 0x00, 0x1f, 0x00, 0x10, 0x20,
+             0x01, 0x0d, 0xb8, 0xde, 0xad, 0xbe, 0xef, 0x00,
+             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    @@ -338,9 +338,7 @@ static int test_advertise_option(sd_event *e) {
+             assert_se(!memcmp(addrs, &msg_advertise[124], r * 16));
+    
+             r = sd_dhcp6_lease_get_domains(lease, &domains);
+    -        assert_se(r == 1);
+    -        assert_se(!strcmp("lab.intra", domains[0]));
+    -        assert_se(domains[1] == NULL);
+    +        assert_se(r == -ENOENT);
+    
+             r = sd_dhcp6_lease_get_ntp_addrs(lease, &addrs);
+             assert_se(r == 1);
+    ```
+    
+    Fixes:
+    ```
+    =================================================================
+    ==15043==ERROR: LeakSanitizer: detected memory leaks
+    
+    Direct leak of 4 byte(s) in 1 object(s) allocated from:
+        #0 0x7f13c8564160 in strdup (/lib64/libasan.so.3+0x5a160)
+        #1 0x7f13c7caaf69 in strv_extend src/basic/strv.c:552
+        #2 0x55f775787230 in dhcp6_option_parse_domainname src/libsystemd-network/dhcp6-option.c:399
+        #3 0x55f775788b96 in dhcp6_lease_set_domains src/libsystemd-network/sd-dhcp6-lease.c:225
+        #4 0x55f775774b95 in test_advertise_option src/libsystemd-network/test-dhcp6-client.c:287
+        #5 0x55f77577883e in main src/libsystemd-network/test-dhcp6-client.c:759
+        #6 0x7f13c7589400 in __libc_start_main (/lib64/libc.so.6+0x20400)
+    
+    Direct leak of 4 byte(s) in 1 object(s) allocated from:
+        #0 0x7f13c8564160 in strdup (/lib64/libasan.so.3+0x5a160)
+        #1 0x7f13c7caaf69 in strv_extend src/basic/strv.c:552
+        #2 0x55f775787230 in dhcp6_option_parse_domainname src/libsystemd-network/dhcp6-option.c:399
+        #3 0x55f775788b96 in dhcp6_lease_set_domains src/libsystemd-network/sd-dhcp6-lease.c:225
+        #4 0x55f775781348 in client_parse_message src/libsystemd-network/sd-dhcp6-client.c:807
+        #5 0x55f775781ba2 in client_receive_advertise src/libsystemd-network/sd-dhcp6-client.c:895
+        #6 0x55f775782453 in client_receive_message src/libsystemd-network/sd-dhcp6-client.c:994
+        #7 0x7f13c7e447f4 in source_dispatch src/libsystemd/sd-event/sd-event.c:2268
+        #8 0x7f13c7e471b0 in sd_event_dispatch src/libsystemd/sd-event/sd-event.c:2627
+        #9 0x7f13c7e47ab3 in sd_event_run src/libsystemd/sd-event/sd-event.c:2686
+        #10 0x7f13c7e47c21 in sd_event_loop src/libsystemd/sd-event/sd-event.c:2706
+        #11 0x55f77577863c in test_client_solicit src/libsystemd-network/test-dhcp6-client.c:737
+        #12 0x55f77577884b in main src/libsystemd-network/test-dhcp6-client.c:760
+        #13 0x7f13c7589400 in __libc_start_main (/lib64/libc.so.6+0x20400)
+    
+    SUMMARY: AddressSanitizer: 8 byte(s) leaked in 2 allocation(s).
+    ```
+
+diff --git a/src/libsystemd-network/dhcp6-option.c b/src/libsystemd-network/dhcp6-option.c
+index 5462e0347..f8056dbc4 100644
+--- a/src/libsystemd-network/dhcp6-option.c
++++ b/src/libsystemd-network/dhcp6-option.c
+@@ -339,7 +339,7 @@ int dhcp6_option_parse_ip6addrs(uint8_t *optval, uint16_t optlen,
+ 
+ int dhcp6_option_parse_domainname(const uint8_t *optval, uint16_t optlen, char ***str_arr) {
+         size_t pos = 0, idx = 0;
+-        _cleanup_free_ char **names = NULL;
++        _cleanup_strv_free_ char **names = NULL;
+         int r;
+ 
+         assert_return(optlen > 1, -ENODATA);
+

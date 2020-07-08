@@ -1,0 +1,90 @@
+commit 9f38a1f8ce8844b6c9fe67c1eb616eb60aff8369
+Author: Moe Jette <jette1@llnl.gov>
+Date:   Fri Mar 7 18:38:08 2008 +0000
+
+    plug some memory leaks
+
+diff --git a/src/slurmctld/controller.c b/src/slurmctld/controller.c
+index ac35778551..85f153e30f 100644
+--- a/src/slurmctld/controller.c
++++ b/src/slurmctld/controller.c
+@@ -124,6 +124,8 @@
+  *    (640 bytes), it is really not lost.
+  * The _keyvalue_regex_init() function will generate two blocks "definitely
+  *    lost", both of size zero. We haven't bothered to address this.
++ * On some systems dlopen() will generate a small number of "definitely
++ *    lost" blocks that are not cleared by dlclose().
+  * On some systems, pthread_create() will generated a small number of 
+  *    "possibly lost" blocks.
+  * Otherwise the report should be free of errors. Remember to reset 
+@@ -442,8 +444,6 @@ int main(int argc, char *argv[])
+ 		verbose("Unable to remove pidfile '%s': %m",
+ 			slurmctld_conf.slurmctld_pidfile);
+ 
+-	slurm_jobacct_storage_fini();	/* Save pending message traffic */
+-
+ #ifdef MEMORY_LEAK_DEBUG
+ 	/* This should purge all allocated memory,   *\
+ 	\*   Anything left over represents a leak.   */
+@@ -469,10 +469,10 @@ int main(int argc, char *argv[])
+ 	/* Plugins are needed to purge job/node data structures,
+ 	 * unplug after other data structures are purged */
+ 	g_slurm_jobcomp_fini();
+-	jobacct_storage_g_fini();
+ 	slurm_acct_storage_fini();
+ 	slurm_jobacct_gather_fini();
+-	slurm_jobacct_storage_fini();
++	jobacct_storage_g_fini(); 	/* Save pending message traffic */
++	slurm_jobacct_storage_fini();	/* Release jobacct plugin memory */
+ 	slurm_sched_fini();
+ 	slurm_select_fini();
+ 	checkpoint_fini();
+@@ -486,6 +486,7 @@ int main(int argc, char *argv[])
+ 	slurm_api_clear_config();
+ 	sleep(2);
+ #else
++	jobacct_storage_g_fini();	/* Save pending message traffic */
+ 	/* Give REQUEST_SHUTDOWN a chance to get propagated, 
+ 	 * up to 3 seconds. */
+ 	for (i=0; i<3; i++) {
+diff --git a/src/slurmctld/partition_mgr.c b/src/slurmctld/partition_mgr.c
+index b220f34f44..993461c129 100644
+--- a/src/slurmctld/partition_mgr.c
++++ b/src/slurmctld/partition_mgr.c
+@@ -548,6 +548,7 @@ int init_part_conf(void)
+ {
+ 	last_part_update = time(NULL);
+ 
++	xfree(default_part.name);	/* needed for reconfig */
+ 	default_part.name        = xstrdup("DEFAULT");
+ 	default_part.hidden      = 0;
+ 	default_part.max_time    = INFINITE;
+@@ -801,6 +802,7 @@ int update_part(update_part_msg_t * part_desc)
+ 		info("update_part: partition %s does not exist, "
+ 			"being created", part_desc->name);
+ 		part_ptr = create_part_record();
++		xfree(part_ptr->name);
+ 		part_ptr->name = xstrdup(part_desc->name);
+ 	}
+ 
+@@ -1136,6 +1138,7 @@ void part_fini (void)
+ 		part_list = NULL;
+ 	}
+ 	xfree(default_part_name);
++	xfree(default_part.name);
+ 	default_part_loc = (struct part_record *) NULL;
+ }
+ 
+diff --git a/src/slurmctld/read_config.c b/src/slurmctld/read_config.c
+index 39b7204fbf..5913e70d7f 100644
+--- a/src/slurmctld/read_config.c
++++ b/src/slurmctld/read_config.c
+@@ -587,6 +587,7 @@ static int _build_single_partitionline_info(slurm_conf_partition_t *part)
+ 	part_ptr = list_find_first(part_list, &list_find_part, part->name);
+ 	if (part_ptr == NULL) {
+ 		part_ptr = create_part_record();
++		xfree(part_ptr->name);
+ 		part_ptr->name = xstrdup(part->name);
+ 	} else {
+ 		verbose("_parse_part_spec: duplicate entry for partition %s",
+

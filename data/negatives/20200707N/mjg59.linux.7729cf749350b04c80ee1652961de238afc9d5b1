@@ -1,0 +1,88 @@
+commit 7729cf749350b04c80ee1652961de238afc9d5b1
+Author: Peter Ujfalusi <peter.ujfalusi@nokia.com>
+Date:   Thu Oct 29 11:58:10 2009 +0200
+
+    ASoC: TWL4030: Change APLL powering sequence
+    
+    It seams that certain part of the twl4030 codec needs the APLL
+    enabled before they are enabled.
+    Paths which has any digital processing needs need the APLL
+    enabled before they can function.
+    For example the vibra output will have some random data after
+    it is enabled and before the APLL also enabled.
+    
+    If only analog components are in use (analog bypass), than it
+    seams, that the APLL does not need to be enabled. This lowers
+    the power consumption with around ~0.005A.
+    
+    Adding DAPM_SUPPLY to the Digital playback route and also
+    to the capture route to enable and disable the APLL.
+    
+    Signed-off-by: Peter Ujfalusi <peter.ujfalusi@nokia.com>
+    Signed-off-by: Mark Brown <broonie@opensource.wolfsonmicro.com>
+
+diff --git a/sound/soc/codecs/twl4030.c b/sound/soc/codecs/twl4030.c
+index ccaeb366eb7c..277e99ce5558 100644
+--- a/sound/soc/codecs/twl4030.c
++++ b/sound/soc/codecs/twl4030.c
+@@ -620,6 +620,20 @@ static int vibramux_event(struct snd_soc_dapm_widget *w,
+ 	return 0;
+ }
+ 
++static int apll_event(struct snd_soc_dapm_widget *w,
++		struct snd_kcontrol *kcontrol, int event)
++{
++	switch (event) {
++	case SND_SOC_DAPM_PRE_PMU:
++		twl4030_apll_enable(w->codec, 1);
++		break;
++	case SND_SOC_DAPM_POST_PMD:
++		twl4030_apll_enable(w->codec, 0);
++		break;
++	}
++	return 0;
++}
++
+ static void headset_ramp(struct snd_soc_codec *codec, int ramp)
+ {
+ 	struct snd_soc_device *socdev = codec->socdev;
+@@ -1185,6 +1199,9 @@ static const struct snd_soc_dapm_widget twl4030_dapm_widgets[] = {
+ 	SND_SOC_DAPM_MIXER("Analog Voice Playback Mixer",
+ 			TWL4030_REG_VDL_APGA_CTL, 0, 0, NULL, 0),
+ 
++	SND_SOC_DAPM_SUPPLY("APLL Enable", SND_SOC_NOPM, 0, 0, apll_event,
++			    SND_SOC_DAPM_PRE_PMU|SND_SOC_DAPM_POST_PMD),
++
+ 	/* Output MIXER controls */
+ 	/* Earpiece */
+ 	SND_SOC_DAPM_MIXER("Earpiece Mixer", SND_SOC_NOPM, 0, 0,
+@@ -1312,6 +1329,13 @@ static const struct snd_soc_dapm_route intercon[] = {
+ 	{"Digital R2 Playback Mixer", NULL, "DAC Right2"},
+ 	{"Digital Voice Playback Mixer", NULL, "DAC Voice"},
+ 
++	/* Supply for the digital part (APLL) */
++	{"Digital R1 Playback Mixer", NULL, "APLL Enable"},
++	{"Digital L1 Playback Mixer", NULL, "APLL Enable"},
++	{"Digital R2 Playback Mixer", NULL, "APLL Enable"},
++	{"Digital L2 Playback Mixer", NULL, "APLL Enable"},
++	{"Digital Voice Playback Mixer", NULL, "APLL Enable"},
++
+ 	{"Analog L1 Playback Mixer", NULL, "Digital L1 Playback Mixer"},
+ 	{"Analog R1 Playback Mixer", NULL, "Digital R1 Playback Mixer"},
+ 	{"Analog L2 Playback Mixer", NULL, "Digital L2 Playback Mixer"},
+@@ -1472,14 +1496,12 @@ static int twl4030_set_bias_level(struct snd_soc_codec *codec,
+ {
+ 	switch (level) {
+ 	case SND_SOC_BIAS_ON:
+-		twl4030_apll_enable(codec, 1);
+ 		break;
+ 	case SND_SOC_BIAS_PREPARE:
+ 		break;
+ 	case SND_SOC_BIAS_STANDBY:
+ 		if (codec->bias_level == SND_SOC_BIAS_OFF)
+ 			twl4030_power_up(codec);
+-		twl4030_apll_enable(codec, 0);
+ 		break;
+ 	case SND_SOC_BIAS_OFF:
+ 		twl4030_power_down(codec);
+

@@ -1,0 +1,42 @@
+commit 0f75df93b3fb46ea680f48c48a837064d764d52c
+Author: Zoltan Varga <vargaz@gmail.com>
+Date:   Fri Dec 2 18:10:16 2016 -0500
+
+    [runtime] Set klass->inited under the  loader lock.
+
+diff --git a/mono/metadata/class-internals.h b/mono/metadata/class-internals.h
+index 20bb9f16aa3..04a8d54fbd2 100644
+--- a/mono/metadata/class-internals.h
++++ b/mono/metadata/class-internals.h
+@@ -278,6 +278,7 @@ struct _MonoClass {
+ 	 * initialise all static fields.
+ 	 */
+ 	/* size_inited is accessed without locks, so it needs a memory barrier */
++	/* All flag bits should be written while holding the loader lock */
+ 	guint size_inited     : 1;
+ 	guint valuetype       : 1; /* derives from System.ValueType */
+ 	guint enumtype        : 1; /* derives from System.Enum */
+diff --git a/mono/metadata/class.c b/mono/metadata/class.c
+index fcad177e764..59020bde769 100644
+--- a/mono/metadata/class.c
++++ b/mono/metadata/class.c
+@@ -5081,13 +5081,14 @@ mono_class_init (MonoClass *klass)
+ 	init_list = g_slist_remove (init_list, klass);
+ 	mono_native_tls_set_value (init_pending_tls_id, init_list);
+ 
+-	/* Because of the double-checking locking pattern */
+-	mono_memory_barrier ();
+-	klass->inited = 1;
+-
+ 	if (locked)
+ 		mono_loader_unlock ();
+ 
++	/* Leave this for last */
++	mono_loader_lock ();
++	klass->inited = 1;
++	mono_loader_unlock ();
++
+ 	return !mono_class_has_failure (klass);
+ }
+ 
+

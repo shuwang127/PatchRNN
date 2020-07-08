@@ -1,0 +1,106 @@
+commit 8f7aeaf6b38fc0d4c8c3eb9292ae250579437724
+Author: aurel32 <aurel32@c046a42c-6fe2-441c-8c8c-71466251a162>
+Date:   Fri Jan 30 19:47:57 2009 +0000
+
+    linux-user: return EINVAL on incorrect sockaddr
+    
+    From: Lauro Ramos Venancio <lauro.venancio@gmail.com>
+    
+    Fixes ltp test accept01
+    
+    Signed-off-by: Riku Voipio <riku.voipio@iki.fi>
+    Signed-off-by: Aurelien Jarno <aurelien@aurel32.net>
+    
+    git-svn-id: svn://svn.savannah.nongnu.org/qemu/trunk@6479 c046a42c-6fe2-441c-8c8c-71466251a162
+
+diff --git a/linux-user/syscall.c b/linux-user/syscall.c
+index dce5cad594..8296e5e43f 100644
+--- a/linux-user/syscall.c
++++ b/linux-user/syscall.c
+@@ -1140,11 +1140,19 @@ static abi_long do_socket(int domain, int type, int protocol)
+     return get_errno(socket(domain, type, protocol));
+ }
+ 
++/* MAX_SOCK_ADDR from linux/net/socket.c */
++#define MAX_SOCK_ADDR	128
++
+ /* do_bind() Must return target values and target errnos. */
+ static abi_long do_bind(int sockfd, abi_ulong target_addr,
+                         socklen_t addrlen)
+ {
+-    void *addr = alloca(addrlen);
++    void *addr;
++
++    if (addrlen < 0 || addrlen > MAX_SOCK_ADDR)
++        return -TARGET_EINVAL;
++
++    addr = alloca(addrlen);
+ 
+     target_to_host_sockaddr(addr, target_addr, addrlen);
+     return get_errno(bind(sockfd, addr, addrlen));
+@@ -1154,7 +1162,12 @@ static abi_long do_bind(int sockfd, abi_ulong target_addr,
+ static abi_long do_connect(int sockfd, abi_ulong target_addr,
+                            socklen_t addrlen)
+ {
+-    void *addr = alloca(addrlen);
++    void *addr;
++
++    if (addrlen < 0 || addrlen > MAX_SOCK_ADDR)
++        return -TARGET_EINVAL;
++
++    addr = alloca(addrlen);
+ 
+     target_to_host_sockaddr(addr, target_addr, addrlen);
+     return get_errno(connect(sockfd, addr, addrlen));
+@@ -1226,6 +1239,9 @@ static abi_long do_accept(int fd, abi_ulong target_addr,
+     if (get_user_u32(addrlen, target_addrlen_addr))
+         return -TARGET_EFAULT;
+ 
++    if (addrlen < 0 || addrlen > MAX_SOCK_ADDR)
++        return -TARGET_EINVAL;
++
+     addr = alloca(addrlen);
+ 
+     ret = get_errno(accept(fd, addr, &addrlen));
+@@ -1248,6 +1264,9 @@ static abi_long do_getpeername(int fd, abi_ulong target_addr,
+     if (get_user_u32(addrlen, target_addrlen_addr))
+         return -TARGET_EFAULT;
+ 
++    if (addrlen < 0 || addrlen > MAX_SOCK_ADDR)
++        return -TARGET_EINVAL;
++
+     addr = alloca(addrlen);
+ 
+     ret = get_errno(getpeername(fd, addr, &addrlen));
+@@ -1273,6 +1292,9 @@ static abi_long do_getsockname(int fd, abi_ulong target_addr,
+     if (get_user_u32(addrlen, target_addrlen_addr))
+         return -TARGET_EFAULT;
+ 
++    if (addrlen < 0 || addrlen > MAX_SOCK_ADDR)
++        return -TARGET_EINVAL;
++
+     addr = alloca(addrlen);
+ 
+     ret = get_errno(getsockname(fd, addr, &addrlen));
+@@ -1308,6 +1330,9 @@ static abi_long do_sendto(int fd, abi_ulong msg, size_t len, int flags,
+     void *host_msg;
+     abi_long ret;
+ 
++    if (addrlen < 0 || addrlen > MAX_SOCK_ADDR)
++        return -TARGET_EINVAL;
++
+     host_msg = lock_user(VERIFY_READ, msg, len, 1);
+     if (!host_msg)
+         return -TARGET_EFAULT;
+@@ -1340,6 +1365,10 @@ static abi_long do_recvfrom(int fd, abi_ulong msg, size_t len, int flags,
+             ret = -TARGET_EFAULT;
+             goto fail;
+         }
++        if (addrlen < 0 || addrlen > MAX_SOCK_ADDR) {
++            ret = -TARGET_EINVAL;
++            goto fail;
++        }
+         addr = alloca(addrlen);
+         ret = get_errno(recvfrom(fd, host_msg, len, flags, addr, &addrlen));
+     } else {
+

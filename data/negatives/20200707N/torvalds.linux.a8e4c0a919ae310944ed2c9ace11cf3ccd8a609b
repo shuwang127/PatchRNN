@@ -1,0 +1,47 @@
+commit a8e4c0a919ae310944ed2c9ace11cf3ccd8a609b
+Author: Marc Zyngier <marc.zyngier@arm.com>
+Date:   Fri Jan 19 15:42:09 2018 +0000
+
+    arm64: Move BP hardening to check_and_switch_context
+    
+    We call arm64_apply_bp_hardening() from post_ttbr_update_workaround,
+    which has the unexpected consequence of being triggered on every
+    exception return to userspace when ARM64_SW_TTBR0_PAN is selected,
+    even if no context switch actually occured.
+    
+    This is a bit suboptimal, and it would be more logical to only
+    invalidate the branch predictor when we actually switch to
+    a different mm.
+    
+    In order to solve this, move the call to arm64_apply_bp_hardening()
+    into check_and_switch_context(), where we're guaranteed to pick
+    a different mm context.
+    
+    Acked-by: Will Deacon <will.deacon@arm.com>
+    Signed-off-by: Marc Zyngier <marc.zyngier@arm.com>
+    Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+
+diff --git a/arch/arm64/mm/context.c b/arch/arm64/mm/context.c
+index ff99a880a730..301417ae2ba8 100644
+--- a/arch/arm64/mm/context.c
++++ b/arch/arm64/mm/context.c
+@@ -234,6 +234,9 @@ void check_and_switch_context(struct mm_struct *mm, unsigned int cpu)
+ 	raw_spin_unlock_irqrestore(&cpu_asid_lock, flags);
+ 
+ switch_mm_fastpath:
++
++	arm64_apply_bp_hardening();
++
+ 	/*
+ 	 * Defer TTBR0_EL1 setting for user threads to uaccess_enable() when
+ 	 * emulating PAN.
+@@ -249,8 +252,6 @@ asmlinkage void post_ttbr_update_workaround(void)
+ 			"ic iallu; dsb nsh; isb",
+ 			ARM64_WORKAROUND_CAVIUM_27456,
+ 			CONFIG_CAVIUM_ERRATUM_27456));
+-
+-	arm64_apply_bp_hardening();
+ }
+ 
+ static int asids_init(void)
+

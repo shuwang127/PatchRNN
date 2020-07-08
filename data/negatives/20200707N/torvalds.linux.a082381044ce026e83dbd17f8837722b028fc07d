@@ -1,0 +1,178 @@
+commit a082381044ce026e83dbd17f8837722b028fc07d
+Author: Nick Kossifidis <mick@madwifi-project.org>
+Date:   Thu Apr 30 15:55:44 2009 -0400
+
+    ath5k: Allow user/driver to set txpower
+    
+    * Now that we have regulatory control enable the driver to set
+     txpower on hw
+    
+     * Also use txpower table offset so that we can match
+     power range set by user/driver with indices on power table.
+    
+     Tested 2 different cards (a CM9 and an RF5112-based ubnt) and got
+     the same output using a remote machine to measure per-packet rssi
+     (conected the cards using attenuators). I also switched between
+     various tx power levels and i saw an equal power change on the remote
+     machine (so txpower changes as expected) and verified that we have
+     the same output on each rate.
+    
+     Signed-off-by: Nick Kossifidis <mickflemm@gmail.com>
+     Signed-off-by: Bob Copeland <me@bobcopeland.com>
+    
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/ath/ath5k/ath5k.h b/drivers/net/wireless/ath/ath5k/ath5k.h
+index 60c6d2edc4b9..04b73453f6a5 100644
+--- a/drivers/net/wireless/ath/ath5k/ath5k.h
++++ b/drivers/net/wireless/ath/ath5k/ath5k.h
+@@ -1100,11 +1100,12 @@ struct ath5k_hw {
+ 		/* Values in 0.25dB units */
+ 		s16		txp_min_pwr;
+ 		s16		txp_max_pwr;
++		/* Values in 0.5dB units */
+ 		s16		txp_offset;
+ 		s16		txp_ofdm;
+-		/* Values in dB units */
+-		s16		txp_cck_ofdm_pwr_delta;
+ 		s16		txp_cck_ofdm_gainf_delta;
++		/* Value in dB units */
++		s16		txp_cck_ofdm_pwr_delta;
+ 	} ah_txpower;
+ 
+ 	struct {
+@@ -1271,7 +1272,7 @@ extern unsigned int ath5k_hw_get_def_antenna(struct ath5k_hw *ah);
+ extern int ath5k_hw_phy_disable(struct ath5k_hw *ah);
+ /* TX power setup */
+ extern int ath5k_hw_txpower(struct ath5k_hw *ah, struct ieee80211_channel *channel, u8 ee_mode, u8 txpower);
+-extern int ath5k_hw_set_txpower_limit(struct ath5k_hw *ah, u8 ee_mode, u8 txpower);
++extern int ath5k_hw_set_txpower_limit(struct ath5k_hw *ah, u8 txpower);
+ 
+ /*
+  * Functions used internaly
+diff --git a/drivers/net/wireless/ath/ath5k/base.c b/drivers/net/wireless/ath/ath5k/base.c
+index 7b80cebffd41..d70856a9520e 100644
+--- a/drivers/net/wireless/ath/ath5k/base.c
++++ b/drivers/net/wireless/ath/ath5k/base.c
+@@ -2747,12 +2747,21 @@ static int
+ ath5k_config(struct ieee80211_hw *hw, u32 changed)
+ {
+ 	struct ath5k_softc *sc = hw->priv;
++	struct ath5k_hw *ah = sc->ah;
+ 	struct ieee80211_conf *conf = &hw->conf;
+ 	int ret;
+ 
+ 	mutex_lock(&sc->lock);
+ 
+-	sc->power_level = conf->power_level;
++	sc->bintval = conf->beacon_int;
++
++	if ((changed & IEEE80211_CONF_CHANGE_POWER) &&
++	(sc->power_level != conf->power_level)) {
++		sc->power_level = conf->power_level;
++
++		/* Half dB steps */
++		ath5k_hw_set_txpower_limit(ah, (conf->power_level * 2));
++	}
+ 
+ 	ret = ath5k_chan_set(sc, conf->channel);
+ 
+diff --git a/drivers/net/wireless/ath/ath5k/phy.c b/drivers/net/wireless/ath/ath5k/phy.c
+index b48b29dca3d2..bb61b8e2dce9 100644
+--- a/drivers/net/wireless/ath/ath5k/phy.c
++++ b/drivers/net/wireless/ath/ath5k/phy.c
+@@ -168,9 +168,6 @@ int ath5k_hw_rfgain_opt_init(struct ath5k_hw *ah)
+  * tx power and a Peak to Average Power Detector (PAPD) will try
+  * to measure the gain.
+  *
+- * TODO: Use propper tx power setting for the probe packet so
+- * that we don't observe a serious power drop on the receiver
+- *
+  * XXX:  How about forcing a tx packet (bypassing PCU arbitrator etc)
+  * just after we enable the probe so that we don't mess with
+  * standard traffic ? Maybe it's time to use sw interrupts and
+@@ -186,7 +183,7 @@ static void ath5k_hw_request_rfgain_probe(struct ath5k_hw *ah)
+ 
+ 	/* Send the packet with 2dB below max power as
+ 	 * patent doc suggest */
+-	ath5k_hw_reg_write(ah, AR5K_REG_SM(ah->ah_txpower.txp_max_pwr - 4,
++	ath5k_hw_reg_write(ah, AR5K_REG_SM(ah->ah_txpower.txp_ofdm - 4,
+ 			AR5K_PHY_PAPD_PROBE_TXPOWER) |
+ 			AR5K_PHY_PAPD_PROBE_TX_NEXT, AR5K_PHY_PAPD_PROBE);
+ 
+@@ -2482,8 +2479,19 @@ ath5k_setup_rate_powertable(struct ath5k_hw *ah, u16 max_pwr,
+ 		for (i = 8; i <= 15; i++)
+ 			rates[i] -= ah->ah_txpower.txp_cck_ofdm_gainf_delta;
+ 
+-	ah->ah_txpower.txp_min_pwr = rates[7];
+-	ah->ah_txpower.txp_max_pwr = rates[0];
++	/* Now that we have all rates setup use table offset to
++	 * match the power range set by user with the power indices
++	 * on PCDAC/PDADC table */
++	for (i = 0; i < 16; i++) {
++		rates[i] += ah->ah_txpower.txp_offset;
++		/* Don't get out of bounds */
++		if (rates[i] > 63)
++			rates[i] = 63;
++	}
++
++	/* Min/max in 0.25dB units */
++	ah->ah_txpower.txp_min_pwr = 2 * rates[7];
++	ah->ah_txpower.txp_max_pwr = 2 * rates[0];
+ 	ah->ah_txpower.txp_ofdm = rates[7];
+ }
+ 
+@@ -2591,16 +2599,37 @@ ath5k_hw_txpower(struct ath5k_hw *ah, struct ieee80211_channel *channel,
+ 	return 0;
+ }
+ 
+-int ath5k_hw_set_txpower_limit(struct ath5k_hw *ah, u8 mode, u8 txpower)
++int ath5k_hw_set_txpower_limit(struct ath5k_hw *ah, u8 txpower)
+ {
+ 	/*Just a try M.F.*/
+ 	struct ieee80211_channel *channel = &ah->ah_current_channel;
++	u8 ee_mode;
+ 
+ 	ATH5K_TRACE(ah->ah_sc);
++
++	switch (channel->hw_value & CHANNEL_MODES) {
++	case CHANNEL_A:
++	case CHANNEL_T:
++	case CHANNEL_XR:
++		ee_mode = AR5K_EEPROM_MODE_11A;
++		break;
++	case CHANNEL_G:
++	case CHANNEL_TG:
++		ee_mode = AR5K_EEPROM_MODE_11G;
++		break;
++	case CHANNEL_B:
++		ee_mode = AR5K_EEPROM_MODE_11B;
++		break;
++	default:
++		ATH5K_ERR(ah->ah_sc,
++			"invalid channel: %d\n", channel->center_freq);
++		return -EINVAL;
++	}
++
+ 	ATH5K_DBG(ah->ah_sc, ATH5K_DEBUG_TXPOWER,
+ 		"changing txpower to %d\n", txpower);
+ 
+-	return ath5k_hw_txpower(ah, channel, mode, txpower);
++	return ath5k_hw_txpower(ah, channel, ee_mode, txpower);
+ }
+ 
+ #undef _ATH5K_PHY
+diff --git a/drivers/net/wireless/ath/ath5k/reset.c b/drivers/net/wireless/ath/ath5k/reset.c
+index 775fdf78554b..cb8a9a1398c9 100644
+--- a/drivers/net/wireless/ath/ath5k/reset.c
++++ b/drivers/net/wireless/ath/ath5k/reset.c
+@@ -1000,7 +1000,7 @@ int ath5k_hw_reset(struct ath5k_hw *ah, enum nl80211_iftype op_mode,
+ 		 * Set TX power (FIXME)
+ 		 */
+ 		ret = ath5k_hw_txpower(ah, channel, ee_mode,
+-					AR5K_TUNE_DEFAULT_TXPOWER);
++					ah->ah_txpower.txp_max_pwr / 2);
+ 		if (ret)
+ 			return ret;
+ 
+

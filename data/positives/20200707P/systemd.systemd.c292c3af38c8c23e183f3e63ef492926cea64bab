@@ -1,0 +1,62 @@
+commit c292c3af38c8c23e183f3e63ef492926cea64bab
+Author: Evgeny Vereshchagin <evvers@ya.ru>
+Date:   Mon Jan 18 06:10:33 2016 +0000
+
+    core: fix memory leak on failed preset-all
+    
+    How to reproduce
+    $ systemctl set-default multi-user # https://github.com/systemd/systemd/issues/2298
+    $ systemctl preset-all
+    Failed to execute operation: Too many levels of symbolic links
+    
+    $ systemctl poweroff
+    
+    Fixes:
+    ==1==
+    ==1== HEAP SUMMARY:
+    ==1==     in use at exit: 65,645 bytes in 7 blocks
+    ==1==   total heap usage: 40,539 allocs, 40,532 frees, 30,147,547 bytes allocated
+    ==1==
+    ==1== 109 (24 direct, 85 indirect) bytes in 1 blocks are definitely lost in loss record 2 of 7
+    ==1==    at 0x4C2BBCF: malloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+    ==1==    by 0x4C2DE2F: realloc (in /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so)
+    ==1==    by 0x23DA71: unit_file_changes_add (install.c:233)
+    ==1==    by 0x23E45D: remove_marked_symlinks_fd (install.c:453)
+    ==1==    by 0x23E267: remove_marked_symlinks_fd (install.c:405)
+    ==1==    by 0x23E641: remove_marked_symlinks (install.c:494)
+    ==1==    by 0x243A91: execute_preset (install.c:2190)
+    ==1==    by 0x244343: unit_file_preset_all (install.c:2351)
+    ==1==    by 0x18AAA2: method_preset_all_unit_files (dbus-manager.c:1846)
+    ==1==    by 0x1D8157: method_callbacks_run (bus-objects.c:420)
+    ==1==    by 0x1DA9E9: object_find_and_run (bus-objects.c:1257)
+    ==1==    by 0x1DB02B: bus_process_object (bus-objects.c:1373)
+    ==1==
+    ==1== LEAK SUMMARY:
+    ==1==    definitely lost: 24 bytes in 1 blocks
+    ==1==    indirectly lost: 85 bytes in 1 blocks
+    ==1==      possibly lost: 0 bytes in 0 blocks
+    ==1==    still reachable: 65,536 bytes in 5 blocks
+    ==1==         suppressed: 0 bytes in 0 blocks
+    ==1== Reachable blocks (those to which a pointer was found) are not shown.
+    ==1== To see them, rerun with: --leak-check=full --show-leak-kinds=all
+    ==1==
+    ==1== For counts of detected and suppressed errors, rerun with: -v
+    ==1== ERROR SUMMARY: 1 errors from 1 contexts (suppressed: 0 from 0)
+
+diff --git a/src/core/dbus-manager.c b/src/core/dbus-manager.c
+index 23a16ac15..c5c672a0a 100644
+--- a/src/core/dbus-manager.c
++++ b/src/core/dbus-manager.c
+@@ -1844,8 +1844,10 @@ static int method_preset_all_unit_files(sd_bus_message *message, void *userdata,
+         scope = m->running_as == MANAGER_SYSTEM ? UNIT_FILE_SYSTEM : UNIT_FILE_USER;
+ 
+         r = unit_file_preset_all(scope, runtime, NULL, mm, force, &changes, &n_changes);
+-        if (r < 0)
++        if (r < 0) {
++                unit_file_changes_free(changes, n_changes);
+                 return r;
++        }
+ 
+         return reply_unit_file_changes_and_free(m, message, -1, changes, n_changes);
+ }
+

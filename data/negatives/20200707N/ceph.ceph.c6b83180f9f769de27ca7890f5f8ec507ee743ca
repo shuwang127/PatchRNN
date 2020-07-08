@@ -1,0 +1,599 @@
+commit c6b83180f9f769de27ca7890f5f8ec507ee743ca
+Author: David Zafman <david.zafman@inktank.com>
+Date:   Wed Sep 25 09:19:16 2013 -0700
+
+    os, osd, tools: Add backportable compatibility checking for sharded objects
+    
+    OSD
+      New CEPH_OSD_FEATURE_INCOMPAT_SHARDS
+    FileStore
+      NEW CEPH_FS_FEATURE_INCOMPAT_SHARDS
+      Add FSSuperblock with feature CompatSet in it
+      Store sharded_objects state using CompatSet
+      Add set_allow_sharded_objects() and get_allow_sharded_objects() to FileStore/ObjectStore
+      Add read_superblock()/write_superblock() internal filestore functions
+    ceph_filestore_dump
+      Add OSDsuperblock to export format
+      Use CompatSet from OSD code itself in filestore-dump tool
+      Always check compatibility of OSD features with on-disk features
+      On import verify compatibility of on-disk features with export data
+      Bump super_ver due to export format change
+    
+    Backport: dumpling, cuttlefish
+    
+    Signed-off-by: David Zafman <david.zafman@inktank.com>
+
+diff --git a/src/os/FileStore.cc b/src/os/FileStore.cc
+index 2c256ad0c0..6a79d54673 100644
+--- a/src/os/FileStore.cc
++++ b/src/os/FileStore.cc
+@@ -86,6 +86,22 @@ using ceph::crypto::SHA1;
+ #define REPLAY_GUARD_XATTR "user.cephos.seq"
+ #define GLOBAL_REPLAY_GUARD_XATTR "user.cephos.gseq"
+ 
++//Initial features in new superblock.
++static CompatSet get_fs_initial_compat_set() {
++  CompatSet::FeatureSet ceph_osd_feature_compat;
++  CompatSet::FeatureSet ceph_osd_feature_ro_compat;
++  CompatSet::FeatureSet ceph_osd_feature_incompat;
++  return CompatSet(ceph_osd_feature_compat, ceph_osd_feature_ro_compat,
++		   ceph_osd_feature_incompat);
++}
++
++//Features are added here that this FileStore supports.
++static CompatSet get_fs_supported_compat_set() {
++  CompatSet compat =  get_fs_initial_compat_set();
++  //Any features here can be set in code, but not in initial superblock
++  return compat;
++}
++
+ 
+ void FileStore::FSPerfTracker::update_from_perfcounters(
+   PerfCounters &logger)
+@@ -447,6 +463,8 @@ FileStore::FileStore(const std::string &base, const std::string &jdev, const cha
+ 
+   generic_backend = new GenericFileStoreBackend(this);
+   backend = generic_backend;
++
++  superblock.compat_features = get_fs_initial_compat_set();
+ }
+ 
+ FileStore::~FileStore()
+@@ -592,6 +610,13 @@ int FileStore::mkfs()
+     goto close_fsid_fd;
+   }
+ 
++  ret = write_superblock();
++  if (ret < 0) {
++    derr << "mkfs: write_superblock() failed: "
++	 << cpp_strerror(ret) << dendl;
++    goto close_fsid_fd;
++  }
++
+   struct statfs basefs;
+   ret = ::fstatfs(basedir_fd, &basefs);
+   if (ret < 0) {
+@@ -917,6 +942,67 @@ int FileStore::_sanity_check_fs()
+   return 0;
+ }
+ 
++int FileStore::write_superblock()
++{
++  char fn[PATH_MAX];
++  snprintf(fn, sizeof(fn), "%s/superblock", basedir.c_str());
++  int fd = ::open(fn, O_WRONLY|O_CREAT|O_TRUNC, 0644);
++  if (fd < 0)
++    return -errno;
++  bufferlist bl;
++  ::encode(superblock, bl);
++
++  int ret = safe_write(fd, bl.c_str(), bl.length());
++  if (ret < 0)
++    goto out;
++  ret = ::fsync(fd);
++  if (ret < 0)
++    ret = -errno;
++  // XXX: fsync() man page says I need to sync containing directory
++out:
++  TEMP_FAILURE_RETRY(::close(fd));
++  return ret;
++}
++
++int FileStore::read_superblock()
++{
++  char fn[PATH_MAX];
++  snprintf(fn, sizeof(fn), "%s/superblock", basedir.c_str());
++  int fd = ::open(fn, O_RDONLY, 0644);
++  if (fd < 0) {
++    if (errno == ENOENT) {
++      // If the file doesn't exist write initial CompatSet
++      return write_superblock();
++    } else
++      return -errno;
++  }
++  bufferptr bp(PATH_MAX);
++  int ret = safe_read(fd, bp.c_str(), bp.length());
++  TEMP_FAILURE_RETRY(::close(fd));
++  if (ret < 0)
++    return ret;
++  bufferlist bl;
++  bl.push_back(bp);
++  bufferlist::iterator i = bl.begin();
++  ::decode(superblock, i);
++  return 0;
++}
++
++void FileStore::set_allow_sharded_objects()
++{
++  if (!get_allow_sharded_objects()) {
++    superblock.compat_features.incompat.insert(CEPH_FS_FEATURE_INCOMPAT_SHARDS);
++    int ret = write_superblock();
++    assert(ret == 0);	//Should we return error and make caller handle it?
++  }
++  return;
++}
++
++bool FileStore::get_allow_sharded_objects()
++{
++  return superblock.compat_features.incompat.contains(CEPH_FS_FEATURE_INCOMPAT_SHARDS);
++}
++
+ int FileStore::update_version_stamp()
+ {
+   return write_version_stamp();
+@@ -1002,6 +1088,7 @@ int FileStore::mount()
+   char buf[PATH_MAX];
+   uint64_t initial_op_seq;
+   set<string> cluster_snaps;
++  CompatSet supported_compat_set = get_fs_supported_compat_set();
+ 
+   dout(5) << "basedir " << basedir << " journal " << journalpath << dendl;
+   
+@@ -1062,6 +1149,20 @@ int FileStore::mount()
+     }
+   }
+ 
++  ret = read_superblock();
++  if (ret < 0) {
++    ret = -EINVAL;
++    goto close_fsid_fd;
++  }
++
++  // Check if this FileStore supports all the necessary features to mount
++  if (supported_compat_set.compare(superblock.compat_features) == -1) {
++    derr << "FileStore::mount : Incompatible features set "
++	   << superblock.compat_features << dendl;
++    ret = -EINVAL;
++    goto close_fsid_fd;
++  }
++
+   // open some dir handles
+   basedir_fd = ::open(basedir.c_str(), O_RDONLY);
+   if (basedir_fd < 0) {
+@@ -4519,3 +4620,39 @@ void FileStore::dump_transactions(list<ObjectStore::Transaction*>& ls, uint64_t
+   m_filestore_dump_fmt.flush(m_filestore_dump);
+   m_filestore_dump.flush();
+ }
++
++// -- FSSuperblock --
++
++void FSSuperblock::encode(bufferlist &bl) const
++{
++  ENCODE_START(1, 1, bl);
++  compat_features.encode(bl);
++  ENCODE_FINISH(bl);
++}
++
++void FSSuperblock::decode(bufferlist::iterator &bl)
++{
++  DECODE_START(1, bl);
++  compat_features.decode(bl);
++  DECODE_FINISH(bl);
++}
++
++void FSSuperblock::dump(Formatter *f) const
++{
++  f->open_object_section("compat");
++  compat_features.dump(f);
++  f->close_section();
++}
++
++void FSSuperblock::generate_test_instances(list<FSSuperblock*>& o)
++{
++  FSSuperblock z;
++  o.push_back(new FSSuperblock(z));
++  CompatSet::FeatureSet feature_compat;
++  CompatSet::FeatureSet feature_ro_compat;
++  CompatSet::FeatureSet feature_incompat;
++  feature_incompat.insert(CEPH_FS_FEATURE_INCOMPAT_SHARDS);
++  z.compat_features = CompatSet(feature_compat, feature_ro_compat,
++                                feature_incompat);
++  o.push_back(new FSSuperblock(z));
++}
+diff --git a/src/os/FileStore.h b/src/os/FileStore.h
+index 885fb02515..efd7c9781c 100644
+--- a/src/os/FileStore.h
++++ b/src/os/FileStore.h
+@@ -66,6 +66,26 @@ static const __SWORD_TYPE ZFS_SUPER_MAGIC(0x2fc12fc1);
+ 
+ class FileStoreBackend;
+ 
++#define CEPH_FS_FEATURE_INCOMPAT_SHARDS CompatSet::Feature(1, "sharded objects")
++
++class FSSuperblock {
++public:
++  CompatSet compat_features;
++
++  FSSuperblock() { }
++
++  void encode(bufferlist &bl) const;
++  void decode(bufferlist::iterator &bl);
++  void dump(Formatter *f) const;
++  static void generate_test_instances(list<FSSuperblock*>& o);
++};
++WRITE_CLASS_ENCODER(FSSuperblock)
++
++inline ostream& operator<<(ostream& out, const FSSuperblock& sb)
++{
++  return out << "sb(" << sb.compat_features << ")";
++}
++
+ class FileStore : public JournalingObjectStore,
+                   public md_config_obs_t
+ {
+@@ -321,6 +341,22 @@ public:
+   int mkfs();
+   int mkjournal();
+ 
++  /**
++   * set_allow_sharded_objects()
++   *
++   * Before sharded ghobject_t can be specified this function must be called
++   *
++   * Once this function is called the FileStore is not mountable by prior releases
++   */
++  void set_allow_sharded_objects();
++
++  /**
++   * get_allow_sharded_objects()
++   *
++   * return value: true if set_allow_sharded_objects() called, otherwise false
++   */
++  bool get_allow_sharded_objects();
++
+   int statfs(struct statfs *buf);
+ 
+   int _do_transactions(
+@@ -553,6 +589,25 @@ private:
+   std::ofstream m_filestore_dump;
+   JSONFormatter m_filestore_dump_fmt;
+   atomic_t m_filestore_kill_at;
++  FSSuperblock superblock;
++
++  /**
++   * write_superblock()
++   *
++   * Write superblock to persisent storage
++   *
++   * return value: 0 on success, otherwise negative errno
++   */
++  int write_superblock();
++
++  /**
++   * read_superblock()
++   *
++   * Fill in FileStore::superblock by reading persistent storage
++   *
++   * return value: 0 on success, otherwise negative errno
++   */
++  int read_superblock();
+ 
+   friend class FileStoreBackend;
+ };
+diff --git a/src/os/ObjectStore.h b/src/os/ObjectStore.h
+index 7e8f6ce43b..2602b19a11 100644
+--- a/src/os/ObjectStore.h
++++ b/src/os/ObjectStore.h
+@@ -857,6 +857,8 @@ public:
+   virtual int get_max_object_name_length() = 0;
+   virtual int mkfs() = 0;  // wipe
+   virtual int mkjournal() = 0; // journal only
++  virtual void set_allow_sharded_objects() = 0;
++  virtual bool get_allow_sharded_objects() = 0;
+ 
+   virtual int statfs(struct statfs *buf) = 0;
+ 
+diff --git a/src/osd/OSD.cc b/src/osd/OSD.cc
+index 4d8a0b4d0d..df1b111a2a 100644
+--- a/src/osd/OSD.cc
++++ b/src/osd/OSD.cc
+@@ -134,7 +134,9 @@ static ostream& _prefix(std::ostream* _dout, int whoami, OSDMapRef osdmap) {
+ 		<< " ";
+ }
+ 
+-static CompatSet get_osd_compat_set() {
++//Initial features in new superblock.
++//Features here are also automatically upgraded
++CompatSet OSD::get_osd_initial_compat_set() {
+   CompatSet::FeatureSet ceph_osd_feature_compat;
+   CompatSet::FeatureSet ceph_osd_feature_ro_compat;
+   CompatSet::FeatureSet ceph_osd_feature_incompat;
+@@ -152,6 +154,13 @@ static CompatSet get_osd_compat_set() {
+ 		   ceph_osd_feature_incompat);
+ }
+ 
++//Features are added here that this OSD supports.
++CompatSet OSD::get_osd_compat_set() {
++  CompatSet compat =  get_osd_initial_compat_set();
++  //Any features here can be set in code, but not in initial superblock
++  return compat;
++}
++
+ OSDService::OSDService(OSD *osd) :
+   osd(osd),
+   cct(osd->cct),
+@@ -646,7 +655,7 @@ int OSD::mkfs(CephContext *cct, const std::string &dev, const std::string &jdev,
+       sb.cluster_fsid = fsid;
+       sb.osd_fsid = store->get_fsid();
+       sb.whoami = whoami;
+-      sb.compat_features = get_osd_compat_set();
++      sb.compat_features = get_osd_initial_compat_set();
+ 
+       // benchmark?
+       if (cct->_conf->osd_auto_weight) {
+@@ -1188,11 +1197,12 @@ int OSD::init()
+       return r;
+   }
+ 
+-  if (osd_compat.compare(superblock.compat_features) != 0) {
++  CompatSet initial = get_osd_initial_compat_set();
++  if (initial.compare(superblock.compat_features) != 0) {
+     // We need to persist the new compat_set before we
+     // do anything else
+     dout(5) << "Upgrading superblock compat_set" << dendl;
+-    superblock.compat_features = osd_compat;
++    superblock.compat_features = initial;
+     ObjectStore::Transaction t;
+     write_superblock(t);
+     r = store->apply_transaction(t);
+diff --git a/src/osd/OSD.h b/src/osd/OSD.h
+index c2f4519687..15dc044035 100644
+--- a/src/osd/OSD.h
++++ b/src/osd/OSD.h
+@@ -731,6 +731,25 @@ public:
+     return oid;
+   }
+   static void recursive_remove_collection(ObjectStore *store, coll_t tmp);
++
++  /**
++   * get_osd_initial_compat_set()
++   *
++   * Get the initial feature set for this OSD.  Features
++   * here are automatically upgraded.
++   *
++   * Return value: Initial osd CompatSet
++   */
++  static CompatSet get_osd_initial_compat_set();
++
++  /**
++   * get_osd_compat_set()
++   *
++   * Get all features supported by this OSD
++   *
++   * Return value: CompatSet of all supported features
++   */
++  static CompatSet get_osd_compat_set();
+   
+ 
+ private:
+diff --git a/src/osd/osd_types.h b/src/osd/osd_types.h
+index 091b2b95e8..66cce34b26 100644
+--- a/src/osd/osd_types.h
++++ b/src/osd/osd_types.h
+@@ -41,6 +41,7 @@
+ #define CEPH_OSD_FEATURE_INCOMPAT_LEVELDBINFO CompatSet::Feature(8, "leveldbinfo")
+ #define CEPH_OSD_FEATURE_INCOMPAT_LEVELDBLOG CompatSet::Feature(9, "leveldblog")
+ #define CEPH_OSD_FEATURE_INCOMPAT_SNAPMAPPER CompatSet::Feature(10, "snapmapper")
++#define CEPH_OSD_FEATURE_INCOMPAT_SHARDS CompatSet::Feature(11, "sharded objects")
+ 
+ 
+ typedef hobject_t collection_list_handle_t;
+diff --git a/src/tools/ceph-filestore-dump.cc b/src/tools/ceph-filestore-dump.cc
+index 266470563d..01a19dd74e 100644
+--- a/src/tools/ceph-filestore-dump.cc
++++ b/src/tools/ceph-filestore-dump.cc
+@@ -52,6 +52,32 @@ enum {
+     END_OF_TYPES,	//Keep at the end
+ };
+ 
++//#define INTERNAL_TEST
++//#define INTERNAL_TEST2
++
++#ifdef INTERNAL_TEST
++CompatSet get_test_compat_set() {
++  CompatSet::FeatureSet ceph_osd_feature_compat;
++  CompatSet::FeatureSet ceph_osd_feature_ro_compat;
++  CompatSet::FeatureSet ceph_osd_feature_incompat;
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_BASE);
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_PGINFO);
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_OLOC);
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_LEC);
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_CATEGORIES);
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_HOBJECTPOOL);
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_BIGINFO);
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_LEVELDBINFO);
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_LEVELDBLOG);
++#ifdef INTERNAL_TEST2
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_SNAPMAPPER);
++  ceph_osd_feature_incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_SHARDS);
++#endif
++  return CompatSet(ceph_osd_feature_compat, ceph_osd_feature_ro_compat,
++		   ceph_osd_feature_incompat);
++}
++#endif
++
+ typedef uint8_t sectiontype_t;
+ typedef uint32_t mymagic_t;
+ typedef int64_t mysize_t;
+@@ -69,7 +95,7 @@ const int fd_none = INT_MIN;
+ //can be added to the export format.
+ struct super_header {
+   static const uint32_t super_magic = (shortmagic << 16) | shortmagic;
+-  static const uint32_t super_ver = 1;
++  static const uint32_t super_ver = 2;
+   static const uint32_t FIXED_LENGTH = 16;
+   uint32_t magic;
+   uint32_t version;
+@@ -139,18 +165,25 @@ struct footer {
+ 
+ struct pg_begin {
+   pg_t pgid;
++  OSDSuperblock superblock;
+ 
+-  pg_begin(pg_t pg): pgid(pg) { }
++  pg_begin(pg_t pg, OSDSuperblock sb):
++    pgid(pg), superblock(sb) { }
+   pg_begin() { }
+ 
+   void encode(bufferlist& bl) const {
+-    ENCODE_START(1, 1, bl);
++    // New super_ver prevents decode from ver 1
++    ENCODE_START(2, 2, bl);
+     ::encode(pgid, bl);
++    ::encode(superblock, bl);
+     ENCODE_FINISH(bl);
+   }
+   void decode(bufferlist::iterator& bl) {
+-    DECODE_START(1, bl);
++    DECODE_START(2, bl);
+     ::decode(pgid, bl);
++    if (struct_v > 1) {
++      ::decode(superblock, bl);
++    }
+     DECODE_FINISH(bl);
+   }
+ };
+@@ -664,7 +697,7 @@ void write_super()
+ }
+ 
+ int do_export(ObjectStore *fs, coll_t coll, pg_t pgid, pg_info_t &info,
+-    epoch_t map_epoch, __u8 struct_ver)
++    epoch_t map_epoch, __u8 struct_ver, OSDSuperblock superblock)
+ {
+   PGLog::IndexedLog log;
+   pg_missing_t missing;
+@@ -675,7 +708,7 @@ int do_export(ObjectStore *fs, coll_t coll, pg_t pgid, pg_info_t &info,
+ 
+   write_super();
+ 
+-  pg_begin pgb(pgid);
++  pg_begin pgb(pgid, superblock);
+   ret = write_section(TYPE_PG_BEGIN, pgb, file_fd);
+   if (ret)
+     return ret;
+@@ -909,7 +942,7 @@ int get_pg_metadata(ObjectStore *store, coll_t coll, bufferlist &bl)
+   return 0;
+ }
+ 
+-int do_import(ObjectStore *store)
++int do_import(ObjectStore *store, OSDSuperblock sb)
+ {
+   bufferlist ebl;
+   pg_info_t info;
+@@ -943,7 +976,16 @@ int do_import(ObjectStore *store)
+   pg_begin pgb;
+   pgb.decode(ebliter);
+   pg_t pgid = pgb.pgid;
+-  
++
++  if (debug) {
++    cout << "Exported features: " << pgb.superblock.compat_features << std::endl;
++  }
++  if (sb.compat_features.compare(pgb.superblock.compat_features) == -1) {
++    cout << "Export has incompatible features set "
++      << pgb.superblock.compat_features << std::endl;
++    return 1;
++  }
++
+   log_oid = OSD::make_pg_log_oid(pgid);
+   biginfo_oid = OSD::make_pg_biginfo_oid(pgid);
+ 
+@@ -1170,14 +1212,67 @@ int main(int argc, char **argv)
+     return 1;
+   }
+ 
++  bool fs_sharded_objects = fs->get_allow_sharded_objects();
++
+   int ret = 0;
+   vector<coll_t> ls;
+   vector<coll_t>::iterator it;
++  CompatSet supported;
++
++#ifdef INTERNAL_TEST
++  supported = get_test_compat_set();
++#else
++  supported = OSD::get_osd_compat_set();
++#endif
++
++  bufferlist bl;
++  OSDSuperblock superblock;
++  bufferlist::iterator p;
++  ret = fs->read(coll_t::META_COLL, OSD_SUPERBLOCK_POBJECT, 0, 0, bl);
++  if (ret < 0) {
++    cout << "Failure to read OSD superblock error= " << r << std::endl;
++    goto out;
++  }
++
++  p = bl.begin();
++  ::decode(superblock, p);
++
++#ifdef INTERNAL_TEST2
++  fs->set_allow_sharded_objects();
++  assert(fs->get_allow_sharded_objects());
++  fs_sharded_objects = true;
++  superblock.compat_features.incompat.insert(CEPH_OSD_FEATURE_INCOMPAT_SHARDS);
++#endif
++
++  if (debug && file_fd != STDOUT_FILENO) {
++    cout << "Supported features: " << supported << std::endl;
++    cout << "On-disk features: " << superblock.compat_features << std::endl;
++  }
++  if (supported.compare(superblock.compat_features) == -1) {
++    cout << "On-disk OSD incompatible features set "
++      << superblock.compat_features << std::endl;
++    ret = EINVAL;
++    goto out;
++  }
++
++  // If there was a crash as an OSD was transitioning to sharded objects
++  // and hadn't completed a set_allow_sharded_objects().
++  // This utility does not want to attempt to finish that transition.
++  if (superblock.compat_features.incompat.contains(CEPH_OSD_FEATURE_INCOMPAT_SHARDS) != fs_sharded_objects) {
++    // An OSD should never have call set_allow_sharded_objects() before
++    // updating its own OSD features.
++    if (fs_sharded_objects)
++      cout << "FileStore sharded but OSD not set, Corruption?" << std::endl;
++    else
++      cout << "Found incomplete transition to sharded objects" << std::endl;
++    ret = EINVAL;
++    goto out;
++  }
+ 
+   if (type == "import") {
+ 
+     try {
+-      ret = do_import(fs);
++      ret = do_import(fs, superblock);
+     }
+     catch (const buffer::error &e) {
+       cout << "do_import threw exception error " << e.what() << std::endl;
+@@ -1260,7 +1355,7 @@ int main(int argc, char **argv)
+       cerr << "struct_v " << (int)struct_ver << std::endl;
+ 
+     if (type == "export") {
+-      ret = do_export(fs, coll, pgid, info, map_epoch, struct_ver);
++      ret = do_export(fs, coll, pgid, info, map_epoch, struct_ver, superblock);
+     } else if (type == "info") {
+       formatter->open_object_section("info");
+       info.dump(formatter);
+

@@ -1,0 +1,54 @@
+commit d6bd0e6b32ea72be91e5789b1e838c244f8a05d9
+Author: Ralf Baechle <ralf@linux-mips.org>
+Date:   Tue Mar 14 23:46:58 2006 +0000
+
+    [MIPS] Protect more of timer_interrupt() by xtime_lock.
+    
+    From Dave Johnson <djohnson+linuxmips@sw.starentnetworks.com>:
+    
+    * do_timer() expects the arch-specific handler to take the lock as it
+      modifies jiffies[_64] and xtime.
+    * writing timerhi/lo in timer_interrupt() will mess up
+      fixed_rate_gettimeoffset() which reads timerhi/lo.
+    
+    Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+
+diff --git a/arch/mips/kernel/time.c b/arch/mips/kernel/time.c
+index 42c94c771afb..51273b7297a7 100644
+--- a/arch/mips/kernel/time.c
++++ b/arch/mips/kernel/time.c
+@@ -424,6 +424,8 @@ irqreturn_t timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+ 	unsigned long j;
+ 	unsigned int count;
+ 
++	write_seqlock(&xtime_lock);
++
+ 	count = mips_hpt_read();
+ 	mips_timer_ack();
+ 
+@@ -441,7 +443,6 @@ irqreturn_t timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+ 	 * CMOS clock accordingly every ~11 minutes. rtc_set_time() has to be
+ 	 * called as close as possible to 500 ms before the new second starts.
+ 	 */
+-	write_seqlock(&xtime_lock);
+ 	if (ntp_synced() &&
+ 	    xtime.tv_sec > last_rtc_update + 660 &&
+ 	    (xtime.tv_nsec / 1000) >= 500000 - ((unsigned) TICK_SIZE) / 2 &&
+@@ -453,7 +454,6 @@ irqreturn_t timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+ 			last_rtc_update = xtime.tv_sec - 600;
+ 		}
+ 	}
+-	write_sequnlock(&xtime_lock);
+ 
+ 	/*
+ 	 * If jiffies has overflown in this timer_interrupt, we must
+@@ -496,6 +496,8 @@ irqreturn_t timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+ 		}
+ 	}
+ 
++	write_sequnlock(&xtime_lock);
++
+ 	/*
+ 	 * In UP mode, we call local_timer_interrupt() to do profiling
+ 	 * and process accouting.
+

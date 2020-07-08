@@ -1,0 +1,85 @@
+commit 6ee06fa9ed91412cb745668d462031cdbe2642e0
+Author: Pradosh Mohapatra <pmohapat@cumulusnetworks.com>
+Date:   Sun Jan 12 18:30:13 2014 +0000
+
+    bgpd: bgpd-set-v4-nexthop-for-v6-peering.patch
+    
+    BGP: While advertising v4 prefixes over a v6 session, set the correct v4 nexthop.
+    
+    ISSUE:
+    
+    For an IPv6 peer, BGPd sets the local router-id as the next-hop's v4 address.
+    This is incorrect as the router-id may not be a valid next-hop to be included
+    in UPDATEs that contain v4 prefixes.
+    
+    PATCH:
+    
+    Set the v4 address in the next-hop field based on the interface that the
+    peering is on (directly connected interface or loopback).
+    
+    Signed-off-by: Pradosh Mohapatra <pmohapat at cumulusnetworks.com>
+    Reviewed-by: Scott Feldman <sfeldma at cumulusnetworks.com>
+    Acked-by: Feng Lu <lu.feng@6wind.com>
+
+diff --git a/bgpd/bgp_zebra.c b/bgpd/bgp_zebra.c
+index 60443830..26b97c2c 100644
+--- a/bgpd/bgp_zebra.c
++++ b/bgpd/bgp_zebra.c
+@@ -534,6 +534,25 @@ if_get_ipv6_local (struct interface *ifp, struct in6_addr *addr)
+ }
+ #endif /* HAVE_IPV6 */
+ 
++static int
++if_get_ipv4_address (struct interface *ifp, struct in_addr *addr)
++{
++  struct listnode *cnode;
++  struct connected *connected;
++  struct prefix *cp;
++
++  for (ALL_LIST_ELEMENTS_RO (ifp->connected, cnode, connected))
++    {
++      cp = connected->address;
++      if ((cp->family == AF_INET) && !ipv4_martian(&(cp->u.prefix4)))
++	  {
++	    *addr = cp->u.prefix4;
++	    return 1;
++	  }
++    }
++  return 0;
++}
++
+ int
+ bgp_nexthop_set (union sockunion *local, union sockunion *remote, 
+ 		 struct bgp_nexthop *nexthop, struct peer *peer)
+@@ -592,8 +611,9 @@ bgp_nexthop_set (union sockunion *local, union sockunion *remote,
+     {
+       struct interface *direct = NULL;
+ 
+-      /* IPv4 nexthop.  I don't care about it. */
+-      if (peer->local_id.s_addr)
++      /* IPv4 nexthop. */
++      ret = if_get_ipv4_address(ifp, &nexthop->v4);
++      if (!ret && peer->local_id.s_addr)
+ 	nexthop->v4 = peer->local_id;
+ 
+       /* Global address*/
+diff --git a/lib/prefix.h b/lib/prefix.h
+index 7f0d3607..8c8992e8 100644
+--- a/lib/prefix.h
++++ b/lib/prefix.h
+@@ -196,4 +196,14 @@ extern const char *inet6_ntoa (struct in6_addr);
+ 
+ extern int all_digit (const char *);
+ 
++static inline int ipv4_martian (struct in_addr *addr)
++{
++  in_addr_t ip = addr->s_addr;
++
++  if (IPV4_NET0(ip) || IPV4_NET127(ip) || IPV4_CLASS_DE(ip)) {
++    return 1;
++  }
++  return 0;
++}
++
+ #endif /* _ZEBRA_PREFIX_H */
+

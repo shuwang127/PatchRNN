@@ -1,0 +1,176 @@
+commit 91aadab3dda85cf51b7c6d89b7e70f32bd437e5b
+Author: ridiculousfish <corydoras@ridiculousfish.com>
+Date:   Mon Apr 28 15:14:33 2014 -0700
+
+    Enhance file_id_t to have richer information, to guard against inode
+    recycling on Linux filesystems
+
+diff --git a/env_universal_common.cpp b/env_universal_common.cpp
+index 63e30352..4d12318d 100644
+--- a/env_universal_common.cpp
++++ b/env_universal_common.cpp
+@@ -624,7 +624,7 @@ void env_universal_t::load_from_fd(int fd)
+     ASSERT_IS_LOCKED(lock);
+     assert(fd >= 0);
+     /* Get the dev / inode */
+-    file_id_t current_file = file_id_for_fd(fd);
++    const file_id_t current_file = file_id_for_fd(fd);
+     if (current_file != last_read_file)
+     {
+         connection_t c(fd);
+diff --git a/wildcard.cpp b/wildcard.cpp
+index 2b93561b..3ec1a8e5 100644
+--- a/wildcard.cpp
++++ b/wildcard.cpp
+@@ -971,7 +971,7 @@ static int wildcard_expand_internal(const wchar_t *wc,
+                     // Insert a "file ID" into visited_files
+                     // If the insertion fails, we've already visited this file (i.e. a symlink loop)
+                     // If we're not recursive, insert anyways (in case we loop back around in a future recursive segment), but continue on; the idea being that literal path components should still work
+-                    const file_id_t file_id(buf.st_dev, buf.st_ino);
++                    const file_id_t file_id = file_id_t::file_id_from_stat(&buf);
+                     if (S_ISDIR(buf.st_mode) && (visited_files.insert(file_id).second || ! is_recursive))
+                     {
+                         new_dir.push_back(L'/');
+diff --git a/wutil.cpp b/wutil.cpp
+index af6de26a..3b1bba79 100644
+--- a/wutil.cpp
++++ b/wutil.cpp
+@@ -35,7 +35,7 @@
+ 
+ typedef std::string cstring;
+ 
+-const file_id_t kInvalidFileID = file_id_t((dev_t)(-1), (ino_t)(-1));
++const file_id_t kInvalidFileID = {-1, -1, -1, -1, -1, -1};
+ 
+ /**
+    Minimum length of the internal covnersion buffers
+@@ -528,14 +528,42 @@ int fish_wcstoi(const wchar_t *str, wchar_t ** endptr, int base)
+     return (int)ret;
+ }
+ 
++file_id_t file_id_t::file_id_from_stat(const struct stat *buf)
++{
++    assert(buf != NULL);
++    
++    file_id_t result = {};
++    result.device = buf->st_dev;
++    result.inode = buf->st_ino;
++    result.size = buf->st_size;
++    result.change_seconds = buf->st_ctime;
++    
++#if STAT_HAVE_NSEC
++    result.change_nanoseconds = buf->st_ctime_nsec;
++#elif defined(__APPLE__)
++    result.change_nanoseconds = buf->st_ctimespec.tv_nsec;
++#elif defined(_BSD_SOURCE) || defined(_SVID_SOURCE) || defined(_XOPEN_SOURCE)
++    result.change_nanoseconds = buf->st_ctim.tv_nsec;
++#else
++    result.change_nanoseconds = 0;
++#endif
++
++#if defined(__APPLE__) || defined(__DragonFly__) || defined(__FreeBSD__) ||  defined(__OpenBSD__) || defined(__NetBSD__)
++    result.generation = buf->st_gen;
++#else
++    result.generation = 0;
++#endif
++    return result;
++}
++
++
+ file_id_t file_id_for_fd(int fd)
+ {
+     file_id_t result = kInvalidFileID;
+     struct stat buf = {};
+     if (0 == fstat(fd, &buf))
+     {
+-        result.first = buf.st_dev;
+-        result.second = buf.st_ino;
++        result = file_id_t::file_id_from_stat(&buf);
+     }
+     return result;
+ }
+@@ -546,9 +574,50 @@ file_id_t file_id_for_path(const wcstring &path)
+     struct stat buf = {};
+     if (0 == wstat(path, &buf))
+     {
+-        result.first = buf.st_dev;
+-        result.second = buf.st_ino;
++        result = file_id_t::file_id_from_stat(&buf);
+     }
+     return result;
+ 
+ }
++
++bool file_id_t::operator==(const file_id_t &rhs) const
++{
++    return device == rhs.device &&
++           inode == rhs.inode &&
++           size == rhs.size &&
++           change_seconds == rhs.change_seconds &&
++           change_nanoseconds == rhs.change_nanoseconds &&
++           generation == rhs.generation;
++}
++
++bool file_id_t::operator!=(const file_id_t &rhs) const
++{
++    return ! (*this == rhs);
++}
++
++template<typename T>
++int compare(T a, T b)
++{
++    if (a < b)
++    {
++        return -1;
++    }
++    else if (a > b)
++    {
++        return 1;
++    }
++    return 0;
++}
++
++bool file_id_t::operator<(const file_id_t &rhs) const
++{
++    /* Compare each field, stopping when we get to a non-equal field */
++    int ret = 0;
++    if (! ret) ret = compare(device, rhs.device);
++    if (! ret) ret = compare(inode, rhs.inode);
++    if (! ret) ret = compare(size, rhs.size);
++    if (! ret) ret = compare(generation, rhs.generation);
++    if (! ret) ret = compare(change_seconds, rhs.change_seconds);
++    if (! ret) ret = compare(change_nanoseconds, rhs.change_nanoseconds);
++    return ret < 0;
++}
+diff --git a/wutil.h b/wutil.h
+index 1b2f6f2b..3355ab14 100644
+--- a/wutil.h
++++ b/wutil.h
+@@ -158,8 +158,24 @@ int wrename(const wcstring &oldName, const wcstring &newName);
+ /** Like wcstol(), but fails on a value outside the range of an int */
+ int fish_wcstoi(const wchar_t *str, wchar_t ** endptr, int base);
+ 
+-/** Class for representing a file's inode. We use this to detect and avoid symlink loops, among other things. */
+-typedef std::pair<dev_t, ino_t> file_id_t;
++/** Class for representing a file's inode. We use this to detect and avoid symlink loops, among other things. While an inode / dev pair is sufficient to distinguish co-existing files, Linux seems to aggressively re-use inodes, so it cannot determine if a file has been deleted (ABA problem). Therefore we include richer information. */
++struct file_id_t
++{
++    dev_t device;
++    ino_t inode;
++    uint64_t size;
++    time_t change_seconds;
++    long change_nanoseconds;
++    uint32_t generation;
++    
++    bool operator==(const file_id_t &rhs) const;
++    bool operator!=(const file_id_t &rhs) const;
++    
++    // Used to permit these as keys in std::map
++    bool operator<(const file_id_t &rhs) const;
++    
++    static file_id_t file_id_from_stat(const struct stat *buf);
++};
+ 
+ file_id_t file_id_for_fd(int fd);
+ file_id_t file_id_for_path(const wcstring &path);
+

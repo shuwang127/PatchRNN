@@ -1,0 +1,247 @@
+commit 7e9b246d874188f0aea605ab89d0bedd65fa95d1
+Author: angelos <angelos@openbsd.org>
+Date:   Sun Jun 18 03:07:25 2000 +0000
+
+    The callbacks need to set the appropriate spl level now.
+
+diff --git a/sys/netinet/ip_ah.c b/sys/netinet/ip_ah.c
+index 149b9d78ac1..5ff34fab0d6 100644
+--- a/sys/netinet/ip_ah.c
++++ b/sys/netinet/ip_ah.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ip_ah.c,v 1.39 2000/06/06 04:49:29 angelos Exp $ */
++/*	$OpenBSD: ip_ah.c,v 1.40 2000/06/18 03:07:25 angelos Exp $ */
+ 
+ /*
+  * The authors of this code are John Ioannidis (ji@tla.org),
+@@ -652,6 +652,7 @@ ah_input_cb(void *op)
+     struct cryptop *crp;
+     struct tdb *tdb;
+     caddr_t ptr = 0;
++    int s, err;
+ 
+     crp = (struct cryptop *) op;
+     crd = crp->crp_desc;
+@@ -662,6 +663,8 @@ ah_input_cb(void *op)
+     ptr = tc->tc_ptr;
+     m = (struct mbuf *) crp->crp_buf;
+ 
++    s = spltdb();
++
+     tdb = gettdb(tc->tc_spi, &tc->tc_dst, tc->tc_proto);
+     FREE(tc, M_XDATA);
+     if (tdb == NULL)
+@@ -680,7 +683,10 @@ ah_input_cb(void *op)
+ 	  tdb->tdb_cryptoid = crp->crp_sid;
+ 
+ 	if (crp->crp_etype == EAGAIN)
+-	  return crypto_dispatch(crp);
++        {
++            splx(s);
++            return crypto_dispatch(crp);
++        }
+ 
+ 	ahstat.ahs_noxform++;
+ 	DPRINTF(("ah_input_cb(): crypto error %d\n", crp->crp_etype));
+@@ -729,9 +735,10 @@ ah_input_cb(void *op)
+     m1 = m_getptr(m, skip, &roff);
+     if (m1 == NULL)
+     {
++	ahstat.ahs_hdrops++;
++        splx(s);
+ 	DPRINTF(("ah_input(): bad mbuf chain for packet in SA %s/%08x\n",
+ 		 ipsp_address(tdb->tdb_dst), ntohl(tdb->tdb_spi)));
+-	ahstat.ahs_hdrops++;
+ 	m_freem(m);
+ 	return EINVAL;
+     }
+@@ -787,9 +794,13 @@ ah_input_cb(void *op)
+ 	  m->m_pkthdr.len -= rplen + ahx->authsize;
+       }
+ 
+-    return ipsec_common_input_cb(m, tdb, skip, protoff);
++    err = ipsec_common_input_cb(m, tdb, skip, protoff);
++    splx(s);
++    return err;
+ 
+  baddone:
++    splx(s);
++
+     if (m)
+       m_freem(m);
+ 
+@@ -1106,6 +1117,7 @@ ah_output_cb(void *op)
+     struct tdb *tdb;
+     caddr_t ptr = 0;
+     struct mbuf *m;
++    int err, s;
+ 
+     crp = (struct cryptop *) op;
+     tc = (struct tdb_crypto *) crp->crp_opaque;
+@@ -1114,6 +1126,8 @@ ah_output_cb(void *op)
+     ptr = tc->tc_ptr;
+     m = (struct mbuf *) crp->crp_buf;
+ 
++    s = spltdb();
++
+     tdb = gettdb(tc->tc_spi, &tc->tc_dst, tc->tc_proto);
+     FREE(tc, M_XDATA);
+     if (tdb == NULL)
+@@ -1130,7 +1144,10 @@ ah_output_cb(void *op)
+ 	  tdb->tdb_cryptoid = crp->crp_sid;
+ 
+ 	if (crp->crp_etype == EAGAIN)
+-          return crypto_dispatch(crp);
++        {
++            splx(s);
++            return crypto_dispatch(crp);
++        }
+ 
+ 	ahstat.ahs_noxform++;
+ 	DPRINTF(("ah_output_cb(): crypto error %d\n", crp->crp_etype));
+@@ -1154,9 +1171,13 @@ ah_output_cb(void *op)
+     FREE(ptr, M_XDATA);
+     crypto_freereq(crp);
+ 
+-    return ipsp_process_done(m, tdb);
++    err =  ipsp_process_done(m, tdb);
++    splx(s);
++    return err;
+ 
+  baddone:
++    splx(s);
++
+     if (m)
+       m_freem(m);
+ 
+diff --git a/sys/netinet/ip_esp.c b/sys/netinet/ip_esp.c
+index c109ea1689f..eea264cdddc 100644
+--- a/sys/netinet/ip_esp.c
++++ b/sys/netinet/ip_esp.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: ip_esp.c,v 1.46 2000/06/15 00:30:12 angelos Exp $ */
++/*	$OpenBSD: ip_esp.c,v 1.47 2000/06/18 03:07:25 angelos Exp $ */
+ 
+ /*
+  * The authors of this code are John Ioannidis (ji@tla.org),
+@@ -484,6 +484,7 @@ esp_input_cb(void *op)
+     struct cryptop *crp;
+     struct tdb *tdb;
+     caddr_t ptr = 0;
++    int s, err = 0;
+ 
+     crp = (struct cryptop *) op;
+     crd = crp->crp_desc;
+@@ -494,6 +495,8 @@ esp_input_cb(void *op)
+     ptr = tc->tc_ptr;
+     m = (struct mbuf *) crp->crp_buf;
+ 
++    s = spltdb();
++
+     tdb = gettdb(tc->tc_spi, &tc->tc_dst, tc->tc_proto);
+     FREE(tc, M_XDATA);
+     if (tdb == NULL)
+@@ -514,7 +517,10 @@ esp_input_cb(void *op)
+ 	  tdb->tdb_cryptoid = crp->crp_sid;
+ 
+ 	if (crp->crp_etype == EAGAIN)
+-	  return crypto_dispatch(crp);
++        {
++            splx(s);
++	    return crypto_dispatch(crp);
++        }
+ 
+ 	espstat.esps_noxform++;
+ 	DPRINTF(("esp_input_cb(): crypto error %d\n", crp->crp_etype));
+@@ -566,9 +572,10 @@ esp_input_cb(void *op)
+     m1 = m_getptr(m, skip, &roff);
+     if (m1 == NULL)
+     {
++	espstat.esps_hdrops++;
++        splx(s);
+ 	DPRINTF(("esp_input_cb(): bad mbuf chain, SA %s/%08x\n",
+ 		 ipsp_address(tdb->tdb_dst), ntohl(tdb->tdb_spi)));
+-	espstat.esps_hdrops++;
+ 	m_freem(m);
+ 	return EINVAL;
+     }
+@@ -629,8 +636,9 @@ esp_input_cb(void *op)
+     /* Verify pad length */
+     if (lastthree[1] + 2 > m->m_pkthdr.len - skip)
+     {
+-	DPRINTF(("esp_input_cb(): invalid padding length %d for packet in SA %s/%08x\n", lastthree[1], ipsp_address(tdb->tdb_dst), ntohl(tdb->tdb_spi)));
+ 	espstat.esps_badilen++;
++        splx(s);
++	DPRINTF(("esp_input_cb(): invalid padding length %d for packet in SA %s/%08x\n", lastthree[1], ipsp_address(tdb->tdb_dst), ntohl(tdb->tdb_spi)));
+ 	m_freem(m);
+ 	return EINVAL;
+     }
+@@ -640,8 +648,9 @@ esp_input_cb(void *op)
+     {
+ 	if ((lastthree[1] != lastthree[0]) && (lastthree[1] != 0))
+ 	{
+-	    DPRINTF(("esp_input(): decryption failed for packet in SA %s/%08x\n", ipsp_address(tdb->tdb_dst), ntohl(tdb->tdb_spi)));
+ 	    espstat.esps_badenc++;
++            splx(s);
++	    DPRINTF(("esp_input(): decryption failed for packet in SA %s/%08x\n", ipsp_address(tdb->tdb_dst), ntohl(tdb->tdb_spi)));
+ 	    m_freem(m);
+ 	    return EINVAL;
+ 	}
+@@ -654,9 +663,13 @@ esp_input_cb(void *op)
+     m_copyback(m, protoff, sizeof(u_int8_t), lastthree + 2);
+ 
+     /* Back to generic IPsec input processing */
+-    return ipsec_common_input_cb(m, tdb, skip, protoff);
++    err = ipsec_common_input_cb(m, tdb, skip, protoff);
++    splx(s);
++    return err;
+ 
+  baddone:
++    splx(s);
++
+     if (m)
+       m_freem(m);
+ 
+@@ -983,11 +996,13 @@ esp_output_cb(void *op)
+     struct tdb_crypto *tc;
+     struct tdb *tdb;
+     struct mbuf *m;
+-    int error;
++    int error, s;
+ 
+     tc = (struct tdb_crypto *) crp->crp_opaque;
+     m = (struct mbuf *) crp->crp_buf;
+ 
++    s = spltdb();
++
+     tdb = gettdb(tc->tc_spi, &tc->tc_dst, tc->tc_proto);
+     FREE(tc, M_XDATA);
+     if (tdb == NULL)
+@@ -1005,7 +1020,10 @@ esp_output_cb(void *op)
+ 	  tdb->tdb_cryptoid = crp->crp_sid;
+ 
+ 	if (crp->crp_etype == EAGAIN)
+-	  return crypto_dispatch(crp);
++        {
++            splx(s);
++            return crypto_dispatch(crp);
++        }
+ 
+ 	espstat.esps_noxform++;
+ 	DPRINTF(("esp_output_cb(): crypto error %d\n", crp->crp_etype));
+@@ -1035,9 +1053,13 @@ esp_output_cb(void *op)
+ 		 tdb->tdb_iv);
+ 
+     /* Call the IPsec input callback */
+-    return ipsp_process_done(m, tdb);
++    error = ipsp_process_done(m, tdb);
++    splx(s);
++    return error;
+ 
+  baddone:
++    splx(s);
++
+     if (m)
+       m_freem(m);
+ 
+

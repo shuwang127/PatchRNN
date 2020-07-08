@@ -1,0 +1,101 @@
+commit f2a2e4910502e866833732f31ee697d15b3e56fd
+Author: Mauro Carvalho Chehab <mchehab@redhat.com>
+Date:   Wed Nov 19 06:17:44 2008 -0300
+
+    V4L/DVB (9647): em28xx: void having two concurrent control URB's
+    
+    Now that we have a polling task for IR, there's a race condition, since
+    IR can be polling while other operations are being doing. Also, we are
+    now sharing the same urb_buf for both read and write control urb
+    operations. So, we need a mutex.
+    
+    Thanks to Davin Heitmueller <devin.heitmueller@gmail.com> for warning me.
+    
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+
+diff --git a/drivers/media/video/em28xx/em28xx-core.c b/drivers/media/video/em28xx/em28xx-core.c
+index 9551b8ab8c44..15e2b525310d 100644
+--- a/drivers/media/video/em28xx/em28xx-core.c
++++ b/drivers/media/video/em28xx/em28xx-core.c
+@@ -76,18 +76,22 @@ int em28xx_read_reg_req_len(struct em28xx *dev, u8 req, u16 reg,
+ 
+ 	em28xx_regdbg("req=%02x, reg=%02x ", req, reg);
+ 
++	mutex_lock(&dev->ctrl_urb_lock);
+ 	ret = usb_control_msg(dev->udev, usb_rcvctrlpipe(dev->udev, 0), req,
+ 			      USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
+ 			      0x0000, reg, dev->urb_buf, len, HZ);
+ 	if (ret < 0) {
+ 		if (reg_debug)
+ 			printk(" failed!\n");
++		mutex_unlock(&dev->ctrl_urb_lock);
+ 		return ret;
+ 	}
+ 
+ 	if (len)
+ 		memcpy(buf, dev->urb_buf, len);
+ 
++	mutex_unlock(&dev->ctrl_urb_lock);
++
+ 	if (reg_debug) {
+ 		printk("%02x values: ", ret);
+ 		for (byte = 0; byte < len; byte++)
+@@ -112,16 +116,18 @@ int em28xx_read_reg_req(struct em28xx *dev, u8 req, u16 reg)
+ 
+ 	em28xx_regdbg("req=%02x, reg=%02x:", req, reg);
+ 
++	mutex_lock(&dev->ctrl_urb_lock);
+ 	ret = usb_control_msg(dev->udev, usb_rcvctrlpipe(dev->udev, 0), req,
+ 			      USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
+ 			      0x0000, reg, dev->urb_buf, 1, HZ);
++	val = dev->urb_buf[0];
++	mutex_unlock(&dev->ctrl_urb_lock);
++
+ 	if (ret < 0) {
+ 		printk(" failed!\n");
+ 		return ret;
+ 	}
+ 
+-	val = dev->urb_buf[0];
+-
+ 	if (reg_debug)
+ 		printk("%02x\n", (unsigned char) val);
+ 
+@@ -156,10 +162,12 @@ int em28xx_write_regs_req(struct em28xx *dev, u8 req, u16 reg, char *buf,
+ 		printk("\n");
+ 	}
+ 
++	mutex_lock(&dev->ctrl_urb_lock);
+ 	memcpy(dev->urb_buf, buf, len);
+ 	ret = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0), req,
+ 			      USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
+ 			      0x0000, reg, dev->urb_buf, len, HZ);
++	mutex_unlock(&dev->ctrl_urb_lock);
+ 
+ 	if (dev->wait_after_write)
+ 		msleep(dev->wait_after_write);
+diff --git a/drivers/media/video/em28xx/em28xx-video.c b/drivers/media/video/em28xx/em28xx-video.c
+index bca5955339b8..c32fc7d24a42 100644
+--- a/drivers/media/video/em28xx/em28xx-video.c
++++ b/drivers/media/video/em28xx/em28xx-video.c
+@@ -1936,6 +1936,7 @@ static int em28xx_init_dev(struct em28xx **devhandle, struct usb_device *udev,
+ 
+ 	dev->udev = udev;
+ 	mutex_init(&dev->lock);
++	mutex_init(&dev->ctrl_urb_lock);
+ 	spin_lock_init(&dev->slock);
+ 	init_waitqueue_head(&dev->open);
+ 	init_waitqueue_head(&dev->wait_frame);
+diff --git a/drivers/media/video/em28xx/em28xx.h b/drivers/media/video/em28xx/em28xx.h
+index 1adf3d9d9bff..5956e9b3062f 100644
+--- a/drivers/media/video/em28xx/em28xx.h
++++ b/drivers/media/video/em28xx/em28xx.h
+@@ -433,6 +433,7 @@ struct em28xx {
+ 
+ 	/* locks */
+ 	struct mutex lock;
++	struct mutex ctrl_urb_lock;	/* protects urb_buf */
+ 	/* spinlock_t queue_lock; */
+ 	struct list_head inqueue, outqueue;
+ 	wait_queue_head_t open, wait_frame, wait_stream;
+

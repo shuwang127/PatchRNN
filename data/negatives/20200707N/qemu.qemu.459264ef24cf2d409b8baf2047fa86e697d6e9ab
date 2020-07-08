@@ -1,0 +1,44 @@
+commit 459264ef24cf2d409b8baf2047fa86e697d6e9ab
+Author: David Gibson <david@gibson.dropbear.id.au>
+Date:   Tue May 23 16:33:06 2017 +1000
+
+    pseries: Restore support for total vcpus not a multiple of threads-per-core for old machine types
+    
+    As of pseries-2.7 and later, we require the total number of guest vcpus to
+    be a multiple of the threads-per-core.  pseries-2.6 and earlier machine
+    types, however, are supposed to allow this for the sake of migration from
+    old qemu versions which allowed this.
+    
+    Unfortunately, 8149e29 "pseries: Enforce homogeneous threads-per-core"
+    broke this by not considering the old machine type case.  This fixes it by
+    only applying the check when the machine type supports hotpluggable cpus.
+    By not-entirely-coincidence, that corresponds to the same time when we
+    started enforcing total threads being a multiple of threads-per-core.
+    
+    Fixes: 8149e2992f7811355cc34721b79d69d1a3a667dd
+    
+    Signed-off-by: David Gibson <david@gibson.dropbear.id.au>
+    Reviewed-by: Laurent Vivier <lvivier@redhat.com>
+    Reviewed-by: Greg Kurz <groug@kaod.org>
+    Tested-by: Greg Kurz <groug@kaod.org>
+
+diff --git a/hw/ppc/spapr.c b/hw/ppc/spapr.c
+index c92d269027..bcb0e184a0 100644
+--- a/hw/ppc/spapr.c
++++ b/hw/ppc/spapr.c
+@@ -2863,7 +2863,13 @@ static void spapr_core_pre_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
+         goto out;
+     }
+ 
+-    if (cc->nr_threads != smp_threads) {
++    /*
++     * In general we should have homogeneous threads-per-core, but old
++     * (pre hotplug support) machine types allow the last core to have
++     * reduced threads as a compatibility hack for when we allowed
++     * total vcpus not a multiple of threads-per-core.
++     */
++    if (mc->has_hotpluggable_cpus && (cc->nr_threads != smp_threads)) {
+         error_setg(errp, "invalid nr-threads %d, must be %d",
+                    cc->nr_threads, smp_threads);
+         return;
+

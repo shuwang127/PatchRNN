@@ -1,0 +1,105 @@
+commit 3dfed9cb86a54bc8266057ef62b99f5d889f4efc
+Author: Carlos Martín Nieto <cmn@elego.de>
+Date:   Wed Oct 31 10:26:04 2012 +0100
+
+    packbuilder: add git_packbuilder_foreach
+    
+    Let the user get each object as a buffer+size pair so they can handle
+    the packfile content as they need to.
+
+diff --git a/include/git2/pack.h b/include/git2/pack.h
+index 748ad2e11..7e28a67e8 100644
+--- a/include/git2/pack.h
++++ b/include/git2/pack.h
+@@ -77,6 +77,16 @@ GIT_EXTERN(int) git_packbuilder_insert_tree(git_packbuilder *pb, const git_oid *
+  */
+ GIT_EXTERN(int) git_packbuilder_write(git_packbuilder *pb, const char *file);
+ 
++/**
++ * Create the new pack and pass each object to the callback
++ *
++ * @param pb the packbuilder
++ * @param cb the callback to call with each packed object's buffer
++ * @param data the callback's data
++ * @return 0 or an error code
++ */
++GIT_EXTERN(int) git_packbuilder_foreach(git_packbuilder *pb, int (*cb)(void *buf, size_t size, void *data), void *data);
++
+ /**
+  * Free the packbuilder and all associated data
+  *
+diff --git a/src/pack-objects.c b/src/pack-objects.c
+index eb76e05a2..8861084e1 100644
+--- a/src/pack-objects.c
++++ b/src/pack-objects.c
+@@ -1237,6 +1237,12 @@ int git_packbuilder_send(git_packbuilder *pb, git_transport *t)
+ 	return write_pack(pb, &send_pack_file, t);
+ }
+ 
++int git_packbuilder_foreach(git_packbuilder *pb, int (*cb)(void *buf, size_t size, void *payload), void *payload)
++{
++	PREPARE_PACK;
++	return write_pack(pb, cb, payload);
++}
++
+ int git_packbuilder_write_buf(git_buf *buf, git_packbuilder *pb)
+ {
+ 	PREPARE_PACK;
+diff --git a/tests-clar/pack/packbuilder.c b/tests-clar/pack/packbuilder.c
+index 6d17a709f..208141c27 100644
+--- a/tests-clar/pack/packbuilder.c
++++ b/tests-clar/pack/packbuilder.c
+@@ -28,12 +28,12 @@ void test_pack_packbuilder__cleanup(void)
+ 	git_packbuilder_free(_packbuilder);
+ 	git_revwalk_free(_revwalker);
+ 	git_indexer_free(_indexer);
++	_indexer = NULL;
+ 	git_repository_free(_repo);
+ }
+ 
+-void test_pack_packbuilder__create_pack(void)
++static void seed_packbuilder(void)
+ {
+-	git_transfer_progress stats;
+ 	git_oid oid, *o;
+ 	unsigned int i;
+ 
+@@ -58,10 +58,37 @@ void test_pack_packbuilder__create_pack(void)
+ 					git_commit_tree_oid((git_commit *)obj)));
+ 		git_object_free(obj);
+ 	}
++}
++
++void test_pack_packbuilder__create_pack(void)
++{
++	git_transfer_progress stats;
+ 
++	seed_packbuilder();
+ 	cl_git_pass(git_packbuilder_write(_packbuilder, "testpack.pack"));
+ 
+ 	cl_git_pass(git_indexer_new(&_indexer, "testpack.pack"));
+ 	cl_git_pass(git_indexer_run(_indexer, &stats));
+ 	cl_git_pass(git_indexer_write(_indexer));
+ }
++
++static git_transfer_progress stats;
++static int foreach_cb(void *buf, size_t len, void *payload)
++{
++	git_indexer_stream *idx = (git_indexer_stream *) payload;
++
++	cl_git_pass(git_indexer_stream_add(idx, buf, len, &stats));
++
++	return 0;
++}
++
++void test_pack_packbuilder__foreach(void)
++{
++	git_indexer_stream *idx;
++
++	seed_packbuilder();
++	cl_git_pass(git_indexer_stream_new(&idx, ".", NULL, NULL));
++	cl_git_pass(git_packbuilder_foreach(_packbuilder, foreach_cb, idx));
++	cl_git_pass(git_indexer_stream_finalize(idx, &stats));
++	git_indexer_stream_free(idx);
++}
+

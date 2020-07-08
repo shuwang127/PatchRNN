@@ -1,0 +1,66 @@
+commit df8b59be0976c56820453730078bef99a8d1dbda
+Author: Dave Jones <davej@redhat.com>
+Date:   Tue Sep 20 12:39:35 2005 -0700
+
+    [CPUFREQ] Avoid the ondemand cpufreq governor to use a too high frequency for stats.
+    
+    The problem is in the ondemand governor, there is a periodic measurement
+    of the CPU usage. This CPU usage is updated by the scheduler after every
+    tick (basically, by adding 1 either to "idle" or to "user" or to
+    "system"). So if the frequency of the governor is too high, the stat
+    will be meaningless (as mostly no number have changed).
+    
+    So this patch checks that the measurements are separated by at least 10
+    ticks. It means that by default, stats will have about 5% error (20
+    ticks). Of course those numbers can be argued but, IMHO, they look sane.
+    The patch also includes a small clean-up to check more explictly the
+    result of the conversion from ns to µs being null.
+    
+    Let's note that (on x86) this has never been really needed before 2.6.13
+    because HZ was always 1000. Now that HZ can be 100, some CPU might be
+    affected by this problem. For instance when HZ=100, the centrino ,which
+    has a 10µs transition latency, would lead to the governor allowing to
+    read stats every tick (10ms)!
+    
+    Signed-off-by: Eric Piel <eric.piel@tremplin-utc.net>
+    Signed-off-by: Dave Jones <davej@redhat.com>
+
+diff --git a/drivers/cpufreq/cpufreq_ondemand.c b/drivers/cpufreq/cpufreq_ondemand.c
+index c1fc9c62bb51..17741111246b 100644
+--- a/drivers/cpufreq/cpufreq_ondemand.c
++++ b/drivers/cpufreq/cpufreq_ondemand.c
+@@ -48,7 +48,10 @@
+  * All times here are in uS.
+  */
+ static unsigned int 				def_sampling_rate;
+-#define MIN_SAMPLING_RATE			(def_sampling_rate / 2)
++#define MIN_SAMPLING_RATE_RATIO			(2)
++/* for correct statistics, we need at least 10 ticks between each measure */
++#define MIN_STAT_SAMPLING_RATE			(MIN_SAMPLING_RATE_RATIO * jiffies_to_usecs(10))
++#define MIN_SAMPLING_RATE			(def_sampling_rate / MIN_SAMPLING_RATE_RATIO)
+ #define MAX_SAMPLING_RATE			(500 * def_sampling_rate)
+ #define DEF_SAMPLING_RATE_LATENCY_MULTIPLIER	(1000)
+ #define DEF_SAMPLING_DOWN_FACTOR		(1)
+@@ -416,13 +419,16 @@ static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
+ 		if (dbs_enable == 1) {
+ 			unsigned int latency;
+ 			/* policy latency is in nS. Convert it to uS first */
++			latency = policy->cpuinfo.transition_latency / 1000;
++			if (latency == 0)
++				latency = 1;
+ 
+-			latency = policy->cpuinfo.transition_latency;
+-			if (latency < 1000)
+-				latency = 1000;
+-
+-			def_sampling_rate = (latency / 1000) *
++			def_sampling_rate = latency *
+ 					DEF_SAMPLING_RATE_LATENCY_MULTIPLIER;
++
++			if (def_sampling_rate < MIN_STAT_SAMPLING_RATE)
++				def_sampling_rate = MIN_STAT_SAMPLING_RATE;
++
+ 			dbs_tuners_ins.sampling_rate = def_sampling_rate;
+ 			dbs_tuners_ins.ignore_nice = 0;
+ 
+

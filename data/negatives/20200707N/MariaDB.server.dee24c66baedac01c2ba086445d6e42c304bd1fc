@@ -1,0 +1,604 @@
+commit dee24c66baedac01c2ba086445d6e42c304bd1fc
+Author: brian@zim.(none) <>
+Date:   Sat Jan 20 17:19:54 2007 -0800
+
+    1) New dirty state for files (need this for longterm fast recovery)
+    2) We now store shortest and longest row information.
+    3) archive_reader can now check and backup files (even if they are hot)
+    4) We now record longest and shortest row information for stats.
+
+diff --git a/storage/archive/archive_reader.c b/storage/archive/archive_reader.c
+index e18d51d1fb1..2e668cdb49d 100644
+--- a/storage/archive/archive_reader.c
++++ b/storage/archive/archive_reader.c
+@@ -7,6 +7,7 @@
+ #include <mysql_version.h>
+ 
+ #define BUFFER_LEN 1024
++#define ARCHIVE_ROW_HEADER_SIZE 4
+ 
+ #define SHOW_VERSION "0.1"
+ 
+@@ -17,6 +18,7 @@ static const char *opt_tmpdir;
+ static const char *new_auto_increment_value;
+ static const char *load_default_groups[]= { "archive_reader", 0 };
+ static char **default_argv;
++int opt_check, opt_force, opt_quiet, opt_backup= 0;
+ 
+ int main(int argc, char *argv[])
+ {
+@@ -39,17 +41,158 @@ int main(int argc, char *argv[])
+   }
+ 
+   printf("Version %u\n", reader_handle.version);
+-  printf("Start position %llu\n", (unsigned long long)reader_handle.start);
++  printf("\tStart position %llu\n", (unsigned long long)reader_handle.start);
+   if (reader_handle.version > 2)
+   {
+-    printf("Block size %u\n", reader_handle.block_size);
+-    printf("Rows %llu\n", reader_handle.rows);
+-    printf("Autoincrement %llu\n", reader_handle.auto_increment);
+-    printf("Check Point %llu\n", reader_handle.check_point);
+-    printf("Forced Flushes %llu\n", reader_handle.forced_flushes);
+-    printf("State %s\n", ( reader_handle.dirty ? "dirty" : "clean"));
++    printf("\tBlock size %u\n", reader_handle.block_size);
++    printf("\tRows %llu\n", reader_handle.rows);
++    printf("\tAutoincrement %llu\n", reader_handle.auto_increment);
++    printf("\tCheck Point %llu\n", reader_handle.check_point);
++    printf("\tForced Flushes %llu\n", reader_handle.forced_flushes);
++    printf("\tLongest Row %u\n", reader_handle.longest_row);
++    printf("\tShortest Row %u\n", reader_handle.shortest_row);
++    printf("\tState %s\n", ( reader_handle.dirty ? "dirty" : "clean"));
+   }
++  else
++  {
++    goto end;
++  }
++
++  printf("\n");
++
++  if (opt_check)
++  {
++    byte size_buffer[ARCHIVE_ROW_HEADER_SIZE];
++    int error;
++    unsigned int x;
++    unsigned int read;
++    unsigned int row_len;
++    unsigned long long row_count= 0;
++    char buffer;
++
++    while ((read= azread(&reader_handle, (byte *)size_buffer, 
++                        ARCHIVE_ROW_HEADER_SIZE, &error)))
++    {
++      if (error == Z_STREAM_ERROR ||  (read && read < ARCHIVE_ROW_HEADER_SIZE))
++      {
++        printf("Table is damaged\n");
++        goto end;
++      }
++
++      /* If we read nothing we are at the end of the file */
++      if (read == 0 || read != ARCHIVE_ROW_HEADER_SIZE)
++        break;
++
++      row_len=  uint4korr(size_buffer);
++      row_count++;
++
++      if (row_len > reader_handle.longest_row)
++      {
++        printf("Table is damaged, row %llu is invalid\n", 
++               row_count);
++        goto end;
++      }
++
++
++      for (read= x= 0; x < row_len ; x++) 
++      {
++        read+= (unsigned int)azread(&reader_handle, &buffer, sizeof(char), &error); 
++        if (!read)
++          break;
++      }
++
++
++      if (row_len != read)
++      {
++        printf("Row length did not match row (at %llu). %u != %u \n", 
++               row_count, row_len, read);
++        goto end;
++      }
++    }
++
++    if (0)
++    {
++      printf("Table is damaged\n");
++      goto end;
++    }
++    else
++    {
++      printf("Found %llu rows\n", row_count);
++    }
++  }
++
++  if (opt_backup)
++  {
++    byte size_buffer[ARCHIVE_ROW_HEADER_SIZE];
++    int error;
++    unsigned int read;
++    unsigned int row_len;
++    unsigned long long row_count= 0;
++    char *buffer;
++
++    azio_stream writer_handle;
++
++    buffer= (char *)malloc(reader_handle.longest_row);
++    if (buffer == NULL)
++    {
++      printf("Could not allocate memory for row %llu\n", row_count);
++      goto end;
++    }
++
++
++    if (!(ret= azopen(&writer_handle, argv[1], O_CREAT|O_RDWR|O_BINARY)))
++    {
++      printf("Could not open file for backup: %s\n", argv[1]);
++      goto end;
++    }
++
++    writer_handle.auto_increment= reader_handle.auto_increment;
++
++    while ((read= azread(&reader_handle, (byte *)size_buffer, 
++                        ARCHIVE_ROW_HEADER_SIZE, &error)))
++    {
++      if (error == Z_STREAM_ERROR ||  (read && read < ARCHIVE_ROW_HEADER_SIZE))
++      {
++        printf("Table is damaged\n");
++        goto end;
++      }
++
++      /* If we read nothing we are at the end of the file */
++      if (read == 0 || read != ARCHIVE_ROW_HEADER_SIZE)
++        break;
++
++      row_len=  uint4korr(size_buffer);
++
++      row_count++;
++
++      memcpy(buffer, size_buffer, ARCHIVE_ROW_HEADER_SIZE);
+ 
++      read= (unsigned int)azread(&reader_handle, buffer + ARCHIVE_ROW_HEADER_SIZE, 
++                                 row_len, &error); 
++
++      DBUG_ASSERT(read == row_len);
++
++      azwrite(&writer_handle, buffer, row_len + ARCHIVE_ROW_HEADER_SIZE);
++
++
++      if (row_len != read)
++      {
++        printf("Row length did not match row (at %llu). %u != %u \n", 
++               row_count, row_len, read);
++        goto end;
++      }
++
++      if (reader_handle.rows == writer_handle.rows)
++        break;
++    }
++
++    free(buffer);
++
++    azclose(&writer_handle);
++  }
++
++end:
++  printf("\n");
+   azclose(&reader_handle);
+ 
+   return 0;
+@@ -61,13 +204,18 @@ get_one_option(int optid,
+ 	       char *argument)
+ {
+   switch (optid) {
++  case 'b':
++    opt_backup= 1;
++    break;
+   case 'c':
+-    printf("Not implemented yet\n");
++    opt_check= 1;
+     break;
+   case 'f':
++    opt_force= 1;
+     printf("Not implemented yet\n");
+     break;
+   case 'q':
++    opt_quiet= 1;
+     printf("Not implemented yet\n");
+     break;
+   case 'V':
+@@ -98,8 +246,10 @@ get_one_option(int optid,
+ 
+ static struct my_option my_long_options[] =
+ {
+-  {"check", 'c',
+-   "Check table for errors.",
++  {"backup", 'b',
++   "Make a backup of an archive table.",
++   0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0},
++  {"check", 'c', "Check table for errors.",
+    0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0},
+ #ifndef DBUG_OFF
+   {"debug", '#',
+@@ -142,7 +292,7 @@ static void usage(void)
+        \nand you are welcome to modify and redistribute it under the GPL \
+        license\n");
+   puts("Read and modify Archive files directly\n");
+-  printf("Usage: %s [OPTIONS] file_to_be_looked_at\n", my_progname);
++  printf("Usage: %s [OPTIONS] file_to_be_looked_at [file_for_backup]\n", my_progname);
+   print_defaults("my", load_default_groups);
+   my_print_help(my_long_options);
+ }
+diff --git a/storage/archive/archive_test.c b/storage/archive/archive_test.c
+index 5d4c0853935..f8d531d9f5e 100644
+--- a/storage/archive/archive_test.c
++++ b/storage/archive/archive_test.c
+@@ -17,11 +17,22 @@
+ #include <string.h>
+ #include <assert.h>
+ #include <stdio.h>
++#include <my_getopt.h>
++#include <mysql_version.h>
++
++#define ARCHIVE_ROW_HEADER_SIZE 4
+ 
+ #define TEST_FILENAME "test.az"
+-#define TEST_STRING "YOU don't know about me without you have read a book by the name of The Adventures of Tom Sawyer; but that ain't no matter.  That book was made by Mr. Mark Twain, and he told the truth, mainly.  There was things which he stretched, but mainly he told the truth.  That is nothing.  I never seen anybody but lied one time or another, without it was Aunt Polly, or the widow, or maybe Mary.  Aunt Polly--Tom's Aunt Polly, she is--and Mary, and the Widow Douglas is all told about in that book, which is mostly a true book, with some stretchers, as I said before.  Now the way that the book winds up is this:  Tom and me found the money that the robbers hid in the cave, and it made us rich.  We got six thousand dollars apiece--all gold.  It was an awful sight of money when it was piled up.  Well, Judge Thatcher he took it and put it out at interest, and it fetched us a dollar a day apiece all the year round --more than a body could tell what to do with.  The Widow Douglas she took me for her son, and allowed she would..."
++#define TEST_STRING_INIT "YOU don't know about me without you have read a book by the name of The Adventures of Tom Sawyer; but that ain't no matter.  That book was made by Mr. Mark Twain, and he told the truth, mainly.  There was things which he stretched, but mainly he told the truth.  That is nothing.  I never seen anybody but lied one time or another, without it was Aunt Polly, or the widow, or maybe Mary.  Aunt Polly--Tom's Aunt Polly, she is--and Mary, and the Widow Douglas is all told about in that book, which is mostly a true book, with some stretchers, as I said before.  Now the way that the book winds up is this:  Tom and me found the money that the robbers hid in the cave, and it made us rich.  We got six thousand dollars apiece--all gold.  It was an awful sight of money when it was piled up.  Well, Judge Thatcher he took it and put it out at interest, and it fetched us a dollar a day apiece all the year round --more than a body could tell what to do with.  The Widow Douglas she took me for her son, and allowed she would..."
+ #define TEST_LOOP_NUM 100
+-#define BUFFER_LEN 1024
++
++
++#define ARCHIVE_ROW_HEADER_SIZE 4
++
++#define BUFFER_LEN 1024 + ARCHIVE_ROW_HEADER_SIZE
++
++char test_string[BUFFER_LEN];
++
+ #define TWOGIG 2147483648
+ #define FOURGIG 4294967296
+ #define EIGHTGIG 8589934592
+@@ -40,6 +51,9 @@ int main(int argc, char *argv[])
+   azio_stream writer_handle, reader_handle;
+   char buffer[BUFFER_LEN];
+ 
++  int4store(test_string, 1024);
++  memcpy(test_string+sizeof(unsigned int), TEST_STRING_INIT, 1024);
++
+   unlink(TEST_FILENAME);
+ 
+   if (argc > 1)
+@@ -63,11 +77,11 @@ int main(int argc, char *argv[])
+   assert(reader_handle.auto_increment == 0);
+   assert(reader_handle.check_point == 0);
+   assert(reader_handle.forced_flushes == 0);
+-  assert(reader_handle.dirty == 1);
++  assert(reader_handle.dirty == AZ_STATE_DIRTY);
+ 
+   for (x= 0; x < TEST_LOOP_NUM; x++)
+   {
+-    ret= azwrite(&writer_handle, TEST_STRING, BUFFER_LEN);
++    ret= azwrite(&writer_handle, test_string, BUFFER_LEN);
+     assert(ret == BUFFER_LEN);
+     written_rows++;
+   }
+@@ -80,17 +94,17 @@ int main(int argc, char *argv[])
+   azflush(&reader_handle,  Z_SYNC_FLUSH);
+   assert(reader_handle.rows == TEST_LOOP_NUM);
+   assert(reader_handle.auto_increment == 0);
+-  assert(reader_handle.check_point == 0);
++  assert(reader_handle.check_point == 61);
+   assert(reader_handle.forced_flushes == 1);
+-  assert(reader_handle.dirty == 1);
++  assert(reader_handle.dirty == AZ_STATE_SAVED);
+ 
+   writer_handle.auto_increment= 4;
+   azflush(&writer_handle, Z_SYNC_FLUSH);
+   assert(writer_handle.rows == TEST_LOOP_NUM);
+   assert(writer_handle.auto_increment == 4);
+-  assert(writer_handle.check_point == 0);
++  assert(writer_handle.check_point == 61);
+   assert(writer_handle.forced_flushes == 2);
+-  assert(writer_handle.dirty == 1);
++  assert(writer_handle.dirty == AZ_STATE_SAVED);
+ 
+   if (!(ret= azopen(&reader_handle, TEST_FILENAME, O_RDONLY|O_BINARY)))
+   {
+@@ -104,14 +118,14 @@ int main(int argc, char *argv[])
+     ret= azread(&reader_handle, buffer, BUFFER_LEN, &error);
+     assert(!error);
+     assert(ret == BUFFER_LEN);
+-    assert(!memcmp(buffer, TEST_STRING, ret));
++    assert(!memcmp(buffer, test_string, ret));
+   }
+   assert(writer_handle.rows == TEST_LOOP_NUM);
+ 
+   /* Test here for falling off the planet */
+ 
+   /* Final Write before closing */
+-  ret= azwrite(&writer_handle, TEST_STRING, BUFFER_LEN);
++  ret= azwrite(&writer_handle, test_string, BUFFER_LEN);
+   assert(ret == BUFFER_LEN);
+ 
+   /* We don't use FINISH, but I want to have it tested */
+@@ -126,7 +140,7 @@ int main(int argc, char *argv[])
+     ret= azread(&reader_handle, buffer, BUFFER_LEN, &error);
+     assert(ret == BUFFER_LEN);
+     assert(!error);
+-    assert(!memcmp(buffer, TEST_STRING, ret));
++    assert(!memcmp(buffer, test_string, ret));
+   }
+ 
+ 
+@@ -139,7 +153,7 @@ int main(int argc, char *argv[])
+     ret= azread(&reader_handle, buffer, BUFFER_LEN, &error);
+     assert(ret == BUFFER_LEN);
+     assert(!error);
+-    assert(!memcmp(buffer, TEST_STRING, ret));
++    assert(!memcmp(buffer, test_string, ret));
+   }
+ 
+   printf("Finished reading\n");
+@@ -149,7 +163,7 @@ int main(int argc, char *argv[])
+     printf("Could not open file (%s) for appending\n", TEST_FILENAME);
+     return 0;
+   }
+-  ret= azwrite(&writer_handle, TEST_STRING, BUFFER_LEN);
++  ret= azwrite(&writer_handle, test_string, BUFFER_LEN);
+   assert(ret == BUFFER_LEN);
+   azflush(&writer_handle,  Z_SYNC_FLUSH);
+ 
+@@ -160,11 +174,28 @@ int main(int argc, char *argv[])
+     ret= azread(&reader_handle, buffer, BUFFER_LEN, &error);
+     assert(!error);
+     assert(ret == BUFFER_LEN);
+-    assert(!memcmp(buffer, TEST_STRING, ret));
++    assert(!memcmp(buffer, test_string, ret));
+   }
+ 
++  /* Reader needs to be flushed to make sure it is up to date */
++  azflush(&reader_handle,  Z_SYNC_FLUSH);
++  assert(reader_handle.rows == 102);
++  assert(reader_handle.auto_increment == 4);
++  assert(reader_handle.check_point == 1255);
++  assert(reader_handle.forced_flushes == 4);
++  assert(reader_handle.dirty == AZ_STATE_SAVED);
++
++  azflush(&writer_handle, Z_SYNC_FLUSH);
++  assert(writer_handle.rows == reader_handle.rows);
++  assert(writer_handle.auto_increment == reader_handle.auto_increment);
++  assert(writer_handle.check_point == reader_handle.check_point);
++  /* This is +1 because  we do a flush right before we read */
++  assert(writer_handle.forced_flushes == reader_handle.forced_flushes + 1);
++  assert(writer_handle.dirty == reader_handle.dirty);
++
+   azclose(&writer_handle);
+   azclose(&reader_handle);
++  exit(0);
+   unlink(TEST_FILENAME);
+ 
+   /* Start size tests */
+@@ -193,7 +224,7 @@ int size_test(unsigned long long length, unsigned long long rows_to_test_for)
+ 
+   for (write_length= 0; write_length < length ; write_length+= ret)
+   {
+-    ret= azwrite(&writer_handle, TEST_STRING, BUFFER_LEN);
++    ret= azwrite(&writer_handle, test_string, BUFFER_LEN);
+     if (ret != BUFFER_LEN)
+     {
+       printf("Size %u\n", ret);
+@@ -218,7 +249,7 @@ int size_test(unsigned long long length, unsigned long long rows_to_test_for)
+   while ((ret= azread(&reader_handle, buffer, BUFFER_LEN, &error)))
+   {
+     read_length+= ret;
+-    assert(!memcmp(buffer, TEST_STRING, ret));
++    assert(!memcmp(buffer, test_string, ret));
+     if (ret != BUFFER_LEN)
+     {
+       printf("Size %u\n", ret);
+diff --git a/storage/archive/azio.c b/storage/archive/azio.c
+index f210fc150c6..c1483310119 100644
+--- a/storage/archive/azio.c
++++ b/storage/archive/azio.c
+@@ -123,6 +123,8 @@ int az_open (azio_stream *s, const char *path, int Flags, File fd)
+   {
+     s->rows= 0;
+     s->forced_flushes= 0;
++    s->shortest_row= 0;
++    s->longest_row= 0;
+     s->auto_increment= 0;
+     s->check_point= 0;
+     s->dirty= 1; /* We create the file dirty */
+@@ -156,7 +158,7 @@ void write_header(azio_stream *s)
+ 
+ 
+   /* Write a very simple .az header: */
+-  bzero(buffer, AZHEADER_SIZE + AZMETA_BUFFER_SIZE);
++  memset(buffer, 0, AZHEADER_SIZE + AZMETA_BUFFER_SIZE);
+   *(ptr + AZ_MAGIC_POS)= az_magic[0];
+   *(ptr + AZ_VERSION_POS)= (unsigned char)s->version;
+   *(ptr + AZ_BLOCK_POS)= (unsigned char)(s->block_size/1024); /* Reserved for block size */
+@@ -169,6 +171,8 @@ void write_header(azio_stream *s)
+   int8store(ptr + AZ_FLUSH_POS, (unsigned long long)s->forced_flushes); /* Start of Data Block Index Block */
+   int8store(ptr + AZ_CHECK_POS, (unsigned long long)s->check_point); /* Start of Data Block Index Block */
+   int8store(ptr + AZ_AUTOINCREMENT_POS, (unsigned long long)s->auto_increment); /* Start of Data Block Index Block */
++  int4store(ptr+ AZ_LONGEST_POS , s->longest_row); /* Longest row */
++  int4store(ptr+ AZ_SHORTEST_POS, s->shortest_row); /* Shorest row */
+   *(ptr + AZ_DIRTY_POS)= (unsigned char)s->dirty; /* Start of Data Block Index Block */
+ 
+   /* Always begin at the begining, and end there as well */
+@@ -316,6 +320,8 @@ void read_header(azio_stream *s, unsigned char *buffer)
+     s->check_point= (unsigned long long)uint8korr(buffer + AZ_CHECK_POS);
+     s->forced_flushes= (unsigned long long)uint8korr(buffer + AZ_FLUSH_POS);
+     s->auto_increment= (unsigned long long)uint8korr(buffer + AZ_AUTOINCREMENT_POS);
++    s->longest_row= (unsigned int)uint4korr(buffer + AZ_LONGEST_POS);
++    s->shortest_row= (unsigned int)uint4korr(buffer + AZ_SHORTEST_POS);
+     s->dirty= (unsigned int)buffer[AZ_DIRTY_POS];
+   }
+   else
+@@ -334,22 +340,19 @@ int destroy (s)
+ {
+   int err = Z_OK;
+ 
+-  if (s->stream.state != NULL) {
+-    if (s->mode == 'w') {
++  if (s->stream.state != NULL) 
++  {
++    if (s->mode == 'w') 
+       err = deflateEnd(&(s->stream));
+-    } 
+     else if (s->mode == 'r') 
+-    {
+       err = inflateEnd(&(s->stream));
+-    }
+   }
++
+   if (s->file > 0 && my_close(s->file, MYF(0))) 
+-  {
+-#ifdef ESPIPE
+-    if (errno != ESPIPE) /* fclose is broken for pipes in HP/UX */
+-#endif
+       err = Z_ERRNO;
+-  }
++
++  s->file= -1;
++
+   if (s->z_err < 0) err = s->z_err;
+ 
+   return err;
+@@ -515,6 +518,12 @@ unsigned int azwrite (azio_stream *s, voidpc buf, unsigned int len)
+   }
+   s->crc = crc32(s->crc, (const Bytef *)buf, len);
+ 
++  if (len > s->longest_row)
++    s->longest_row= len;
++
++  if (len < s->shortest_row || !(s->shortest_row))
++    s->shortest_row= len;
++
+   return (unsigned int)(len - s->stream.avail_in);
+ }
+ 
+@@ -536,7 +545,9 @@ int do_flush (azio_stream *s, int flush)
+   {
+     len = AZ_BUFSIZE - s->stream.avail_out;
+ 
+-    if (len != 0) {
++    if (len != 0) 
++    {
++      s->check_point= my_tell(s->file, MYF(0));
+       if ((uInt)my_write(s->file, (byte *)s->outbuf, len, MYF(0)) != len) 
+       {
+         s->z_err = Z_ERRNO;
+@@ -562,7 +573,9 @@ int do_flush (azio_stream *s, int flush)
+   }
+ 
+   if (flush == Z_FINISH)
+-    s->dirty= 0; /* Mark it clean, we should be good now */
++    s->dirty= AZ_STATE_CLEAN; /* Mark it clean, we should be good now */
++  else
++    s->dirty= AZ_STATE_SAVED; /* Mark it clean, we should be good now */
+   write_header(s);
+ 
+   return  s->z_err == Z_STREAM_END ? Z_OK : s->z_err;
+@@ -748,15 +761,20 @@ int azclose (azio_stream *s)
+ {
+ 
+   if (s == NULL) return Z_STREAM_ERROR;
+-
++  
++  if (s->file < 1) return Z_OK;
+ 
+   if (s->mode == 'w') 
+   {
+-    if (do_flush (s, Z_FINISH) != Z_OK)
++    if (do_flush(s, Z_FINISH) != Z_OK)
+       return destroy(s);
+ 
+     putLong(s->file, s->crc);
+     putLong(s->file, (uLong)(s->in & 0xffffffff));
++    s->dirty= AZ_STATE_CLEAN;
++    s->check_point= my_tell(s->file, MYF(0));
++    write_header(s);
+   }
++
+   return destroy(s);
+ }
+diff --git a/storage/archive/azlib.h b/storage/archive/azlib.h
+index 3bf82ce218e..94ed45121cc 100644
+--- a/storage/archive/azlib.h
++++ b/storage/archive/azlib.h
+@@ -48,6 +48,7 @@ extern "C" {
+ */
+ #define AZMETA_BUFFER_SIZE sizeof(unsigned long long) \
+   + sizeof(unsigned long long) + sizeof(unsigned long long) + sizeof(unsigned long long) \
++  + sizeof(unsigned int) + sizeof(unsigned int) \
+   + sizeof(unsigned char)
+ 
+ #define AZHEADER_SIZE 20
+@@ -63,7 +64,18 @@ extern "C" {
+ #define AZ_FLUSH_POS 28
+ #define AZ_CHECK_POS 36
+ #define AZ_AUTOINCREMENT_POS 44
+-#define AZ_DIRTY_POS 52
++#define AZ_LONGEST_POS 52
++#define AZ_SHORTEST_POS 56
++#define AZ_DIRTY_POS 60
++
++
++/*
++  Flags for state
++*/
++#define AZ_STATE_CLEAN 0
++#define AZ_STATE_DIRTY 1
++#define AZ_STATE_SAVED 2
++#define AZ_STATE_CRASHED 3
+ 
+ /*
+      The 'zlib' compression library provides in-memory compression and
+@@ -203,6 +215,8 @@ typedef struct azio_stream {
+   unsigned long long forced_flushes;   /* Forced Flushes */
+   unsigned long long rows;   /* rows */
+   unsigned long long auto_increment;   /* auto increment field */
++  unsigned int longest_row;   /* Longest row */
++  unsigned int shortest_row;   /* Shortest row */
+   unsigned char dirty;   /* State of file */
+ } azio_stream;
+ 
+diff --git a/storage/archive/ha_archive.cc b/storage/archive/ha_archive.cc
+index 10b1ae5bc4f..1c0fa95e621 100644
+--- a/storage/archive/ha_archive.cc
++++ b/storage/archive/ha_archive.cc
+@@ -613,7 +613,6 @@ int ha_archive::create(const char *name, TABLE *table_arg,
+   DBUG_RETURN(0);
+ 
+ error2:
+-  azclose(&create_stream);
+   delete_table(name);
+ error:
+   /* Return error number, if we got one */
+@@ -1228,7 +1227,7 @@ int ha_archive::optimize(THD* thd, HA_CHECK_OPT* check_opt)
+   if (share->archive_write_open)
+   {
+     azclose(&(share->archive_write));
+-    share->archive_write_open= 0;
++    share->archive_write_open= FALSE;
+   }
+ 
+   /* Lets create a file to contain the new data */
+@@ -1362,8 +1361,6 @@ THR_LOCK_DATA **ha_archive::store_lock(THD *thd,
+ 
+ void ha_archive::update_create_info(HA_CREATE_INFO *create_info)
+ {
+-  struct stat stat_buff;
+-
+   DBUG_ENTER("ha_archive::update_create_info");
+ 
+   ha_archive::info(HA_STATUS_AUTO);
+

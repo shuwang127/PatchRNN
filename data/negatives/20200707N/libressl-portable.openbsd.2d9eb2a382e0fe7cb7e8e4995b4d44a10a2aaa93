@@ -1,0 +1,56 @@
+commit 2d9eb2a382e0fe7cb7e8e4995b4d44a10a2aaa93
+Author: matthew <>
+Date:   Sat Jun 21 02:34:26 2014 +0000
+
+    Protect explicit_bzero() from link-time optimization
+    
+    Modern compiler toolchains are capable of optimizing even across
+    translation unit boundaries, so simply moving the memory clearing into
+    a separate function is not guaranteed to clear memory.
+    
+    To avoid this, we take advantage of ELF weak symbol semantics, and
+    insert a call to an empty, weakly named function.  The semantics of
+    calling this function aren't determinable until load time, so the
+    compiler and linker need to keep the memset() call.
+    
+    There are still ways a toolchain might defeat this trick (e.g.,
+    optimistically expecting the weak symbol to not be overloaded, and
+    only calling memset() if it is; promoting weak symbols to strong
+    symbols at link-time when emitting a static binary because they won't
+    be interposed; implementing load-time optimizations).  But at least
+    for the foreseeable future, these seem unlikely.
+    
+    ok deraadt
+
+diff --git a/src/lib/libc/string/explicit_bzero.c b/src/lib/libc/string/explicit_bzero.c
+index 5124df23c..3e33ca85b 100644
+--- a/src/lib/libc/string/explicit_bzero.c
++++ b/src/lib/libc/string/explicit_bzero.c
+@@ -1,16 +1,19 @@
+-/*	$OpenBSD: explicit_bzero.c,v 1.2 2014/06/10 04:17:37 deraadt Exp $ */
++/*	$OpenBSD: explicit_bzero.c,v 1.3 2014/06/21 02:34:26 matthew Exp $ */
+ /*
+  * Public domain.
+- * Written by Ted Unangst
++ * Written by Matthew Dempsky.
+  */
+ 
+ #include <string.h>
+ 
+-/*
+- * explicit_bzero - don't let the compiler optimize away bzero
+- */
++__attribute__((weak)) void
++__explicit_bzero_hook(void *buf, size_t len)
++{
++}
++
+ void
+-explicit_bzero(void *p, size_t n)
++explicit_bzero(void *buf, size_t len)
+ {
+-	bzero(p, n);
++	memset(buf, 0, len);
++	__explicit_bzero_hook(buf, len);
+ }
+

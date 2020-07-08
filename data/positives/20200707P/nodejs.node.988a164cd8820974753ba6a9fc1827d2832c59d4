@@ -1,0 +1,49 @@
+commit 988a164cd8820974753ba6a9fc1827d2832c59d4
+Author: Ben Noordhuis <info@bnoordhuis.nl>
+Date:   Wed Aug 15 02:10:02 2012 +0200
+
+    openssl: fix uninitialized memory access
+    
+    ASN1_STRING_to_UTF8() passes an ASN1_STRING to ASN1_STRING_set() but
+    forgot to initialize the `length` field.
+    
+    Fixes the following valgrind error:
+    
+      $ valgrind -q --track-origins=yes --num-callers=19 \
+          out/Debug/node test/simple/test-tls-client-abort.js
+      ==2690== Conditional jump or move depends on uninitialised value(s)
+      ==2690==    at 0x784B69: ASN1_STRING_set (asn1_lib.c:382)
+      ==2690==    by 0x809564: ASN1_mbstring_ncopy (a_mbstr.c:204)
+      ==2690==    by 0x8090F0: ASN1_mbstring_copy (a_mbstr.c:86)
+      ==2690==    by 0x782F1F: ASN1_STRING_to_UTF8 (a_strex.c:570)
+      ==2690==    by 0x78F090: asn1_string_canon (x_name.c:409)
+      ==2690==    by 0x78EF17: x509_name_canon (x_name.c:354)
+      ==2690==    by 0x78EA7D: x509_name_ex_d2i (x_name.c:210)
+      ==2690==    by 0x788058: ASN1_item_ex_d2i (tasn_dec.c:239)
+      ==2690==    by 0x7890D4: asn1_template_noexp_d2i (tasn_dec.c:746)
+      ==2690==    by 0x788CB6: asn1_template_ex_d2i (tasn_dec.c:607)
+      ==2690==    by 0x78877A: ASN1_item_ex_d2i (tasn_dec.c:448)
+      ==2690==    by 0x7890D4: asn1_template_noexp_d2i (tasn_dec.c:746)
+      ==2690==    by 0x788CB6: asn1_template_ex_d2i (tasn_dec.c:607)
+      ==2690==    by 0x78877A: ASN1_item_ex_d2i (tasn_dec.c:448)
+      ==2690==    by 0x787C93: ASN1_item_d2i (tasn_dec.c:136)
+      ==2690==    by 0x78F5E4: d2i_X509 (x_x509.c:141)
+      ==2690==    by 0x7C9B91: PEM_ASN1_read_bio (pem_oth.c:81)
+      ==2690==    by 0x7CA506: PEM_read_bio_X509 (pem_x509.c:67)
+      ==2690==    by 0x703C9A: node::crypto::SecureContext::AddRootCerts(v8::Arguments const&) (node_crypto.cc:497)
+      ==2690==  Uninitialised value was created by a stack allocation
+      ==2690==    at 0x782E89: ASN1_STRING_to_UTF8 (a_strex.c:560)
+
+diff --git a/deps/openssl/openssl/crypto/asn1/a_strex.c b/deps/openssl/openssl/crypto/asn1/a_strex.c
+index 264ebf2393..8a467abd75 100644
+--- a/deps/openssl/openssl/crypto/asn1/a_strex.c
++++ b/deps/openssl/openssl/crypto/asn1/a_strex.c
+@@ -566,6 +566,7 @@ int ASN1_STRING_to_UTF8(unsigned char **out, ASN1_STRING *in)
+ 	mbflag = tag2nbyte[type];
+ 	if(mbflag == -1) return -1;
+ 	mbflag |= MBSTRING_FLAG;
++	memset(&stmp, 0, sizeof(stmp));
+ 	stmp.data = NULL;
+ 	ret = ASN1_mbstring_copy(&str, in->data, in->length, mbflag, B_ASN1_UTF8STRING);
+ 	if(ret < 0) return ret;
+

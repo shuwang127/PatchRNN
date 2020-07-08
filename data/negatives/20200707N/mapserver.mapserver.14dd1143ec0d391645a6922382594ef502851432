@@ -1,0 +1,100 @@
+commit 14dd1143ec0d391645a6922382594ef502851432
+Author: Daniel Morissette <dmorissette@mapgears.com>
+Date:   Fri Aug 11 16:58:02 2006 +0000
+
+    Added ability to encrypt tokens (passwords, etc.) in database connection
+    strings (MS-RFC-18, bug 1792)
+    
+    
+    git-svn-id: http://svn.osgeo.org/mapserver/trunk@5580 7532c77e-422f-0410-93f4-f0b67bdd69e2
+
+diff --git a/mappostgis.c b/mappostgis.c
+index 66700d72..ee35d700 100644
+--- a/mappostgis.c
++++ b/mappostgis.c
+@@ -27,6 +27,10 @@
+  ******************************************************************************
+  *
+  * $Log$
++ * Revision 1.73  2006/08/11 16:58:01  dan
++ * Added ability to encrypt tokens (passwords, etc.) in database connection
++ * strings (MS-RFC-18, bug 1792)
++ *
+  * Revision 1.72  2006/05/09 22:35:41  pramsey
+  * Added quotes around field names being retrieved by query requests. (Bug 1536)
+  *
+@@ -307,12 +311,22 @@ int msPOSTGISLayerOpen(layerObj *layer)
+ 
+     layerinfo->conn = (PGconn *) msConnPoolRequest(layer);
+     if(!layerinfo->conn) {
++        char *conn_decrypted;
+         if(layer->debug) {
+             msDebug("MSPOSTGISLayerOpen -- shared connection not available.\n");
+         }
+-                
++
++        /* Decrypt any encrypted token in connection and attempt to connect */
++        conn_decrypted = msDecryptStringTokens(map, connection);
++        if (conn_decrypted == NULL) {
++          return(MS_FAILURE);  /* An error should already have been produced */
++        }
++   
+         layerinfo->conn = PQconnectdb(layer->connection);
+ 
++        msFree(conn_decrypted);
++        conn_decrypted = NULL;
++
+         if(!layerinfo->conn || PQstatus(layerinfo->conn) == CONNECTION_BAD) {
+             msDebug("FAILURE!!!");
+             maskeddata = (char *)malloc(strlen(layer->connection) + 1);
+diff --git a/mapsde.c b/mapsde.c
+index a65ac3f4..7d80c557 100644
+--- a/mapsde.c
++++ b/mapsde.c
+@@ -27,6 +27,10 @@
+  ******************************************************************************
+  *
+  * $Log$
++ * Revision 1.109  2006/08/11 16:58:02  dan
++ * Added ability to encrypt tokens (passwords, etc.) in database connection
++ * strings (MS-RFC-18, bug 1792)
++ *
+  * Revision 1.108  2006/08/01 18:23:12  sdlime
+  * Fixed a problem in the SDE code that prohibited setting SDE to only process the attribute portion of a query.
+  *
+@@ -868,6 +872,8 @@ int msSDELayerOpen(layerObj *layer) {
+   
+   /* If we weren't returned a connection and stream, initialize new ones */
+   if (!poolinfo) {
++    char *conn_decrypted;
++
+     if (layer->debug) 
+       msDebug("msSDELayerOpen(): "
+               "Layer %s opened from scratch.\n", layer->name);
+@@ -878,14 +884,23 @@ int msSDELayerOpen(layerObj *layer) {
+       return MS_FAILURE;
+     } 		
+ 
+-	  /* Split the connection parameters and make sure we have enough of them */
+-    params = split(layer->connection, ',', &numparams);
++    /* Decrypt any encrypted token in the connection string */
++    conn_decrypted = msDecryptStringTokens(layer->map, layer->connection);
++    if (conn_decrypted == NULL) {
++        return(MS_FAILURE);  /* An error should already have been produced */
++    }
++    /* Split the connection parameters and make sure we have enough of them */
++    params = split(conn_decrypted, ',', &numparams);
+     if(!params) {
+       msSetError( MS_MEMERR, 
+                   "Error spliting SDE connection information.", 
+                   "msSDELayerOpen()");
++      msFree(conn_decrypted);
+       return(MS_FAILURE);
+     }
++    msFree(conn_decrypted);
++    conn_decrypted = NULL;
++
+     if(numparams < 5) {
+       msSetError( MS_SDEERR, 
+                   "Not enough SDE connection parameters specified.", 
+

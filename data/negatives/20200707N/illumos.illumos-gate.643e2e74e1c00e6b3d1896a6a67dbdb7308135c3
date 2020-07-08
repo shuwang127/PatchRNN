@@ -1,0 +1,126 @@
+commit 643e2e74e1c00e6b3d1896a6a67dbdb7308135c3
+Author: bholler <none@none>
+Date:   Wed Jul 16 18:53:49 2008 -0700
+
+    6716526 apic_find_cpu assert failed after suspend in Toshiba M9
+
+diff --git a/usr/src/uts/i86pc/io/pcplusmp/apic.c b/usr/src/uts/i86pc/io/pcplusmp/apic.c
+index 4be6fff168..13ffecd606 100644
+--- a/usr/src/uts/i86pc/io/pcplusmp/apic.c
++++ b/usr/src/uts/i86pc/io/pcplusmp/apic.c
+@@ -1169,8 +1169,13 @@ apic_post_cpu_start()
+ 	while (get_apic_cmd1() & AV_PENDING)
+ 		apic_ret();
+ 
++	/*
++	 * We may be booting, or resuming from suspend; aci_status will
++	 * be APIC_CPU_INTR_ENABLE if coming from suspend, so we add the
++	 * APIC_CPU_ONLINE flag here rather than setting aci_status completely.
++	 */
+ 	cpun = psm_get_cpu_id();
+-	apic_cpus[cpun].aci_status = APIC_CPU_ONLINE;
++	apic_cpus[cpun].aci_status |= APIC_CPU_ONLINE;
+ 
+ 	apicadr[APIC_DIVIDE_REG] = apic_divide_reg_init;
+ 	return (PSM_SUCCESS);
+@@ -1651,6 +1656,11 @@ apic_disable_intr(processorid_t cpun)
+ 		return (PSM_SUCCESS);
+ }
+ 
++/*
++ * Bind interrupts to the CPU's local APIC.
++ * Interrupts should not be bound to a CPU's local APIC until the CPU
++ * is ready to receive interrupts.
++ */
+ static void
+ apic_enable_intr(processorid_t cpun)
+ {
+diff --git a/usr/src/uts/i86pc/os/cpr_impl.c b/usr/src/uts/i86pc/os/cpr_impl.c
+index 2a7d3a9802..ef6de394bb 100644
+--- a/usr/src/uts/i86pc/os/cpr_impl.c
++++ b/usr/src/uts/i86pc/os/cpr_impl.c
+@@ -215,6 +215,16 @@ i_cpr_save_context(void *arg)
+ 
+ 		i_cpr_platform_free(papic_state);
+ 
++		/*
++		 * Enable interrupts on this cpu.
++		 * Do not bind interrupts to this CPU's local APIC until
++		 * the CPU is ready to recieve interrupts.
++		 */
++		ASSERT(CPU->cpu_id != i_cpr_bootcpuid());
++		mutex_enter(&cpu_lock);
++		cpu_enable_intr(CPU);
++		mutex_exit(&cpu_lock);
++
+ 		/*
+ 		 * Setting the bit in cpu_ready_set must be the last operation
+ 		 * in processor initialization; the boot CPU will continue to
+@@ -658,6 +668,14 @@ i_cpr_power_down(int sleeptype)
+ 
+ 		i_cpr_platform_free(&(wc_other_cpus->wc_apic_state));
+ 
++		/*
++		 * Enable interrupts on boot cpu.
++		 */
++		ASSERT(CPU->cpu_id == i_cpr_bootcpuid());
++		mutex_enter(&cpu_lock);
++		cpu_enable_intr(CPU);
++		mutex_exit(&cpu_lock);
++
+ 		PT(PT_INTRRESTORE);
+ 		intr_restore(saved_intr);
+ 		PT(PT_CPU);
+diff --git a/usr/src/uts/i86pc/os/mp_machdep.c b/usr/src/uts/i86pc/os/mp_machdep.c
+index 53e86c44bf..a8db4c22d9 100644
+--- a/usr/src/uts/i86pc/os/mp_machdep.c
++++ b/usr/src/uts/i86pc/os/mp_machdep.c
+@@ -938,7 +938,16 @@ mach_smpinit(void)
+ 	if (pops->psm_state)
+ 		psm_state = pops->psm_state;
+ 
+-	/* check for multiple cpu's */
++	/*
++	 * Set these vectors here so they can be used by Suspend/Resume
++	 * on UP machines.
++	 */
++	if (pops->psm_disable_intr)
++		psm_disable_intr = pops->psm_disable_intr;
++	if (pops->psm_enable_intr)
++		psm_enable_intr  = pops->psm_enable_intr;
++
++	/* check for multiple CPUs */
+ 	if (cnt < 2)
+ 		return;
+ 
+@@ -958,11 +967,6 @@ mach_smpinit(void)
+ #endif
+ 	}
+ 
+-	if (pops->psm_disable_intr)
+-		psm_disable_intr = pops->psm_disable_intr;
+-	if (pops->psm_enable_intr)
+-		psm_enable_intr  = pops->psm_enable_intr;
+-
+ 	psm_get_ipivect = pops->psm_get_ipivect;
+ 
+ 	(void) add_avintr((void *)NULL, XC_HI_PIL, xc_serv, "xc_hi_intr",
+diff --git a/usr/src/uts/i86xpv/io/psm/xpv_psm.c b/usr/src/uts/i86xpv/io/psm/xpv_psm.c
+index b9aa197853..413029ebdb 100644
+--- a/usr/src/uts/i86xpv/io/psm/xpv_psm.c
++++ b/usr/src/uts/i86xpv/io/psm/xpv_psm.c
+@@ -839,7 +839,12 @@ xen_psm_post_cpu_start()
+ 
+ 	cpun = psm_get_cpu_id();
+ 	if (DOMAIN_IS_INITDOMAIN(xen_info)) {
+-		apic_cpus[cpun].aci_status = APIC_CPU_ONLINE;
++		/*
++		 * Non-virtualized environments can call psm_post_cpu_start
++		 * from Suspend/Resume with the APIC_CPU_INTR_ENABLE bit set.
++		 * xen_psm_post_cpu_start() is only called from boot.
++		 */
++		apic_cpus[cpun].aci_status |= APIC_CPU_ONLINE;
+ 	}
+ 	return (PSM_SUCCESS);
+ }
+

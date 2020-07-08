@@ -1,0 +1,193 @@
+commit be844f9284c692355189165a7a2fc19ecaebb1f6
+Author: Yukihiro "Matz" Matsumoto <matz@ruby-lang.org>
+Date:   Tue Nov 4 02:41:42 2014 +0900
+
+    Fix misaligned access when reading irep; close #2630
+    
+    Add padding bytes before iseq block that may be used as mrb_code[].
+    Note that dumped mrb format has changed.
+    
+    Based on a patch from kimu_shu <alfvegardrisc@gmail.com>
+
+diff --git a/include/mruby/dump.h b/include/mruby/dump.h
+index 101dbf67..19411001 100644
+--- a/include/mruby/dump.h
++++ b/include/mruby/dump.h
+@@ -43,7 +43,7 @@ MRB_API mrb_irep *mrb_read_irep(mrb_state*, const uint8_t*);
+ 
+ /* Rite Binary File header */
+ #define RITE_BINARY_IDENTIFIER         "RITE"
+-#define RITE_BINARY_FORMAT_VER         "0002"
++#define RITE_BINARY_FORMAT_VER         "0003"
+ #define RITE_COMPILER_NAME             "MATZ"
+ #define RITE_COMPILER_VERSION          "0000"
+ 
+@@ -56,6 +56,7 @@ MRB_API mrb_irep *mrb_read_irep(mrb_state*, const uint8_t*);
+ #define RITE_SECTION_LV_IDENTIFIER     "LVAR"
+ 
+ #define MRB_DUMP_DEFAULT_STR_LEN      128
++#define MRB_DUMP_ALIGNMENT            sizeof(uint32_t)
+ 
+ /* binary header */
+ struct rite_binary_header {
+diff --git a/src/dump.c b/src/dump.c
+index 0ea4e5af..ea19bee6 100644
+--- a/src/dump.c
++++ b/src/dump.c
+@@ -24,6 +24,17 @@ static size_t get_irep_record_size_1(mrb_state *mrb, mrb_irep *irep);
+ # error This code cannot be built on your environment.
+ #endif
+ 
++static size_t
++write_padding(uint8_t *buf)
++{
++  const size_t align = MRB_DUMP_ALIGNMENT;
++  size_t pad_len = -(intptr_t)buf & (align-1);
++  if (pad_len > 0) {
++    memset(buf, 0, pad_len);
++  }
++  return pad_len;
++}
++
+ static size_t
+ get_irep_header_size(mrb_state *mrb)
+ {
+@@ -55,6 +66,7 @@ get_iseq_block_size(mrb_state *mrb, mrb_irep *irep)
+   size_t size = 0;
+ 
+   size += sizeof(uint32_t); /* ilen */
++  size += sizeof(uint32_t); /* max padding */
+   size += sizeof(uint32_t) * irep->ilen; /* iseq(n) */
+ 
+   return size;
+@@ -67,6 +79,7 @@ write_iseq_block(mrb_state *mrb, mrb_irep *irep, uint8_t *buf, uint8_t flags)
+   uint32_t iseq_no;
+ 
+   cur += uint32_to_bin(irep->ilen, cur); /* number of opcode */
++  cur += write_padding(cur);
+   if (flags & FLAG_BYTEORDER_NATIVE) {
+     memcpy(cur, irep->iseq, irep->ilen * sizeof(mrb_code));
+     cur += irep->ilen * sizeof(mrb_code);
+@@ -272,9 +285,10 @@ get_irep_record_size(mrb_state *mrb, mrb_irep *irep)
+ }
+ 
+ static int
+-write_irep_record(mrb_state *mrb, mrb_irep *irep, uint8_t* bin, size_t *irep_record_size, uint8_t flags)
++write_irep_record(mrb_state *mrb, mrb_irep *irep, uint8_t *bin, size_t *irep_record_size, uint8_t flags)
+ {
+   uint32_t i;
++  uint8_t *src = bin;
+ 
+   if (irep == NULL) {
+     return MRB_DUMP_INVALID_IREP;
+@@ -285,8 +299,6 @@ write_irep_record(mrb_state *mrb, mrb_irep *irep, uint8_t* bin, size_t *irep_rec
+     return MRB_DUMP_GENERAL_FAILURE;
+   }
+ 
+-  memset(bin, 0, *irep_record_size);
+-
+   bin += write_irep_header(mrb, irep, bin);
+   bin += write_iseq_block(mrb, irep, bin, flags);
+   bin += write_pool_block(mrb, irep, bin);
+@@ -300,9 +312,9 @@ write_irep_record(mrb_state *mrb, mrb_irep *irep, uint8_t* bin, size_t *irep_rec
+     if (result != MRB_DUMP_OK) {
+       return result;
+     }
+-    *irep_record_size += rsize;
+     bin += rsize;
+   }
++  *irep_record_size = bin - src;
+   return MRB_DUMP_OK;
+ }
+ 
+@@ -334,10 +346,9 @@ write_section_irep_header(mrb_state *mrb, size_t section_size, uint8_t *bin)
+ }
+ 
+ static int
+-write_section_irep(mrb_state *mrb, mrb_irep *irep, uint8_t *bin, uint8_t flags)
++write_section_irep(mrb_state *mrb, mrb_irep *irep, uint8_t *bin, size_t *len_p, uint8_t flags)
+ {
+   int result;
+-  size_t section_size = 0; /* size of irep record */
+   size_t rsize = 0;
+   uint8_t *cur = bin;
+ 
+@@ -346,14 +357,13 @@ write_section_irep(mrb_state *mrb, mrb_irep *irep, uint8_t *bin, uint8_t flags)
+   }
+ 
+   cur += sizeof(struct rite_section_irep_header);
+-  section_size += sizeof(struct rite_section_irep_header);
+ 
+   result = write_irep_record(mrb, irep, cur, &rsize, flags);
+   if (result != MRB_DUMP_OK) {
+     return result;
+   }
+-  section_size += rsize;
+-  write_section_irep_header(mrb, section_size, bin);
++  *len_p = cur - bin + rsize;
++  write_section_irep_header(mrb, *len_p, bin);
+ 
+   return MRB_DUMP_OK;
+ }
+@@ -866,6 +876,7 @@ static int
+ dump_irep(mrb_state *mrb, mrb_irep *irep, int debug_info, uint8_t **bin, size_t *bin_size, uint8_t flags)
+ {
+   int result = MRB_DUMP_GENERAL_FAILURE;
++  size_t malloc_size;
+   size_t section_irep_size;
+   size_t section_lineno_size = 0, section_lv_size = 0;
+   uint8_t *cur = NULL;
+@@ -906,17 +917,20 @@ dump_irep(mrb_state *mrb, mrb_irep *irep, int debug_info, uint8_t **bin, size_t
+     section_lv_size += get_lv_section_size(mrb, irep, lv_syms, lv_syms_len);
+   }
+ 
+-  *bin_size = sizeof(struct rite_binary_header) +
+-              section_irep_size + section_lineno_size + section_lv_size +
+-              sizeof(struct rite_binary_footer);
+-  cur = *bin = (uint8_t*)mrb_malloc(mrb, *bin_size);
++  malloc_size = sizeof(struct rite_binary_header) +
++                section_irep_size + section_lineno_size + section_lv_size +
++                sizeof(struct rite_binary_footer);
++  cur = *bin = (uint8_t*)mrb_malloc(mrb, malloc_size);
+   cur += sizeof(struct rite_binary_header);
+ 
+-  result = write_section_irep(mrb, irep, cur, flags);
++  result = write_section_irep(mrb, irep, cur, &section_irep_size, flags);
+   if (result != MRB_DUMP_OK) {
+     goto error_exit;
+   }
+   cur += section_irep_size;
++  *bin_size = sizeof(struct rite_binary_header) +
++              section_irep_size + section_lineno_size + section_lv_size +
++              sizeof(struct rite_binary_footer);
+ 
+   /* write DEBUG section */
+   if (debug_info) {
+diff --git a/src/load.c b/src/load.c
+index 5c42eb2b..e0620a96 100644
+--- a/src/load.c
++++ b/src/load.c
+@@ -31,6 +31,13 @@
+ # error This code cannot be built on your environment.
+ #endif
+ 
++static size_t
++skip_padding(const uint8_t *buf)
++{
++  const size_t align = MRB_DUMP_ALIGNMENT;
++  return -(intptr_t)buf & (align-1);
++}
++
+ static size_t
+ offset_crc_body(void)
+ {
+@@ -68,6 +75,8 @@ read_irep_record_1(mrb_state *mrb, const uint8_t *bin, size_t *len, uint8_t flag
+   /* ISEQ BLOCK */
+   irep->ilen = (size_t)bin_to_uint32(src);
+   src += sizeof(uint32_t);
++  src += skip_padding(src);
++
+   if (irep->ilen > 0) {
+     if (SIZE_ERROR_MUL(sizeof(mrb_code), irep->ilen)) {
+       return NULL;
+

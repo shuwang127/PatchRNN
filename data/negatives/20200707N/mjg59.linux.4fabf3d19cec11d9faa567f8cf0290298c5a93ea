@@ -1,0 +1,99 @@
+commit 4fabf3d19cec11d9faa567f8cf0290298c5a93ea
+Author: He Kuang <hekuang@huawei.com>
+Date:   Thu Mar 12 15:21:49 2015 +0800
+
+    perf hists browser: Fix UI bug after fold/unfold
+    
+    In perf hists browser, the fold/unfold stat of each hist entry is
+    recorded but hb->nr_callchain_rows loses its value after zoom out and
+    zoom in back. This causes a wrong row cursor range that restrict user to
+    move down anymore.
+    
+    This bug can be reproduced as follows:
+    
+      $ perf record -g -e syscalls:* ls
+      $ perf report
+    
+        Available samples
+      ================================================================
+        2 syscalls:sys_enter_mprotect <= [enter one of the entries]
+        2 syscalls:sys_exit_mprotect
+        13 syscalls:sys_enter_brk
+        ...
+    
+    In the hists brower, unfold some of the items, now the cursor can reach
+    to any rows:
+    
+        Children      Self  Command  Shared Object          Symbol
+      ================================================================
+      -  100.00%   100.00%  ls       libuClibc-0.9.33.2.so  [.] lstat64
+      - lstat64
+           16.67% 0x6469702e64
+           8.33% 0x646970
+           8.33% 0x617461
+           8.33% 0x65
+      -   16.67%     0.00%  ls       [unknown]              [.]0x6469702e64
+         0x6469702e64 <= [cursor can reach to bottom line, everything is ok]
+    
+    Now, zoom back to "Available samples" and enter again:
+    
+        Children      Self  Command  Shared Object          Symbol
+      ================================================================
+      -  100.00%   100.00%  ls       libuClibc-0.9.33.2.so  [.] lstat64
+      - lstat64
+           16.67% 0x6469702e64
+           8.33% 0x646970
+           8.33% 0x617461 <= [cursor may stop here, can't move down anymore]
+           8.33% 0x65
+      -   16.67%     0.00%  ls       [unknown]              [.]0x6469702e64
+         0x6469702e64
+    
+    This patch recalculates hb->nr_callchain_rows to fix the bug.
+    
+    Signed-off-by: He Kuang <hekuang@huawei.com>
+    Acked-by: Namhyung Kim <namhyung@kernel.org>
+    Cc: Jiri Olsa <jolsa@kernel.org>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Cc: Wang Nan <wangnan0@huawei.com>
+    Link: http://lkml.kernel.org/r/1426144909-18951-1-git-send-email-hekuang@huawei.com
+    Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+
+diff --git a/tools/perf/ui/browsers/hists.c b/tools/perf/ui/browsers/hists.c
+index ad312d91caed..49eddeb81458 100644
+--- a/tools/perf/ui/browsers/hists.c
++++ b/tools/perf/ui/browsers/hists.c
+@@ -48,6 +48,24 @@ static bool hist_browser__has_filter(struct hist_browser *hb)
+ 	return hists__has_filter(hb->hists) || hb->min_pcnt;
+ }
+ 
++static int hist_browser__get_folding(struct hist_browser *browser)
++{
++	struct rb_node *nd;
++	struct hists *hists = browser->hists;
++	int unfolded_rows = 0;
++
++	for (nd = rb_first(&hists->entries);
++	     (nd = hists__filter_entries(nd, browser->min_pcnt)) != NULL;
++	     nd = rb_next(nd)) {
++		struct hist_entry *he =
++			rb_entry(nd, struct hist_entry, rb_node);
++
++		if (he->ms.unfolded)
++			unfolded_rows += he->nr_rows;
++	}
++	return unfolded_rows;
++}
++
+ static u32 hist_browser__nr_entries(struct hist_browser *hb)
+ {
+ 	u32 nr_entries;
+@@ -57,6 +75,7 @@ static u32 hist_browser__nr_entries(struct hist_browser *hb)
+ 	else
+ 		nr_entries = hb->hists->nr_entries;
+ 
++	hb->nr_callchain_rows = hist_browser__get_folding(hb);
+ 	return nr_entries + hb->nr_callchain_rows;
+ }
+ 
+

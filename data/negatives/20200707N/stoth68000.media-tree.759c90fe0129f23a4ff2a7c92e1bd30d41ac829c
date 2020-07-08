@@ -1,0 +1,54 @@
+commit 759c90fe0129f23a4ff2a7c92e1bd30d41ac829c
+Author: Ricard Wanderlof <ricard.wanderlof@axis.com>
+Date:   Mon Oct 19 08:52:54 2015 +0200
+
+    ALSA: USB-audio: Adjust max packet size calculation for tx_length_quirk
+    
+    For the Zoom R16/24 (tx_length_quirk set), when calculating the maximum
+    sample frequency, consideration must be made for the fact that four bytes
+    of the packet contain a length descriptor and consequently must not be
+    counted as part of the audio data.
+    
+    This is corroborated by the wMaxPacketSize for this device, which is 108
+    bytes according for the USB playback endpoint descriptor. The frame size
+    is 8 bytes (2 channels of 4 bytes each), and the 108 bytes thus work out
+    as 13 * 8 + 4, i.e. corresponding to 13 frames plus the additional 4 byte
+    length descriptor.
+    
+    Signed-off-by: Ricard Wanderlof <ricardw@axis.com>
+    Signed-off-by: Takashi Iwai <tiwai@suse.de>
+
+diff --git a/sound/usb/endpoint.c b/sound/usb/endpoint.c
+index 0cc64bd4d0a4..7b1cb365ffab 100644
+--- a/sound/usb/endpoint.c
++++ b/sound/usb/endpoint.c
+@@ -617,6 +617,8 @@ static int data_ep_set_params(struct snd_usb_endpoint *ep,
+ 	unsigned int max_packs_per_period, urbs_per_period, urb_packs;
+ 	unsigned int max_urbs, i;
+ 	int frame_bits = snd_pcm_format_physical_width(pcm_format) * channels;
++	int tx_length_quirk = (ep->chip->tx_length_quirk &&
++			       usb_pipeout(ep->pipe));
+ 
+ 	if (pcm_format == SNDRV_PCM_FORMAT_DSD_U16_LE && fmt->dsd_dop) {
+ 		/*
+@@ -650,11 +652,17 @@ static int data_ep_set_params(struct snd_usb_endpoint *ep,
+ 	 */
+ 	maxsize = (((ep->freqmax << ep->datainterval) + 0xffff) >> 16) *
+ 			 (frame_bits >> 3);
++	if (tx_length_quirk)
++		maxsize += sizeof(__le32); /* Space for length descriptor */
+ 	/* but wMaxPacketSize might reduce this */
+ 	if (ep->maxpacksize && ep->maxpacksize < maxsize) {
+ 		/* whatever fits into a max. size packet */
+-		maxsize = ep->maxpacksize;
+-		ep->freqmax = (maxsize / (frame_bits >> 3))
++		unsigned int data_maxsize = maxsize = ep->maxpacksize;
++
++		if (tx_length_quirk)
++			/* Need to remove the length descriptor to calc freq */
++			data_maxsize -= sizeof(__le32);
++		ep->freqmax = (data_maxsize / (frame_bits >> 3))
+ 				<< (16 - ep->datainterval);
+ 	}
+ 
+

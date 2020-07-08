@@ -1,0 +1,33 @@
+commit 2138534c134c89eb68cf17a3c7534a3459c1ea5b
+Author: unknown <aelkin/elkin@dsl-hkibras-fe30f900-107.dhcp.inet.fi>
+Date:   Sun Nov 26 15:55:49 2006 +0200
+
+    Bug #24487 Valgrind: uninited byte in table->record[1] in binlog code for rbr + innodb
+    
+    The reason of this valgrind's compaint is not a bug but rather a feature of bitwise ops:
+    for any value of the byte x
+    x | 1 -> 1,  and x & 0 -> 0.
+    x, being a null_byte part of record[1] can be left unassigned even after
+    ha_innobase::index_read_idx because the above and still be correct.
+    Addding a check memory upon the invocation of the function can detect this fact
+    long before record[1], old record, is eventually passed to my_write.
+    
+    Fixed with initialization of record[1]'s null_bytes part in open_table_from_share.
+    
+    
+    sql/table.cc:
+      initializing part of record[1]
+
+diff --git a/sql/table.cc b/sql/table.cc
+index 7f80b95c954..1506c1220d7 100644
+--- a/sql/table.cc
++++ b/sql/table.cc
+@@ -1400,6 +1400,7 @@ int open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
+   if (records > 1)
+   {
+     memcpy(outparam->record[0], share->default_values, share->rec_buff_length);
++    memcpy(outparam->record[1], share->default_values, share->null_bytes);
+     if (records > 2)
+       memcpy(outparam->record[1], share->default_values,
+              share->rec_buff_length);
+

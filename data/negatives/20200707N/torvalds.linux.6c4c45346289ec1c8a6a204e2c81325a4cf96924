@@ -1,0 +1,70 @@
+commit 6c4c45346289ec1c8a6a204e2c81325a4cf96924
+Author: Arik Nemtsov <arik@wizery.com>
+Date:   Tue Nov 27 08:44:54 2012 +0200
+
+    wlcore: consolidate free_link and always call it
+    
+    Make sure free_link is always called when removing an interface. This
+    ensures all skbs belonging to this interface are returned to mac80211.
+    Otherwise these dangling skbs might crash the system on the next
+    call to wl1271_tx_reset_link_queues(). This happens on recovery/stop or
+    an unsuccessful Tx flush.
+    
+    Signed-off-by: Ido Yariv <ido@wizery.com>
+    Signed-off-by: Arik Nemtsov <arik@wizery.com>
+    Signed-off-by: Luciano Coelho <coelho@ti.com>
+
+diff --git a/drivers/net/wireless/ti/wlcore/cmd.c b/drivers/net/wireless/ti/wlcore/cmd.c
+index ead19c9c9ea6..38243aa8614f 100644
+--- a/drivers/net/wireless/ti/wlcore/cmd.c
++++ b/drivers/net/wireless/ti/wlcore/cmd.c
+@@ -339,6 +339,11 @@ void wl12xx_free_link(struct wl1271 *wl, struct wl12xx_vif *wlvif, u8 *hlid)
+ 	__clear_bit(*hlid, wlvif->links_map);
+ 	spin_unlock_irqrestore(&wl->wl_lock, flags);
+ 
++	wl->links[*hlid].allocated_pkts = 0;
++	wl->links[*hlid].prev_freed_pkts = 0;
++	wl->links[*hlid].ba_bitmap = 0;
++	memset(wl->links[*hlid].addr, 0, ETH_ALEN);
++
+ 	/*
+ 	 * At this point op_tx() will not add more packets to the queues. We
+ 	 * can purge them.
+diff --git a/drivers/net/wireless/ti/wlcore/main.c b/drivers/net/wireless/ti/wlcore/main.c
+index 63d3413d6002..6dcd7ecb3bec 100644
+--- a/drivers/net/wireless/ti/wlcore/main.c
++++ b/drivers/net/wireless/ti/wlcore/main.c
+@@ -4429,8 +4429,6 @@ void wl1271_free_sta(struct wl1271 *wl, struct wl12xx_vif *wlvif, u8 hlid)
+ 		return;
+ 
+ 	clear_bit(hlid, wlvif->ap.sta_hlid_map);
+-	memset(wl->links[hlid].addr, 0, ETH_ALEN);
+-	wl->links[hlid].ba_bitmap = 0;
+ 	__clear_bit(hlid, &wl->ap_ps_map);
+ 	__clear_bit(hlid, (unsigned long *)&wl->ap_fw_ps_map);
+ 	wl12xx_free_link(wl, wlvif, &hlid);
+diff --git a/drivers/net/wireless/ti/wlcore/tx.c b/drivers/net/wireless/ti/wlcore/tx.c
+index b5b9bd6d4f06..c711c91a0cc6 100644
+--- a/drivers/net/wireless/ti/wlcore/tx.c
++++ b/drivers/net/wireless/ti/wlcore/tx.c
+@@ -1009,13 +1009,14 @@ void wl12xx_tx_reset_wlvif(struct wl1271 *wl, struct wl12xx_vif *wlvif)
+ 
+ 	/* TX failure */
+ 	for_each_set_bit(i, wlvif->links_map, WL12XX_MAX_LINKS) {
+-		if (wlvif->bss_type == BSS_TYPE_AP_BSS)
++		if (wlvif->bss_type == BSS_TYPE_AP_BSS) {
++			/* this calls wl12xx_free_link */
+ 			wl1271_free_sta(wl, wlvif, i);
+-		else
++		} else {
++			u8 hlid = i;
+ 			wlvif->sta.ba_rx_bitmap = 0;
+-
+-		wl->links[i].allocated_pkts = 0;
+-		wl->links[i].prev_freed_pkts = 0;
++			wl12xx_free_link(wl, wlvif, &hlid);
++		}
+ 	}
+ 	wlvif->last_tx_hlid = 0;
+ 
+

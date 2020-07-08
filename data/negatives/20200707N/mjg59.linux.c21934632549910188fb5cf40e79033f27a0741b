@@ -1,0 +1,58 @@
+commit c21934632549910188fb5cf40e79033f27a0741b
+Author: Xiao Guangrong <xiaoguangrong@linux.vnet.ibm.com>
+Date:   Tue Dec 4 07:17:11 2012 +0800
+
+    KVM: MMU: optimize for set_spte
+    
+    There are two cases we need to adjust page size in set_spte:
+    1): the one is other vcpu creates new sp in the window between mapping_level()
+        and acquiring mmu-lock.
+    2): the another case is the new sp is created by itself (page-fault path) when
+        guest uses the target gfn as its page table.
+    
+    In current code, set_spte drop the spte and emulate the access for these case,
+    it works not good:
+    - for the case 1, it may destroy the mapping established by other vcpu, and
+      do expensive instruction emulation.
+    - for the case 2, it may emulate the access even if the guest is accessing
+      the page which not used as page table. There is a example, 0~2M is used as
+      huge page in guest, in this huge page, only page 3 used as page table, then
+      guest read/writes on other pages can cause instruction emulation.
+    
+    Both of these cases can be fixed by allowing guest to retry the access, it
+    will refault, then we can establish the mapping by using small page
+    
+    Signed-off-by: Xiao Guangrong <xiaoguangrong@linux.vnet.ibm.com>
+    Acked-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Gleb Natapov <gleb@redhat.com>
+
+diff --git a/arch/x86/kvm/mmu.c b/arch/x86/kvm/mmu.c
+index b875a9ed9b8e..01d7c2ad05f5 100644
+--- a/arch/x86/kvm/mmu.c
++++ b/arch/x86/kvm/mmu.c
+@@ -2382,12 +2382,20 @@ static int set_spte(struct kvm_vcpu *vcpu, u64 *sptep,
+ 	    || (!vcpu->arch.mmu.direct_map && write_fault
+ 		&& !is_write_protection(vcpu) && !user_fault)) {
+ 
++		/*
++		 * There are two cases:
++		 * - the one is other vcpu creates new sp in the window
++		 *   between mapping_level() and acquiring mmu-lock.
++		 * - the another case is the new sp is created by itself
++		 *   (page-fault path) when guest uses the target gfn as
++		 *   its page table.
++		 * Both of these cases can be fixed by allowing guest to
++		 * retry the access, it will refault, then we can establish
++		 * the mapping by using small page.
++		 */
+ 		if (level > PT_PAGE_TABLE_LEVEL &&
+-		    has_wrprotected_page(vcpu->kvm, gfn, level)) {
+-			ret = 1;
+-			drop_spte(vcpu->kvm, sptep);
++		    has_wrprotected_page(vcpu->kvm, gfn, level))
+ 			goto done;
+-		}
+ 
+ 		spte |= PT_WRITABLE_MASK | SPTE_MMU_WRITEABLE;
+ 
+

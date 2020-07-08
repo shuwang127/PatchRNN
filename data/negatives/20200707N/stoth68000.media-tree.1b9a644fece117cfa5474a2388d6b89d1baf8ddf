@@ -1,0 +1,79 @@
+commit 1b9a644fece117cfa5474a2388d6b89d1baf8ddf
+Author: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date:   Tue Sep 7 18:32:22 2010 +0200
+
+    perf: Optimize context ops
+    
+    Assuming we don't mix events of different pmus onto a single context
+    (with the exeption of software events inside a hardware group) we can
+    now assume that all events on a particular context belong to the same
+    pmu, hence we can disable the pmu for the entire context operations.
+    
+    This reduces the amount of hardware writes.
+    
+    The exception for swevents comes from the fact that the sw pmu disable
+    is a nop.
+    
+    Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Cc: paulus <paulus@samba.org>
+    Cc: stephane eranian <eranian@googlemail.com>
+    Cc: Robert Richter <robert.richter@amd.com>
+    Cc: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Lin Ming <ming.m.lin@intel.com>
+    Cc: Yanmin <yanmin_zhang@linux.intel.com>
+    LKML-Reference: <new-submission>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/kernel/perf_event.c b/kernel/perf_event.c
+index 357ee8d5e8ae..9819a69a61a1 100644
+--- a/kernel/perf_event.c
++++ b/kernel/perf_event.c
+@@ -1065,6 +1065,7 @@ static void ctx_sched_out(struct perf_event_context *ctx,
+ 	struct perf_event *event;
+ 
+ 	raw_spin_lock(&ctx->lock);
++	perf_pmu_disable(ctx->pmu);
+ 	ctx->is_active = 0;
+ 	if (likely(!ctx->nr_events))
+ 		goto out;
+@@ -1083,6 +1084,7 @@ static void ctx_sched_out(struct perf_event_context *ctx,
+ 			group_sched_out(event, cpuctx, ctx);
+ 	}
+ out:
++	perf_pmu_enable(ctx->pmu);
+ 	raw_spin_unlock(&ctx->lock);
+ }
+ 
+@@ -1400,6 +1402,7 @@ void perf_event_context_sched_in(struct perf_event_context *ctx)
+ 	if (cpuctx->task_ctx == ctx)
+ 		return;
+ 
++	perf_pmu_disable(ctx->pmu);
+ 	/*
+ 	 * We want to keep the following priority order:
+ 	 * cpu pinned (that don't need to move), task pinned,
+@@ -1418,6 +1421,7 @@ void perf_event_context_sched_in(struct perf_event_context *ctx)
+ 	 * cpu-context we got scheduled on is actually rotating.
+ 	 */
+ 	perf_pmu_rotate_start(ctx->pmu);
++	perf_pmu_enable(ctx->pmu);
+ }
+ 
+ /*
+@@ -1629,6 +1633,7 @@ static enum hrtimer_restart perf_event_context_tick(struct hrtimer *timer)
+ 			rotate = 1;
+ 	}
+ 
++	perf_pmu_disable(cpuctx->ctx.pmu);
+ 	perf_ctx_adjust_freq(&cpuctx->ctx, cpuctx->timer_interval);
+ 	if (ctx)
+ 		perf_ctx_adjust_freq(ctx, cpuctx->timer_interval);
+@@ -1649,6 +1654,7 @@ static enum hrtimer_restart perf_event_context_tick(struct hrtimer *timer)
+ 		task_ctx_sched_in(ctx, EVENT_FLEXIBLE);
+ 
+ done:
++	perf_pmu_enable(cpuctx->ctx.pmu);
+ 	hrtimer_forward_now(timer, ns_to_ktime(cpuctx->timer_interval));
+ 
+ 	return restart;
+

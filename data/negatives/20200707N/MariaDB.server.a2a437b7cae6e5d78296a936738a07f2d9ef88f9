@@ -1,0 +1,68 @@
+commit a2a437b7cae6e5d78296a936738a07f2d9ef88f9
+Author: Konstantin Osipov <kostja@sun.com>
+Date:   Sat Nov 21 02:12:23 2009 +0300
+
+    Backport the implementation of vio_pending from 6.0-codebase.
+    Original changeset:
+    ------------------------------------------------------------
+    revno: 2626
+    committer: davi@mysql.com/endora.local
+    timestamp: Wed 2008-04-23 09:33:25 -0300
+    message:
+    Fix for main.ssl and main.ssl_compress test case failures under pool-of-threads.
+    
+    The problem is that the SSL layer has a read buffer and might read
+    more data than requested by the VIO layer. The SSL layer empties the
+    socket buffer which causes the socket to not be signaled for IO if
+    the client is waiting for a command which is sitting in the read
+    buffer.
+    
+    The solution is to retrieve from the transport layer the number of
+    bytes waiting in the read buffer. The data in the read buffer needs
+    to be processed before waiting for more data.
+
+diff --git a/include/violite.h b/include/violite.h
+index 0af7a566307..3e8e430392b 100644
+--- a/include/violite.h
++++ b/include/violite.h
+@@ -86,6 +86,7 @@ my_bool	vio_peer_addr(Vio* vio, char *buf, uint16 *port);
+ void	vio_in_addr(Vio *vio, struct in_addr *in);
+ my_bool vio_poll_read(Vio *vio, uint timeout);
+ my_bool vio_is_connected(Vio *vio);
++ssize_t vio_pending(Vio *vio);
+ 
+ #ifdef HAVE_OPENSSL
+ #include <openssl/opensslv.h>
+diff --git a/vio/viosocket.c b/vio/viosocket.c
+index 30187cbed56..51345d072b2 100644
+--- a/vio/viosocket.c
++++ b/vio/viosocket.c
+@@ -855,3 +855,27 @@ int vio_close_shared_memory(Vio * vio)
+ }
+ #endif /* HAVE_SMEM */
+ #endif /* __WIN__ */
++
++
++/**
++  Number of bytes in the read buffer.
++
++  @return number of bytes in the read buffer or < 0 if error.
++*/
++
++ssize_t vio_pending(Vio *vio)
++{
++#ifdef HAVE_OPENSSL
++  SSL *ssl= (SSL*) vio->ssl_arg;
++#endif
++
++  if (vio->read_pos < vio->read_end)
++    return vio->read_end - vio->read_pos;
++
++#ifdef HAVE_OPENSSL
++  if (ssl)
++    return SSL_pending(ssl);
++#endif
++
++  return 0;
++}
+

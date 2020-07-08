@@ -1,0 +1,57 @@
+commit d54fc3bbc25641c7a0921902101a30a1d3e8ac98
+Author: Hans Verkuil <hverkuil@xs4all.nl>
+Date:   Sun Jun 26 07:44:56 2016 -0300
+
+    [media] rc-main: fix kernel oops after unloading keymap module
+    
+    When the rc_map table is created the char pointer of the name of the keymap
+    is copied to the rc_map->name field. However, this pointer points to memory
+    from the keymap module itself.
+    
+    Since these keymap modules are not refcounted, that means anyone can call
+    rmmod to unload that module. Which is not a big deal because the contents of
+    the map is all copied to rc_map, except for the keymap name.
+    
+    So after a keymap module is unloaded the name pointer has become stale. Unloading
+    the rc-core module will now cause a kernel oops in rc_dev_uevent().
+    
+    The solution is to kstrdup the name so there are no more references to the
+    keymap module remaining.
+    
+    Signed-off-by: Hans Verkuil <hans.verkuil@cisco.com>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+
+diff --git a/drivers/media/rc/rc-main.c b/drivers/media/rc/rc-main.c
+index 7dfc7c2188f0..601ca2337e45 100644
+--- a/drivers/media/rc/rc-main.c
++++ b/drivers/media/rc/rc-main.c
+@@ -130,13 +130,18 @@ static struct rc_map_list empty_map = {
+ static int ir_create_table(struct rc_map *rc_map,
+ 			   const char *name, u64 rc_type, size_t size)
+ {
+-	rc_map->name = name;
++	rc_map->name = kstrdup(name, GFP_KERNEL);
++	if (!rc_map->name)
++		return -ENOMEM;
+ 	rc_map->rc_type = rc_type;
+ 	rc_map->alloc = roundup_pow_of_two(size * sizeof(struct rc_map_table));
+ 	rc_map->size = rc_map->alloc / sizeof(struct rc_map_table);
+ 	rc_map->scan = kmalloc(rc_map->alloc, GFP_KERNEL);
+-	if (!rc_map->scan)
++	if (!rc_map->scan) {
++		kfree(rc_map->name);
++		rc_map->name = NULL;
+ 		return -ENOMEM;
++	}
+ 
+ 	IR_dprintk(1, "Allocated space for %u keycode entries (%u bytes)\n",
+ 		   rc_map->size, rc_map->alloc);
+@@ -153,6 +158,7 @@ static int ir_create_table(struct rc_map *rc_map,
+ static void ir_free_table(struct rc_map *rc_map)
+ {
+ 	rc_map->size = 0;
++	kfree(rc_map->name);
+ 	kfree(rc_map->scan);
+ 	rc_map->scan = NULL;
+ }
+

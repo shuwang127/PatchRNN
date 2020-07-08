@@ -1,0 +1,49 @@
+commit 5cbd54ef470d880fc37fbe4b21eb514806d51e0d
+Author: Ingo Molnar <mingo@elte.hu>
+Date:   Wed Nov 12 20:05:50 2008 +0100
+
+    sched: fix init_idle()'s use of sched_clock()
+    
+    Maciej Rutecki reported:
+    
+    > I have this bug during suspend to disk:
+    >
+    > [  188.592151] Enabling non-boot CPUs ...
+    > [  188.592151] SMP alternatives: switching to SMP code
+    > [  188.666058] BUG: using smp_processor_id() in preemptible
+    > [00000000]
+    > code: suspend_to_disk/2934
+    > [  188.666064] caller is native_sched_clock+0x2b/0x80
+    
+    Which, as noted by Linus, was caused by me, via:
+    
+      7cbaef9c "sched: optimize sched_clock() a bit"
+    
+    Move the rq locking a bit earlier in the initialization sequence,
+    that will make the sched_clock() call in init_idle() non-preemptible.
+    
+    Reported-by: Maciej Rutecki <maciej.rutecki@gmail.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 3bafbe350f4f..c94baf2969e7 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -5870,6 +5870,8 @@ void __cpuinit init_idle(struct task_struct *idle, int cpu)
+ 	struct rq *rq = cpu_rq(cpu);
+ 	unsigned long flags;
+ 
++	spin_lock_irqsave(&rq->lock, flags);
++
+ 	__sched_fork(idle);
+ 	idle->se.exec_start = sched_clock();
+ 
+@@ -5877,7 +5879,6 @@ void __cpuinit init_idle(struct task_struct *idle, int cpu)
+ 	idle->cpus_allowed = cpumask_of_cpu(cpu);
+ 	__set_task_cpu(idle, cpu);
+ 
+-	spin_lock_irqsave(&rq->lock, flags);
+ 	rq->curr = rq->idle = idle;
+ #if defined(CONFIG_SMP) && defined(__ARCH_WANT_UNLOCKED_CTXSW)
+ 	idle->oncpu = 1;
+

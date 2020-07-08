@@ -1,0 +1,271 @@
+commit 058276303dbc4ed089c1f7dad0871810b1f5ddf1
+Author: Linus Walleij <linus.walleij@stericsson.com>
+Date:   Mon May 17 16:30:42 2010 -0700
+
+    DMAENGINE: extend the control command to include an arg
+    
+    This adds an argument to the DMAengine control function, so that
+    we can later provide control commands that need some external data
+    passed in through an argument akin to the ioctl() operation
+    prototype.
+    
+    [dan.j.williams@intel.com: fix up some missed conversions]
+    Signed-off-by: Linus Walleij <linus.walleij@stericsson.com>
+    Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+
+diff --git a/drivers/dma/at_hdmac.c b/drivers/dma/at_hdmac.c
+index 93ed99c84cf1..ee805a43f879 100644
+--- a/drivers/dma/at_hdmac.c
++++ b/drivers/dma/at_hdmac.c
+@@ -759,7 +759,8 @@ atc_prep_slave_sg(struct dma_chan *chan, struct scatterlist *sgl,
+ 	return NULL;
+ }
+ 
+-static int atc_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd)
++static int atc_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
++		       unsigned long arg)
+ {
+ 	struct at_dma_chan	*atchan = to_at_dma_chan(chan);
+ 	struct at_dma		*atdma = to_at_dma(chan->device);
+diff --git a/drivers/dma/coh901318.c b/drivers/dma/coh901318.c
+index 4233440741a2..a724e6be1b4d 100644
+--- a/drivers/dma/coh901318.c
++++ b/drivers/dma/coh901318.c
+@@ -942,7 +942,7 @@ coh901318_free_chan_resources(struct dma_chan *chan)
+ 
+ 	spin_unlock_irqrestore(&cohc->lock, flags);
+ 
+-	chan->device->device_control(chan, DMA_TERMINATE_ALL);
++	chan->device->device_control(chan, DMA_TERMINATE_ALL, 0);
+ }
+ 
+ 
+@@ -1176,7 +1176,8 @@ coh901318_issue_pending(struct dma_chan *chan)
+ }
+ 
+ static int
+-coh901318_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd)
++coh901318_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
++		  unsigned long arg)
+ {
+ 	unsigned long flags;
+ 	struct coh901318_chan *cohc = to_coh901318_chan(chan);
+diff --git a/drivers/dma/dw_dmac.c b/drivers/dma/dw_dmac.c
+index 18fb5b41cedf..a3991ab0d67e 100644
+--- a/drivers/dma/dw_dmac.c
++++ b/drivers/dma/dw_dmac.c
+@@ -781,7 +781,8 @@ dwc_prep_slave_sg(struct dma_chan *chan, struct scatterlist *sgl,
+ 	return NULL;
+ }
+ 
+-static int dwc_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd)
++static int dwc_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
++		       unsigned long arg)
+ {
+ 	struct dw_dma_chan	*dwc = to_dw_dma_chan(chan);
+ 	struct dw_dma		*dw = to_dw_dma(chan->device);
+diff --git a/drivers/dma/fsldma.c b/drivers/dma/fsldma.c
+index cb1924f46c9e..005329d496bd 100644
+--- a/drivers/dma/fsldma.c
++++ b/drivers/dma/fsldma.c
+@@ -775,7 +775,7 @@ static struct dma_async_tx_descriptor *fsl_dma_prep_slave_sg(
+ }
+ 
+ static int fsl_dma_device_control(struct dma_chan *dchan,
+-				  enum dma_ctrl_cmd cmd)
++				  enum dma_ctrl_cmd cmd, unsigned long arg)
+ {
+ 	struct fsldma_chan *chan;
+ 	unsigned long flags;
+diff --git a/drivers/dma/ipu/ipu_idmac.c b/drivers/dma/ipu/ipu_idmac.c
+index 246a6143e4a7..cb26ee9773d6 100644
+--- a/drivers/dma/ipu/ipu_idmac.c
++++ b/drivers/dma/ipu/ipu_idmac.c
+@@ -1472,7 +1472,8 @@ static void idmac_issue_pending(struct dma_chan *chan)
+ 	 */
+ }
+ 
+-static int __idmac_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd)
++static int __idmac_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
++			   unsigned long arg)
+ {
+ 	struct idmac_channel *ichan = to_idmac_chan(chan);
+ 	struct idmac *idmac = to_idmac(chan->device);
+@@ -1513,14 +1514,15 @@ static int __idmac_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd)
+ 	return 0;
+ }
+ 
+-static int idmac_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd)
++static int idmac_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
++			 unsigned long arg)
+ {
+ 	struct idmac_channel *ichan = to_idmac_chan(chan);
+ 	int ret;
+ 
+ 	mutex_lock(&ichan->chan_mutex);
+ 
+-	ret = __idmac_control(chan, cmd);
++	ret = __idmac_control(chan, cmd, arg);
+ 
+ 	mutex_unlock(&ichan->chan_mutex);
+ 
+@@ -1616,7 +1618,7 @@ static void idmac_free_chan_resources(struct dma_chan *chan)
+ 
+ 	mutex_lock(&ichan->chan_mutex);
+ 
+-	__idmac_control(chan, DMA_TERMINATE_ALL);
++	__idmac_control(chan, DMA_TERMINATE_ALL, 0);
+ 
+ 	if (ichan->status > IPU_CHANNEL_FREE) {
+ #ifdef DEBUG
+@@ -1709,7 +1711,7 @@ static void __exit ipu_idmac_exit(struct ipu *ipu)
+ 	for (i = 0; i < IPU_CHANNELS_NUM; i++) {
+ 		struct idmac_channel *ichan = ipu->channel + i;
+ 
+-		idmac_control(&ichan->dma_chan, DMA_TERMINATE_ALL);
++		idmac_control(&ichan->dma_chan, DMA_TERMINATE_ALL, 0);
+ 		idmac_prep_slave_sg(&ichan->dma_chan, NULL, 0, DMA_NONE, 0);
+ 	}
+ 
+diff --git a/drivers/dma/shdma.c b/drivers/dma/shdma.c
+index 98f82cdb404c..e9de1d35c20d 100644
+--- a/drivers/dma/shdma.c
++++ b/drivers/dma/shdma.c
+@@ -580,7 +580,8 @@ static struct dma_async_tx_descriptor *sh_dmae_prep_slave_sg(
+ 			       direction, flags);
+ }
+ 
+-static int sh_dmae_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd)
++static int sh_dmae_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
++			   unsigned long arg)
+ {
+ 	struct sh_dmae_chan *sh_chan = to_sh_chan(chan);
+ 
+diff --git a/drivers/dma/ste_dma40.c b/drivers/dma/ste_dma40.c
+index 81fec95312b6..c426829f6ab8 100644
+--- a/drivers/dma/ste_dma40.c
++++ b/drivers/dma/ste_dma40.c
+@@ -2065,7 +2065,8 @@ static void d40_issue_pending(struct dma_chan *chan)
+ 	spin_unlock_irqrestore(&d40c->lock, flags);
+ }
+ 
+-static int d40_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd)
++static int d40_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
++		       unsigned long arg)
+ {
+ 	unsigned long flags;
+ 	struct d40_chan *d40c = container_of(chan, struct d40_chan, chan);
+diff --git a/drivers/dma/timb_dma.c b/drivers/dma/timb_dma.c
+index 44b346d8d319..0172fa3c7a2b 100644
+--- a/drivers/dma/timb_dma.c
++++ b/drivers/dma/timb_dma.c
+@@ -611,7 +611,8 @@ static struct dma_async_tx_descriptor *td_prep_slave_sg(struct dma_chan *chan,
+ 	return &td_desc->txd;
+ }
+ 
+-static int td_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd)
++static int td_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
++		      unsigned long arg)
+ {
+ 	struct timb_dma_chan *td_chan =
+ 		container_of(chan, struct timb_dma_chan, chan);
+diff --git a/drivers/dma/txx9dmac.c b/drivers/dma/txx9dmac.c
+index e523737639aa..d02edb05910e 100644
+--- a/drivers/dma/txx9dmac.c
++++ b/drivers/dma/txx9dmac.c
+@@ -938,7 +938,8 @@ txx9dmac_prep_slave_sg(struct dma_chan *chan, struct scatterlist *sgl,
+ 	return &first->txd;
+ }
+ 
+-static int txx9dmac_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd)
++static int txx9dmac_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
++			    unsigned long arg)
+ {
+ 	struct txx9dmac_chan *dc = to_txx9dmac_chan(chan);
+ 	struct txx9dmac_desc *desc, *_desc;
+diff --git a/drivers/mmc/host/atmel-mci.c b/drivers/mmc/host/atmel-mci.c
+index ae6d24ba4f08..fd2d24f81478 100644
+--- a/drivers/mmc/host/atmel-mci.c
++++ b/drivers/mmc/host/atmel-mci.c
+@@ -578,7 +578,7 @@ static void atmci_stop_dma(struct atmel_mci *host)
+ 	struct dma_chan *chan = host->data_chan;
+ 
+ 	if (chan) {
+-		chan->device->device_control(chan, DMA_TERMINATE_ALL);
++	  chan->device->device_control(chan, DMA_TERMINATE_ALL, 0);
+ 		atmci_dma_cleanup(host);
+ 	} else {
+ 		/* Data transfer was stopped by the interrupt handler */
+diff --git a/drivers/serial/sh-sci.c b/drivers/serial/sh-sci.c
+index 690988237971..882f3d5ed028 100644
+--- a/drivers/serial/sh-sci.c
++++ b/drivers/serial/sh-sci.c
+@@ -1087,7 +1087,7 @@ static void work_fn_rx(struct work_struct *work)
+ 		unsigned long flags;
+ 		int count;
+ 
+-		chan->device->device_control(chan, DMA_TERMINATE_ALL);
++		chan->device->device_control(chan, DMA_TERMINATE_ALL, 0);
+ 		dev_dbg(port->dev, "Read %u bytes with cookie %d\n",
+ 			sh_desc->partial, sh_desc->cookie);
+ 
+diff --git a/drivers/video/mx3fb.c b/drivers/video/mx3fb.c
+index 3aa50bc276eb..7cfc170bce19 100644
+--- a/drivers/video/mx3fb.c
++++ b/drivers/video/mx3fb.c
+@@ -388,7 +388,7 @@ static void sdc_disable_channel(struct mx3fb_info *mx3_fbi)
+ 	spin_unlock_irqrestore(&mx3fb->lock, flags);
+ 
+ 	mx3_fbi->txd->chan->device->device_control(mx3_fbi->txd->chan,
+-						   DMA_TERMINATE_ALL);
++						   DMA_TERMINATE_ALL, 0);
+ 	mx3_fbi->txd = NULL;
+ 	mx3_fbi->cookie = -EINVAL;
+ }
+diff --git a/include/linux/dmaengine.h b/include/linux/dmaengine.h
+index 50b7b3e0d572..17456571ff7a 100644
+--- a/include/linux/dmaengine.h
++++ b/include/linux/dmaengine.h
+@@ -347,7 +347,8 @@ struct dma_device {
+ 		struct dma_chan *chan, struct scatterlist *sgl,
+ 		unsigned int sg_len, enum dma_data_direction direction,
+ 		unsigned long flags);
+-	int (*device_control)(struct dma_chan *chan, enum dma_ctrl_cmd cmd);
++	int (*device_control)(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
++		unsigned long arg);
+ 
+ 	enum dma_status (*device_tx_status)(struct dma_chan *chan,
+ 					    dma_cookie_t cookie,
+diff --git a/sound/soc/txx9/txx9aclc.c b/sound/soc/txx9/txx9aclc.c
+index b35d00706c0e..9398f507f77f 100644
+--- a/sound/soc/txx9/txx9aclc.c
++++ b/sound/soc/txx9/txx9aclc.c
+@@ -159,7 +159,7 @@ static void txx9aclc_dma_tasklet(unsigned long data)
+ 		void __iomem *base = drvdata->base;
+ 
+ 		spin_unlock_irqrestore(&dmadata->dma_lock, flags);
+-		chan->device->device_control(chan, DMA_TERMINATE_ALL);
++		chan->device->device_control(chan, DMA_TERMINATE_ALL, 0);
+ 		/* first time */
+ 		for (i = 0; i < NR_DMA_CHAIN; i++) {
+ 			desc = txx9aclc_dma_submit(dmadata,
+@@ -267,7 +267,7 @@ static int txx9aclc_pcm_close(struct snd_pcm_substream *substream)
+ 	struct dma_chan *chan = dmadata->dma_chan;
+ 
+ 	dmadata->frag_count = -1;
+-	chan->device->device_control(chan, DMA_TERMINATE_ALL);
++	chan->device->device_control(chan, DMA_TERMINATE_ALL, 0);
+ 	return 0;
+ }
+ 
+@@ -396,7 +396,8 @@ static int txx9aclc_pcm_remove(struct platform_device *pdev)
+ 		struct dma_chan *chan = dmadata->dma_chan;
+ 		if (chan) {
+ 			dmadata->frag_count = -1;
+-			chan->device->device_control(chan, DMA_TERMINATE_ALL);
++			chan->device->device_control(chan,
++						     DMA_TERMINATE_ALL, 0);
+ 			dma_release_channel(chan);
+ 		}
+ 		dev->dmadata[i].dma_chan = NULL;
+

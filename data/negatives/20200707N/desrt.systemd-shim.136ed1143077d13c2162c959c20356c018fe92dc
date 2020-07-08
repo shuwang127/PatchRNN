@@ -1,0 +1,41 @@
+commit 136ed1143077d13c2162c959c20356c018fe92dc
+Author: Ryan Lortie <desrt@desrt.ca>
+Date:   Mon Nov 11 10:50:38 2013 -0500
+
+    Flush the bus before exit
+    
+    This fixes a theoretical race condition that became less theoretical
+    with time.
+    
+    When coupled with the inactivity timeout, it means that the process had
+    10 seconds to send the replies to method calls from the D-Bus worker
+    thread before the process would exit and the reply would be lost.  10
+    seconds is enough for anybody, right?
+    
+    Unfortunately, the timeout was scheduled from the time each job was
+    started -- not ended.  Some jobs take longer than 10 seconds and
+    therefore systemd-shim was quitting immediately upon return to the
+    mainloop -- immediately after sending the reply to the worker.
+
+diff --git a/src/systemd-shim.c b/src/systemd-shim.c
+index 58219be..a420774 100644
+--- a/src/systemd-shim.c
++++ b/src/systemd-shim.c
+@@ -32,7 +32,15 @@ exit_on_inactivity (gpointer user_data)
+   extern gboolean in_shutdown;
+ 
+   if (!in_shutdown)
+-    exit (0);
++    {
++      GDBusConnection *session_bus;
++
++      session_bus = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, NULL);
++      g_dbus_connection_flush_sync (session_bus, NULL, NULL);
++      g_object_unref (session_bus);
++
++      exit (0);
++    }
+ 
+   return FALSE;
+ }
+

@@ -1,0 +1,37 @@
+commit 4fac6269172eab2be0490a12936248113d14848d
+Author: Jan Lindström <jan.lindstrom@mariadb.com>
+Date:   Mon Jun 29 12:48:42 2015 +0300
+
+    MDEV-8390: innodb.innodb-flush-changed-page-bitmaps crashes
+    
+    Analysis: Flush changed page bitmaps calls log_online_follow_redo_log
+    that later calls log_group_read_log_seg with release_mutex = true
+    and that causes the log_sys mutex being released before
+    log_decrypt_after_read function that later required log_sys mutex.
+    
+    Fix: Enter log_sys mutex before log_decrypt_after_read if mutex
+    is released and release the mutex after the function if we
+    acquired it before function call.
+
+diff --git a/storage/xtradb/log/log0log.cc b/storage/xtradb/log/log0log.cc
+index 9a1eb1b1b28..64459b9c2c7 100644
+--- a/storage/xtradb/log/log0log.cc
++++ b/storage/xtradb/log/log0log.cc
+@@ -2581,8 +2581,16 @@ log_group_read_log_seg(
+ 	       (ulint) (source_offset % UNIV_PAGE_SIZE),
+ 	       len, buf, (type == LOG_ARCHIVE) ? &log_archive_io : NULL, 0);
+ 
++	if (release_mutex) {
++		mutex_enter(&log_sys->mutex);
++	}
++
+ 	log_decrypt_after_read(buf, len);
+ 
++	if (release_mutex) {
++		mutex_exit(&log_sys->mutex);
++	}
++
+ 	start_lsn += len;
+ 	buf += len;
+ 
+

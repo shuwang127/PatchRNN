@@ -1,0 +1,74 @@
+commit a8c20614b0163a71f2df3f9788bfe8b9ff07d742
+Author: Paul Burton <paul.burton@imgtec.com>
+Date:   Tue Sep 22 11:12:14 2015 -0700
+
+    MIPS: CPS: Warn if a core doesn't start
+    
+    When debugging core bringup it is useful to see the state of the CPC
+    sequencer, so output that value if the core hasn't started within a
+    reasonable amount of time (1 second). This avoids simply appearing to
+    the user to hang if a secondary core fails to start.
+    
+    Signed-off-by: Paul Burton <paul.burton@imgtec.com>
+    Cc: linux-mips@linux-mips.org
+    Cc: Rusty Russell <rusty@rustcorp.com.au>
+    Cc: Andrew Bresticker <abrestic@chromium.org>
+    Cc: linux-kernel@vger.kernel.org
+    Cc: Niklas Cassel <niklas.cassel@axis.com>
+    Cc: Ezequiel Garcia <ezequiel.garcia@imgtec.com>
+    Cc: Markos Chandras <markos.chandras@imgtec.com>
+    Patchwork: https://patchwork.linux-mips.org/patch/11205/
+    Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+
+diff --git a/arch/mips/kernel/smp-cps.c b/arch/mips/kernel/smp-cps.c
+index 8b967507e852..48b1b7554f05 100644
+--- a/arch/mips/kernel/smp-cps.c
++++ b/arch/mips/kernel/smp-cps.c
+@@ -8,6 +8,7 @@
+  * option) any later version.
+  */
+ 
++#include <linux/delay.h>
+ #include <linux/io.h>
+ #include <linux/irqchip/mips-gic.h>
+ #include <linux/sched.h>
+@@ -188,7 +189,8 @@ static void __init cps_prepare_cpus(unsigned int max_cpus)
+ 
+ static void boot_core(unsigned core)
+ {
+-	u32 access;
++	u32 access, stat, seq_state;
++	unsigned timeout;
+ 
+ 	/* Select the appropriate core */
+ 	write_gcr_cl_other(core << CM_GCR_Cx_OTHER_CORENUM_SHF);
+@@ -208,6 +210,28 @@ static void boot_core(unsigned core)
+ 		/* Reset the core */
+ 		mips_cpc_lock_other(core);
+ 		write_cpc_co_cmd(CPC_Cx_CMD_RESET);
++
++		timeout = 100;
++		while (true) {
++			stat = read_cpc_co_stat_conf();
++			seq_state = stat & CPC_Cx_STAT_CONF_SEQSTATE_MSK;
++
++			/* U6 == coherent execution, ie. the core is up */
++			if (seq_state == CPC_Cx_STAT_CONF_SEQSTATE_U6)
++				break;
++
++			/* Delay a little while before we start warning */
++			if (timeout) {
++				timeout--;
++				mdelay(10);
++				continue;
++			}
++
++			pr_warn("Waiting for core %u to start... STAT_CONF=0x%x\n",
++				core, stat);
++			mdelay(1000);
++		}
++
+ 		mips_cpc_unlock_other();
+ 	} else {
+ 		/* Take the core out of reset */
+

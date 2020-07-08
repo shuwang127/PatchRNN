@@ -1,0 +1,120 @@
+commit 226173edae1c49c68ebb723771a02302c85e3475
+Author: Matthew Dharm <mdharm-usb@one-eyed-alien.net>
+Date:   Thu Aug 25 20:03:50 2005 -0700
+
+    [PATCH] USB: storage: Fix messed-up locking
+    
+    This is patch as550 from Alan Stern.
+    
+    Apparently someone changed the SCSI core so that it no longer holds the
+    host lock when doing a device or bus reset.  usb-storage was updated at
+    the time, but the change was done carelessly.  Some of the code depends
+    on that lock being held.
+    
+    This patch reintroduces the host lock where needed and tries to clarify
+    the comments explaining why the lock is necessary.  It also moves the
+    code that clears the TIMED_OUT and ABORTING bitflags so that it executes
+    as soon as the timed-out command has completed (and while the host lock
+    is held).
+    
+    Signed-off-by: Alan Stern <stern@rowland.harvard.edu>
+    Signed-off-by: Matthew Dharm <mdharm-usb@one-eyed-alien.net>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/usb/storage/scsiglue.c b/drivers/usb/storage/scsiglue.c
+index d34dc9f417f0..4837524eada7 100644
+--- a/drivers/usb/storage/scsiglue.c
++++ b/drivers/usb/storage/scsiglue.c
+@@ -227,42 +227,42 @@ static int queuecommand(struct scsi_cmnd *srb,
+  ***********************************************************************/
+ 
+ /* Command timeout and abort */
+-/* This is always called with scsi_lock(host) held */
+ static int command_abort(struct scsi_cmnd *srb)
+ {
+ 	struct us_data *us = host_to_us(srb->device->host);
+ 
+ 	US_DEBUGP("%s called\n", __FUNCTION__);
+ 
++	/* us->srb together with the TIMED_OUT, RESETTING, and ABORTING
++	 * bits are protected by the host lock. */
++	scsi_lock(us_to_host(us));
++
+ 	/* Is this command still active? */
+ 	if (us->srb != srb) {
++		scsi_unlock(us_to_host(us));
+ 		US_DEBUGP ("-- nothing to abort\n");
+ 		return FAILED;
+ 	}
+ 
+ 	/* Set the TIMED_OUT bit.  Also set the ABORTING bit, but only if
+ 	 * a device reset isn't already in progress (to avoid interfering
+-	 * with the reset).  To prevent races with auto-reset, we must
+-	 * stop any ongoing USB transfers while still holding the host
+-	 * lock. */
++	 * with the reset).  Note that we must retain the host lock while
++	 * calling usb_stor_stop_transport(); otherwise it might interfere
++	 * with an auto-reset that begins as soon as we release the lock. */
+ 	set_bit(US_FLIDX_TIMED_OUT, &us->flags);
+ 	if (!test_bit(US_FLIDX_RESETTING, &us->flags)) {
+ 		set_bit(US_FLIDX_ABORTING, &us->flags);
+ 		usb_stor_stop_transport(us);
+ 	}
++	scsi_unlock(us_to_host(us));
+ 
+ 	/* Wait for the aborted command to finish */
+ 	wait_for_completion(&us->notify);
+-
+-	/* Reacquire the lock and allow USB transfers to resume */
+-	clear_bit(US_FLIDX_ABORTING, &us->flags);
+-	clear_bit(US_FLIDX_TIMED_OUT, &us->flags);
+ 	return SUCCESS;
+ }
+ 
+ /* This invokes the transport reset mechanism to reset the state of the
+  * device */
+-/* This is always called with scsi_lock(host) held */
+ static int device_reset(struct scsi_cmnd *srb)
+ {
+ 	struct us_data *us = host_to_us(srb->device->host);
+@@ -279,7 +279,6 @@ static int device_reset(struct scsi_cmnd *srb)
+ }
+ 
+ /* Simulate a SCSI bus reset by resetting the device's USB port. */
+-/* This is always called with scsi_lock(host) held */
+ static int bus_reset(struct scsi_cmnd *srb)
+ {
+ 	struct us_data *us = host_to_us(srb->device->host);
+@@ -291,7 +290,6 @@ static int bus_reset(struct scsi_cmnd *srb)
+ 	result = usb_stor_port_reset(us);
+ 	up(&(us->dev_semaphore));
+ 
+-	/* lock the host for the return */
+ 	return result < 0 ? FAILED : SUCCESS;
+ }
+ 
+diff --git a/drivers/usb/storage/usb.c b/drivers/usb/storage/usb.c
+index cb4c770baf32..f9a9bfa1aef5 100644
+--- a/drivers/usb/storage/usb.c
++++ b/drivers/usb/storage/usb.c
+@@ -392,11 +392,16 @@ static int usb_stor_control_thread(void * __us)
+ 		/* If an abort request was received we need to signal that
+ 		 * the abort has finished.  The proper test for this is
+ 		 * the TIMED_OUT flag, not srb->result == DID_ABORT, because
+-		 * a timeout/abort request might be received after all the
+-		 * USB processing was complete. */
+-		if (test_bit(US_FLIDX_TIMED_OUT, &us->flags))
++		 * the timeout might have occurred after the command had
++		 * already completed with a different result code. */
++		if (test_bit(US_FLIDX_TIMED_OUT, &us->flags)) {
+ 			complete(&(us->notify));
+ 
++			/* Allow USB transfers to resume */
++			clear_bit(US_FLIDX_ABORTING, &us->flags);
++			clear_bit(US_FLIDX_TIMED_OUT, &us->flags);
++		}
++
+ 		/* finished working on this command */
+ 		us->srb = NULL;
+ 		scsi_unlock(host);
+

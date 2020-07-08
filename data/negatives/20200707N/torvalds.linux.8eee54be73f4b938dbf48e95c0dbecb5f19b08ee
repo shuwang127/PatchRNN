@@ -1,0 +1,50 @@
+commit 8eee54be73f4b938dbf48e95c0dbecb5f19b08ee
+Author: Pablo Neira Ayuso <pablo@netfilter.org>
+Date:   Tue Jun 21 00:12:26 2016 +0200
+
+    netfilter: nft_hash: support deletion of inactive elements
+    
+    New elements are inactive in the preparation phase, and its
+    NFT_SET_ELEM_BUSY_MASK flag is set on.
+    
+    This busy flag doesn't allow us to delete it from the same transaction,
+    following a sequence like:
+    
+            begin transaction
+            add element X
+            delete element X
+            end transaction
+    
+    This sequence is valid and may be triggered by robots. To resolve this
+    problem, allow deactivating elements that are active in the current
+    generation (ie. those that has been just added in this batch).
+    
+    Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+
+diff --git a/net/netfilter/nft_hash.c b/net/netfilter/nft_hash.c
+index 6fa016564f90..d3a507d3f192 100644
+--- a/net/netfilter/nft_hash.c
++++ b/net/netfilter/nft_hash.c
+@@ -153,9 +153,10 @@ static void *nft_hash_deactivate(const struct nft_set *set,
+ 				 const struct nft_set_elem *elem)
+ {
+ 	struct nft_hash *priv = nft_set_priv(set);
++	struct net *net = read_pnet(&set->pnet);
+ 	struct nft_hash_elem *he;
+ 	struct nft_hash_cmp_arg arg = {
+-		.genmask = nft_genmask_next(read_pnet(&set->pnet)),
++		.genmask = nft_genmask_next(net),
+ 		.set	 = set,
+ 		.key	 = elem->key.val.data,
+ 	};
+@@ -163,7 +164,8 @@ static void *nft_hash_deactivate(const struct nft_set *set,
+ 	rcu_read_lock();
+ 	he = rhashtable_lookup_fast(&priv->ht, &arg, nft_hash_params);
+ 	if (he != NULL) {
+-		if (!nft_set_elem_mark_busy(&he->ext))
++		if (!nft_set_elem_mark_busy(&he->ext) ||
++		    !nft_is_active(net, &he->ext))
+ 			nft_set_elem_change_active(set, &he->ext);
+ 		else
+ 			he = NULL;
+

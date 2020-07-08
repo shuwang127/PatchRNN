@@ -1,0 +1,65 @@
+commit 858a18a6a2f74e8f0e5b2e9671d4b74694aba708
+Author: Vitaliy Gusev <vgusev@openvz.org>
+Date:   Tue Mar 16 01:07:51 2010 +0000
+
+    route: Fix caught BUG_ON during rt_secret_rebuild_oneshot()
+    
+    route: Fix caught BUG_ON during rt_secret_rebuild_oneshot()
+    
+    Call rt_secret_rebuild can cause BUG_ON(timer_pending(&net->ipv4.rt_secret_timer)) in
+    add_timer as there is not any synchronization for call rt_secret_rebuild_oneshot()
+    for the same net namespace.
+    
+    Also this issue affects to rt_secret_reschedule().
+    
+    Thus use mod_timer enstead.
+    
+    Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+    Acked-by: Neil Horman <nhorman@tuxdriver.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ipv4/route.c b/net/ipv4/route.c
+index d9b40248b97f..a770df2493d2 100644
+--- a/net/ipv4/route.c
++++ b/net/ipv4/route.c
+@@ -932,10 +932,8 @@ static void rt_secret_rebuild_oneshot(struct net *net)
+ {
+ 	del_timer_sync(&net->ipv4.rt_secret_timer);
+ 	rt_cache_invalidate(net);
+-	if (ip_rt_secret_interval) {
+-		net->ipv4.rt_secret_timer.expires += ip_rt_secret_interval;
+-		add_timer(&net->ipv4.rt_secret_timer);
+-	}
++	if (ip_rt_secret_interval)
++		mod_timer(&net->ipv4.rt_secret_timer, jiffies + ip_rt_secret_interval);
+ }
+ 
+ static void rt_emergency_hash_rebuild(struct net *net)
+@@ -3103,22 +3101,20 @@ static void rt_secret_reschedule(int old)
+ 	rtnl_lock();
+ 	for_each_net(net) {
+ 		int deleted = del_timer_sync(&net->ipv4.rt_secret_timer);
++		long time;
+ 
+ 		if (!new)
+ 			continue;
+ 
+ 		if (deleted) {
+-			long time = net->ipv4.rt_secret_timer.expires - jiffies;
++			time = net->ipv4.rt_secret_timer.expires - jiffies;
+ 
+ 			if (time <= 0 || (time += diff) <= 0)
+ 				time = 0;
+-
+-			net->ipv4.rt_secret_timer.expires = time;
+ 		} else
+-			net->ipv4.rt_secret_timer.expires = new;
++			time = new;
+ 
+-		net->ipv4.rt_secret_timer.expires += jiffies;
+-		add_timer(&net->ipv4.rt_secret_timer);
++		mod_timer(&net->ipv4.rt_secret_timer, jiffies + time);
+ 	}
+ 	rtnl_unlock();
+ }
+

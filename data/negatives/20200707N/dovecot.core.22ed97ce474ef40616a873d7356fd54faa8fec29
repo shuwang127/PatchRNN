@@ -1,0 +1,31 @@
+commit 22ed97ce474ef40616a873d7356fd54faa8fec29
+Author: Timo Sirainen <timo.sirainen@dovecot.fi>
+Date:   Sat Jan 14 15:10:17 2017 +0200
+
+    lib-storage: Fix accessing the same "raw" mailbox multiple times in process.
+    
+    If the same file was opened as the raw mailbox multiple times, the previous
+    mail_index was cached by mail-index-alloc-cache. Opening it the second time
+    already contained a mail in the index, so trying to add another one logged
+    an error:
+    
+    Error: Log synchronization error at seq=1,offset=256 for (in-memory index): Append with UID 1, but next_uid = 2
+
+diff --git a/src/lib-storage/index/raw/raw-sync.c b/src/lib-storage/index/raw/raw-sync.c
+index 0a28cceca..ea6402dce 100644
+--- a/src/lib-storage/index/raw/raw-sync.c
++++ b/src/lib-storage/index/raw/raw-sync.c
+@@ -22,6 +22,12 @@ static int raw_sync(struct raw_mailbox *mbox)
+ 		MAIL_INDEX_SYNC_FLAG_FLUSH_DIRTY |
+ 		MAIL_INDEX_SYNC_FLAG_REQUIRE_CHANGES;
+ 
++	if (mail_index_view_get_messages_count(mbox->box.view) > 0) {
++		/* already-synced index was opened via
++		   mail-index-alloc-cache. */
++		return 0;
++	}
++
+ 	ret = mail_index_sync_begin(mbox->box.index, &index_sync_ctx,
+ 				    &sync_view, &trans, sync_flags);
+ 	if (ret <= 0) {
+

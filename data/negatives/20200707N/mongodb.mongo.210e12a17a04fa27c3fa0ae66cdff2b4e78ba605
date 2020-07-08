@@ -1,0 +1,104 @@
+commit 210e12a17a04fa27c3fa0ae66cdff2b4e78ba605
+Author: dwight <dwight@10gen.com>
+Date:   Tue Sep 6 11:58:17 2011 -0400
+
+    SERVER-3760 fix memcmp to now potentially go to far on one of the input arrays.
+    in addition fix a case where compare order of bindata types, when subtype and len, were in consistent
+    with BSONObj's compare.  this ordering is somewhat arbitrary but must be consistent.
+
+diff --git a/db/key.cpp b/db/key.cpp
+index 4325800e14..011eea1c67 100644
+--- a/db/key.cpp
++++ b/db/key.cpp
+@@ -458,16 +458,21 @@ namespace mongo {
+             {
+                 int L = *l;
+                 int R = *r;
++                int llen = binDataCodeToLength(L);
+                 int diff = L-R; // checks length and subtype simultaneously
+-                if( diff )
++                if( diff ) {
++                    // unfortunately nibbles are backwards to do subtype and len in one check (could bit swap...)
++                    int rlen = binDataCodeToLength(R);
++                    if( llen != rlen ) 
++                        return llen - rlen;
+                     return diff;
++                }
+                 // same length, same type
+                 l++; r++;
+-                int len = binDataCodeToLength(L);
+-                int res = memcmp(l, r, len);
++                int res = memcmp(l, r, llen);
+                 if( res ) 
+                     return res;
+-                l += len; r += len;
++                l += llen; r += llen;
+                 break;
+             }
+         case cdate:
+@@ -618,14 +623,18 @@ namespace mongo {
+                 break;
+             case cstring:
+                 {
++                    if( *l != *r ) 
++                        return false; // not same length
+                     unsigned sz = ((unsigned) *l) + 1;
+-                    if( memcmp(l, r, sz) ) // first byte checked is the length byte
++                    if( memcmp(l, r, sz) )
+                         return false;
+                     l += sz; r += sz;
+                     break;
+                 }
+             case cbindata:
+                 {
++                    if( *l != *r )
++                        return false; // len or subtype mismatch
+                     int len = binDataCodeToLength(*l) + 1;
+                     if( memcmp(l, r, len) ) 
+                         return false;
+diff --git a/dbtests/jsobjtests.cpp b/dbtests/jsobjtests.cpp
+index 034bb97c62..85dd259724 100644
+--- a/dbtests/jsobjtests.cpp
++++ b/dbtests/jsobjtests.cpp
+@@ -568,6 +568,40 @@ namespace JsobjTests {
+                     keyTest( o, true );
+                 }
+ 
++                {
++                    // check (non)equality
++                    BSONObj a = BSONObjBuilder().appendBinData("", 8, (BinDataType) 1, "abcdefgh").obj();
++                    BSONObj b = BSONObjBuilder().appendBinData("", 8, (BinDataType) 1, "abcdefgj").obj();
++                    ASSERT( !a.equal(b) );
++                    int res_ab = a.woCompare(b);
++                    ASSERT( res_ab != 0 );
++                    keyTest( a, true );
++                    keyTest( b, true );
++
++                    // check subtypes do not equal
++                    BSONObj c = BSONObjBuilder().appendBinData("", 8, (BinDataType) 4, "abcdefgh").obj();
++                    BSONObj d = BSONObjBuilder().appendBinData("", 8, (BinDataType) 0x81, "abcdefgh").obj();
++                    ASSERT( !a.equal(c) );
++                    int res_ac = a.woCompare(c);
++                    ASSERT( res_ac != 0 );
++                    keyTest( c, true );
++                    ASSERT( !a.equal(d) );
++                    int res_ad = a.woCompare(d);
++                    ASSERT( res_ad != 0 );
++                    keyTest( d, true );
++
++                    KeyV1Owned A(a);
++                    KeyV1Owned B(b);
++                    KeyV1Owned C(c);
++                    KeyV1Owned D(d);
++                    ASSERT( !A.woEqual(B) );
++                    ASSERT( A.woCompare(B, Ordering::make(BSONObj())) == res_ab );
++                    ASSERT( !A.woEqual(C) );
++                    ASSERT( A.woCompare(C, Ordering::make(BSONObj())) < 0 && res_ac < 0 );
++                    ASSERT( !A.woEqual(D) );
++                    ASSERT( A.woCompare(D, Ordering::make(BSONObj())) < 0 && res_ad < 0 );
++                }
++
+                 {
+                     BSONObjBuilder b;
+                     b.appendBinData("f", 33, (BinDataType) 1, "123456789012345678901234567890123");
+

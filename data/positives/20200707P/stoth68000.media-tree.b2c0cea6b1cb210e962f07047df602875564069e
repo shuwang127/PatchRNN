@@ -1,0 +1,72 @@
+commit b2c0cea6b1cb210e962f07047df602875564069e
+Author: J. Bruce Fields <bfields@citi.umich.edu>
+Date:   Tue May 5 19:04:29 2009 -0400
+
+    nfsd4: check for negative dentry before use in nfsv4 readdir
+    
+    After 2f9092e1020246168b1309b35e085ecd7ff9ff72 "Fix i_mutex vs.  readdir
+    handling in nfsd" (and 14f7dd63 "Copy XFS readdir hack into nfsd code"),
+    an entry may be removed between the first mutex_unlock and the second
+    mutex_lock. In this case, lookup_one_len() will return a negative
+    dentry.  Check for this case to avoid a NULL dereference.
+    
+    Signed-off-by: J. Bruce Fields <bfields@citi.umich.edu>
+    Reviewed-by: J. R. Okajima <hooanon05@yahoo.co.jp>
+    Cc: stable@kernel.org
+
+diff --git a/fs/nfsd/nfs4xdr.c b/fs/nfsd/nfs4xdr.c
+index b820c311931c..b73549d293be 100644
+--- a/fs/nfsd/nfs4xdr.c
++++ b/fs/nfsd/nfs4xdr.c
+@@ -2214,6 +2214,15 @@ nfsd4_encode_dirent_fattr(struct nfsd4_readdir *cd,
+ 	dentry = lookup_one_len(name, cd->rd_fhp->fh_dentry, namlen);
+ 	if (IS_ERR(dentry))
+ 		return nfserrno(PTR_ERR(dentry));
++	if (!dentry->d_inode) {
++		/*
++		 * nfsd_buffered_readdir drops the i_mutex between
++		 * readdir and calling this callback, leaving a window
++		 * where this directory entry could have gone away.
++		 */
++		dput(dentry);
++		return nfserr_noent;
++	}
+ 
+ 	exp_get(exp);
+ 	/*
+@@ -2276,6 +2285,7 @@ nfsd4_encode_dirent(void *ccdv, const char *name, int namlen,
+ 	struct nfsd4_readdir *cd = container_of(ccd, struct nfsd4_readdir, common);
+ 	int buflen;
+ 	__be32 *p = cd->buffer;
++	__be32 *cookiep;
+ 	__be32 nfserr = nfserr_toosmall;
+ 
+ 	/* In nfsv4, "." and ".." never make it onto the wire.. */
+@@ -2292,7 +2302,7 @@ nfsd4_encode_dirent(void *ccdv, const char *name, int namlen,
+ 		goto fail;
+ 
+ 	*p++ = xdr_one;                             /* mark entry present */
+-	cd->offset = p;                             /* remember pointer */
++	cookiep = p;
+ 	p = xdr_encode_hyper(p, NFS_OFFSET_MAX);    /* offset of next entry */
+ 	p = xdr_encode_array(p, name, namlen);      /* name length & name */
+ 
+@@ -2306,6 +2316,8 @@ nfsd4_encode_dirent(void *ccdv, const char *name, int namlen,
+ 		goto fail;
+ 	case nfserr_dropit:
+ 		goto fail;
++	case nfserr_noent:
++		goto skip_entry;
+ 	default:
+ 		/*
+ 		 * If the client requested the RDATTR_ERROR attribute,
+@@ -2324,6 +2336,8 @@ nfsd4_encode_dirent(void *ccdv, const char *name, int namlen,
+ 	}
+ 	cd->buflen -= (p - cd->buffer);
+ 	cd->buffer = p;
++	cd->offset = cookiep;
++skip_entry:
+ 	cd->common.err = nfs_ok;
+ 	return 0;
+ fail:
+

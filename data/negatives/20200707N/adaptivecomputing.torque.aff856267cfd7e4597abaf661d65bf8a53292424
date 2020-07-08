@@ -1,0 +1,79 @@
+commit aff856267cfd7e4597abaf661d65bf8a53292424
+Author: glen <glen@8f940c70-5916-0410-ac46-d1fa2fa6ea29>
+Date:   Sat Jan 27 14:14:59 2007 +0000
+
+    more updates to job_clone (prep for job arrays )
+
+diff --git a/src/include/job.h b/src/include/job.h
+index a2f958f6a..3881d9649 100644
+--- a/src/include/job.h
++++ b/src/include/job.h
+@@ -257,6 +257,7 @@ enum job_atr {
+   JOB_ATR_forwardx11,
+   JOB_ATR_submit_args,
+   JOB_ATR_job_array_size,
++  JOB_ATR_job_array_id,
+   JOB_ATR_umask,
+ #include "site_job_attr_enum.h"
+ 
+@@ -439,6 +440,7 @@ struct job {
+ 	    char    ji_queue[PBS_MAXQUEUENAME + 1];  /* name of current queue */
+ 	    char    ji_destin[PBS_MAXROUTEDEST + 1]; /* dest from qmove/route */
+ 	    int	    ji_un_type;		/* type of ji_un union */
++	    int     ji_arrayid;		/* job array id */
+ 	    union {	/* depends on type of queue currently in */
+ 		struct {	/* if in execution queue .. */
+ 	     	    pbs_net_t ji_momaddr;  /* host addr of Server */
+diff --git a/src/server/job_func.c b/src/server/job_func.c
+index 3de61a63e..6d3c21d59 100644
+--- a/src/server/job_func.c
++++ b/src/server/job_func.c
+@@ -647,7 +647,9 @@ void job_free(
+ 
+   return;
+   }  /* END job_free() */
++  
+ 
++#ifndef PBS_MOM
+ 
+ /*
+  * job_clone - create a clone of a job for use with job arrays
+@@ -691,11 +693,27 @@ job *job_clone(
+   /* new job structure is allocated, 
+      now we need to copy the old job, but modify based on taskid */
+ 
+-  /* first copy the fixed size quick save information */
++  pnewjob->ji_alljobs = poldjob->ji_alljobs;	/* links to all jobs in server */
++  pnewjob->ji_jobque = poldjob->ji_jobque;	/* SVR: links to jobs in same queue */
++  pnewjob->ji_modified = 1;			/* struct changed, needs to be saved */
++  pnewjob->ji_svrtask = poldjob->ji_svrtask;	/* links to svr work_task list */
++  pnewjob->ji_qhdr = poldjob->ji_qhdr;		/* current queue header */
++  CLEAR_HEAD(pnewjob->ji_rejectdest);		/* list of rejected destinations */
++	
++	
++  /* copy the fixed size quick save information */
+   memcpy(&pnewjob->ji_qs, &poldjob->ji_qs, sizeof(struct jobfix));
+ 
++  pnewjob->ji_qs.ji_arrayid = taskid;
++
+   /* find the job id for the cloned job */
+   oldid = strdup(poldjob->ji_qs.ji_jobid);
++  if (oldid == NULL)
++    {
++    log_err(errno,id,"no memory");
++    job_free(pnewjob);
++    return(NULL);
++    }
+ 
+   hostname = index(oldid, '.');
+   *(hostname++) = '\0';
+@@ -795,7 +813,7 @@ job *job_clone(
+   return pnewjob;
+   } /* END job_clone() */
+ 
+-
++#endif
+ 
+ /*
+  * job_init_wattr - initialize job working attribute array
+

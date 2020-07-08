@@ -1,0 +1,77 @@
+commit 31e4dda4747713de13889f7c79c7aec341fea61b
+Author: Bryan Schumaker <bjschuma@netapp.com>
+Date:   Fri Apr 27 13:27:38 2012 -0400
+
+    NFS: Fix SECINFO_NO_NAME
+    
+    I was using the same decoder function for SECINFO and SECINFO_NO_NAME,
+    so it was returning an error when it tried to decode an OP_SECINFO_NO_NAME
+    header as OP_SECINFO.
+    
+    Signed-off-by: Bryan Schumaker <bjschuma@netapp.com>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+
+diff --git a/fs/nfs/nfs4xdr.c b/fs/nfs/nfs4xdr.c
+index 203c0967451b..c77e802db736 100644
+--- a/fs/nfs/nfs4xdr.c
++++ b/fs/nfs/nfs4xdr.c
+@@ -5094,16 +5094,13 @@ static int decode_secinfo_gss(struct xdr_stream *xdr, struct nfs4_secinfo_flavor
+ 	return -EINVAL;
+ }
+ 
+-static int decode_secinfo(struct xdr_stream *xdr, struct nfs4_secinfo_res *res)
++static int decode_secinfo_common(struct xdr_stream *xdr, struct nfs4_secinfo_res *res)
+ {
+ 	struct nfs4_secinfo_flavor *sec_flavor;
+ 	int status;
+ 	__be32 *p;
+ 	int i, num_flavors;
+ 
+-	status = decode_op_hdr(xdr, OP_SECINFO);
+-	if (status)
+-		goto out;
+ 	p = xdr_inline_decode(xdr, 4);
+ 	if (unlikely(!p))
+ 		goto out_overflow;
+@@ -5129,6 +5126,7 @@ static int decode_secinfo(struct xdr_stream *xdr, struct nfs4_secinfo_res *res)
+ 		res->flavors->num_flavors++;
+ 	}
+ 
++	status = 0;
+ out:
+ 	return status;
+ out_overflow:
+@@ -5136,7 +5134,23 @@ static int decode_secinfo(struct xdr_stream *xdr, struct nfs4_secinfo_res *res)
+ 	return -EIO;
+ }
+ 
++static int decode_secinfo(struct xdr_stream *xdr, struct nfs4_secinfo_res *res)
++{
++	int status = decode_op_hdr(xdr, OP_SECINFO);
++	if (status)
++		return status;
++	return decode_secinfo_common(xdr, res);
++}
++
+ #if defined(CONFIG_NFS_V4_1)
++static int decode_secinfo_no_name(struct xdr_stream *xdr, struct nfs4_secinfo_res *res)
++{
++	int status = decode_op_hdr(xdr, OP_SECINFO_NO_NAME);
++	if (status)
++		return status;
++	return decode_secinfo_common(xdr, res);
++}
++
+ static int decode_exchange_id(struct xdr_stream *xdr,
+ 			      struct nfs41_exchange_id_res *res)
+ {
+@@ -6821,7 +6835,7 @@ static int nfs4_xdr_dec_secinfo_no_name(struct rpc_rqst *rqstp,
+ 	status = decode_putrootfh(xdr);
+ 	if (status)
+ 		goto out;
+-	status = decode_secinfo(xdr, res);
++	status = decode_secinfo_no_name(xdr, res);
+ out:
+ 	return status;
+ }
+

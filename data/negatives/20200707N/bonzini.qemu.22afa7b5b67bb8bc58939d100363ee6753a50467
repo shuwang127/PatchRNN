@@ -1,0 +1,50 @@
+commit 22afa7b5b67bb8bc58939d100363ee6753a50467
+Author: Kevin Wolf <kwolf@redhat.com>
+Date:   Fri Jun 26 19:51:24 2009 +0200
+
+    block-raw: Allow pread beyond the end of growable images
+    
+    When using O_DIRECT, qcow2 snapshots didn't work any more for me. In the
+    process of creating the snapshot, qcow2 tries to pwrite some new information
+    (e.g. new L1 table) which will often end up being after the old end of the
+    image file. Now pwrite tries to align things and reads the old contents of the
+    file, read returns 0 because there is nothing to read after the end of file and
+    pwrite is stuck in an endless loop.
+    
+    This patch allows to pread beyond the end of an image file. Whenever the
+    given offset is after the end of the image file, the read succeeds and fills
+    the buffer with zeros.
+    
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+    Signed-off-by: Anthony Liguori <aliguori@us.ibm.com>
+
+diff --git a/block/raw-posix.c b/block/raw-posix.c
+index 31b68ff813..8b1e67c063 100644
+--- a/block/raw-posix.c
++++ b/block/raw-posix.c
+@@ -117,6 +117,7 @@ typedef struct BDRVRawState {
+ static int posix_aio_init(void);
+ 
+ static int fd_open(BlockDriverState *bs);
++static int64_t raw_getlength(BlockDriverState *bs);
+ 
+ #if defined(__FreeBSD__)
+ static int cdrom_reopen(BlockDriverState *bs);
+@@ -231,6 +232,16 @@ static int raw_pread_aligned(BlockDriverState *bs, int64_t offset,
+     if (ret == count)
+         goto label__raw_read__success;
+ 
++    /* Allow reads beyond the end (needed for pwrite) */
++    if ((ret == 0) && bs->growable) {
++        int64_t size = raw_getlength(bs);
++        if (offset >= size) {
++            memset(buf, 0, count);
++            ret = count;
++            goto label__raw_read__success;
++        }
++    }
++
+     DEBUG_BLOCK_PRINT("raw_pread(%d:%s, %" PRId64 ", %p, %d) [%" PRId64
+                       "] read failed %d : %d = %s\n",
+                       s->fd, bs->filename, offset, buf, count,
+

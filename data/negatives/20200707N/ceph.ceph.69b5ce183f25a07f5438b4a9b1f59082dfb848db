@@ -1,0 +1,65 @@
+commit 69b5ce183f25a07f5438b4a9b1f59082dfb848db
+Author: Jason Dillaman <dillaman@redhat.com>
+Date:   Sun Mar 6 13:02:34 2016 -0500
+
+    librados: calc_snap_set_diff now provides last known object size
+    
+    This allows truncate requests to be detected between snapshots.
+    
+    Signed-off-by: Jason Dillaman <dillaman@redhat.com>
+
+diff --git a/src/librados/snap_set_diff.cc b/src/librados/snap_set_diff.cc
+index 5db0fb9793..9fb166f581 100644
+--- a/src/librados/snap_set_diff.cc
++++ b/src/librados/snap_set_diff.cc
+@@ -15,15 +15,16 @@
+  * calculate intervals/extents that vary between two snapshots
+  */
+ void calc_snap_set_diff(CephContext *cct, const librados::snap_set_t& snap_set,
+-			librados::snap_t start,
+-			librados::snap_t end,
+-			interval_set<uint64_t> *diff, bool *end_exists)
++			librados::snap_t start, librados::snap_t end,
++			interval_set<uint64_t> *diff, uint64_t *end_size,
++                        bool *end_exists)
+ {
+   ldout(cct, 10) << "calc_snap_set_diff start " << start << " end " << end
+ 		 << ", snap_set seq " << snap_set.seq << dendl;
+   bool saw_start = false;
+   uint64_t start_size = 0;
+   diff->clear();
++  *end_size = 0;
+   *end_exists = false;
+ 
+   for (vector<librados::clone_info_t>::const_iterator r = snap_set.clones.begin();
+@@ -44,7 +45,7 @@ void calc_snap_set_diff(CephContext *cct, const librados::snap_set_t& snap_set,
+     ldout(cct, 20) << " clone " << r->cloneid << " snaps " << r->snaps
+ 		   << " -> [" << a << "," << b << "]"
+ 		   << " size " << r->size << " overlap to next " << r->overlap << dendl;
+-    
++
+     if (b < start) {
+       // this is before start
+       ++r;
+@@ -65,6 +66,7 @@ void calc_snap_set_diff(CephContext *cct, const librados::snap_set_t& snap_set,
+       saw_start = true;
+     }
+ 
++    *end_size = r->size;
+     if (end < a) {
+       ldout(cct, 20) << " past end " << end << ", end object does not exist" << dendl;
+       *end_exists = false;
+diff --git a/src/librados/snap_set_diff.h b/src/librados/snap_set_diff.h
+index 7bc75cd6cf..acb71965b5 100644
+--- a/src/librados/snap_set_diff.h
++++ b/src/librados/snap_set_diff.h
+@@ -11,7 +11,7 @@ class CephContext;
+ void calc_snap_set_diff(CephContext *cct,
+ 			const librados::snap_set_t& snap_set,
+ 			librados::snap_t start, librados::snap_t end,
+-			interval_set<uint64_t> *diff,
++			interval_set<uint64_t> *diff, uint64_t *end_size,
+ 			bool *end_exists);
+ 
+ #endif
+

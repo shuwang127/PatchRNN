@@ -1,0 +1,58 @@
+commit 2b7c15ca17128f7c11ebb3d4480f917829703b01
+Author: Marcelo Cerri <mhcerri@linux.vnet.ibm.com>
+Date:   Fri Aug 2 12:09:51 2013 +0000
+
+    crypto: nx - fix physical addresses added to sg lists
+    
+    The co-processor receives data to be hashed through scatter/gather lists
+    pointing to physical addresses. When a vmalloc'ed data is given, the
+    driver must calculate the physical address to each page of the data.
+    
+    However the current version of it just calculates the physical address
+    once and keeps incrementing it even when a page boundary is crossed.
+    This patch fixes this behaviour.
+    
+    Reviewed-by: Fionnuala Gunter <fin@linux.vnet.ibm.com>
+    Reviewed-by: Joel Schopp <jschopp@linux.vnet.ibm.com>
+    Reviewed-by: Joy Latten <jmlatten@linux.vnet.ibm.com>
+    Signed-off-by: Marcelo Cerri <mhcerri@linux.vnet.ibm.com>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/crypto/nx/nx.c b/drivers/crypto/nx/nx.c
+index bbdab6e5ccf0..ad07dc62b95a 100644
+--- a/drivers/crypto/nx/nx.c
++++ b/drivers/crypto/nx/nx.c
+@@ -114,13 +114,29 @@ struct nx_sg *nx_build_sg_list(struct nx_sg *sg_head,
+ 	 * have been described (or @sgmax elements have been written), the
+ 	 * loop ends. min_t is used to ensure @end_addr falls on the same page
+ 	 * as sg_addr, if not, we need to create another nx_sg element for the
+-	 * data on the next page */
++	 * data on the next page.
++	 *
++	 * Also when using vmalloc'ed data, every time that a system page
++	 * boundary is crossed the physical address needs to be re-calculated.
++	 */
+ 	for (sg = sg_head; sg_len < len; sg++) {
++		u64 next_page;
++
+ 		sg->addr = sg_addr;
+-		sg_addr = min_t(u64, NX_PAGE_NUM(sg_addr + NX_PAGE_SIZE), end_addr);
+-		sg->len = sg_addr - sg->addr;
++		sg_addr = min_t(u64, NX_PAGE_NUM(sg_addr + NX_PAGE_SIZE),
++				end_addr);
++
++		next_page = (sg->addr & PAGE_MASK) + PAGE_SIZE;
++		sg->len = min_t(u64, sg_addr, next_page) - sg->addr;
+ 		sg_len += sg->len;
+ 
++		if (sg_addr >= next_page &&
++				is_vmalloc_addr(start_addr + sg_len)) {
++			sg_addr = page_to_phys(vmalloc_to_page(
++						start_addr + sg_len));
++			end_addr = sg_addr + len - sg_len;
++		}
++
+ 		if ((sg - sg_head) == sgmax) {
+ 			pr_err("nx: scatter/gather list overflow, pid: %d\n",
+ 			       current->pid);
+

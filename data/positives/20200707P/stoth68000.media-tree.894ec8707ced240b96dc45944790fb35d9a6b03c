@@ -1,0 +1,48 @@
+commit 894ec8707ced240b96dc45944790fb35d9a6b03c
+Author: Daniel Drake <dsd@gentoo.org>
+Date:   Mon Dec 12 00:37:08 2005 -0800
+
+    [PATCH] Fix listxattr() for generic security attributes
+    
+    Commit f549d6c18c0e8e6cf1bf0e7a47acc1daf7e2cec1 introduced a generic
+    fallback for security xattrs, but appears to include a subtle bug.
+    
+    Gentoo users with kernels with selinux compiled in, and coreutils compiled
+    with acl support, noticed that they could not copy files on tmpfs using
+    'cp'.
+    
+    cp (compiled with acl support) copies the file, lists the extended
+    attributes on the old file, copies them all to the new file, and then
+    exits.  However the listxattr() calls were failing with this odd behaviour:
+    
+    llistxattr("a.out", (nil), 0)           = 17
+    llistxattr("a.out", 0x7fffff8c6cb0, 17) = -1 ERANGE (Numerical result out of
+    range)
+    
+    I believe this is a simple problem in the logic used to check the buffer
+    sizes; if the user sends a buffer the exact size of the data, then its ok
+    :)
+    
+    This change solves the problem.
+    More info can be found at http://bugs.gentoo.org/113138
+    
+    Signed-off-by: Daniel Drake <dsd@gentoo.org>
+    Acked-by: James Morris <jmorris@namei.org>
+    Acked-by: Stephen Smalley <sds@tycho.nsa.gov>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/fs/xattr.c b/fs/xattr.c
+index a9db22557998..bcc2156d4d28 100644
+--- a/fs/xattr.c
++++ b/fs/xattr.c
+@@ -245,7 +245,7 @@ listxattr(struct dentry *d, char __user *list, size_t size)
+ 		error = d->d_inode->i_op->listxattr(d, klist, size);
+ 	} else {
+ 		error = security_inode_listsecurity(d->d_inode, klist, size);
+-		if (size && error >= size)
++		if (size && error > size)
+ 			error = -ERANGE;
+ 	}
+ 	if (error > 0) {
+

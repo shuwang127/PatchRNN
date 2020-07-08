@@ -1,0 +1,116 @@
+commit 9efe32120b4d5aaa88eccf4767fa7d7c5c700fd1
+Author: wm4 <wm4@nowhere>
+Date:   Sat Mar 2 17:08:05 2013 +0100
+
+    vo_opengl: don't destroy VOFLAG_HIDDEN window
+    
+    This was done so because the X11 code had a hard to track down issue
+    with some window managers, and caused the VO window to be placed
+    incorrectly. This was fixed in the previous commit. Consequently, we can
+    remove this bad hack.
+
+diff --git a/video/out/gl_common.c b/video/out/gl_common.c
+index c416f20900..1f7b51de5b 100644
+--- a/video/out/gl_common.c
++++ b/video/out/gl_common.c
+@@ -1599,7 +1599,6 @@ MPGLContext *mpgl_init(enum MPGLType type, struct vo *vo)
+         .gl = talloc_zero(ctx, GL),
+         .type = type,
+         .vo = vo,
+-        .vo_init_ok = true,
+     };
+     switch (ctx->type) {
+ #ifdef CONFIG_GL_COCOA
+@@ -1669,23 +1668,9 @@ MPGLContext *mpgl_init(enum MPGLType type, struct vo *vo)
+     return NULL;
+ }
+ 
+-bool mpgl_destroy_window(struct MPGLContext *ctx)
+-{
+-    ctx->releaseGlContext(ctx);
+-    *ctx->gl = (GL) {0};
+-    // This is a caveat. At least on X11, this will recreate the X display
+-    // connection. Also, if vo_init() fails, unspecified things will happen.
+-    ctx->vo_uninit(ctx->vo);
+-    ctx->vo_init_ok = ctx->vo_init(ctx->vo);
+-    return ctx->vo_init_ok;
+-}
+-
+ bool mpgl_config_window(struct MPGLContext *ctx, int gl_caps, uint32_t d_width,
+                         uint32_t d_height, uint32_t flags)
+ {
+-    if (!ctx->vo_init_ok)
+-        return false;
+-
+     gl_caps |= MPGL_CAP_GL;
+ 
+     ctx->requested_gl_version = (gl_caps & MPGL_CAP_GL_LEGACY)
+@@ -1710,9 +1695,7 @@ bool mpgl_config_window(struct MPGLContext *ctx, int gl_caps, uint32_t d_width,
+ 
+ void mpgl_uninit(MPGLContext *ctx)
+ {
+-    if (!ctx)
+-        return;
+-    if (ctx->vo_init_ok) {
++    if (ctx) {
+         ctx->releaseGlContext(ctx);
+         ctx->vo_uninit(ctx->vo);
+     }
+diff --git a/video/out/gl_common.h b/video/out/gl_common.h
+index d3e049cc28..415e31e941 100644
+--- a/video/out/gl_common.h
++++ b/video/out/gl_common.h
+@@ -139,7 +139,6 @@ typedef struct MPGLContext {
+ 
+     // For free use by the backend.
+     void *priv;
+-    bool vo_init_ok;
+ } MPGLContext;
+ 
+ int mpgl_find_backend(const char *name);
+@@ -155,10 +154,6 @@ void mpgl_uninit(MPGLContext *ctx);
+ bool mpgl_config_window(struct MPGLContext *ctx, int gl_caps, uint32_t d_width,
+                         uint32_t d_height, uint32_t flags);
+ 
+-// Destroy the window, without resetting GL3 vs. GL2 context choice.
+-// If this fails (false), mpgl_uninit(ctx) must be called.
+-bool mpgl_destroy_window(struct MPGLContext *ctx);
+-
+ // print a multi line string with line numbers (e.g. for shader sources)
+ // mod, lev: module and log level, as in mp_msg()
+ void mp_log_source(int mod, int lev, const char *src);
+diff --git a/video/out/vo_opengl.c b/video/out/vo_opengl.c
+index baaad18381..98406ecad4 100644
+--- a/video/out/vo_opengl.c
++++ b/video/out/vo_opengl.c
+@@ -2181,12 +2181,6 @@ static int preinit(struct vo *vo, const char *arg)
+     if (!config_window(p, 320, 200, VOFLAG_HIDDEN))
+         goto err_out;
+     check_gl_features(p);
+-    // We created a window to test whether the GL context could be
+-    // created and so on. Destroy that window to make sure all state
+-    // associated with it is lost.
+-    uninit_gl(p);
+-    if (!mpgl_destroy_window(p->glctx))
+-        goto err_out;
+ 
+     return 0;
+ 
+diff --git a/video/out/vo_opengl_old.c b/video/out/vo_opengl_old.c
+index 96472d02f2..30a0467d46 100644
+--- a/video/out/vo_opengl_old.c
++++ b/video/out/vo_opengl_old.c
+@@ -2264,12 +2264,6 @@ static int preinit(struct vo *vo, const char *arg)
+         if (!config_window(vo, 320, 200, VOFLAG_HIDDEN))
+             goto err_out;
+         autodetectGlExtensions(vo);
+-        // We created a window to test whether the GL context supports hardware
+-        // acceleration and so on. Destroy that window to make sure all state
+-        // associated with it is lost.
+-        uninitGl(vo);
+-        if (!mpgl_destroy_window(p->glctx))
+-            goto err_out;
+     }
+     if (p->many_fmts)
+         mp_msg(MSGT_VO, MSGL_INFO, "[gl] using extended formats. "
+

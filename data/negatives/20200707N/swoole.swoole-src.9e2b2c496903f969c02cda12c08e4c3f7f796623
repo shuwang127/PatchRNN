@@ -1,0 +1,95 @@
+commit 9e2b2c496903f969c02cda12c08e4c3f7f796623
+Author: matyhtf <mikan.tenny@gmail.com>
+Date:   Thu Mar 1 14:36:04 2018 +0800
+
+    fix bugs.
+
+diff --git a/swoole.c b/swoole.c
+index f1188507..5bcee4ec 100644
+--- a/swoole.c
++++ b/swoole.c
+@@ -962,6 +962,12 @@ PHP_MINIT_FUNCTION(swoole)
+ 
+     //swoole init
+     swoole_init();
++
++#ifdef SW_COROUTINE
++    memset(&COROG, 0, sizeof(COROG));
++    swReactorCheckPoint = NULL;
++#endif
++
+     swoole_server_port_init(module_number TSRMLS_CC);
+     swoole_client_init(module_number TSRMLS_CC);
+ #ifdef SW_COROUTINE
+diff --git a/swoole_coroutine_util.c b/swoole_coroutine_util.c
+index faccdce9..cc34612b 100644
+--- a/swoole_coroutine_util.c
++++ b/swoole_coroutine_util.c
+@@ -408,7 +408,8 @@ static void swoole_corountine_call_function(zend_fcall_info *fci, zend_fcall_inf
+ #endif
+         efree(swReactorCheckPoint);
+         swReactorCheckPoint = prev_checkpoint;
+-        if (use_array) {
++        if (use_array)
++        {
+             zend_fcall_info_args_clear(fci, 1);
+         }
+         zend_vm_stack_free_args(current_ex);
+@@ -442,7 +443,7 @@ static PHP_METHOD(swoole_coroutine_util, call_user_func)
+ 		Z_PARAM_VARIADIC('*', fci.params, fci.param_count)
+ 	ZEND_PARSE_PARAMETERS_END();
+ 
+-    if (fci_cache.function_handler->type == ZEND_INTERNAL_FUNCTION)
++    if (fci_cache.function_handler->type == ZEND_INTERNAL_FUNCTION || COROG.current_coro == NULL)
+     {
+         fci.retval = return_value;
+         zend_call_function(&fci, &fci_cache);
+@@ -491,7 +492,7 @@ static PHP_METHOD(swoole_coroutine_util, call_user_func_array)
+ 
+     zend_fcall_info_args(&fci, params);
+ 
+-    if (fci_cache.function_handler->type == ZEND_INTERNAL_FUNCTION)
++    if (fci_cache.function_handler->type == ZEND_INTERNAL_FUNCTION || COROG.current_coro == NULL)
+     {
+         fci.retval = return_value;
+         zend_call_function(&fci, &fci_cache);
+diff --git a/swoole_mysql_coro.c b/swoole_mysql_coro.c
+index f097972b..4a6553ec 100644
+--- a/swoole_mysql_coro.c
++++ b/swoole_mysql_coro.c
+@@ -204,7 +204,7 @@ static int swoole_mysql_coro_close(zval *this)
+     if (client->statement_list)
+     {
+         swLinkedList_node *node = client->statement_list->head;
+-        while(node)
++        while (node)
+         {
+             mysql_statement *stmt = node->data;
+             if (stmt->object)
+@@ -1085,16 +1085,16 @@ static PHP_METHOD(swoole_mysql_coro, __destruct)
+     php_context *context = swoole_get_property(getThis(), 0);
+     if (!context)
+     {
+-		return;
++        return;
++    }
++    if (likely(context->state == SW_CORO_CONTEXT_RUNNING))
++    {
++        efree(context);
++    }
++    else
++    {
++        context->state = SW_CORO_CONTEXT_TERM;
+     }
+-	if (likely(context->state == SW_CORO_CONTEXT_RUNNING))
+-	{
+-		efree(context);
+-	}
+-	else
+-	{
+-		context->state = SW_CORO_CONTEXT_TERM;
+-	}
+     swoole_set_property(getThis(), 0, NULL);
+ }
+ 
+

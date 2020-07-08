@@ -1,0 +1,162 @@
+commit 258858cec6959bf7d5295ed4216304d59ed52aa9
+Author: Simone Mainardi <mainardi@ntop.org>
+Date:   Fri Apr 7 17:16:40 2017 +0200
+
+    Implements inline quota checks for bridged interfaces
+    
+    Quotas are now checked inline to avoid unacceptable over-quota transmissions.
+    
+    Quotas were previously checked every 5 minutes and that was causing
+    unacceptable transmissions. For example, an host sending at 10MB/sec could have
+    sent 50MB in 5 seconds.
+    
+    Checking quotas inline also required to keep host pool statistics updated inline.
+    To preserve the software efficiency, host pool statistics are updated inline only
+    for bridged interfaces.
+
+diff --git a/include/Flow.h b/include/Flow.h
+index f819f4b0..a8dac48d 100644
+--- a/include/Flow.h
++++ b/include/Flow.h
+@@ -236,8 +236,10 @@ class Flow : public GenericHashEntry {
+   inline u_int8_t getTcpFlags()        { return(src2dst_tcp_flags | dst2src_tcp_flags);  };
+   inline u_int8_t getTcpFlagsCli2Srv() { return(src2dst_tcp_flags);                      };
+   inline u_int8_t getTcpFlagsSrv2Cli() { return(dst2src_tcp_flags);                      };
++#ifdef NTOPNG_PRO
+   bool isPassVerdict();
+   void setDropVerdict()         { passVerdict = false; };
++#endif
+   u_int32_t getPid(bool client);
+   u_int32_t getFatherPid(bool client);
+   char* get_username(bool client);
+@@ -333,7 +335,7 @@ class Flow : public GenericHashEntry {
+   char* print(char *buf, u_int buf_len);
+   void update_hosts_stats(struct timeval *tv, bool inDeleteMethod);
+ #ifdef NTOPNG_PRO
+-  void update_pools_stats(struct timeval *tv,
++  void update_pools_stats(const struct timeval *tv,
+ 			  u_int64_t diff_sent_packets, u_int64_t diff_sent_bytes,
+ 			  u_int64_t diff_rcvd_packets, u_int64_t diff_rcvd_bytes);
+ #endif
+diff --git a/src/Flow.cpp b/src/Flow.cpp
+index 119e9f7f..a315cbbd 100644
+--- a/src/Flow.cpp
++++ b/src/Flow.cpp
+@@ -931,9 +931,10 @@ void Flow::update_hosts_stats(struct timeval *tv, bool inDeleteMethod) {
+       if(trafficProfile)
+ 	trafficProfile->incBytes(diff_sent_bytes+diff_rcvd_bytes);
+ 
+-      update_pools_stats(tv, diff_sent_packets, diff_sent_bytes, diff_rcvd_packets, diff_rcvd_bytes);
+-
+-      recheckQuota();
++      /* Periodic pools stats updates only for non-bridge interfaces. For bridged interfaces,
++       pools statistics are updated inline after a positive pass verdict. See NetworkInterface.cpp */
++      if(!iface->is_bridge_interface())
++	update_pools_stats(tv, diff_sent_packets, diff_sent_bytes, diff_rcvd_packets, diff_rcvd_bytes);
+ 
+       }
+ #endif
+@@ -1151,7 +1152,7 @@ void Flow::update_hosts_stats(struct timeval *tv, bool inDeleteMethod) {
+ 
+ #ifdef NTOPNG_PRO
+ 
+-void Flow::update_pools_stats(struct timeval *tv,
++void Flow::update_pools_stats(const struct timeval *tv,
+ 				u_int64_t diff_sent_packets, u_int64_t diff_sent_bytes,
+ 				u_int64_t diff_rcvd_packets, u_int64_t diff_rcvd_bytes) {
+   if(!diff_sent_packets && !diff_rcvd_packets)
+@@ -1416,7 +1417,11 @@ void Flow::lua(lua_State* vm, AddressTree * ptree,
+ 
+     lua_push_bool_table_entry(vm, "flow_goodput.low", isLowGoodput());
+ 
+-    lua_push_bool_table_entry(vm, "verdict.pass", isPassVerdict() ? (json_bool)1 : (json_bool)0);
++#ifdef NTOPNG_PRO
++    if(iface->is_bridge_interface())
++      lua_push_bool_table_entry(vm, "verdict.pass", isPassVerdict() ? (json_bool)1 : (json_bool)0);
++#endif
++
+     lua_push_bool_table_entry(vm, "dump.disk", getDumpFlowTraffic());
+ 
+     if(protocol == IPPROTO_TCP) {
+@@ -1860,9 +1865,11 @@ json_object* Flow::flow2json() {
+   if(isSSL() && protos.ssl.certificate)
+     json_object_object_add(my_object, "SSL_SERVER_NAME", json_object_new_string(protos.ssl.certificate));
+ 
++#ifdef NTOPNG_PRO
+   if(iface->is_bridge_interface())
+     json_object_object_add(my_object, "verdict.pass",
+ 			   json_object_new_boolean(isPassVerdict() ? (json_bool)1 : (json_bool)0));
++#endif
+ 
+   return(my_object);
+ }
+@@ -2445,9 +2452,13 @@ void Flow::dissectHTTP(bool src2dst_direction, char *payload, u_int16_t payload_
+ 
+ /* *************************************** */
+ 
++#ifdef NTOPNG_PRO
++
+ bool Flow::isPassVerdict() {
+   if(!passVerdict) return(passVerdict);
+ 
++  recheckQuota();
++
+   if(cli_host && srv_host)
+     return((!quota_exceeded)
+         && (!(cli_host->dropAllTraffic() || srv_host->dropAllTraffic()))
+@@ -2456,6 +2467,8 @@ bool Flow::isPassVerdict() {
+     return(true);
+ }
+ 
++#endif
++
+ /* *************************************** */
+ 
+ bool Flow::dumpFlowTraffic() {
+@@ -2561,8 +2574,6 @@ void Flow::updateFlowShapers() {
+ 
+   passVerdict = (cli2srv_verdict && srv2cli_verdict);
+ 
+-  recheckQuota();
+-
+ #ifdef SHAPER_DEBUG
+   {
+     char buf[512];
+diff --git a/src/NetworkInterface.cpp b/src/NetworkInterface.cpp
+index e71dba85..800e5a48 100644
+--- a/src/NetworkInterface.cpp
++++ b/src/NetworkInterface.cpp
+@@ -1447,6 +1447,18 @@ bool NetworkInterface::processPacket(const struct bpf_timeval *when,
+ 					   flow->get_detected_protocol_name(buf, sizeof(buf)),
+ 					   shaper_ingress, shaper_egress);
+ 	      pass_verdict = passShaperPacket(shaper_ingress, shaper_egress, (struct pcap_pkthdr*)h);
++
++	      if(pass_verdict) {
++		/* Update pools stats inline only for bridge interfaces! */
++		if(src2dst_direction)
++		  flow->update_pools_stats(when,
++					   1, rawsize, /* sent-only */
++					   0, 0);
++		else
++		  flow->update_pools_stats(when,
++					   0, 0,
++					   1, rawsize /* received-only */);
++	      }
+ 	    }
+ 	}
+     }
+diff --git a/src/nDPIStats.cpp b/src/nDPIStats.cpp
+index 61c48813..131d1f8e 100644
+--- a/src/nDPIStats.cpp
++++ b/src/nDPIStats.cpp
+@@ -171,7 +171,8 @@ void nDPIStats::incStats(u_int32_t when, u_int16_t proto_id,
+     counters[proto_id]->packets.sent += sent_packets, counters[proto_id]->bytes.sent += sent_bytes;
+     counters[proto_id]->packets.rcvd += rcvd_packets, counters[proto_id]->bytes.rcvd += rcvd_bytes;
+ 
+-    if((when != 0) && (counters[proto_id]->last_epoch_update != when)) {
++    if((when != 0)
++       && (when - counters[proto_id]->last_epoch_update >= ntop->getPrefs()->get_housekeeping_frequency())) {
+       counters[proto_id]->duration += ntop->getPrefs()->get_housekeeping_frequency(),
+ 	counters[proto_id]->last_epoch_update = when;
+     }
+

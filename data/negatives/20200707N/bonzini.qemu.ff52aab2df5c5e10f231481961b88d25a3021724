@@ -1,0 +1,49 @@
+commit ff52aab2df5c5e10f231481961b88d25a3021724
+Author: Max Reitz <mreitz@redhat.com>
+Date:   Thu Aug 7 22:47:53 2014 +0200
+
+    qcow2: Catch !*host_offset for data allocation
+    
+    qcow2_alloc_cluster_offset() uses host_offset == 0 as "no preferred
+    offset" for the (data) cluster range to be allocated. However, this
+    offset is actually valid and may be allocated on images with a corrupted
+    refcount table or first refcount block.
+    
+    In this case, the corruption prevention should normally catch that
+    write anyway (because it would overwrite the image header). But since 0
+    is a special value here, the function assumes that nothing has been
+    allocated at all which it asserts against.
+    
+    Because this condition is not qemu's fault but rather that of a broken
+    image, it shouldn't throw an assertion but rather mark the image corrupt
+    and show an appropriate message, which this patch does by calling the
+    corruption check earlier than it would be called normally (before the
+    assertion).
+    
+    Signed-off-by: Max Reitz <mreitz@redhat.com>
+    Reviewed-by: Eric Blake <eblake@redhat.com>
+    Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+
+diff --git a/block/qcow2-cluster.c b/block/qcow2-cluster.c
+index e7c5f486cd..5b36018b3e 100644
+--- a/block/qcow2-cluster.c
++++ b/block/qcow2-cluster.c
+@@ -1119,6 +1119,17 @@ static int handle_alloc(BlockDriverState *bs, uint64_t guest_offset,
+         return 0;
+     }
+ 
++    /* !*host_offset would overwrite the image header and is reserved for "no
++     * host offset preferred". If 0 was a valid host offset, it'd trigger the
++     * following overlap check; do that now to avoid having an invalid value in
++     * *host_offset. */
++    if (!alloc_cluster_offset) {
++        ret = qcow2_pre_write_overlap_check(bs, 0, alloc_cluster_offset,
++                                            nb_clusters * s->cluster_size);
++        assert(ret < 0);
++        goto fail;
++    }
++
+     /*
+      * Save info needed for meta data update.
+      *
+

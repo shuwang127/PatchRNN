@@ -1,0 +1,51 @@
+commit 88fdc7006018b92d6ec92c54b3819764703daaba
+Author: Robert Haas <rhaas@postgresql.org>
+Date:   Thu Feb 8 12:31:48 2018 -0500
+
+    Fix possible infinite loop with Parallel Append.
+    
+    When the previously-chosen plan was non-partial, all pa_finished
+    flags for partial plans are now set, and pa_next_plan has not yet
+    been set to INVALID_SUBPLAN_INDEX, the previous code could go into
+    an infinite loop.
+    
+    Report by Rajkumar Raghuwanshi.  Patch by Amit Khandekar and me.
+    Review by Kyotaro Horiguchi.
+    
+    Discussion: http://postgr.es/m/CAJ3gD9cf43z78qY=U=H0HvOEN341qfRO-vLpnKPSviHeWgJQ5w@mail.gmail.com
+
+diff --git a/src/backend/executor/nodeAppend.c b/src/backend/executor/nodeAppend.c
+index 64a17fb032..264d8fea8d 100644
+--- a/src/backend/executor/nodeAppend.c
++++ b/src/backend/executor/nodeAppend.c
+@@ -473,6 +473,9 @@ choose_next_subplan_for_worker(AppendState *node)
+ 		return false;
+ 	}
+ 
++	/* Save the plan from which we are starting the search. */
++	node->as_whichplan = pstate->pa_next_plan;
++
+ 	/* Loop until we find a subplan to execute. */
+ 	while (pstate->pa_finished[pstate->pa_next_plan])
+ 	{
+@@ -481,14 +484,17 @@ choose_next_subplan_for_worker(AppendState *node)
+ 			/* Advance to next plan. */
+ 			pstate->pa_next_plan++;
+ 		}
+-		else if (append->first_partial_plan < node->as_nplans)
++		else if (node->as_whichplan > append->first_partial_plan)
+ 		{
+ 			/* Loop back to first partial plan. */
+ 			pstate->pa_next_plan = append->first_partial_plan;
+ 		}
+ 		else
+ 		{
+-			/* At last plan, no partial plans, arrange to bail out. */
++			/*
++			 * At last plan, and either there are no partial plans or we've
++			 * tried them all.  Arrange to bail out.
++			 */
+ 			pstate->pa_next_plan = node->as_whichplan;
+ 		}
+ 
+

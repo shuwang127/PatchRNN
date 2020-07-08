@@ -1,0 +1,101 @@
+commit 62cedb9f135794ec26a93ae29e5f0231ab263c84
+Author: David Vrabel <david.vrabel@citrix.com>
+Date:   Thu Jun 25 16:35:49 2015 +0100
+
+    mm: memory hotplug with an existing resource
+    
+    Add add_memory_resource() to add memory using an existing "System RAM"
+    resource.  This is useful if the memory region is being located by
+    finding a free resource slot with allocate_resource().
+    
+    Xen guests will make use of this in their balloon driver to hotplug
+    arbitrary amounts of memory in response to toolstack requests.
+    
+    Signed-off-by: David Vrabel <david.vrabel@citrix.com>
+    Reviewed-by: Daniel Kiper <daniel.kiper@oracle.com>
+    Reviewed-by: Tang Chen <tangchen@cn.fujitsu.com>
+
+diff --git a/include/linux/memory_hotplug.h b/include/linux/memory_hotplug.h
+index 8f60e899b33c..2ea574ff9714 100644
+--- a/include/linux/memory_hotplug.h
++++ b/include/linux/memory_hotplug.h
+@@ -11,6 +11,7 @@ struct zone;
+ struct pglist_data;
+ struct mem_section;
+ struct memory_block;
++struct resource;
+ 
+ #ifdef CONFIG_MEMORY_HOTPLUG
+ 
+@@ -266,6 +267,7 @@ static inline void remove_memory(int nid, u64 start, u64 size) {}
+ extern int walk_memory_range(unsigned long start_pfn, unsigned long end_pfn,
+ 		void *arg, int (*func)(struct memory_block *, void *));
+ extern int add_memory(int nid, u64 start, u64 size);
++extern int add_memory_resource(int nid, struct resource *resource);
+ extern int zone_for_memory(int nid, u64 start, u64 size, int zone_default,
+ 		bool for_device);
+ extern int arch_add_memory(int nid, u64 start, u64 size, bool for_device);
+diff --git a/mm/memory_hotplug.c b/mm/memory_hotplug.c
+index aa992e2df58a..0780d118d26e 100644
+--- a/mm/memory_hotplug.c
++++ b/mm/memory_hotplug.c
+@@ -1232,23 +1232,21 @@ int zone_for_memory(int nid, u64 start, u64 size, int zone_default,
+ }
+ 
+ /* we are OK calling __meminit stuff here - we have CONFIG_MEMORY_HOTPLUG */
+-int __ref add_memory(int nid, u64 start, u64 size)
++int __ref add_memory_resource(int nid, struct resource *res)
+ {
++	u64 start, size;
+ 	pg_data_t *pgdat = NULL;
+ 	bool new_pgdat;
+ 	bool new_node;
+-	struct resource *res;
+ 	int ret;
+ 
++	start = res->start;
++	size = resource_size(res);
++
+ 	ret = check_hotplug_memory_range(start, size);
+ 	if (ret)
+ 		return ret;
+ 
+-	res = register_memory_resource(start, size);
+-	ret = -EEXIST;
+-	if (!res)
+-		return ret;
+-
+ 	{	/* Stupid hack to suppress address-never-null warning */
+ 		void *p = NODE_DATA(nid);
+ 		new_pgdat = !p;
+@@ -1300,13 +1298,28 @@ int __ref add_memory(int nid, u64 start, u64 size)
+ 	/* rollback pgdat allocation and others */
+ 	if (new_pgdat)
+ 		rollback_node_hotadd(nid, pgdat);
+-	release_memory_resource(res);
+ 	memblock_remove(start, size);
+ 
+ out:
+ 	mem_hotplug_done();
+ 	return ret;
+ }
++EXPORT_SYMBOL_GPL(add_memory_resource);
++
++int __ref add_memory(int nid, u64 start, u64 size)
++{
++	struct resource *res;
++	int ret;
++
++	res = register_memory_resource(start, size);
++	if (!res)
++		return -EEXIST;
++
++	ret = add_memory_resource(nid, res);
++	if (ret < 0)
++		release_memory_resource(res);
++	return ret;
++}
+ EXPORT_SYMBOL_GPL(add_memory);
+ 
+ #ifdef CONFIG_MEMORY_HOTREMOVE
+

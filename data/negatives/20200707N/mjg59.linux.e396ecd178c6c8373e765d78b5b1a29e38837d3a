@@ -1,0 +1,191 @@
+commit e396ecd178c6c8373e765d78b5b1a29e38837d3a
+Author: Alexandre Courbot <acourbot@nvidia.com>
+Date:   Fri Sep 4 19:59:31 2015 +0900
+
+    drm/nouveau/platform: allow to specify the IOMMU bit
+    
+    Current Tegra code taking advantage of the IOMMU assumes a hardcoded
+    value for the IOMMU bit. Make it a platform property instead for
+    flexibility.
+    
+    v2 (Ben Skeggs): remove nvkm dependence on drm structures
+    
+    Signed-off-by: Alexandre Courbot <acourbot@nvidia.com>
+    Signed-off-by: Ben Skeggs <bskeggs@redhat.com>
+
+diff --git a/drivers/gpu/drm/nouveau/include/nvif/os.h b/drivers/gpu/drm/nouveau/include/nvif/os.h
+index 3accc99d8e0b..9fcab67c8557 100644
+--- a/drivers/gpu/drm/nouveau/include/nvif/os.h
++++ b/drivers/gpu/drm/nouveau/include/nvif/os.h
+@@ -27,6 +27,7 @@
+ #include <linux/agp_backend.h>
+ #include <linux/reset.h>
+ #include <linux/iommu.h>
++#include <linux/of_device.h>
+ 
+ #include <asm/unaligned.h>
+ 
+diff --git a/drivers/gpu/drm/nouveau/include/nvkm/core/tegra.h b/drivers/gpu/drm/nouveau/include/nvkm/core/tegra.h
+index 5aa2480da25f..16641cec18a2 100644
+--- a/drivers/gpu/drm/nouveau/include/nvkm/core/tegra.h
++++ b/drivers/gpu/drm/nouveau/include/nvkm/core/tegra.h
+@@ -4,6 +4,7 @@
+ #include <core/mm.h>
+ 
+ struct nvkm_device_tegra {
++	const struct nvkm_device_tegra_func *func;
+ 	struct nvkm_device device;
+ 	struct platform_device *pdev;
+ 	int irq;
+@@ -28,7 +29,17 @@ struct nvkm_device_tegra {
+ 	int gpu_speedo;
+ };
+ 
+-int nvkm_device_tegra_new(struct platform_device *,
++struct nvkm_device_tegra_func {
++	/*
++	 * If an IOMMU is used, indicates which address bit will trigger a
++	 * IOMMU translation when set (when this bit is not set, IOMMU is
++	 * bypassed). A value of 0 means an IOMMU is never used.
++	 */
++	u8 iommu_bit;
++};
++
++int nvkm_device_tegra_new(const struct nvkm_device_tegra_func *,
++			  struct platform_device *,
+ 			  const char *cfg, const char *dbg,
+ 			  bool detect, bool mmio, u64 subdev_mask,
+ 			  struct nvkm_device **);
+diff --git a/drivers/gpu/drm/nouveau/nouveau_drm.c b/drivers/gpu/drm/nouveau/nouveau_drm.c
+index f93266582f27..1d3ee5179ab8 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_drm.c
++++ b/drivers/gpu/drm/nouveau/nouveau_drm.c
+@@ -1028,13 +1028,14 @@ nouveau_drm_pci_driver = {
+ };
+ 
+ struct drm_device *
+-nouveau_platform_device_create(struct platform_device *pdev,
++nouveau_platform_device_create(const struct nvkm_device_tegra_func *func,
++			       struct platform_device *pdev,
+ 			       struct nvkm_device **pdevice)
+ {
+ 	struct drm_device *drm;
+ 	int err;
+ 
+-	err = nvkm_device_tegra_new(pdev, nouveau_config, nouveau_debug,
++	err = nvkm_device_tegra_new(func, pdev, nouveau_config, nouveau_debug,
+ 				    true, true, ~0ULL, pdevice);
+ 	if (err)
+ 		goto err_free;
+diff --git a/drivers/gpu/drm/nouveau/nouveau_drm.h b/drivers/gpu/drm/nouveau/nouveau_drm.h
+index acfa03bd50de..51027a9030f6 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_drm.h
++++ b/drivers/gpu/drm/nouveau/nouveau_drm.h
+@@ -178,8 +178,11 @@ nouveau_drm(struct drm_device *dev)
+ int nouveau_pmops_suspend(struct device *);
+ int nouveau_pmops_resume(struct device *);
+ 
++#include <nvkm/core/tegra.h>
++
+ struct drm_device *
+-nouveau_platform_device_create(struct platform_device *, struct nvkm_device **);
++nouveau_platform_device_create(const struct nvkm_device_tegra_func *,
++			       struct platform_device *, struct nvkm_device **);
+ void nouveau_drm_device_remove(struct drm_device *dev);
+ 
+ #define NV_PRINTK(l,c,f,a...) do {                                             \
+diff --git a/drivers/gpu/drm/nouveau/nouveau_platform.c b/drivers/gpu/drm/nouveau/nouveau_platform.c
+index 3eb665453165..60e32c4e4e49 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_platform.c
++++ b/drivers/gpu/drm/nouveau/nouveau_platform.c
+@@ -23,11 +23,14 @@
+ 
+ static int nouveau_platform_probe(struct platform_device *pdev)
+ {
++	const struct nvkm_device_tegra_func *func;
+ 	struct nvkm_device *device;
+ 	struct drm_device *drm;
+ 	int ret;
+ 
+-	drm = nouveau_platform_device_create(pdev, &device);
++	func = of_device_get_match_data(&pdev->dev);
++
++	drm = nouveau_platform_device_create(func, pdev, &device);
+ 	if (IS_ERR(drm))
+ 		return PTR_ERR(drm);
+ 
+@@ -48,9 +51,19 @@ static int nouveau_platform_remove(struct platform_device *pdev)
+ }
+ 
+ #if IS_ENABLED(CONFIG_OF)
++static const struct nvkm_device_tegra_func gk20a_platform_data = {
++	.iommu_bit = 34,
++};
++
+ static const struct of_device_id nouveau_platform_match[] = {
+-	{ .compatible = "nvidia,gk20a" },
+-	{ .compatible = "nvidia,gm20b" },
++	{
++		.compatible = "nvidia,gk20a",
++		.data = &gk20a_platform_data,
++	},
++	{
++		.compatible = "nvidia,gm20b",
++		.data = &gk20a_platform_data,
++	},
+ 	{ }
+ };
+ 
+diff --git a/drivers/gpu/drm/nouveau/nvkm/engine/device/tegra.c b/drivers/gpu/drm/nouveau/nvkm/engine/device/tegra.c
+index da57c8a60608..7f8a42721eb2 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/engine/device/tegra.c
++++ b/drivers/gpu/drm/nouveau/nvkm/engine/device/tegra.c
+@@ -85,6 +85,9 @@ nvkm_device_tegra_probe_iommu(struct nvkm_device_tegra *tdev)
+ 	unsigned long pgsize_bitmap;
+ 	int ret;
+ 
++	if (!tdev->func->iommu_bit)
++		return;
++
+ 	mutex_init(&tdev->iommu.mutex);
+ 
+ 	if (iommu_present(&platform_bus_type)) {
+@@ -114,7 +117,8 @@ nvkm_device_tegra_probe_iommu(struct nvkm_device_tegra *tdev)
+ 			goto free_domain;
+ 
+ 		ret = nvkm_mm_init(&tdev->iommu.mm, 0,
+-				   (1ULL << 40) >> tdev->iommu.pgshift, 1);
++				   (1ULL << tdev->func->iommu_bit) >>
++				   tdev->iommu.pgshift, 1);
+ 		if (ret)
+ 			goto detach_device;
+ 	}
+@@ -237,7 +241,8 @@ nvkm_device_tegra_func = {
+ };
+ 
+ int
+-nvkm_device_tegra_new(struct platform_device *pdev,
++nvkm_device_tegra_new(const struct nvkm_device_tegra_func *func,
++		      struct platform_device *pdev,
+ 		      const char *cfg, const char *dbg,
+ 		      bool detect, bool mmio, u64 subdev_mask,
+ 		      struct nvkm_device **pdevice)
+@@ -248,6 +253,7 @@ nvkm_device_tegra_new(struct platform_device *pdev,
+ 	if (!(tdev = kzalloc(sizeof(*tdev), GFP_KERNEL)))
+ 		return -ENOMEM;
+ 	*pdevice = &tdev->device;
++	tdev->func = func;
+ 	tdev->pdev = pdev;
+ 	tdev->irq = -1;
+ 
+@@ -285,7 +291,8 @@ nvkm_device_tegra_new(struct platform_device *pdev,
+ }
+ #else
+ int
+-nvkm_device_tegra_new(struct platform_device *pdev,
++nvkm_device_tegra_new(const struct nvkm_device_tegra_func *func,
++		      struct platform_device *pdev,
+ 		      const char *cfg, const char *dbg,
+ 		      bool detect, bool mmio, u64 subdev_mask,
+ 		      struct nvkm_device **pdevice)
+

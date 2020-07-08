@@ -1,0 +1,61 @@
+commit 66d7e85ea7c3628189d19b265495358f756cb463
+Author: Chris Mason <chris.mason@oracle.com>
+Date:   Thu Mar 12 20:12:45 2009 -0400
+
+    Btrfs: Check for a blocking lock before taking the spin
+    
+    This reduces contention on the extent buffer spin locks by testing for a
+    blocking lock before trying to take the spinlock.
+    
+    Signed-off-by: Chris Mason <chris.mason@oracle.com>
+
+diff --git a/fs/btrfs/locking.c b/fs/btrfs/locking.c
+index 47b0a88c12a2..6d8db2f5c38d 100644
+--- a/fs/btrfs/locking.c
++++ b/fs/btrfs/locking.c
+@@ -71,12 +71,13 @@ void btrfs_clear_lock_blocking(struct extent_buffer *eb)
+ static int btrfs_spin_on_block(struct extent_buffer *eb)
+ {
+ 	int i;
++
+ 	for (i = 0; i < 512; i++) {
+-		cpu_relax();
+ 		if (!test_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags))
+ 			return 1;
+ 		if (need_resched())
+ 			break;
++		cpu_relax();
+ 	}
+ 	return 0;
+ }
+@@ -102,6 +103,7 @@ int btrfs_try_spin_lock(struct extent_buffer *eb)
+ 
+ 	/* spin for a bit on the BLOCKING flag */
+ 	for (i = 0; i < 2; i++) {
++		cpu_relax();
+ 		if (!btrfs_spin_on_block(eb))
+ 			break;
+ 
+@@ -148,6 +150,9 @@ int btrfs_tree_lock(struct extent_buffer *eb)
+ 	DEFINE_WAIT(wait);
+ 	wait.func = btrfs_wake_function;
+ 
++	if (!btrfs_spin_on_block(eb))
++		goto sleep;
++
+ 	while(1) {
+ 		spin_nested(eb);
+ 
+@@ -165,9 +170,10 @@ int btrfs_tree_lock(struct extent_buffer *eb)
+ 		 * spin for a bit, and if the blocking flag goes away,
+ 		 * loop around
+ 		 */
++		cpu_relax();
+ 		if (btrfs_spin_on_block(eb))
+ 			continue;
+-
++sleep:
+ 		prepare_to_wait_exclusive(&eb->lock_wq, &wait,
+ 					  TASK_UNINTERRUPTIBLE);
+ 
+

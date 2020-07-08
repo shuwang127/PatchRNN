@@ -1,0 +1,52 @@
+commit 36dd288f0f930c154ec6a4d73a6a35f3079418c6
+Author: Hannes Reinecke <hare@suse.de>
+Date:   Tue Mar 9 10:18:48 2010 +0100
+
+    [SCSI] scsi_transport_fc: Protect against overflow in dev_loss_tmo
+    
+    The rport structure defines dev_loss_tmo as u32, which is
+    later multiplied with HZ to get the actual timeout value.
+    This might overflow for large dev_loss_tmo values. So we
+    should be better using u64 as intermediate variables here
+    to protect against overflow.
+    
+    Signed-off-by: Hannes Reinecke <hare@suse.de>
+    Acked-by: James Smart <james.smart@emulex.com>
+    Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+
+diff --git a/drivers/scsi/scsi_transport_fc.c b/drivers/scsi/scsi_transport_fc.c
+index 6cfffc88022a..55fe730a8606 100644
+--- a/drivers/scsi/scsi_transport_fc.c
++++ b/drivers/scsi/scsi_transport_fc.c
+@@ -834,7 +834,7 @@ static ssize_t
+ store_fc_rport_dev_loss_tmo(struct device *dev, struct device_attribute *attr,
+ 			    const char *buf, size_t count)
+ {
+-	int val;
++	unsigned long val;
+ 	struct fc_rport *rport = transport_class_to_rport(dev);
+ 	struct Scsi_Host *shost = rport_to_shost(rport);
+ 	struct fc_internal *i = to_fc_internal(shost->transportt);
+@@ -847,6 +847,12 @@ store_fc_rport_dev_loss_tmo(struct device *dev, struct device_attribute *attr,
+ 	if ((*cp && (*cp != '\n')) || (val < 0))
+ 		return -EINVAL;
+ 
++	/*
++	 * Check for overflow; dev_loss_tmo is u32
++	 */
++	if (val > UINT_MAX)
++		return -EINVAL;
++
+ 	/*
+ 	 * If fast_io_fail is off we have to cap
+ 	 * dev_loss_tmo at SCSI_DEVICE_BLOCK_MAX_TIMEOUT
+@@ -2865,7 +2871,7 @@ void
+ fc_remote_port_delete(struct fc_rport  *rport)
+ {
+ 	struct Scsi_Host *shost = rport_to_shost(rport);
+-	int timeout = rport->dev_loss_tmo;
++	unsigned long timeout = rport->dev_loss_tmo;
+ 	unsigned long flags;
+ 
+ 	/*
+

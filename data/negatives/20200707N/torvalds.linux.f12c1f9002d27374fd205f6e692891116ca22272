@@ -1,0 +1,57 @@
+commit f12c1f9002d27374fd205f6e692891116ca22272
+Author: Andy Lutomirski <luto@amacapital.net>
+Date:   Wed Jul 30 14:59:49 2014 -0700
+
+    x86/vdso: Fix vdso2c's special_pages[] error checking
+    
+    Stephen Rothwell's compiler did something amazing: it unrolled a
+    loop, discovered that one iteration of that loop contained an
+    always-true test, and emitted a warning that will IMO only serve
+    to convince people to disable the warning.
+    
+    That bogus warning caused me to wonder what prompted such an
+    absurdity from his compiler, and I discovered that the code in
+    question was, in fact, completely wrong -- I was looking things
+    up in the wrong array.
+    
+    This affects 3.16 as well, but the only effect is to screw up
+    the error checking a bit.  vdso2c's output is unaffected.
+    
+    Reported-by: Stephen Rothwell <sfr@canb.auug.org.au>
+    Signed-off-by: Andy Lutomirski <luto@amacapital.net>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Cc: "H. Peter Anvin" <hpa@zytor.com>
+    Cc: Peter Zijlstra <peterz@infradead.org>
+    Cc: Linus Torvalds <torvalds@linux-foundation.org>
+    Link: http://lkml.kernel.org/r/53d96ad5.80ywqrbs33ZBCQej%25akpm@linux-foundation.org
+    Signed-off-by: Ingo Molnar <mingo@kernel.org>
+
+diff --git a/arch/x86/vdso/vdso2c.h b/arch/x86/vdso/vdso2c.h
+index fd57829b30d8..0224987556ce 100644
+--- a/arch/x86/vdso/vdso2c.h
++++ b/arch/x86/vdso/vdso2c.h
+@@ -109,16 +109,18 @@ static void BITSFUNC(go)(void *raw_addr, size_t raw_len,
+ 
+ 	/* Validate mapping addresses. */
+ 	for (i = 0; i < sizeof(special_pages) / sizeof(special_pages[0]); i++) {
+-		if (!syms[i])
++		INT_BITS symval = syms[special_pages[i]];
++
++		if (!symval)
+ 			continue;  /* The mapping isn't used; ignore it. */
+ 
+-		if (syms[i] % 4096)
++		if (symval % 4096)
+ 			fail("%s must be a multiple of 4096\n",
+ 			     required_syms[i].name);
+-		if (syms[sym_vvar_start] > syms[i] + 4096)
+-			fail("%s underruns begin_vvar\n",
++		if (symval + 4096 < syms[sym_vvar_start])
++			fail("%s underruns vvar_start\n",
+ 			     required_syms[i].name);
+-		if (syms[i] + 4096 > 0)
++		if (symval + 4096 > 0)
+ 			fail("%s is on the wrong side of the vdso text\n",
+ 			     required_syms[i].name);
+ 	}
+

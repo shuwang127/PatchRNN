@@ -1,0 +1,162 @@
+commit d612dab6df72f48bdc50c89206feee9b242fd439
+Author: Guy Harris <guy@alum.mit.edu>
+Date:   Sun May 5 00:57:59 2002 +0000
+
+    Make "tvb_ensure_length_remaining()" return a "guint" - it can't return
+    a negative value.
+    
+    Use "tvb_ensure_length_remaining()" in "tcp_dissect_pdus()", rather than
+    checking the return value of "tvb_length_remaining()" ourselves, and
+    make various variables and parameters in it "guint" as appropriate.
+    
+    svn path=/trunk/; revision=5396
+
+diff --git a/epan/tvbuff.c b/epan/tvbuff.c
+index 6af9f46caf..4a1de7974b 100644
+--- a/epan/tvbuff.c
++++ b/epan/tvbuff.c
+@@ -9,7 +9,7 @@
+  * 		the data of a backing tvbuff, or can be a composite of
+  * 		other tvbuffs.
+  *
+- * $Id: tvbuff.c,v 1.34 2002/04/24 21:53:05 guy Exp $
++ * $Id: tvbuff.c,v 1.35 2002/05/05 00:57:59 guy Exp $
+  *
+  * Copyright (c) 2000 by Gilbert Ramirez <gram@alumni.rice.edu>
+  *
+@@ -607,7 +607,7 @@ tvb_length_remaining(tvbuff_t *tvb, gint offset)
+ 	}
+ }
+ 
+-gint
++guint
+ tvb_ensure_length_remaining(tvbuff_t *tvb, gint offset)
+ {
+ 	gint retval;
+@@ -619,6 +619,7 @@ tvb_ensure_length_remaining(tvbuff_t *tvb, gint offset)
+ 		return -1;	/* squelch compiler complaint */
+ 	}
+ 	else {
++		g_assert(retval >= 0);
+ 		return retval;
+ 	}
+ }
+diff --git a/epan/tvbuff.h b/epan/tvbuff.h
+index 8f419f9e2d..159c4fa4ff 100644
+--- a/epan/tvbuff.h
++++ b/epan/tvbuff.h
+@@ -9,7 +9,7 @@
+  * 		the data of a backing tvbuff, or can be a composite of
+  * 		other tvbuffs.
+  *
+- * $Id: tvbuff.h,v 1.25 2002/04/24 21:53:05 guy Exp $
++ * $Id: tvbuff.h,v 1.26 2002/05/05 00:57:59 guy Exp $
+  *
+  * Copyright (c) 2000 by Gilbert Ramirez <gram@alumni.rice.edu>
+  *
+@@ -193,7 +193,7 @@ extern guint tvb_length(tvbuff_t*);
+ extern gint tvb_length_remaining(tvbuff_t*, gint offset);
+ 
+ /* Same as above, but throws BoundsError if the offset is out of bounds. */
+-extern gint tvb_ensure_length_remaining(tvbuff_t*, gint offset);
++extern guint tvb_ensure_length_remaining(tvbuff_t*, gint offset);
+ 
+ /* Checks (w/o throwing exception) that the bytes referred to by
+  * 'offset'/'length' actually exist in the buffer */
+diff --git a/packet-tcp.c b/packet-tcp.c
+index 0bfa45eb65..0ed8e922d3 100644
+--- a/packet-tcp.c
++++ b/packet-tcp.c
+@@ -1,7 +1,7 @@
+ /* packet-tcp.c
+  * Routines for TCP packet disassembly
+  *
+- * $Id: packet-tcp.c,v 1.140 2002/05/05 00:16:32 guy Exp $
++ * $Id: packet-tcp.c,v 1.141 2002/05/05 00:57:57 guy Exp $
+  *
+  * Ethereal - Network traffic analyzer
+  * By Gerald Combs <gerald@ethereal.com>
+@@ -664,20 +664,28 @@ desegment_tcp(tvbuff_t *tvb, packet_info *pinfo, int offset,
+  */
+ void
+ tcp_dissect_pdus(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
+-		 gboolean proto_desegment, int fixed_len,
++		 gboolean proto_desegment, guint fixed_len,
+ 		 guint (*get_pdu_len)(tvbuff_t *, int),
+ 		 void (*dissect_pdu)(tvbuff_t *, packet_info *, proto_tree *))
+ {
+   volatile int offset = 0;
+-  int length_remaining;
++  guint length_remaining;
+   guint plen;
+-  int length;
++  guint length;
+   tvbuff_t *next_tvb;
+ 
+   while (tvb_reported_length_remaining(tvb, offset) != 0) {
+-    length_remaining = tvb_length_remaining(tvb, offset);
+-    if (length_remaining == -1)
+-      THROW(BoundsError);
++    /*
++     * We use "tvb_ensure_length_remaining()" to make sure there actually
++     * *is* data remaining.  The protocol we're handling could conceivably
++     * consists of a sequence of fixed-length PDUs, and therefore the
++     * "get_pdu_len" routine might not actually fetch anything from
++     * the tvbuff, and thus might not cause an exception to be thrown if
++     * we've run past the end of the tvbuff.
++     *
++     * This means we're guaranteed that "length_remaining" is positive.
++     */
++    length_remaining = tvb_ensure_length_remaining(tvb, offset);
+ 
+     /*
+      * Can we do reassembly?
+@@ -711,7 +719,7 @@ tcp_dissect_pdus(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
+       /*
+        * Yes - is the PDU split across segment boundaries?
+        */
+-      if ((guint)length_remaining < plen) {
++      if (length_remaining < plen) {
+ 	/*
+ 	 * Yes.  Tell the TCP dissector where the data for this message
+ 	 * starts in the data it handed us, and how many more bytes we
+@@ -736,7 +744,7 @@ tcp_dissect_pdus(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
+      * is within the reported length but beyond that third length, with
+      * that exception getting the "Unreassembled Packet" error.
+      */
+-    if (plen < (guint)fixed_len) {
++    if (plen < fixed_len) {
+       /*
+        * The PDU length from the fixed-length portion probably didn't
+        * include the fixed-length portion's length, and was probably so
+@@ -748,7 +756,7 @@ tcp_dissect_pdus(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
+       return;
+     }
+     length = length_remaining;
+-    if ((guint)length > plen)
++    if (length > plen)
+ 	length = plen;
+     next_tvb = tvb_new_subset(tvb, offset, length, plen);
+ 
+diff --git a/packet-tcp.h b/packet-tcp.h
+index 40d8a354e5..006b7a3559 100644
+--- a/packet-tcp.h
++++ b/packet-tcp.h
+@@ -1,6 +1,6 @@
+ /* packet-tcp.h
+  *
+- * $Id: packet-tcp.h,v 1.10 2002/05/05 00:16:32 guy Exp $
++ * $Id: packet-tcp.h,v 1.11 2002/05/05 00:57:57 guy Exp $
+  *
+  * Ethereal - Network traffic analyzer
+  * By Gerald Combs <gerald@ethereal.com>
+@@ -54,7 +54,7 @@ struct tcpinfo {
+  */
+ extern void
+ tcp_dissect_pdus(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
+-		 gboolean proto_desegment, int fixed_len,
++		 gboolean proto_desegment, guint fixed_len,
+ 		 guint (*get_pdu_len)(tvbuff_t *, int),
+ 		 void (*dissect_pdu)(tvbuff_t *, packet_info *, proto_tree *));
+ 
+

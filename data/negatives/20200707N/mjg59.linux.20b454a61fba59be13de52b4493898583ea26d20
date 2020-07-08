@@ -1,0 +1,41 @@
+commit 20b454a61fba59be13de52b4493898583ea26d20
+Author: Tejun Heo <tj@kernel.org>
+Date:   Thu Mar 3 09:57:57 2016 -0500
+
+    cgroup: suppress spurious de-populated events
+    
+    During task migration, tasks may transfer between two css_sets which
+    are associated with the same cgroup.  If those tasks are the only
+    tasks in the cgroup, this currently triggers a spurious de-populated
+    event on the cgroup.
+    
+    Fix it by bumping up populated count before bumping it down during
+    migration to ensure that it doesn't reach zero spuriously.
+    
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Acked-by: Zefan Li <lizefan@huawei.com>
+
+diff --git a/kernel/cgroup.c b/kernel/cgroup.c
+index e97772b42dfb..5d452e7fcb4f 100644
+--- a/kernel/cgroup.c
++++ b/kernel/cgroup.c
+@@ -678,6 +678,9 @@ static void css_set_move_task(struct task_struct *task,
+ {
+ 	lockdep_assert_held(&css_set_lock);
+ 
++	if (to_cset && !css_set_populated(to_cset))
++		css_set_update_populated(to_cset, true);
++
+ 	if (from_cset) {
+ 		struct css_task_iter *it, *pos;
+ 
+@@ -711,8 +714,6 @@ static void css_set_move_task(struct task_struct *task,
+ 		 */
+ 		WARN_ON_ONCE(task->flags & PF_EXITING);
+ 
+-		if (!css_set_populated(to_cset))
+-			css_set_update_populated(to_cset, true);
+ 		rcu_assign_pointer(task->cgroups, to_cset);
+ 		list_add_tail(&task->cg_list, use_mg_tasks ? &to_cset->mg_tasks :
+ 							     &to_cset->tasks);
+

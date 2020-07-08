@@ -1,0 +1,65 @@
+commit 42af0bf3e4532b8fdef283eb074face615e0adb8
+Author: mcbride <mcbride@openbsd.org>
+Date:   Fri Jul 29 10:48:35 2011 +0000
+
+    Make sure we use the right tbl/dyn pointer to check the pfrkt_refcntcost;
+    improved debugging for error cases inside the weighted round-robin loop.
+    
+    original diff from claudio, ok henning
+
+diff --git a/sys/net/pf_lb.c b/sys/net/pf_lb.c
+index 5f8e2069598..cef02687a55 100644
+--- a/sys/net/pf_lb.c
++++ b/sys/net/pf_lb.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: pf_lb.c,v 1.16 2011/07/27 00:26:10 mcbride Exp $ */
++/*	$OpenBSD: pf_lb.c,v 1.17 2011/07/29 10:48:35 mcbride Exp $ */
+ 
+ /*
+  * Copyright (c) 2001 Daniel Hartmeier
+@@ -416,7 +416,10 @@ pf_map_addr(sa_family_t af, struct pf_rule *r, struct pf_addr *saddr,
+ 			return (1);
+ 
+ 		/* iterate over table if it contains entries which are weighted */
+-		if (rpool->addr.p.tbl->pfrkt_refcntcost > 0) {
++		if ((rpool->addr.type == PF_ADDR_TABLE &&
++		    rpool->addr.p.tbl->pfrkt_refcntcost > 0) ||
++		    (rpool->addr.type == PF_ADDR_DYNIFTL &&
++		    rpool->addr.p.dyn->pfid_kt->pfrkt_refcntcost > 0)) {
+ 			do {
+ 				if (rpool->addr.type == PF_ADDR_TABLE) {
+ 					if (pfr_pool_get(rpool->addr.p.tbl,
+@@ -434,11 +437,15 @@ pf_map_addr(sa_family_t af, struct pf_rule *r, struct pf_addr *saddr,
+ 					    &rpool->curweight, af,
+ 					    pf_islinklocal))
+ 						return (1);
+-				} else if (pf_match_addr(0, raddr, rmask,
+-				    &rpool->counter, af))
++				} else {
++					log(LOG_ERR, "pf: pf_map_addr: "
++					    "weighted RR failure");
+ 					return (1);
++				}
++				if (rpool->weight >= rpool->curweight)
++					break;
+ 				PF_AINC(&rpool->counter, af);
+-			} while (rpool->weight < rpool->curweight);
++			} while (1);
+  
+ 			weight = rpool->weight;
+ 		}
+@@ -554,8 +561,11 @@ pf_map_addr(sa_family_t af, struct pf_rule *r, struct pf_addr *saddr,
+ 		if ((rpool->opts & PF_POOL_TYPEMASK) ==
+ 		    PF_POOL_LEASTSTATES)
+ 			addlog(" with state count %d", states);
+-		if ((rpool->addr.p.tbl->pfrkt_refcntcost > 0) &&
+-		    ((rpool->opts & PF_POOL_TYPEMASK) != PF_POOL_LEASTSTATES))
++		if (((rpool->addr.type == PF_ADDR_TABLE &&
++		    rpool->addr.p.tbl->pfrkt_refcntcost > 0) ||
++		    (rpool->addr.type == PF_ADDR_DYNIFTL &&
++		    rpool->addr.p.dyn->pfid_kt->pfrkt_refcntcost > 0)) &&
++		    ((rpool->opts & PF_POOL_TYPEMASK) != PF_POOL_LEASTSTATES)) 
+ 			addlog(" with weight %u", weight);
+ 		addlog("\n");
+ 	}
+

@@ -1,0 +1,49 @@
+commit c48a11c7ad2623b99bbd6859b0b4234e7f11176f
+Author: Mel Gorman <mgorman@suse.de>
+Date:   Tue Jul 31 16:44:23 2012 -0700
+
+    netvm: propagate page->pfmemalloc to skb
+    
+    The skb->pfmemalloc flag gets set to true iff during the slab allocation
+    of data in __alloc_skb that the the PFMEMALLOC reserves were used.  If the
+    packet is fragmented, it is possible that pages will be allocated from the
+    PFMEMALLOC reserve without propagating this information to the skb.  This
+    patch propagates page->pfmemalloc from pages allocated for fragments to
+    the skb.
+    
+    Signed-off-by: Mel Gorman <mgorman@suse.de>
+    Acked-by: David S. Miller <davem@davemloft.net>
+    Cc: Neil Brown <neilb@suse.de>
+    Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Cc: Mike Christie <michaelc@cs.wisc.edu>
+    Cc: Eric B Munson <emunson@mgebm.net>
+    Cc: Eric Dumazet <eric.dumazet@gmail.com>
+    Cc: Sebastian Andrzej Siewior <sebastian@breakpoint.cc>
+    Cc: Mel Gorman <mgorman@suse.de>
+    Cc: Christoph Lameter <cl@linux.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 0336f02e3667..b814bb8fd5ab 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -1247,6 +1247,17 @@ static inline void __skb_fill_page_desc(struct sk_buff *skb, int i,
+ {
+ 	skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+ 
++	/*
++	 * Propagate page->pfmemalloc to the skb if we can. The problem is
++	 * that not all callers have unique ownership of the page. If
++	 * pfmemalloc is set, we check the mapping as a mapping implies
++	 * page->index is set (index and pfmemalloc share space).
++	 * If it's a valid mapping, we cannot use page->pfmemalloc but we
++	 * do not lose pfmemalloc information as the pages would not be
++	 * allocated using __GFP_MEMALLOC.
++	 */
++	if (page->pfmemalloc && !page->mapping)
++		skb->pfmemalloc	= true;
+ 	frag->page.p		  = page;
+ 	frag->page_offset	  = off;
+ 	skb_frag_size_set(frag, size);
+

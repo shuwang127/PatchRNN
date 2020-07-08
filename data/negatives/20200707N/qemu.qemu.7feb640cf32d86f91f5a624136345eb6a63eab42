@@ -1,0 +1,99 @@
+commit 7feb640cf32d86f91f5a624136345eb6a63eab42
+Author: Alexey Korolev <akorolex@gmail.com>
+Date:   Fri Feb 22 16:58:44 2013 +1300
+
+    Fix guest OS hang when 64bit PCI bar present
+    
+    This patch addresses the issue fully described here:
+    http://lists.nongnu.org/archive/html/qemu-devel/2013-02/msg01804.html
+    
+    Linux kernels prior to 2.6.36 do not disable the PCI device during
+    enumeration process. Since lower and higher parts of a 64bit BAR
+    are programmed separately this leads to qemu receiving a request to occupy
+    a completely wrong address region for a short period of time.
+    We have found that the boot process screws up completely if kvm-apic range
+    is overlapped even for a short period of time (it is fine for other
+    regions though).
+    
+    This patch raises the priority of the kvm-apic memory region, so it is
+    never pushed out by PCI devices. The patch is quite safe as it does not
+    touch memory manager.
+    
+    Signed-off-by: Alexey Korolev <akorolex@gmail.com>
+    Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+
+diff --git a/hw/sysbus.c b/hw/sysbus.c
+index 6d9d1df419..50c7232799 100644
+--- a/hw/sysbus.c
++++ b/hw/sysbus.c
+@@ -48,7 +48,8 @@ void sysbus_connect_irq(SysBusDevice *dev, int n, qemu_irq irq)
+     }
+ }
+ 
+-void sysbus_mmio_map(SysBusDevice *dev, int n, hwaddr addr)
++static void sysbus_mmio_map_common(SysBusDevice *dev, int n, hwaddr addr,
++                                   bool may_overlap, unsigned priority)
+ {
+     assert(n >= 0 && n < dev->num_mmio);
+ 
+@@ -61,11 +62,29 @@ void sysbus_mmio_map(SysBusDevice *dev, int n, hwaddr addr)
+         memory_region_del_subregion(get_system_memory(), dev->mmio[n].memory);
+     }
+     dev->mmio[n].addr = addr;
+-    memory_region_add_subregion(get_system_memory(),
+-                                addr,
+-                                dev->mmio[n].memory);
++    if (may_overlap) {
++        memory_region_add_subregion_overlap(get_system_memory(),
++                                            addr,
++                                            dev->mmio[n].memory,
++                                            priority);
++    }
++    else {
++        memory_region_add_subregion(get_system_memory(),
++                                    addr,
++                                    dev->mmio[n].memory);
++    }
+ }
+ 
++void sysbus_mmio_map(SysBusDevice *dev, int n, hwaddr addr)
++{
++    sysbus_mmio_map_common(dev, n, addr, false, 0);
++}
++
++void sysbus_mmio_map_overlap(SysBusDevice *dev, int n, hwaddr addr,
++                             unsigned priority)
++{
++    sysbus_mmio_map_common(dev, n, addr, true, priority);
++}
+ 
+ /* Request an IRQ source.  The actual IRQ object may be populated later.  */
+ void sysbus_init_irq(SysBusDevice *dev, qemu_irq *p)
+diff --git a/hw/sysbus.h b/hw/sysbus.h
+index a7fcded6e7..2100bd7d07 100644
+--- a/hw/sysbus.h
++++ b/hw/sysbus.h
+@@ -56,6 +56,8 @@ void sysbus_init_ioports(SysBusDevice *dev, pio_addr_t ioport, pio_addr_t size);
+ 
+ void sysbus_connect_irq(SysBusDevice *dev, int n, qemu_irq irq);
+ void sysbus_mmio_map(SysBusDevice *dev, int n, hwaddr addr);
++void sysbus_mmio_map_overlap(SysBusDevice *dev, int n, hwaddr addr,
++                             unsigned priority);
+ void sysbus_add_memory(SysBusDevice *dev, hwaddr addr,
+                        MemoryRegion *mem);
+ void sysbus_add_memory_overlap(SysBusDevice *dev, hwaddr addr,
+diff --git a/target-i386/cpu.c b/target-i386/cpu.c
+index 5582e5f4e6..8fb736a5b4 100644
+--- a/target-i386/cpu.c
++++ b/target-i386/cpu.c
+@@ -2088,7 +2088,8 @@ static void x86_cpu_apic_init(X86CPU *cpu, Error **errp)
+         /* NOTE: the APIC is directly connected to the CPU - it is not
+            on the global memory bus. */
+         /* XXX: what if the base changes? */
+-        sysbus_mmio_map(SYS_BUS_DEVICE(env->apic_state), 0, MSI_ADDR_BASE);
++        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(env->apic_state), 0,
++                                MSI_ADDR_BASE, 0x1000);
+         apic_mapped = 1;
+     }
+ }
+

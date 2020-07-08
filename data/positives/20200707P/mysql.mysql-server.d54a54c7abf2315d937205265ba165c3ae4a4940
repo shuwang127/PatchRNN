@@ -1,0 +1,83 @@
+commit d54a54c7abf2315d937205265ba165c3ae4a4940
+Author: jonas@perch.ndb.mysql.com <>
+Date:   Thu Oct 27 16:41:55 2005 +0200
+
+    bug#13078 - ndb
+      memleak when doing ordered index scan on index with column larger than 32 bytes
+
+diff --git a/ndb/src/ndbapi/NdbImpl.hpp b/ndb/src/ndbapi/NdbImpl.hpp
+index 33aaca8de96..aa918a6f9f8 100644
+--- a/ndb/src/ndbapi/NdbImpl.hpp
++++ b/ndb/src/ndbapi/NdbImpl.hpp
+@@ -78,11 +78,9 @@ public:
+   /**
+    * NOTE free lists must be _after_ theNdbObjectIdMap take
+    *   assure that destructors are run in correct order
++   * NOTE these has to be in this specific order to make destructor run in
++   *      correct order
+    */
+-  Ndb_free_list_t<NdbConnection> theConIdleList; 
+-  Ndb_free_list_t<NdbOperation>  theOpIdleList;  
+-  Ndb_free_list_t<NdbIndexScanOperation> theScanOpIdleList;
+-  Ndb_free_list_t<NdbIndexOperation> theIndexOpIdleList;
+   Ndb_free_list_t<NdbRecAttr> theRecAttrIdleList;  
+   Ndb_free_list_t<NdbApiSignal> theSignalIdleList;
+   Ndb_free_list_t<NdbLabel> theLabelList;
+@@ -91,6 +89,10 @@ public:
+   Ndb_free_list_t<NdbCall> theCallList;
+   Ndb_free_list_t<NdbBlob> theNdbBlobIdleList;
+   Ndb_free_list_t<NdbReceiver> theScanList;
++  Ndb_free_list_t<NdbIndexScanOperation> theScanOpIdleList;
++  Ndb_free_list_t<NdbOperation>  theOpIdleList;  
++  Ndb_free_list_t<NdbIndexOperation> theIndexOpIdleList;
++  Ndb_free_list_t<NdbConnection> theConIdleList; 
+ };
+ 
+ #ifdef VM_TRACE
+diff --git a/ndb/src/ndbapi/NdbRecAttr.cpp b/ndb/src/ndbapi/NdbRecAttr.cpp
+index f993c652bf9..26039fb7867 100644
+--- a/ndb/src/ndbapi/NdbRecAttr.cpp
++++ b/ndb/src/ndbapi/NdbRecAttr.cpp
+@@ -35,6 +35,7 @@ Adjust:  971206  UABRONM First version
+ 
+ NdbRecAttr::NdbRecAttr(Ndb*)
+ {
++  theStorageX = 0;
+   init();
+ }
+ 
+@@ -64,6 +65,9 @@ NdbRecAttr::setup(const NdbColumnImpl* anAttrInfo, char* aValue)
+   theNULLind = 0;
+   m_nullable = anAttrInfo->m_nullable;
+ 
++  if (theStorageX)
++    delete[] theStorageX;
++
+   // check alignment to signal data
+   // a future version could check alignment per data type as well
+   
+diff --git a/ndb/src/ndbapi/ndb_cluster_connection.cpp b/ndb/src/ndbapi/ndb_cluster_connection.cpp
+index 4fcf4d08396..a313a973a42 100644
+--- a/ndb/src/ndbapi/ndb_cluster_connection.cpp
++++ b/ndb/src/ndbapi/ndb_cluster_connection.cpp
+@@ -308,6 +308,19 @@ Ndb_cluster_connection_impl::~Ndb_cluster_connection_impl()
+ 
+   //  fragmentToNodeMap.release();
+ 
++  if (ndb_global_event_buffer_mutex != NULL)
++  {
++    NdbMutex_Destroy(ndb_global_event_buffer_mutex);
++    ndb_global_event_buffer_mutex= NULL;
++  }
++#ifdef VM_TRACE
++  if (ndb_print_state_mutex != NULL)
++  {
++    NdbMutex_Destroy(ndb_print_state_mutex);
++    ndb_print_state_mutex= NULL;
++  }
++#endif
++
+   DBUG_VOID_RETURN;
+ }
+ 
+

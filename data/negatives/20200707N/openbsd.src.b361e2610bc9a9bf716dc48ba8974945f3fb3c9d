@@ -1,0 +1,220 @@
+commit b361e2610bc9a9bf716dc48ba8974945f3fb3c9d
+Author: jsing <jsing@openbsd.org>
+Date:   Fri Jul 2 09:20:26 2010 +0000
+
+    Determine the data offset using a variable specified within the softraid
+    metadata. This allows us to implement seamless transitions from the
+    previous metadata version to the current version, avoiding the need to
+    recreate the softraid volume.
+    
+    Joint work with marco@ during c2k10.
+    
+    ok marco@
+
+diff --git a/sys/dev/softraid.c b/sys/dev/softraid.c
+index ad03205b17a..196370de27f 100644
+--- a/sys/dev/softraid.c
++++ b/sys/dev/softraid.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: softraid.c,v 1.207 2010/06/28 18:31:01 krw Exp $ */
++/* $OpenBSD: softraid.c,v 1.208 2010/07/02 09:20:26 jsing Exp $ */
+ /*
+  * Copyright (c) 2007, 2008, 2009 Marco Peereboom <marco@peereboom.us>
+  * Copyright (c) 2008 Chris Kuethe <ckuethe@openbsd.org>
+@@ -538,6 +538,7 @@ sr_meta_init(struct sr_discipline *sd, struct sr_chunk_head *cl)
+ 	sm->ssdi.ssd_version = SR_META_VERSION;
+ 	sm->ssd_ondisk = 0;
+ 	sm->ssdi.ssd_flags = sd->sd_meta_flags;
++	sm->ssd_data_offset = SR_DATA_OFFSET;
+ 
+ 	/* get uuid from chunk 0 */
+ 	bcopy(&sd->sd_vol.sv_chunks[0]->src_meta.scmi.scm_uuid,
+@@ -815,20 +816,43 @@ sr_meta_validate(struct sr_discipline *sd, dev_t dev, struct sr_metadata *sm,
+ 		goto done;
+ 	}
+ 
+-	if (sm->ssdi.ssd_version != SR_META_VERSION) {
+-		printf("%s: %s can not read metadata version %u, expected %u\n",
+-		    DEVNAME(sc), devname, sm->ssdi.ssd_version,
+-		    SR_META_VERSION);
+-		goto done;
+-	}
+-
++	/* Verify metadata checksum. */
+ 	sr_checksum(sc, sm, &checksum, sizeof(struct sr_meta_invariant));
+ 	if (bcmp(&checksum, &sm->ssd_checksum, sizeof(checksum))) {
+ 		printf("%s: invalid metadata checksum\n", DEVNAME(sc));
+ 		goto done;
+ 	}
+ 
+-	/* XXX do other checksums */
++	/* Handle changes between versions. */
++	if (sm->ssdi.ssd_version == 3) {
++
++		/*
++		 * Version 3 - update metadata version and fix up data offset
++		 * value since this did not exist in version 3.
++		 */
++		sm->ssdi.ssd_version = SR_META_VERSION;
++		snprintf(sm->ssdi.ssd_revision, sizeof(sm->ssdi.ssd_revision),
++		    "%03d", SR_META_VERSION);
++		if (sm->ssd_data_offset == 0)
++			sm->ssd_data_offset = SR_META_V3_DATA_OFFSET;
++
++	} else if (sm->ssdi.ssd_version == SR_META_VERSION) {
++
++		/* 
++		 * Version 4 - original metadata format did not store
++		 * data offset so fix this up if necessary.
++		 */
++		if (sm->ssd_data_offset == 0)
++			sm->ssd_data_offset = SR_DATA_OFFSET;
++
++	} else {
++
++		printf("%s: %s can not read metadata version %u, expected %u\n",
++		    DEVNAME(sc), devname, sm->ssdi.ssd_version,
++		    SR_META_VERSION);
++		goto done;
++
++	}
+ 
+ #ifdef SR_DEBUG
+ 	/* warn if disk changed order */
+@@ -3718,6 +3742,9 @@ sr_validate_io(struct sr_workunit *wu, daddr64_t *blk, char *func)
+ 	DNPRINTF(SR_D_DIS, "%s: %s 0x%02x\n", DEVNAME(sd->sd_sc), func,
+ 	    xs->cmd->opcode);
+ 
++	if (sd->sd_meta->ssd_data_offset == 0)
++		panic("invalid data offset");
++
+ 	if (sd->sd_vol_status == BIOC_SVOFFLINE) {
+ 		DNPRINTF(SR_D_DIS, "%s: %s device offline\n",
+ 		    DEVNAME(sd->sd_sc), func);
+diff --git a/sys/dev/softraid_crypto.c b/sys/dev/softraid_crypto.c
+index 6cf972097e5..e8e0ce9436b 100644
+--- a/sys/dev/softraid_crypto.c
++++ b/sys/dev/softraid_crypto.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: softraid_crypto.c,v 1.52 2010/05/18 04:41:14 dlg Exp $ */
++/* $OpenBSD: softraid_crypto.c,v 1.53 2010/07/02 09:20:26 jsing Exp $ */
+ /*
+  * Copyright (c) 2007 Marco Peereboom <marco@peereboom.us>
+  * Copyright (c) 2008 Hans-Joerg Hoexer <hshoexer@openbsd.org>
+@@ -1165,7 +1165,7 @@ sr_crypto_rw2(struct sr_workunit *wu, struct cryptop *crp)
+ 	if (sr_validate_io(wu, &blk, "sr_crypto_rw2"))
+ 		goto bad;
+ 
+-	blk += SR_DATA_OFFSET;
++	blk += sd->sd_meta->ssd_data_offset;
+ 
+ 	wu->swu_io_count = 1;
+ 
+diff --git a/sys/dev/softraid_raid0.c b/sys/dev/softraid_raid0.c
+index 785b12e54ec..f8473a876e6 100644
+--- a/sys/dev/softraid_raid0.c
++++ b/sys/dev/softraid_raid0.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: softraid_raid0.c,v 1.21 2010/07/01 19:31:04 thib Exp $ */
++/* $OpenBSD: softraid_raid0.c,v 1.22 2010/07/02 09:20:26 jsing Exp $ */
+ /*
+  * Copyright (c) 2008 Marco Peereboom <marco@peereboom.us>
+  *
+@@ -300,7 +300,8 @@ sr_raid0_rw(struct sr_workunit *wu)
+ 	chunk = strip_no % no_chunk;
+ 	stripoffs = lbaoffs & (strip_size - 1);
+ 	chunkoffs = (strip_no / no_chunk) << strip_bits;
+-	physoffs = chunkoffs + stripoffs + (SR_DATA_OFFSET << DEV_BSHIFT);
++	physoffs = chunkoffs + stripoffs +
++	    (sd->sd_meta->ssd_data_offset << DEV_BSHIFT);
+ 	length = MIN(xs->datalen, strip_size - stripoffs);
+ 	leftover = xs->datalen;
+ 	data = xs->data;
+diff --git a/sys/dev/softraid_raid1.c b/sys/dev/softraid_raid1.c
+index 0cd5b415f08..49cc61a3f2b 100644
+--- a/sys/dev/softraid_raid1.c
++++ b/sys/dev/softraid_raid1.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: softraid_raid1.c,v 1.24 2010/07/01 19:31:04 thib Exp $ */
++/* $OpenBSD: softraid_raid1.c,v 1.25 2010/07/02 09:20:26 jsing Exp $ */
+ /*
+  * Copyright (c) 2007 Marco Peereboom <marco@peereboom.us>
+  *
+@@ -381,7 +381,7 @@ sr_raid1_rw(struct sr_workunit *wu)
+ 		goto bad;
+ 
+ 	/* calculate physical block */
+-	blk += SR_DATA_OFFSET;
++	blk += sd->sd_meta->ssd_data_offset;
+ 
+ 	if (xs->flags & SCSI_DATA_IN)
+ 		ios = 1;
+diff --git a/sys/dev/softraid_raid6.c b/sys/dev/softraid_raid6.c
+index bc2563899d6..65a0bd8adbe 100644
+--- a/sys/dev/softraid_raid6.c
++++ b/sys/dev/softraid_raid6.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: softraid_raid6.c,v 1.17 2010/07/01 19:31:04 thib Exp $ */
++/* $OpenBSD: softraid_raid6.c,v 1.18 2010/07/02 09:20:26 jsing Exp $ */
+ /*
+  * Copyright (c) 2009 Marco Peereboom <marco@peereboom.us>
+  * Copyright (c) 2009 Jordan Hargrave <jordan@openbsd.org>
+@@ -491,7 +491,7 @@ sr_raid6_rw(struct sr_workunit *wu)
+ 		strip_offs = lbaoffs & (strip_size - 1);
+ 		chunk_offs = (strip_no / no_chunk) << strip_bits;
+ 		phys_offs = chunk_offs + strip_offs +
+-		    (SR_DATA_OFFSET << DEV_BSHIFT);
++		    (sd->sd_meta->ssd_data_offset << DEV_BSHIFT);
+ 
+ 		/* get size remaining in this stripe */
+ 		length = MIN(strip_size - strip_offs, datalen);
+diff --git a/sys/dev/softraid_raidp.c b/sys/dev/softraid_raidp.c
+index 8b9a7a1235a..562003445b6 100644
+--- a/sys/dev/softraid_raidp.c
++++ b/sys/dev/softraid_raidp.c
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: softraid_raidp.c,v 1.17 2010/07/01 19:31:04 thib Exp $ */
++/* $OpenBSD: softraid_raidp.c,v 1.18 2010/07/02 09:20:26 jsing Exp $ */
+ /*
+  * Copyright (c) 2009 Marco Peereboom <marco@peereboom.us>
+  * Copyright (c) 2009 Jordan Hargrave <jordan@openbsd.org>
+@@ -407,7 +407,7 @@ sr_raidp_rw(struct sr_workunit *wu)
+ 		strip_offs = lbaoffs & (strip_size - 1);
+ 		chunk_offs = (strip_no / no_chunk) << strip_bits;
+ 		phys_offs = chunk_offs + strip_offs +
+-		    (SR_DATA_OFFSET << DEV_BSHIFT);
++		    (sd->sd_meta->ssd_data_offset << DEV_BSHIFT);
+ 
+ 		/* get size remaining in this stripe */
+ 		length = MIN(strip_size - strip_offs, datalen);
+diff --git a/sys/dev/softraidvar.h b/sys/dev/softraidvar.h
+index e699954e69c..a4ba153a891 100644
+--- a/sys/dev/softraidvar.h
++++ b/sys/dev/softraidvar.h
+@@ -1,4 +1,4 @@
+-/* $OpenBSD: softraidvar.h,v 1.92 2010/04/18 16:57:48 jsing Exp $ */
++/* $OpenBSD: softraidvar.h,v 1.93 2010/07/02 09:20:26 jsing Exp $ */
+ /*
+  * Copyright (c) 2006 Marco Peereboom <marco@peereboom.us>
+  * Copyright (c) 2008 Chris Kuethe <ckuethe@openbsd.org>
+@@ -26,6 +26,10 @@
+ #define SR_META_SIZE		64	/* save space at chunk beginning */
+ #define SR_META_OFFSET		16	/* skip 8192 bytes at chunk beginning */
+ 
++#define SR_META_V3_SIZE		64
++#define SR_META_V3_OFFSET	16
++#define SR_META_V3_DATA_OFFSET	(SR_META_V3_OFFSET + SR_META_V3_SIZE)
++
+ #define SR_META_F_NATIVE	0	/* Native metadata format. */
+ #define SR_META_F_INVALID	-1
+ 
+@@ -82,7 +86,7 @@ struct sr_metadata {
+ 	char			ssd_devname[32];/* /dev/XXXXX */
+ 	u_int32_t		ssd_meta_flags;
+ #define	SR_META_DIRTY		0x1
+-	u_int32_t		ssd_pad;
++	u_int32_t		ssd_data_offset;
+ 	u_int64_t		ssd_ondisk;	/* on disk version counter */
+ 	int64_t			ssd_rebuild;	/* last block of rebuild */
+ } __packed;
+

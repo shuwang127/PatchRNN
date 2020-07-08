@@ -1,0 +1,154 @@
+commit b1720231ca07dee3382980f3b25e6581bd2e54e9
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Mon Mar 23 17:28:39 2009 +0100
+
+    mac80211: unify and fix TX aggregation start
+    
+    When TX aggregation becomes operational, we do a number of steps:
+     1) print a debug message
+     2) wake the virtual queue
+     3) notify the driver
+    
+    Unfortunately, 1) and 3) are only done if the driver is first to
+    reply to the aggregation request, it is, however, possible that the
+    remote station replies before the driver! Thus, unify the code for
+    this and call the new function ieee80211_agg_tx_operational in both
+    places where TX aggregation can become operational.
+    
+    Additionally, rename the driver notification from
+    IEEE80211_AMPDU_TX_RESUME to IEEE80211_AMPDU_TX_OPERATIONAL.
+    
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/ath9k/main.c b/drivers/net/wireless/ath9k/main.c
+index c13e4e536341..13d4e6756c99 100644
+--- a/drivers/net/wireless/ath9k/main.c
++++ b/drivers/net/wireless/ath9k/main.c
+@@ -2730,7 +2730,7 @@ static int ath9k_ampdu_action(struct ieee80211_hw *hw,
+ 
+ 		ieee80211_stop_tx_ba_cb_irqsafe(hw, sta->addr, tid);
+ 		break;
+-	case IEEE80211_AMPDU_TX_RESUME:
++	case IEEE80211_AMPDU_TX_OPERATIONAL:
+ 		ath_tx_aggr_resume(sc, sta, tid);
+ 		break;
+ 	default:
+diff --git a/include/net/mac80211.h b/include/net/mac80211.h
+index 6f3bc4cc53e5..07fe9875506e 100644
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -1236,14 +1236,14 @@ enum ieee80211_filter_flags {
+  * @IEEE80211_AMPDU_RX_STOP: stop Rx aggregation
+  * @IEEE80211_AMPDU_TX_START: start Tx aggregation
+  * @IEEE80211_AMPDU_TX_STOP: stop Tx aggregation
+- * @IEEE80211_AMPDU_TX_RESUME: resume TX aggregation
++ * @IEEE80211_AMPDU_TX_OPERATIONAL: TX aggregation has become operational
+  */
+ enum ieee80211_ampdu_mlme_action {
+ 	IEEE80211_AMPDU_RX_START,
+ 	IEEE80211_AMPDU_RX_STOP,
+ 	IEEE80211_AMPDU_TX_START,
+ 	IEEE80211_AMPDU_TX_STOP,
+-	IEEE80211_AMPDU_TX_RESUME,
++	IEEE80211_AMPDU_TX_OPERATIONAL,
+ };
+ 
+ /**
+diff --git a/net/mac80211/agg-tx.c b/net/mac80211/agg-tx.c
+index e5776ef1717a..fd718e2b29f7 100644
+--- a/net/mac80211/agg-tx.c
++++ b/net/mac80211/agg-tx.c
+@@ -404,6 +404,27 @@ int ieee80211_start_tx_ba_session(struct ieee80211_hw *hw, u8 *ra, u16 tid)
+ }
+ EXPORT_SYMBOL(ieee80211_start_tx_ba_session);
+ 
++static void ieee80211_agg_tx_operational(struct ieee80211_local *local,
++					 struct sta_info *sta, u16 tid)
++{
++#ifdef CONFIG_MAC80211_HT_DEBUG
++	printk(KERN_DEBUG "Aggregation is on for tid %d \n", tid);
++#endif
++
++	if (local->hw.ampdu_queues) {
++		/*
++		 * Wake up the A-MPDU queue, we stopped it earlier,
++		 * this will in turn wake the entire AC.
++		 */
++		ieee80211_wake_queue_by_reason(&local->hw,
++			local->hw.queues + sta->tid_to_tx_q[tid],
++			IEEE80211_QUEUE_STOP_REASON_AGGREGATION);
++	}
++
++	local->ops->ampdu_action(&local->hw, IEEE80211_AMPDU_TX_OPERATIONAL,
++				 &sta->sta, tid, NULL);
++}
++
+ void ieee80211_start_tx_ba_cb(struct ieee80211_hw *hw, u8 *ra, u16 tid)
+ {
+ 	struct ieee80211_local *local = hw_to_local(hw);
+@@ -446,20 +467,8 @@ void ieee80211_start_tx_ba_cb(struct ieee80211_hw *hw, u8 *ra, u16 tid)
+ 
+ 	*state |= HT_ADDBA_DRV_READY_MSK;
+ 
+-	if (*state == HT_AGG_STATE_OPERATIONAL) {
+-#ifdef CONFIG_MAC80211_HT_DEBUG
+-		printk(KERN_DEBUG "Aggregation is on for tid %d \n", tid);
+-#endif
+-		if (hw->ampdu_queues) {
+-			/*
+-			 * Wake up this queue, we stopped it earlier,
+-			 * this will in turn wake the entire AC.
+-			 */
+-			ieee80211_wake_queue_by_reason(hw,
+-				hw->queues + sta->tid_to_tx_q[tid],
+-				IEEE80211_QUEUE_STOP_REASON_AGGREGATION);
+-		}
+-	}
++	if (*state == HT_AGG_STATE_OPERATIONAL)
++		ieee80211_agg_tx_operational(local, sta, tid);
+ 
+  out:
+ 	spin_unlock_bh(&sta->lock);
+@@ -646,9 +655,7 @@ void ieee80211_process_addba_resp(struct ieee80211_local *local,
+ 				  struct ieee80211_mgmt *mgmt,
+ 				  size_t len)
+ {
+-	struct ieee80211_hw *hw = &local->hw;
+-	u16 capab;
+-	u16 tid, start_seq_num;
++	u16 capab, tid;
+ 	u8 *state;
+ 
+ 	capab = le16_to_cpu(mgmt->u.action.u.addba_resp.capab);
+@@ -682,26 +689,10 @@ void ieee80211_process_addba_resp(struct ieee80211_local *local,
+ 
+ 		*state |= HT_ADDBA_RECEIVED_MSK;
+ 
+-		if (hw->ampdu_queues && *state != curstate &&
+-		    *state == HT_AGG_STATE_OPERATIONAL) {
+-			/*
+-			 * Wake up this queue, we stopped it earlier,
+-			 * this will in turn wake the entire AC.
+-			 */
+-			ieee80211_wake_queue_by_reason(hw,
+-				hw->queues + sta->tid_to_tx_q[tid],
+-				IEEE80211_QUEUE_STOP_REASON_AGGREGATION);
+-		}
+-		sta->ampdu_mlme.addba_req_num[tid] = 0;
++		if (*state != curstate && *state == HT_AGG_STATE_OPERATIONAL)
++			ieee80211_agg_tx_operational(local, sta, tid);
+ 
+-		if (local->ops->ampdu_action) {
+-			(void)local->ops->ampdu_action(hw,
+-					       IEEE80211_AMPDU_TX_RESUME,
+-					       &sta->sta, tid, &start_seq_num);
+-		}
+-#ifdef CONFIG_MAC80211_HT_DEBUG
+-		printk(KERN_DEBUG "Resuming TX aggregation for tid %d\n", tid);
+-#endif /* CONFIG_MAC80211_HT_DEBUG */
++		sta->ampdu_mlme.addba_req_num[tid] = 0;
+ 	} else {
+ 		sta->ampdu_mlme.addba_req_num[tid]++;
+ 		___ieee80211_stop_tx_ba_session(sta, tid, WLAN_BACK_INITIATOR);
+

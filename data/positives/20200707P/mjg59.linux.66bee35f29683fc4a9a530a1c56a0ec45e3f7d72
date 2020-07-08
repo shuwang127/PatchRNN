@@ -1,0 +1,93 @@
+commit 66bee35f29683fc4a9a530a1c56a0ec45e3f7d72
+Author: Hans de Goede <hdegoede@redhat.com>
+Date:   Sat Mar 21 17:26:24 2015 +0100
+
+    extcon: Fix missing locking when [un]registering notifiers
+    
+    Since extcon.c is using raw_notifiers it must protect the notifier
+    list itself when [un]registering notifiers to avoid the list changing while
+    extcon_update_state is walking the list (through raw_notifier_call_chain).
+    
+    Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+    [cw00.choi: Apply this patch to extcon.c driver instead of old extcon-class.c]
+    Signed-off-by: Chanwoo Choi <cw00.choi@samsung.com>
+
+diff --git a/drivers/extcon/extcon.c b/drivers/extcon/extcon.c
+index 752ce1208428..4c9f165e4a04 100644
+--- a/drivers/extcon/extcon.c
++++ b/drivers/extcon/extcon.c
+@@ -445,6 +445,9 @@ int extcon_register_interest(struct extcon_specific_cable_nb *obj,
+ 			     const char *extcon_name, const char *cable_name,
+ 			     struct notifier_block *nb)
+ {
++	unsigned long flags;
++	int ret;
++
+ 	if (!obj || !cable_name || !nb)
+ 		return -EINVAL;
+ 
+@@ -462,8 +465,11 @@ int extcon_register_interest(struct extcon_specific_cable_nb *obj,
+ 
+ 		obj->internal_nb.notifier_call = _call_per_cable;
+ 
+-		return raw_notifier_chain_register(&obj->edev->nh,
++		spin_lock_irqsave(&obj->edev->lock, flags);
++		ret = raw_notifier_chain_register(&obj->edev->nh,
+ 						  &obj->internal_nb);
++		spin_unlock_irqrestore(&obj->edev->lock, flags);
++		return ret;
+ 	} else {
+ 		struct class_dev_iter iter;
+ 		struct extcon_dev *extd;
+@@ -496,10 +502,17 @@ EXPORT_SYMBOL_GPL(extcon_register_interest);
+  */
+ int extcon_unregister_interest(struct extcon_specific_cable_nb *obj)
+ {
++	unsigned long flags;
++	int ret;
++
+ 	if (!obj)
+ 		return -EINVAL;
+ 
+-	return raw_notifier_chain_unregister(&obj->edev->nh, &obj->internal_nb);
++	spin_lock_irqsave(&obj->edev->lock, flags);
++	ret = raw_notifier_chain_unregister(&obj->edev->nh, &obj->internal_nb);
++	spin_unlock_irqrestore(&obj->edev->lock, flags);
++
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(extcon_unregister_interest);
+ 
+@@ -516,7 +529,14 @@ EXPORT_SYMBOL_GPL(extcon_unregister_interest);
+ int extcon_register_notifier(struct extcon_dev *edev,
+ 			struct notifier_block *nb)
+ {
+-	return raw_notifier_chain_register(&edev->nh, nb);
++	unsigned long flags;
++	int ret;
++
++	spin_lock_irqsave(&edev->lock, flags);
++	ret = raw_notifier_chain_register(&edev->nh, nb);
++	spin_unlock_irqrestore(&edev->lock, flags);
++
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(extcon_register_notifier);
+ 
+@@ -528,7 +548,14 @@ EXPORT_SYMBOL_GPL(extcon_register_notifier);
+ int extcon_unregister_notifier(struct extcon_dev *edev,
+ 			struct notifier_block *nb)
+ {
+-	return raw_notifier_chain_unregister(&edev->nh, nb);
++	unsigned long flags;
++	int ret;
++
++	spin_lock_irqsave(&edev->lock, flags);
++	ret = raw_notifier_chain_unregister(&edev->nh, nb);
++	spin_unlock_irqrestore(&edev->lock, flags);
++
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(extcon_unregister_notifier);
+ 
+

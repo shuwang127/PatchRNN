@@ -1,0 +1,46 @@
+commit 74c6c71530847808d4e3be7b205719270efee80c
+Author: Johannes Thumshirn <jthumshirn@suse.de>
+Date:   Thu Apr 12 09:16:06 2018 -0600
+
+    nvme: don't send keep-alives to the discovery controller
+    
+    NVMe over Fabrics 1.0 Section 5.2 "Discovery Controller Properties and
+    Command Support" Figure 31 "Discovery Controller – Admin Commands"
+    explicitly listst all commands but "Get Log Page" and "Identify" as
+    reserved, but NetApp report the Linux host is sending Keep Alive
+    commands to the discovery controller, which is a violation of the
+    Spec.
+    
+    We're already checking for discovery controllers when configuring the
+    keep alive timeout but when creating a discovery controller we're not
+    hard wiring the keep alive timeout to 0 and thus remain on
+    NVME_DEFAULT_KATO for the discovery controller.
+    
+    This can be easily remproduced when issuing a direct connect to the
+    discovery susbsystem using:
+    'nvme connect [...] --nqn=nqn.2014-08.org.nvmexpress.discovery'
+    
+    Signed-off-by: Johannes Thumshirn <jthumshirn@suse.de>
+    Fixes: 07bfcd09a288 ("nvme-fabrics: add a generic NVMe over Fabrics library")
+    Reported-by: Martin George <marting@netapp.com>
+    Reviewed-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Keith Busch <keith.busch@intel.com>
+    Signed-off-by: Jens Axboe <axboe@kernel.dk>
+
+diff --git a/drivers/nvme/host/fabrics.c b/drivers/nvme/host/fabrics.c
+index 8f0f34d06d46..3583f9492a45 100644
+--- a/drivers/nvme/host/fabrics.c
++++ b/drivers/nvme/host/fabrics.c
+@@ -608,8 +608,10 @@ static int nvmf_parse_options(struct nvmf_ctrl_options *opts,
+ 			opts->discovery_nqn =
+ 				!(strcmp(opts->subsysnqn,
+ 					 NVME_DISC_SUBSYS_NAME));
+-			if (opts->discovery_nqn)
++			if (opts->discovery_nqn) {
++				opts->kato = 0;
+ 				opts->nr_io_queues = 0;
++			}
+ 			break;
+ 		case NVMF_OPT_TRADDR:
+ 			p = match_strdup(args);
+

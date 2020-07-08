@@ -1,0 +1,96 @@
+commit 7ce66118aaca8c9ed23cd44d629b8037a4117c11
+Author: Felix Kuehling <Felix.Kuehling@amd.com>
+Date:   Wed Nov 1 19:21:58 2017 -0400
+
+    drm/amd: Update kgd_kfd interface for resuming SDMA queues
+    
+    Add wptr and mm parameters to hqd_sdma_load and pass these parameters
+    from device_queue_manager through the mqd_manager.
+    
+    SDMA doesn't support polling while the engine believes it's idle. The
+    driver must update the wptr. The new parameters will be used for looking
+    up the updated value from the specified mm when SDMA queues are resumed
+    after being disabled.
+    
+    Signed-off-by: Felix Kuehling <Felix.Kuehling@amd.com>
+    Reviewed-by: Oded Gabbay <oded.gabbay@gmail.com>
+    Signed-off-by: Oded Gabbay <oded.gabbay@gmail.com>
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gfx_v7.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gfx_v7.c
+index 1e3e9be7d77e..a55d7948075b 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gfx_v7.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gfx_v7.c
+@@ -105,7 +105,8 @@ static int kgd_hqd_load(struct kgd_dev *kgd, void *mqd, uint32_t pipe_id,
+ 			uint32_t queue_id, uint32_t __user *wptr,
+ 			uint32_t wptr_shift, uint32_t wptr_mask,
+ 			struct mm_struct *mm);
+-static int kgd_hqd_sdma_load(struct kgd_dev *kgd, void *mqd);
++static int kgd_hqd_sdma_load(struct kgd_dev *kgd, void *mqd,
++			     uint32_t __user *wptr, struct mm_struct *mm);
+ static bool kgd_hqd_is_occupied(struct kgd_dev *kgd, uint64_t queue_address,
+ 				uint32_t pipe_id, uint32_t queue_id);
+ 
+@@ -375,7 +376,8 @@ static int kgd_hqd_load(struct kgd_dev *kgd, void *mqd, uint32_t pipe_id,
+ 	return 0;
+ }
+ 
+-static int kgd_hqd_sdma_load(struct kgd_dev *kgd, void *mqd)
++static int kgd_hqd_sdma_load(struct kgd_dev *kgd, void *mqd,
++			     uint32_t __user *wptr, struct mm_struct *mm)
+ {
+ 	struct amdgpu_device *adev = get_amdgpu_device(kgd);
+ 	struct cik_sdma_rlc_registers *m;
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gfx_v8.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gfx_v8.c
+index 056929b8ccd0..1017ff51c957 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gfx_v8.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gfx_v8.c
+@@ -64,7 +64,8 @@ static int kgd_hqd_load(struct kgd_dev *kgd, void *mqd, uint32_t pipe_id,
+ 			uint32_t queue_id, uint32_t __user *wptr,
+ 			uint32_t wptr_shift, uint32_t wptr_mask,
+ 			struct mm_struct *mm);
+-static int kgd_hqd_sdma_load(struct kgd_dev *kgd, void *mqd);
++static int kgd_hqd_sdma_load(struct kgd_dev *kgd, void *mqd,
++			     uint32_t __user *wptr, struct mm_struct *mm);
+ static bool kgd_hqd_is_occupied(struct kgd_dev *kgd, uint64_t queue_address,
+ 		uint32_t pipe_id, uint32_t queue_id);
+ static bool kgd_hqd_sdma_is_occupied(struct kgd_dev *kgd, void *mqd);
+@@ -358,7 +359,8 @@ static int kgd_hqd_load(struct kgd_dev *kgd, void *mqd, uint32_t pipe_id,
+ 	return 0;
+ }
+ 
+-static int kgd_hqd_sdma_load(struct kgd_dev *kgd, void *mqd)
++static int kgd_hqd_sdma_load(struct kgd_dev *kgd, void *mqd,
++			     uint32_t __user *wptr, struct mm_struct *mm)
+ {
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/amd/amdkfd/kfd_mqd_manager_cik.c b/drivers/gpu/drm/amd/amdkfd/kfd_mqd_manager_cik.c
+index 4728fad3fd74..ea02bfa3bda3 100644
+--- a/drivers/gpu/drm/amd/amdkfd/kfd_mqd_manager_cik.c
++++ b/drivers/gpu/drm/amd/amdkfd/kfd_mqd_manager_cik.c
+@@ -160,7 +160,9 @@ static int load_mqd_sdma(struct mqd_manager *mm, void *mqd,
+ 			 uint32_t pipe_id, uint32_t queue_id,
+ 			 struct queue_properties *p, struct mm_struct *mms)
+ {
+-	return mm->dev->kfd2kgd->hqd_sdma_load(mm->dev->kgd, mqd);
++	return mm->dev->kfd2kgd->hqd_sdma_load(mm->dev->kgd, mqd,
++					       (uint32_t __user *)p->write_ptr,
++					       mms);
+ }
+ 
+ static int update_mqd(struct mqd_manager *mm, void *mqd,
+diff --git a/drivers/gpu/drm/amd/include/kgd_kfd_interface.h b/drivers/gpu/drm/amd/include/kgd_kfd_interface.h
+index f516fd10e6ba..c6d4e64531c7 100644
+--- a/drivers/gpu/drm/amd/include/kgd_kfd_interface.h
++++ b/drivers/gpu/drm/amd/include/kgd_kfd_interface.h
+@@ -184,7 +184,8 @@ struct kfd2kgd_calls {
+ 			uint32_t wptr_shift, uint32_t wptr_mask,
+ 			struct mm_struct *mm);
+ 
+-	int (*hqd_sdma_load)(struct kgd_dev *kgd, void *mqd);
++	int (*hqd_sdma_load)(struct kgd_dev *kgd, void *mqd,
++			     uint32_t __user *wptr, struct mm_struct *mm);
+ 
+ 	bool (*hqd_is_occupied)(struct kgd_dev *kgd, uint64_t queue_address,
+ 				uint32_t pipe_id, uint32_t queue_id);
+

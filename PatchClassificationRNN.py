@@ -148,13 +148,6 @@ class Tokenizer:
 
         return results
 
-# read in and process the CSV file (once)
-token_map = {}
-handle = open("token_map.csv", "r")
-csv_reader = csv.reader(handle)
-for row in csv_reader:
-    token_map[row[0]] = chr(int(row[1]))
-
 
 def main():
     # load data.
@@ -316,35 +309,66 @@ def CreateDiffVocab(data):
         return lineStr, lineStrB, lineStrA
 
     def GetClangTokens(line):
-        return
+        # defination.
+        tokenClass = [clang.cindex.TokenKind.KEYWORD,      # 1
+                      clang.cindex.TokenKind.IDENTIFIER,   # 2
+                      clang.cindex.TokenKind.LITERAL,      # 3
+                      clang.cindex.TokenKind.PUNCTUATION,  # 4
+                      clang.cindex.TokenKind.COMMENT]      # 5
+        tokenDict = {cls: index + 1 for index, cls in enumerate(tokenClass)}
+        #print(tokenDict)
+
+        # initialize.
+        tokens = []
+        tokenTypes = []
+        diffTypes = []
+
+        # clang sparser.
+        idx = clang.cindex.Index.create()
+        tu = idx.parse('tmp.cpp', args=['-std=c++11'], unsaved_files=[('tmp.cpp', RemoveSign(line))], options=0)
+        for t in tu.get_tokens(extent=tu.cursor.extent):
+            #print(t.kind, t.spelling, t.location)
+            tokens.append(t.spelling)
+            tokenTypes.append(tokenDict[t.kind])
+            diffTypes.append(1 if (line[0] == '+') else -1 if (line[0] == '-') else 0)
+        #print(tokens)
+        #print(tokenTypes)
+        #print(diffTypes)
+
+        return tokens, tokenTypes, diffTypes
+
+    def GetWordTokens(line):
+        tknzr = TweetTokenizer()
+        tokens = tknzr.tokenize(RemoveSign(line))
+        return tokens
+
+    #lines = data[0][1]
+    #print(lines)
+    #hunk = data[0][1][0]
+    #print(hunk)
+    #line = data[0][1][0][0]
+    #print(line)
 
     # for each sample data[n].
     numData = len(data)
     for n in range(numData):
         diffLines = data[n][1]
 
-    lines = data[0][1]
-    print(lines)
-    hunk = data[0][1][0]
-    print(hunk)
-    line = data[0][1][0][0]
-    print(line)
 
-    tknzr = TweetTokenizer()
+    lines = data[0][1]
     for hunk in lines:
         for line in hunk:
-            tokens = tknzr.tokenize(line)
             print(line, end='')
+            #tokens = GetWordTokens(line)
+            #print(tokens)
+            tokens, tokenTypes, diffTypes = GetClangTokens(line)
             print(tokens)
+            print(tokenTypes)
+            print(diffTypes)
+            print('-----------------------------------------------------------------------')
 
-    line = data[0][1][0][0]
-    print(line)
 
-    # clang sparser.
-    idx = clang.cindex.Index.create()
-    tu = idx.parse(tempPath + 'tmp.cpp', args=['-std=c++11'], unsaved_files=[(tempPath + 'tmp.cpp', line)], options=0)
-    for t in tu.get_tokens(extent=tu.cursor.extent):
-        print(t.kind, t.spelling, t.location)
+
 
     return
 

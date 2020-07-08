@@ -1,0 +1,146 @@
+commit e7ca56562990991bc614a43b9351ee0737f3045d
+Author: Eric Blake <eblake@redhat.com>
+Date:   Thu Jun 9 10:48:39 2016 -0600
+
+    string-output-visitor: Favor new visit_free() function
+    
+    Now that we have a polymorphic visit_free(), we no longer need
+    string_output_visitor_cleanup(); however, we still need to
+    expose the subtype for string_output_get_string().
+    
+    Signed-off-by: Eric Blake <eblake@redhat.com>
+    Message-Id: <1465490926-28625-9-git-send-email-eblake@redhat.com>
+    Reviewed-by: Markus Armbruster <armbru@redhat.com>
+    Signed-off-by: Markus Armbruster <armbru@redhat.com>
+
+diff --git a/hmp.c b/hmp.c
+index fd5daa75b7..559cad1bb5 100644
+--- a/hmp.c
++++ b/hmp.c
+@@ -2006,7 +2006,7 @@ void hmp_info_memdev(Monitor *mon, const QDict *qdict)
+         monitor_printf(mon, "  host nodes: %s\n", str);
+ 
+         g_free(str);
+-        string_output_visitor_cleanup(ov);
++        visit_free(string_output_get_visitor(ov));
+         m = m->next;
+         i++;
+     }
+diff --git a/include/qapi/string-output-visitor.h b/include/qapi/string-output-visitor.h
+index e10522a35b..03e377e50b 100644
+--- a/include/qapi/string-output-visitor.h
++++ b/include/qapi/string-output-visitor.h
+@@ -23,7 +23,6 @@ typedef struct StringOutputVisitor StringOutputVisitor;
+  * requires a non-null list argument to visit_start_list().
+  */
+ StringOutputVisitor *string_output_visitor_new(bool human);
+-void string_output_visitor_cleanup(StringOutputVisitor *v);
+ 
+ char *string_output_get_string(StringOutputVisitor *v);
+ Visitor *string_output_get_visitor(StringOutputVisitor *v);
+diff --git a/net/net.c b/net/net.c
+index d25f80232a..336469f9cc 100644
+--- a/net/net.c
++++ b/net/net.c
+@@ -1210,7 +1210,7 @@ static void netfilter_print_info(Monitor *mon, NetFilterState *nf)
+         object_property_get(OBJECT(nf), string_output_get_visitor(ov),
+                             prop->name, NULL);
+         str = string_output_get_string(ov);
+-        string_output_visitor_cleanup(ov);
++        visit_free(string_output_get_visitor(ov));
+         monitor_printf(mon, ",%s=%s", prop->name, str);
+         g_free(str);
+     }
+diff --git a/qapi/string-output-visitor.c b/qapi/string-output-visitor.c
+index ff9ddf068a..78aab876e3 100644
+--- a/qapi/string-output-visitor.c
++++ b/qapi/string-output-visitor.c
+@@ -326,11 +326,6 @@ static void string_output_free(Visitor *v)
+ {
+     StringOutputVisitor *sov = to_sov(v);
+ 
+-    string_output_visitor_cleanup(sov);
+-}
+-
+-void string_output_visitor_cleanup(StringOutputVisitor *sov)
+-{
+     if (sov->string) {
+         g_string_free(sov->string, true);
+     }
+diff --git a/qom/object.c b/qom/object.c
+index 02c0a3a98f..2407b667d9 100644
+--- a/qom/object.c
++++ b/qom/object.c
+@@ -1242,14 +1242,15 @@ int object_property_get_enum(Object *obj, const char *name,
+     enumprop = prop->opaque;
+ 
+     sov = string_output_visitor_new(false);
+-    object_property_get(obj, string_output_get_visitor(sov), name, &err);
++    v = string_output_get_visitor(sov);
++    object_property_get(obj, v, name, &err);
+     if (err) {
+         error_propagate(errp, err);
+-        string_output_visitor_cleanup(sov);
++        visit_free(v);
+         return 0;
+     }
+     str = string_output_get_string(sov);
+-    string_output_visitor_cleanup(sov);
++    visit_free(v);
+     v = string_input_visitor_new(str);
+     visit_type_enum(v, name, &ret, enumprop->strings, errp);
+ 
+@@ -1281,7 +1282,7 @@ void object_property_get_uint16List(Object *obj, const char *name,
+     g_free(str);
+     visit_free(v);
+ out:
+-    string_output_visitor_cleanup(ov);
++    visit_free(string_output_get_visitor(ov));
+ }
+ 
+ void object_property_parse(Object *obj, const char *string,
+@@ -1309,7 +1310,7 @@ char *object_property_print(Object *obj, const char *name, bool human,
+     string = string_output_get_string(sov);
+ 
+ out:
+-    string_output_visitor_cleanup(sov);
++    visit_free(string_output_get_visitor(sov));
+     return string;
+ }
+ 
+diff --git a/tests/test-string-output-visitor.c b/tests/test-string-output-visitor.c
+index edff5235fe..bfa3e8ec7f 100644
+--- a/tests/test-string-output-visitor.c
++++ b/tests/test-string-output-visitor.c
+@@ -50,7 +50,7 @@ static void visitor_output_setup_human(TestOutputVisitorData *data,
+ static void visitor_output_teardown(TestOutputVisitorData *data,
+                                     const void *unused)
+ {
+-    string_output_visitor_cleanup(data->sov);
++    visit_free(data->ov);
+     data->sov = NULL;
+     data->ov = NULL;
+ }
+diff --git a/tests/test-visitor-serialization.c b/tests/test-visitor-serialization.c
+index 0766dcc5a1..377ee3e788 100644
+--- a/tests/test-visitor-serialization.c
++++ b/tests/test-visitor-serialization.c
+@@ -1047,7 +1047,7 @@ static void qmp_deserialize(void **native_out, void *datap,
+ static void qmp_cleanup(void *datap)
+ {
+     QmpSerializeData *d = datap;
+-    qmp_output_visitor_cleanup(d->qov);
++    visit_free(qmp_output_get_visitor(d->qov));
+     visit_free(d->qiv);
+ 
+     g_free(d);
+@@ -1083,7 +1083,7 @@ static void string_cleanup(void *datap)
+ {
+     StringSerializeData *d = datap;
+ 
+-    string_output_visitor_cleanup(d->sov);
++    visit_free(string_output_get_visitor(d->sov));
+     visit_free(d->siv);
+     g_free(d->string);
+     g_free(d);
+

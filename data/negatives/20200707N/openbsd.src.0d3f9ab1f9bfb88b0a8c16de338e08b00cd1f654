@@ -1,0 +1,135 @@
+commit 0d3f9ab1f9bfb88b0a8c16de338e08b00cd1f654
+Author: nordin <nordin@openbsd.org>
+Date:   Wed Jan 30 20:29:44 2002 +0000
+
+    Add proc0 to the PIDHASH table. art@ ok
+
+diff --git a/sys/kern/init_main.c b/sys/kern/init_main.c
+index 2334eb947b4..d1cd0f7c354 100644
+--- a/sys/kern/init_main.c
++++ b/sys/kern/init_main.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: init_main.c,v 1.91 2002/01/16 20:50:17 miod Exp $	*/
++/*	$OpenBSD: init_main.c,v 1.92 2002/01/30 20:29:44 nordin Exp $	*/
+ /*	$NetBSD: init_main.c,v 1.84.4.1 1996/06/02 09:08:06 mrg Exp $	*/
+ 
+ /*
+@@ -243,6 +243,7 @@ main(framep)
+ 	 */
+ 	LIST_INSERT_HEAD(&allproc, p, p_list);
+ 	p->p_pgrp = &pgrp0;
++	LIST_INSERT_HEAD(PIDHASH(0), p, p_hash);
+ 	LIST_INSERT_HEAD(PGRPHASH(0), &pgrp0, pg_hash);
+ 	LIST_INIT(&pgrp0.pg_members);
+ 	LIST_INSERT_HEAD(&pgrp0.pg_members, p, p_pglist);
+diff --git a/sys/miscfs/procfs/procfs.h b/sys/miscfs/procfs/procfs.h
+index a35112a4f12..619a7cc205b 100644
+--- a/sys/miscfs/procfs/procfs.h
++++ b/sys/miscfs/procfs/procfs.h
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: procfs.h,v 1.13 2001/06/27 04:58:43 art Exp $	*/
++/*	$OpenBSD: procfs.h,v 1.14 2002/01/30 20:29:44 nordin Exp $	*/
+ /*	$NetBSD: procfs.h,v 1.17 1996/02/12 15:01:41 christos Exp $	*/
+ 
+ /*
+@@ -123,7 +123,6 @@ struct vfs_namemap {
+ int vfs_getuserstr __P((struct uio *, char *, int *));
+ vfs_namemap_t *vfs_findname __P((vfs_namemap_t *, char *, int));
+ 
+-#define PFIND(pid) ((pid) ? pfind(pid) : &proc0)
+ int procfs_allocvp __P((struct mount *, struct vnode **, long, pfstype));
+ int procfs_checkioperm __P((struct proc *p, struct proc *t));
+ int procfs_doctl __P((struct proc *, struct proc *, struct pfsnode *pfsp, struct uio *uio));
+diff --git a/sys/miscfs/procfs/procfs_subr.c b/sys/miscfs/procfs/procfs_subr.c
+index db88505b070..9d0f1c9fb5a 100644
+--- a/sys/miscfs/procfs/procfs_subr.c
++++ b/sys/miscfs/procfs/procfs_subr.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: procfs_subr.c,v 1.15 2001/11/15 07:04:21 art Exp $	*/
++/*	$OpenBSD: procfs_subr.c,v 1.16 2002/01/30 20:29:44 nordin Exp $	*/
+ /*	$NetBSD: procfs_subr.c,v 1.15 1996/02/12 15:01:42 christos Exp $	*/
+ 
+ /*
+@@ -211,7 +211,7 @@ procfs_rw(v)
+ 	struct pfsnode *pfs = VTOPFS(vp);
+ 	struct proc *p;
+ 
+-	p = PFIND(pfs->pfs_pid);
++	p = pfind(pfs->pfs_pid);
+ 	if (p == 0)
+ 		return (EINVAL);
+ 	/* Do not permit games to be played with init(8) */
+diff --git a/sys/miscfs/procfs/procfs_vnops.c b/sys/miscfs/procfs/procfs_vnops.c
+index 29e162374b5..a680f1b273b 100644
+--- a/sys/miscfs/procfs/procfs_vnops.c
++++ b/sys/miscfs/procfs/procfs_vnops.c
+@@ -1,4 +1,4 @@
+-/*	$OpenBSD: procfs_vnops.c,v 1.21 2001/12/04 22:44:32 art Exp $	*/
++/*	$OpenBSD: procfs_vnops.c,v 1.22 2002/01/30 20:29:44 nordin Exp $	*/
+ /*	$NetBSD: procfs_vnops.c,v 1.40 1996/03/16 23:52:55 christos Exp $	*/
+ 
+ /*
+@@ -224,7 +224,7 @@ procfs_open(v)
+ 	struct proc *p2;		/* traced */
+ 	int error;
+ 
+-	if ((p2 = PFIND(pfs->pfs_pid)) == 0)
++	if ((p2 = pfind(pfs->pfs_pid)) == 0)
+ 		return (ENOENT);	/* was ESRCH, jsp */
+ 
+ 	switch (pfs->pfs_type) {
+@@ -345,7 +345,7 @@ procfs_bmap(v)
+  * the vnode by calling vgone().  this may
+  * be overkill and a waste of time since the
+  * chances are that the process will still be
+- * there and PFIND is not free.
++ * there and pfind is not free.
+  *
+  * (vp) is not locked on entry or exit.
+  */
+@@ -358,7 +358,7 @@ procfs_inactive(v)
+ 	} */ *ap = v;
+ 	struct pfsnode *pfs = VTOPFS(ap->a_vp);
+ 
+-	if (PFIND(pfs->pfs_pid) == 0)
++	if (pfind(pfs->pfs_pid) == 0)
+ 		vgone(ap->a_vp);
+ 
+ 	return (0);
+@@ -519,7 +519,7 @@ procfs_getattr(v)
+ 		break;
+ 
+ 	default:
+-		procp = PFIND(pfs->pfs_pid);
++		procp = pfind(pfs->pfs_pid);
+ 		if (procp == 0)
+ 			return (ENOENT);
+ 	}
+@@ -802,7 +802,7 @@ procfs_lookup(v)
+ 		if (pid == NO_PID)
+ 			break;
+ 
+-		p = PFIND(pid);
++		p = pfind(pid);
+ 		if (p == 0)
+ 			break;
+ 
+@@ -812,7 +812,7 @@ procfs_lookup(v)
+ 		if (cnp->cn_flags & ISDOTDOT)
+ 			return (procfs_root(dvp->v_mount, vpp));
+ 
+-		p = PFIND(pfs->pfs_pid);
++		p = pfind(pfs->pfs_pid);
+ 		if (p == 0)
+ 			break;
+ 
+@@ -920,7 +920,7 @@ procfs_readdir(v)
+ 		struct proc *p;
+ 		struct proc_target *pt;
+ 
+-		p = PFIND(pfs->pfs_pid);
++		p = pfind(pfs->pfs_pid);
+ 		if (p == NULL)
+ 			break;
+ 
+

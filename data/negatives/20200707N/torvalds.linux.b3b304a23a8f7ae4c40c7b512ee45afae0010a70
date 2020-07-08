@@ -1,0 +1,127 @@
+commit b3b304a23a8f7ae4c40c7b512ee45afae0010a70
+Author: Miklos Szeredi <mszeredi@suse.cz>
+Date:   Fri Feb 8 04:21:35 2008 -0800
+
+    mount options: add generic_show_options()
+    
+    Add a new s_options field to struct super_block.  Filesystems can save
+    mount options passed to them in mount or remount.  It is automatically
+    freed when the superblock is destroyed.
+    
+    A new helper function, generic_show_options() is introduced, which uses
+    this field to display the mount options in /proc/mounts.
+    
+    Another helper function, save_mount_options() may be used by
+    filesystems to save the options in the super block.
+    
+    Signed-off-by: Miklos Szeredi <mszeredi@suse.cz>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/namespace.c b/fs/namespace.c
+index e9c10cd01e13..db51ddc9b671 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -320,6 +320,50 @@ void mnt_unpin(struct vfsmount *mnt)
+ 
+ EXPORT_SYMBOL(mnt_unpin);
+ 
++static inline void mangle(struct seq_file *m, const char *s)
++{
++	seq_escape(m, s, " \t\n\\");
++}
++
++/*
++ * Simple .show_options callback for filesystems which don't want to
++ * implement more complex mount option showing.
++ *
++ * See also save_mount_options().
++ */
++int generic_show_options(struct seq_file *m, struct vfsmount *mnt)
++{
++	const char *options = mnt->mnt_sb->s_options;
++
++	if (options != NULL && options[0]) {
++		seq_putc(m, ',');
++		mangle(m, options);
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL(generic_show_options);
++
++/*
++ * If filesystem uses generic_show_options(), this function should be
++ * called from the fill_super() callback.
++ *
++ * The .remount_fs callback usually needs to be handled in a special
++ * way, to make sure, that previous options are not overwritten if the
++ * remount fails.
++ *
++ * Also note, that if the filesystem's .remount_fs function doesn't
++ * reset all options to their default value, but changes only newly
++ * given options, then the displayed options will not reflect reality
++ * any more.
++ */
++void save_mount_options(struct super_block *sb, char *options)
++{
++	kfree(sb->s_options);
++	sb->s_options = kstrdup(options, GFP_KERNEL);
++}
++EXPORT_SYMBOL(save_mount_options);
++
+ /* iterator */
+ static void *m_start(struct seq_file *m, loff_t *pos)
+ {
+@@ -341,11 +385,6 @@ static void m_stop(struct seq_file *m, void *v)
+ 	up_read(&namespace_sem);
+ }
+ 
+-static inline void mangle(struct seq_file *m, const char *s)
+-{
+-	seq_escape(m, s, " \t\n\\");
+-}
+-
+ static int show_vfsmnt(struct seq_file *m, void *v)
+ {
+ 	struct vfsmount *mnt = list_entry(v, struct vfsmount, mnt_list);
+diff --git a/fs/super.c b/fs/super.c
+index ceaf2e3d594c..65f6849847f4 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -105,6 +105,7 @@ static inline void destroy_super(struct super_block *s)
+ {
+ 	security_sb_free(s);
+ 	kfree(s->s_subtype);
++	kfree(s->s_options);
+ 	kfree(s);
+ }
+ 
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 3db22fc2249a..cb3a9001f3b9 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1038,6 +1038,12 @@ struct super_block {
+ 	 * in /proc/mounts will be "type.subtype"
+ 	 */
+ 	char *s_subtype;
++
++	/*
++	 * Saved mount options for lazy filesystems using
++	 * generic_show_options()
++	 */
++	char *s_options;
+ };
+ 
+ extern struct timespec current_fs_time(struct super_block *sb);
+@@ -1970,6 +1976,9 @@ extern int __must_check inode_setattr(struct inode *, struct iattr *);
+ 
+ extern void file_update_time(struct file *file);
+ 
++extern int generic_show_options(struct seq_file *m, struct vfsmount *mnt);
++extern void save_mount_options(struct super_block *sb, char *options);
++
+ static inline ino_t parent_ino(struct dentry *dentry)
+ {
+ 	ino_t res;
+

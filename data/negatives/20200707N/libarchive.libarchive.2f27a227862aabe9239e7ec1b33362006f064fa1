@@ -1,0 +1,55 @@
+commit 2f27a227862aabe9239e7ec1b33362006f064fa1
+Author: Tim Kientzle <kientzle@gmail.com>
+Date:   Sun Jun 14 13:46:29 2009 -0400
+
+    When building out the read filter pipeline, ask each filter
+    for some data after we initialize it.  This catches filter
+    startup failures (such as errors forking an external program)
+    at open time.  Adjust one test that now sees an error earlier.
+    
+    SVN-Revision: 1166
+
+diff --git a/libarchive/archive_read.c b/libarchive/archive_read.c
+index 93cf18bc..535e360e 100644
+--- a/libarchive/archive_read.c
++++ b/libarchive/archive_read.c
+@@ -330,6 +330,7 @@ build_stream(struct archive_read *a)
+ 	int number_bidders, i, bid, best_bid;
+ 	struct archive_read_filter_bidder *bidder, *best_bidder;
+ 	struct archive_read_filter *filter;
++	ssize_t avail;
+ 	int r;
+ 
+ 	for (;;) {
+@@ -368,6 +369,12 @@ build_stream(struct archive_read *a)
+ 			free(filter);
+ 			return (r);
+ 		}
++		/* Verify the filter by asking it for some data. */
++		__archive_read_filter_ahead(filter, 1, &avail);
++		if (avail < ARCHIVE_OK) {
++			free(filter);
++			return (avail);
++		}
+ 		a->filter = filter;
+ 	}
+ }
+diff --git a/libarchive/test/test_read_compress_program.c b/libarchive/test/test_read_compress_program.c
+index c866e8ae..2d9e22b0 100644
+--- a/libarchive/test/test_read_compress_program.c
++++ b/libarchive/test/test_read_compress_program.c
+@@ -53,11 +53,9 @@ DEFINE_TEST(test_read_compress_program)
+ 	assertEqualIntA(a, ARCHIVE_OK, r);
+ 	assertEqualIntA(a, ARCHIVE_OK,
+ 	    archive_read_support_format_all(a));
+-	assertEqualIntA(a, ARCHIVE_OK,
+-	    archive_read_open_memory(a, archive, sizeof(archive)));
+ 	assertEqualIntA(a, ARCHIVE_FATAL,
+-	    archive_read_next_header(a, &ae));
+-	assertEqualIntA(a, ARCHIVE_WARN, archive_read_close(a));
++	    archive_read_open_memory(a, archive, sizeof(archive)));
++	assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
+ 	assertEqualInt(ARCHIVE_OK, archive_read_finish(a));
+ 
+ 	/*
+

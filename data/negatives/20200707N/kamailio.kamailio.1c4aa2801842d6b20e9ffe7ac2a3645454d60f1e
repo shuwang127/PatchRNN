@@ -1,0 +1,93 @@
+commit 1c4aa2801842d6b20e9ffe7ac2a3645454d60f1e
+Author: Jan Janak <jan@iptel.org>
+Date:   Wed Sep 1 11:41:09 2004 +0000
+
+    Registrar can will now add received parameter to contacts if corresponding
+    usrloc contact contains "received" attribute.
+
+diff --git a/modules_s/registrar/reg_mod.c b/modules_s/registrar/reg_mod.c
+index 9c9f58ad0..5e552c012 100644
+--- a/modules_s/registrar/reg_mod.c
++++ b/modules_s/registrar/reg_mod.c
+@@ -67,6 +67,12 @@ int max_expires     = 0;              /* Minimum expires the phones are allowed
+ char* realm_pref    = "";   /* Realm prefix to be removed */
+ str realm_prefix;
+ 
++#define RCV_NAME "received"
++#define RCV_NAME_LEN (sizeof(RCV_NAME) - 1)
++
++str rcv_param = {RCV_NAME, RCV_NAME_LEN};
++
++
+ /*
+  * sl_send_reply function pointer
+  */
+@@ -98,6 +104,7 @@ static param_export_t params[] = {
+ 	{"realm_prefix",    STR_PARAM, &realm_pref     },
+ 	{"min_expires",     INT_PARAM, &min_expires    },
+ 	{"max_expires",     INT_PARAM, &max_expires    },
++        {"received_param",  STR_PARAM, &rcv_param      },
+ 	{0,0,0}
+ };
+ 
+@@ -139,6 +146,8 @@ static int mod_init(void)
+ 	realm_prefix.s = realm_pref;
+ 	realm_prefix.len = strlen(realm_pref);
+ 	
++	rcv_param.len = sizeof(rcv_param.s);
++
+ 	bind_usrloc = (bind_usrloc_t)find_export("ul_bind_usrloc", 1, 0);
+ 	if (!bind_usrloc) {
+ 		LOG(L_ERR, "registrar: Can't bind usrloc\n");
+diff --git a/modules_s/registrar/reg_mod.h b/modules_s/registrar/reg_mod.h
+index ad74bddc0..8952b8746 100644
+--- a/modules_s/registrar/reg_mod.h
++++ b/modules_s/registrar/reg_mod.h
+@@ -47,6 +47,8 @@ extern str realm_prefix;
+ 
+ extern float def_q;
+ 
++extern str rcv_param;
++
+ usrloc_api_t ul;  /* Structure containing pointers to usrloc functions */
+ 
+ extern int (*sl_reply)(struct sip_msg* _m, char* _s1, char* _s2);
+diff --git a/modules_s/registrar/reply.c b/modules_s/registrar/reply.c
+index 758c59986..7827b9ffb 100644
+--- a/modules_s/registrar/reply.c
++++ b/modules_s/registrar/reply.c
+@@ -90,6 +90,15 @@ static inline unsigned int calc_buf_len(ucontact_t* c)
+ 			qlen = len_q(c->q);
+ 			if (qlen) len += Q_PARAM_LEN + qlen;
+ 			len += EXPIRES_PARAM_LEN + INT2STR_MAX_LEN;
++			if (c->received.s) {
++				len += 1 /* ; */ 
++					+ rcv_param.len 
++					+ 1 /* = */ 
++					+ 1 /* dquote */ 
++					+ c->received.len
++					+ 1 /* dquote */
++					;
++			}
+ 		}
+ 		c = c->next;
+ 	}
+@@ -156,6 +165,17 @@ int build_contact(ucontact_t* c)
+ 			p += EXPIRES_PARAM_LEN;
+ 			memcpy(p, int2str((int)(c->expires - act_time), &len), len);
+ 			p += len;
++
++			if (c->received.s) {
++				*p++ = ';';
++				memcpy(p, rcv_param.s, rcv_param.len);
++				p += rcv_param.len;
++				*p++ = '=';
++				*p++ = '\"';
++				memcpy(p, c->received.s, c->received.len);
++				p += c->received.len;
++				*p++ = '\"';
++			}
+ 		}
+ 
+ 		c = c->next;
+

@@ -1,0 +1,46 @@
+commit 90abccf2c6e6e9c5a5d519eaed95292afa30aa11
+Author: Miao Xie <miaox@cn.fujitsu.com>
+Date:   Thu Sep 13 04:53:47 2012 -0600
+
+    Revert "Btrfs: do not do filemap_write_and_wait_range in fsync"
+    
+    This reverts commit 0885ef5b5601e9b007c383e77c172769b1f214fd
+    
+    After applying the above patch, the performance slowed down because the dirty
+    page flush can only be done by one task, so revert it.
+    
+    The following is the test result of sysbench:
+            Before          After
+            24MB/s          39MB/s
+    
+    Signed-off-by: Miao Xie <miaox@cn.fujitsu.com>
+
+diff --git a/fs/btrfs/file.c b/fs/btrfs/file.c
+index 0a4b03d8fcd6..d0fc4c5aaf15 100644
+--- a/fs/btrfs/file.c
++++ b/fs/btrfs/file.c
+@@ -1544,12 +1544,20 @@ int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
+ 
+ 	trace_btrfs_sync_file(file, datasync);
+ 
++	/*
++	 * We write the dirty pages in the range and wait until they complete
++	 * out of the ->i_mutex. If so, we can flush the dirty pages by
++	 * multi-task, and make the performance up.
++	 */
++	ret = filemap_write_and_wait_range(inode->i_mapping, start, end);
++	if (ret)
++		return ret;
++
+ 	mutex_lock(&inode->i_mutex);
+ 
+ 	/*
+-	 * we wait first, since the writeback may change the inode, also wait
+-	 * ordered range does a filemape_write_and_wait_range which is why we
+-	 * don't do it above like other file systems.
++	 * We flush the dirty pages again to avoid some dirty pages in the
++	 * range being left.
+ 	 */
+ 	atomic_inc(&root->log_batch);
+ 	btrfs_wait_ordered_range(inode, start, end);
+

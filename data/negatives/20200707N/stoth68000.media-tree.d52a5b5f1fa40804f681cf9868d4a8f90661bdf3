@@ -1,0 +1,59 @@
+commit d52a5b5f1fa40804f681cf9868d4a8f90661bdf3
+Author: Miao Xie <miaox@cn.fujitsu.com>
+Date:   Wed Jan 5 10:07:18 2011 +0000
+
+    btrfs: try to reclaim some space when chunk allocation fails
+    
+    We cannot write data into files when when there is tiny space in the filesystem.
+    
+    Reproduce steps:
+     # mkfs.btrfs /dev/sda1
+     # mount /dev/sda1 /mnt
+     # dd if=/dev/zero of=/mnt/tmpfile0 bs=4K count=1
+     # dd if=/dev/zero of=/mnt/tmpfile1 bs=4K count=99999999999999
+       (fill the filesystem)
+     # umount /mnt
+     # mount /dev/sda1 /mnt
+     # rm -f /mnt/tmpfile0
+     # dd if=/dev/zero of=/mnt/tmpfile0 bs=4K count=1
+       (failed with nospec)
+    
+    But if we do the last step again, we can write data successfully. The reason of
+    the problem is that btrfs didn't try to commit the current transaction and
+    reclaim some space when chunk allocation failed.
+    
+    This patch fixes it by committing the current transaction to reclaim some
+    space when chunk allocation fails.
+    
+    Signed-off-by: Miao Xie <miaox@cn.fujitsu.com>
+    Reviewed-by: Josef Bacik <josef@redhat.com>
+    Signed-off-by: Chris Mason <chris.mason@oracle.com>
+
+diff --git a/fs/btrfs/extent-tree.c b/fs/btrfs/extent-tree.c
+index b180efdc8b68..3c71d95111fe 100644
+--- a/fs/btrfs/extent-tree.c
++++ b/fs/btrfs/extent-tree.c
+@@ -3162,8 +3162,12 @@ int btrfs_check_data_free_space(struct inode *inode, u64 bytes)
+ 					     bytes + 2 * 1024 * 1024,
+ 					     alloc_target, 0);
+ 			btrfs_end_transaction(trans, root);
+-			if (ret < 0)
+-				return ret;
++			if (ret < 0) {
++				if (ret != -ENOSPC)
++					return ret;
++				else
++					goto commit_trans;
++			}
+ 
+ 			if (!data_sinfo) {
+ 				btrfs_set_inode_space_info(root, inode);
+@@ -3174,6 +3178,7 @@ int btrfs_check_data_free_space(struct inode *inode, u64 bytes)
+ 		spin_unlock(&data_sinfo->lock);
+ 
+ 		/* commit the current transaction and try again */
++commit_trans:
+ 		if (!committed && !root->fs_info->open_ioctl_trans) {
+ 			committed = 1;
+ 			trans = btrfs_join_transaction(root, 1);
+

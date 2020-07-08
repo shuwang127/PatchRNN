@@ -1,0 +1,236 @@
+commit c045256d146800ea1d741a8e9e377dada6b7e195
+Author: David Gibson <david@gibson.dropbear.id.au>
+Date:   Mon Nov 23 19:31:14 2009 +0000
+
+    powerpc/mm: Fix bug in pagetable cache cleanup with CONFIG_PPC_SUBPAGE_PROT
+    
+    Commit a0668cdc154e54bf0c85182e0535eea237d53146 cleans up the handling
+    of kmem_caches for allocating various levels of pagetables.
+    Unfortunately, it conflicts badly with CONFIG_PPC_SUBPAGE_PROT, due to
+    the latter's cleverly hidden technique of adding some extra allocation
+    space to the top level page directory to store the extra information
+    it needs.
+    
+    Since that extra allocation really doesn't fit into the cleaned up
+    page directory allocating scheme, this patch alters
+    CONFIG_PPC_SUBPAGE_PROT to instead allocate its struct
+    subpage_prot_table as part of the mm_context_t.
+    
+    Signed-off-by: David Gibson <david@gibson.dropbear.id.au>
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+
+diff --git a/arch/powerpc/include/asm/mmu-hash64.h b/arch/powerpc/include/asm/mmu-hash64.h
+index 7514ec2f8540..9d9551840f4a 100644
+--- a/arch/powerpc/include/asm/mmu-hash64.h
++++ b/arch/powerpc/include/asm/mmu-hash64.h
+@@ -373,6 +373,38 @@ extern void slb_set_size(u16 size);
+ 
+ #ifndef __ASSEMBLY__
+ 
++#ifdef CONFIG_PPC_SUBPAGE_PROT
++/*
++ * For the sub-page protection option, we extend the PGD with one of
++ * these.  Basically we have a 3-level tree, with the top level being
++ * the protptrs array.  To optimize speed and memory consumption when
++ * only addresses < 4GB are being protected, pointers to the first
++ * four pages of sub-page protection words are stored in the low_prot
++ * array.
++ * Each page of sub-page protection words protects 1GB (4 bytes
++ * protects 64k).  For the 3-level tree, each page of pointers then
++ * protects 8TB.
++ */
++struct subpage_prot_table {
++	unsigned long maxaddr;	/* only addresses < this are protected */
++	unsigned int **protptrs[2];
++	unsigned int *low_prot[4];
++};
++
++#define SBP_L1_BITS		(PAGE_SHIFT - 2)
++#define SBP_L2_BITS		(PAGE_SHIFT - 3)
++#define SBP_L1_COUNT		(1 << SBP_L1_BITS)
++#define SBP_L2_COUNT		(1 << SBP_L2_BITS)
++#define SBP_L2_SHIFT		(PAGE_SHIFT + SBP_L1_BITS)
++#define SBP_L3_SHIFT		(SBP_L2_SHIFT + SBP_L2_BITS)
++
++extern void subpage_prot_free(struct mm_struct *mm);
++extern void subpage_prot_init_new_context(struct mm_struct *mm);
++#else
++static inline void subpage_prot_free(pgd_t *pgd) {}
++static inline void subpage_prot_init_new_context(struct mm_struct *mm) { }
++#endif /* CONFIG_PPC_SUBPAGE_PROT */
++
+ typedef unsigned long mm_context_id_t;
+ 
+ typedef struct {
+@@ -386,6 +418,9 @@ typedef struct {
+ 	u16 sllp;		/* SLB page size encoding */
+ #endif
+ 	unsigned long vdso_base;
++#ifdef CONFIG_PPC_SUBPAGE_PROT
++	struct subpage_prot_table spt;
++#endif /* CONFIG_PPC_SUBPAGE_PROT */
+ } mm_context_t;
+ 
+ 
+diff --git a/arch/powerpc/include/asm/pgalloc-64.h b/arch/powerpc/include/asm/pgalloc-64.h
+index 5c1cd73dafa8..605f5c5398d1 100644
+--- a/arch/powerpc/include/asm/pgalloc-64.h
++++ b/arch/powerpc/include/asm/pgalloc-64.h
+@@ -28,10 +28,6 @@
+  */
+ #define MAX_PGTABLE_INDEX_SIZE	0xf
+ 
+-#ifndef CONFIG_PPC_SUBPAGE_PROT
+-static inline void subpage_prot_free(pgd_t *pgd) {}
+-#endif
+-
+ extern struct kmem_cache *pgtable_cache[];
+ #define PGT_CACHE(shift) (pgtable_cache[(shift)-1])
+ 
+@@ -42,7 +38,6 @@ static inline pgd_t *pgd_alloc(struct mm_struct *mm)
+ 
+ static inline void pgd_free(struct mm_struct *mm, pgd_t *pgd)
+ {
+-	subpage_prot_free(pgd);
+ 	kmem_cache_free(PGT_CACHE(PGD_INDEX_SIZE), pgd);
+ }
+ 
+diff --git a/arch/powerpc/include/asm/pte-hash64-64k.h b/arch/powerpc/include/asm/pte-hash64-64k.h
+index 82b72207c51c..c4490f9c67c4 100644
+--- a/arch/powerpc/include/asm/pte-hash64-64k.h
++++ b/arch/powerpc/include/asm/pte-hash64-64k.h
+@@ -76,41 +76,4 @@
+ 	remap_pfn_range((vma), (addr), (pfn), PAGE_SIZE,		\
+ 			__pgprot(pgprot_val((prot)) | _PAGE_4K_PFN))
+ 
+-
+-#ifdef CONFIG_PPC_SUBPAGE_PROT
+-/*
+- * For the sub-page protection option, we extend the PGD with one of
+- * these.  Basically we have a 3-level tree, with the top level being
+- * the protptrs array.  To optimize speed and memory consumption when
+- * only addresses < 4GB are being protected, pointers to the first
+- * four pages of sub-page protection words are stored in the low_prot
+- * array.
+- * Each page of sub-page protection words protects 1GB (4 bytes
+- * protects 64k).  For the 3-level tree, each page of pointers then
+- * protects 8TB.
+- */
+-struct subpage_prot_table {
+-	unsigned long maxaddr;	/* only addresses < this are protected */
+-	unsigned int **protptrs[2];
+-	unsigned int *low_prot[4];
+-};
+-
+-#undef PGD_TABLE_SIZE
+-#define PGD_TABLE_SIZE		((sizeof(pgd_t) << PGD_INDEX_SIZE) + \
+-				 sizeof(struct subpage_prot_table))
+-
+-#define SBP_L1_BITS		(PAGE_SHIFT - 2)
+-#define SBP_L2_BITS		(PAGE_SHIFT - 3)
+-#define SBP_L1_COUNT		(1 << SBP_L1_BITS)
+-#define SBP_L2_COUNT		(1 << SBP_L2_BITS)
+-#define SBP_L2_SHIFT		(PAGE_SHIFT + SBP_L1_BITS)
+-#define SBP_L3_SHIFT		(SBP_L2_SHIFT + SBP_L2_BITS)
+-
+-extern void subpage_prot_free(pgd_t *pgd);
+-
+-static inline struct subpage_prot_table *pgd_subpage_prot(pgd_t *pgd)
+-{
+-	return (struct subpage_prot_table *)(pgd + PTRS_PER_PGD);
+-}
+-#endif /* CONFIG_PPC_SUBPAGE_PROT */
+ #endif	/* __ASSEMBLY__ */
+diff --git a/arch/powerpc/mm/hash_utils_64.c b/arch/powerpc/mm/hash_utils_64.c
+index 6810128aba30..50f867d657df 100644
+--- a/arch/powerpc/mm/hash_utils_64.c
++++ b/arch/powerpc/mm/hash_utils_64.c
+@@ -835,9 +835,9 @@ void demote_segment_4k(struct mm_struct *mm, unsigned long addr)
+  * Result is 0: full permissions, _PAGE_RW: read-only,
+  * _PAGE_USER or _PAGE_USER|_PAGE_RW: no access.
+  */
+-static int subpage_protection(pgd_t *pgdir, unsigned long ea)
++static int subpage_protection(struct mm_struct *mm, unsigned long ea)
+ {
+-	struct subpage_prot_table *spt = pgd_subpage_prot(pgdir);
++	struct subpage_prot_table *spt = &mm->context.spt;
+ 	u32 spp = 0;
+ 	u32 **sbpm, *sbpp;
+ 
+@@ -865,7 +865,7 @@ static int subpage_protection(pgd_t *pgdir, unsigned long ea)
+ }
+ 
+ #else /* CONFIG_PPC_SUBPAGE_PROT */
+-static inline int subpage_protection(pgd_t *pgdir, unsigned long ea)
++static inline int subpage_protection(struct mm_struct *mm, unsigned long ea)
+ {
+ 	return 0;
+ }
+diff --git a/arch/powerpc/mm/mmu_context_hash64.c b/arch/powerpc/mm/mmu_context_hash64.c
+index b9e4cc2c2057..b910d37aea1a 100644
+--- a/arch/powerpc/mm/mmu_context_hash64.c
++++ b/arch/powerpc/mm/mmu_context_hash64.c
+@@ -76,6 +76,7 @@ int init_new_context(struct task_struct *tsk, struct mm_struct *mm)
+ 	 */
+ 	if (slice_mm_new_context(mm))
+ 		slice_set_user_psize(mm, mmu_virtual_psize);
++	subpage_prot_init_new_context(mm);
+ 	mm->context.id = index;
+ 
+ 	return 0;
+@@ -92,5 +93,6 @@ EXPORT_SYMBOL_GPL(__destroy_context);
+ void destroy_context(struct mm_struct *mm)
+ {
+ 	__destroy_context(mm->context.id);
++	subpage_prot_free(mm);
+ 	mm->context.id = NO_CONTEXT;
+ }
+diff --git a/arch/powerpc/mm/subpage-prot.c b/arch/powerpc/mm/subpage-prot.c
+index 4cafc0c33d0a..a040b81e93bd 100644
+--- a/arch/powerpc/mm/subpage-prot.c
++++ b/arch/powerpc/mm/subpage-prot.c
+@@ -24,9 +24,9 @@
+  * Also makes sure that the subpage_prot_table structure is
+  * reinitialized for the next user.
+  */
+-void subpage_prot_free(pgd_t *pgd)
++void subpage_prot_free(struct mm_struct *mm)
+ {
+-	struct subpage_prot_table *spt = pgd_subpage_prot(pgd);
++	struct subpage_prot_table *spt = &mm->context.spt;
+ 	unsigned long i, j, addr;
+ 	u32 **p;
+ 
+@@ -51,6 +51,13 @@ void subpage_prot_free(pgd_t *pgd)
+ 	spt->maxaddr = 0;
+ }
+ 
++void subpage_prot_init_new_context(struct mm_struct *mm)
++{
++	struct subpage_prot_table *spt = &mm->context.spt;
++
++	memset(spt, 0, sizeof(*spt));
++}
++
+ static void hpte_flush_range(struct mm_struct *mm, unsigned long addr,
+ 			     int npages)
+ {
+@@ -87,7 +94,7 @@ static void hpte_flush_range(struct mm_struct *mm, unsigned long addr,
+ static void subpage_prot_clear(unsigned long addr, unsigned long len)
+ {
+ 	struct mm_struct *mm = current->mm;
+-	struct subpage_prot_table *spt = pgd_subpage_prot(mm->pgd);
++	struct subpage_prot_table *spt = &mm->context.spt;
+ 	u32 **spm, *spp;
+ 	int i, nw;
+ 	unsigned long next, limit;
+@@ -136,7 +143,7 @@ static void subpage_prot_clear(unsigned long addr, unsigned long len)
+ long sys_subpage_prot(unsigned long addr, unsigned long len, u32 __user *map)
+ {
+ 	struct mm_struct *mm = current->mm;
+-	struct subpage_prot_table *spt = pgd_subpage_prot(mm->pgd);
++	struct subpage_prot_table *spt = &mm->context.spt;
+ 	u32 **spm, *spp;
+ 	int i, nw;
+ 	unsigned long next, limit;
+

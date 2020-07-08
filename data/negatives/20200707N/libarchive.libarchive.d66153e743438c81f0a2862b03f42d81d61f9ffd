@@ -1,0 +1,76 @@
+commit d66153e743438c81f0a2862b03f42d81d61f9ffd
+Author: Tim Kientzle <kientzle@gmail.com>
+Date:   Sun Oct 19 18:40:55 2008 -0400
+
+    Return ARCHIVE_FATAL instead of -1 for read failures here.
+    Make end-of-file persistent; don't call the client again.
+    Comment the upcoming change to the end-of-file semantics for now,
+    since I still need to do a little more groundwork.
+    
+    SVN-Revision: 227
+
+diff --git a/libarchive/archive_read_support_compression_none.c b/libarchive/archive_read_support_compression_none.c
+index 702c6103..1ee38f64 100644
+--- a/libarchive/archive_read_support_compression_none.c
++++ b/libarchive/archive_read_support_compression_none.c
+@@ -157,7 +157,7 @@ archive_decompressor_none_read_ahead(struct archive_read *a, const void **buff,
+ 
+ 	state = (struct archive_decompress_none *)a->decompressor->data;
+ 	if (state->fatal)
+-		return (-1);
++		return (ARCHIVE_FATAL);
+ 
+ 	/*
+ 	 * Keep pulling more data until we can satisfy the request.
+@@ -199,21 +199,30 @@ archive_decompressor_none_read_ahead(struct archive_read *a, const void **buff,
+ 
+ 		/* If we've used up the client data, get more. */
+ 		if (state->client_avail <= 0) {
++			if (state->end_of_file) {
++				*buff = state->next;
++				return (state->avail);
++				/* TODO: Change this to return(0) consistent
++				 * with new eof handling commented below. */
++			}
+ 			bytes_read = (a->client_reader)(&a->archive,
+ 			    a->client_data, &state->client_buff);
+ 			if (bytes_read < 0) {		/* Read error. */
+ 				state->client_total = state->client_avail = 0;
+ 				state->client_next = state->client_buff = NULL;
+ 				state->fatal = 1;
+-				return (-1);
++				return (ARCHIVE_FATAL);
+ 			}
+-			if (bytes_read == 0) {		/* End-of-file. */
++			if (bytes_read == 0) {	/* Premature end-of-file. */
+ 				state->client_total = state->client_avail = 0;
+ 				state->client_next = state->client_buff = NULL;
+ 				state->end_of_file = 1;
+ 				/* Return whatever we do have. */
+ 				*buff = state->next;
+ 				return (state->avail);
++				/* TODO: I want to change this to
++				 * return(0) as an eof marker, but a little
++				 * more work is needed first. */
+ 			}
+ 			a->archive.raw_position += bytes_read;
+ 			state->client_total = bytes_read;
+@@ -243,7 +252,7 @@ archive_decompressor_none_read_ahead(struct archive_read *a, const void **buff,
+ 						    ENOMEM,
+ 						    "Unable to allocate copy buffer");
+ 						state->fatal = 1;
+-						return (-1);
++						return (ARCHIVE_FATAL);
+ 					}
+ 					s = t;
+ 				}
+@@ -253,7 +262,7 @@ archive_decompressor_none_read_ahead(struct archive_read *a, const void **buff,
+ 					archive_set_error(&a->archive, ENOMEM,
+ 					    "Unable to allocate copy buffer");
+ 					state->fatal = 1;
+-					return (-1);
++					return (ARCHIVE_FATAL);
+ 				}
+ 				/* Move data into newly-enlarged buffer. */
+ 				if (state->avail > 0)
+

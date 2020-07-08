@@ -1,0 +1,61 @@
+commit a64e715fc74b1a7dcc5944f848acc38b2c4d4ee2
+Author: Linus Torvalds <torvalds@woody.linux-foundation.org>
+Date:   Mon Mar 3 10:12:14 2008 -0800
+
+    Allow ARG_MAX execve string space even with a small stack limit
+    
+    The new code that removed the limitation on the execve string size
+    (which was historically 32 pages) replaced it with a much softer limit
+    based on RLIMIT_STACK which is usually much larger than the traditional
+    limit.  See commit b6a2fea39318e43fee84fa7b0b90d68bed92d2ba ("mm:
+    variable length argument support") for details.
+    
+    However, if you have a small stack limit (perhaps because you need lots
+    of stacks in a threaded environment), the new heuristic of allowing up
+    to 1/4th of RLIMIT_STACK to be used for argument and environment strings
+    could actually be smaller than the old limit.
+    
+    So just say that it's ok to have up to ARG_MAX strings regardless of the
+    value of RLIMIT_STACK, and check the rlimit only when going over that
+    traditional limit.
+    
+    (Of course, if you actually have a *really* small stack limit, the whole
+    stack itself will be limited before you hit ARG_MAX, but that has always
+    been true and is clearly the right behaviour anyway).
+    
+    Acked-by: Carlos O'Donell <carlos@codesourcery.com>
+    Cc: Michael Kerrisk <michael.kerrisk@googlemail.com>
+    Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Cc: Ollie Wild <aaw@google.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/exec.c b/fs/exec.c
+index a44b142fb460..54a0a557b678 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -173,8 +173,15 @@ static struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
+ 		return NULL;
+ 
+ 	if (write) {
+-		struct rlimit *rlim = current->signal->rlim;
+ 		unsigned long size = bprm->vma->vm_end - bprm->vma->vm_start;
++		struct rlimit *rlim;
++
++		/*
++		 * We've historically supported up to 32 pages (ARG_MAX)
++		 * of argument strings even with small stacks
++		 */
++		if (size <= ARG_MAX)
++			return page;
+ 
+ 		/*
+ 		 * Limit to 1/4-th the stack size for the argv+env strings.
+@@ -183,6 +190,7 @@ static struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
+ 		 *  - the program will have a reasonable amount of stack left
+ 		 *    to work from.
+ 		 */
++		rlim = current->signal->rlim;
+ 		if (size > rlim[RLIMIT_STACK].rlim_cur / 4) {
+ 			put_page(page);
+ 			return NULL;
+

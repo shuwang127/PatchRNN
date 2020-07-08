@@ -1,0 +1,259 @@
+commit 32bde73da26d1fb5c5c3094e8f63a411d875029f
+Author: Sage Weil <sage@newdream.net>
+Date:   Thu Mar 12 11:14:09 2009 -0700
+
+    mds: MDSMap::get_state_naem -> ceph_mds_state_name
+
+diff --git a/src/include/ceph_fs.h b/src/include/ceph_fs.h
+index 8bdf67d116..27156205f2 100644
+--- a/src/include/ceph_fs.h
++++ b/src/include/ceph_fs.h
+@@ -582,11 +582,11 @@ struct ceph_mds_getmap {
+  *   > 0 -> in
+  *  <= 0 -> out
+  */
+-#define CEPH_MDS_STATE_DNE         0  /* down, does not exist. */
++//#define CEPH_MDS_STATE_DNE         0  /* down, does not exist. */
+ #define CEPH_MDS_STATE_STOPPED    -1  /* down, once existed, but no subtrees.
+ 					 empty log. */
+-#define CEPH_MDS_STATE_DESTROYING -2  /* down, existing, semi-destroyed. */
+-#define CEPH_MDS_STATE_FAILED      3  /* down, needs to be recovered. */
++  //#define CEPH_MDS_STATE_DESTROYING -2  /* down, existing, semi-destroyed. */
++  //#define CEPH_MDS_STATE_FAILED      3  /* down, needs to be recovered. */
+ 
+ #define CEPH_MDS_STATE_BOOT       -4  /* up, boot announcement. */
+ #define CEPH_MDS_STATE_STANDBY    -5  /* up, idle.  waiting for assignment. */
+@@ -602,6 +602,34 @@ struct ceph_mds_getmap {
+ #define CEPH_MDS_STATE_ACTIVE      12 /* up, active */
+ #define CEPH_MDS_STATE_STOPPING    13 /* up, but exporting metadata */
+ 
++static inline const char *ceph_mds_state_name(int s)
++{
++	switch (s) {
++		// down and out
++	case CEPH_MDS_STATE_STOPPED:    return "down:stopped";
++		/*
++		  case STATE_DNE:        return "dne";
++		  case STATE_DESTROYING: return "down:destroying";
++		  case STATE_FAILED:     return "down:failed";
++		*/
++		/* up and out */
++	case CEPH_MDS_STATE_BOOT:       return "up:boot";
++	case CEPH_MDS_STATE_STANDBY:    return "up:standby";
++	case CEPH_MDS_STATE_STANDBY_REPLAY:    return "up:standby-replay";
++	case CEPH_MDS_STATE_CREATING:   return "up:creating";
++	case CEPH_MDS_STATE_STARTING:   return "up:starting";
++		/* up and in */
++	case CEPH_MDS_STATE_REPLAY:     return "up:replay";
++	case CEPH_MDS_STATE_RESOLVE:    return "up:resolve";
++	case CEPH_MDS_STATE_RECONNECT:  return "up:reconnect";
++	case CEPH_MDS_STATE_REJOIN:     return "up:rejoin";
++	case CEPH_MDS_STATE_ACTIVE:     return "up:active";
++	case CEPH_MDS_STATE_STOPPING:   return "up:stopping";
++	default: return "";
++	}
++	return 0;
++}
++
+ 
+ /*
+  * metadata lock types.
+diff --git a/src/mds/MDS.cc b/src/mds/MDS.cc
+index 9128143af0..8aef7c2b5d 100644
+--- a/src/mds/MDS.cc
++++ b/src/mds/MDS.cc
+@@ -441,9 +441,9 @@ void MDS::beacon_start()
+ void MDS::beacon_send()
+ {
+   ++beacon_last_seq;
+-  dout(10) << "beacon_send " << MDSMap::get_state_name(want_state)
++  dout(10) << "beacon_send " << ceph_mds_state_name(want_state)
+ 	   << " seq " << beacon_last_seq
+-	   << " (currently " << MDSMap::get_state_name(state) << ")"
++	   << " (currently " << ceph_mds_state_name(state) << ")"
+ 	   << dendl;
+ 
+   // pick new random mon if we have any outstanding beacons...
+@@ -465,7 +465,7 @@ void MDS::beacon_send()
+ 
+ void MDS::handle_mds_beacon(MMDSBeacon *m)
+ {
+-  dout(10) << "handle_mds_beacon " << MDSMap::get_state_name(m->get_state())
++  dout(10) << "handle_mds_beacon " << ceph_mds_state_name(m->get_state())
+ 	   << " seq " << m->get_seq() << dendl;
+   version_t seq = m->get_seq();
+ 
+@@ -571,7 +571,7 @@ void MDS::handle_mds_map(MMDSMap *m)
+   addr = messenger->get_myaddr();
+   whoami = mdsmap->get_rank(addr);
+   state = mdsmap->get_state(addr);
+-  dout(10) << "map says i am " << addr << " mds" << whoami << " state " << MDSMap::get_state_name(state) << dendl;
++  dout(10) << "map says i am " << addr << " mds" << whoami << " state " << ceph_mds_state_name(state) << dendl;
+ 
+   if (state == MDSMap::STATE_STANDBY) {
+     want_state = state = MDSMap::STATE_STANDBY;
+@@ -620,8 +620,8 @@ void MDS::handle_mds_map(MMDSMap *m)
+   // did it change?
+   if (oldstate != state) {
+     dout(1) << "handle_mds_map state change "
+-	    << mdsmap->get_state_name(oldstate) << " --> "
+-	    << mdsmap->get_state_name(state) << dendl;
++	    << ceph_mds_state_name(oldstate) << " --> "
++	    << ceph_mds_state_name(state) << dendl;
+     want_state = state;
+ 
+     // now active?
+@@ -740,7 +740,7 @@ void MDS::bcast_mds_map()
+ 
+ void MDS::request_state(int s)
+ {
+-  dout(3) << "request_state " << MDSMap::get_state_name(s) << dendl;
++  dout(3) << "request_state " << ceph_mds_state_name(s) << dendl;
+   want_state = s;
+   beacon_send();
+ }
+diff --git a/src/mds/MDSMap.cc b/src/mds/MDSMap.cc
+index d8f48df3e3..f81afffdcc 100644
+--- a/src/mds/MDSMap.cc
++++ b/src/mds/MDSMap.cc
+@@ -50,7 +50,7 @@ void MDSMap::print(ostream& out)
+ 	<< " '" << info.name << "'"
+ 	<< " mds" << info.rank
+ 	<< "." << info.inc
+-	<< " " << get_state_name(info.state)
++	<< " " << ceph_mds_state_name(info.state)
+ 	<< " seq " << info.state_seq;
+     if (info.laggy())
+       out << " laggy since " << info.laggy_since;
+@@ -85,7 +85,7 @@ void MDSMap::print_summary(ostream& out)
+   out << "e" << get_epoch() << ": " << up.size() << "/" << in.size() << "/" << max_mds << " up";
+ 
+   for (map<int,int>::reverse_iterator p = by_state.rbegin(); p != by_state.rend(); p++)
+-    out << ", " << p->second << " " << get_state_name(p->first);
++    out << ", " << p->second << " " << ceph_mds_state_name(p->first);
+   
+   if (failed.size())
+     out << ", " << failed.size() << " failed";
+diff --git a/src/mds/MDSMap.h b/src/mds/MDSMap.h
+index 2991f99228..5686c1c75f 100644
+--- a/src/mds/MDSMap.h
++++ b/src/mds/MDSMap.h
+@@ -75,34 +75,6 @@ class MDSMap {
+   static const int STATE_ACTIVE =     CEPH_MDS_STATE_ACTIVE; // up, active
+   static const int STATE_STOPPING  =  CEPH_MDS_STATE_STOPPING; // up, exporting metadata (-> standby or out)
+   
+-  static const char *get_state_name(int s) {
+-    switch (s) {
+-      // down and out
+-    case STATE_STOPPED:    return "down:stopped";
+-      /*
+-    case STATE_DNE:        return "dne";
+-    case STATE_DESTROYING: return "down:destroying";
+-      // down and in
+-    case STATE_FAILED:     return "down:failed";
+-      */
+-      // up and out
+-    case STATE_BOOT:       return "up:boot";
+-    case STATE_STANDBY:    return "up:standby";
+-    case STATE_STANDBY_REPLAY:    return "up:standby-replay";
+-    case STATE_CREATING:   return "up:creating";
+-    case STATE_STARTING:   return "up:starting";
+-      // up and in
+-    case STATE_REPLAY:     return "up:replay";
+-    case STATE_RESOLVE:    return "up:resolve";
+-    case STATE_RECONNECT:  return "up:reconnect";
+-    case STATE_REJOIN:     return "up:rejoin";
+-    case STATE_ACTIVE:     return "up:active";
+-    case STATE_STOPPING:   return "up:stopping";
+-    default: assert(0);
+-    }
+-    return 0;
+-  }
+-
+   struct mds_info_t {
+     string name;
+     int32_t rank;
+diff --git a/src/messages/MMDSBeacon.h b/src/messages/MMDSBeacon.h
+index ccc2c1cd04..ebde2fa808 100644
+--- a/src/messages/MMDSBeacon.h
++++ b/src/messages/MMDSBeacon.h
+@@ -50,7 +50,7 @@ class MMDSBeacon : public Message {
+   void set_standby_for_name(string& n) { standby_for_name = n; }
+ 
+   void print(ostream& out) {
+-    out << "mdsbeacon(" << name << " " << MDSMap::get_state_name(state) 
++    out << "mdsbeacon(" << name << " " << ceph_mds_state_name(state) 
+ 	<< " seq " << seq << ")";
+   }
+   
+diff --git a/src/mon/MDSMonitor.cc b/src/mon/MDSMonitor.cc
+index 212df54406..b2bf3e524a 100644
+--- a/src/mon/MDSMonitor.cc
++++ b/src/mon/MDSMonitor.cc
+@@ -211,8 +211,8 @@ bool MDSMonitor::preprocess_beacon(MMDSBeacon *m)
+       // legal state change?
+       if ((info.state == MDSMap::STATE_STANDBY ||
+ 	   info.state == MDSMap::STATE_STANDBY_REPLAY) && state > 0) {
+-	dout(10) << "mds_beacon mds can't activate itself (" << MDSMap::get_state_name(info.state)
+-		 << " -> " << MDSMap::get_state_name(state) << ")" << dendl;
++	dout(10) << "mds_beacon mds can't activate itself (" << ceph_mds_state_name(info.state)
++		 << " -> " << ceph_mds_state_name(state) << ")" << dendl;
+ 	goto ignore;
+       }
+ 
+@@ -297,8 +297,8 @@ bool MDSMonitor::prepare_beacon(MMDSBeacon *m)
+     }
+   
+     dout(10) << "prepare_beacon mds" << info.rank
+-	     << " " << MDSMap::get_state_name(info.state)
+-	     << " -> " << MDSMap::get_state_name(state)
++	     << " " << ceph_mds_state_name(info.state)
++	     << " -> " << ceph_mds_state_name(state)
+ 	     << dendl;
+     if (state == MDSMap::STATE_STOPPED) {
+       pending_mdsmap.up.erase(info.rank);
+@@ -419,7 +419,7 @@ bool MDSMonitor::prepare_command(MMonCommand *m)
+       } else {
+ 	r = -EEXIST;
+ 	ss << "mds" << who << " not active (" 
+-	   << mdsmap.get_state_name(mdsmap.get_state(who)) << ")";
++	   << ceph_mds_state_name(mdsmap.get_state(who)) << ")";
+       }
+     }
+     else if (m->cmd[1] == "set_max_mds" && m->cmd.size() > 2) {
+@@ -546,7 +546,7 @@ void MDSMonitor::tick()
+       MDSMap::mds_info_t& info = pending_mdsmap.mds_info[addr];
+ 
+       dout(10) << "no beacon from " << addr << " mds" << info.rank << "." << info.inc
+-	       << " " << MDSMap::get_state_name(info.state)
++	       << " " << ceph_mds_state_name(info.state)
+ 	       << " since " << since << dendl;
+       
+       // are we in?
+@@ -557,7 +557,7 @@ void MDSMonitor::tick()
+ 	  pending_mdsmap.find_standby_for(info.rank, info.name, sa)) {
+ 	MDSMap::mds_info_t& si = pending_mdsmap.mds_info[sa];
+ 	dout(10) << " replacing " << addr << " mds" << info.rank << "." << info.inc
+-		 << " " << MDSMap::get_state_name(info.state)
++		 << " " << ceph_mds_state_name(info.state)
+ 		 << " with " << si.name << " " << sa << dendl;
+ 	switch (info.state) {
+ 	case MDSMap::STATE_CREATING:
+@@ -595,14 +595,14 @@ void MDSMonitor::tick()
+ 	do_propose = true;
+       } else if (info.state == MDSMap::STATE_STANDBY_REPLAY) {
+ 	dout(10) << " failing " << addr << " mds" << info.rank << "." << info.inc
+-		 << " " << MDSMap::get_state_name(info.state)
++		 << " " << ceph_mds_state_name(info.state)
+ 		 << dendl;
+ 	pending_mdsmap.mds_info.erase(addr);
+ 	do_propose = true;
+       } else if (!info.laggy()) {
+ 	// just mark laggy
+ 	dout(10) << " marking " << addr << " mds" << info.rank << "." << info.inc
+-		 << " " << MDSMap::get_state_name(info.state)
++		 << " " << ceph_mds_state_name(info.state)
+ 		 << " laggy" << dendl;
+ 	info.laggy_since = now;
+ 	do_propose = true;
+

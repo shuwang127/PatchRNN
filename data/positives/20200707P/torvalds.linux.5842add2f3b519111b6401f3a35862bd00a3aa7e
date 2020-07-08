@@ -1,0 +1,123 @@
+commit 5842add2f3b519111b6401f3a35862bd00a3aa7e
+Author: Andy Adamson <andros@citi.umich.edu>
+Date:   Sun Mar 26 01:37:26 2006 -0800
+
+    [PATCH] VFS,fs/locks.c,NFSD4: add race_free posix_lock_file_conf() interface
+    
+    Lockd and the NFSv4 server both exercise a race condition where
+    posix_test_lock() is called either before or after posix_lock_file() to
+    deal with a denied lock request due to a conflicting lock.
+    
+    Remove the race condition for the NFSv4 server by adding a new conflicting
+    lock parameter to __posix_lock_file() , changing the name to
+    __posix_lock_file_conf().
+    
+    Keep posix_lock_file() interface, add posix_lock_conf() interface, both
+    call __posix_lock_file_conf().
+    
+    [akpm@osdl.org: Put the EXPORT_SYMBOL() where it belongs]
+    Signed-off-by: Andy Adamson <andros@citi.umich.edu>
+    Signed-off-by: J. Bruce Fields <bfields@citi.umich.edu>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/fs/locks.c b/fs/locks.c
+index 4badf6a0e7b6..4d9e71d43e7e 100644
+--- a/fs/locks.c
++++ b/fs/locks.c
+@@ -792,9 +792,7 @@ static int flock_lock_file(struct file *filp, struct file_lock *new_fl)
+ 	return error;
+ }
+ 
+-EXPORT_SYMBOL(posix_lock_file);
+-
+-static int __posix_lock_file(struct inode *inode, struct file_lock *request)
++static int __posix_lock_file_conf(struct inode *inode, struct file_lock *request, struct file_lock *conflock)
+ {
+ 	struct file_lock *fl;
+ 	struct file_lock *new_fl, *new_fl2;
+@@ -818,6 +816,8 @@ static int __posix_lock_file(struct inode *inode, struct file_lock *request)
+ 				continue;
+ 			if (!posix_locks_conflict(request, fl))
+ 				continue;
++			if (conflock)
++				locks_copy_lock(conflock, fl);
+ 			error = -EAGAIN;
+ 			if (!(request->fl_flags & FL_SLEEP))
+ 				goto out;
+@@ -987,8 +987,24 @@ static int __posix_lock_file(struct inode *inode, struct file_lock *request)
+  */
+ int posix_lock_file(struct file *filp, struct file_lock *fl)
+ {
+-	return __posix_lock_file(filp->f_dentry->d_inode, fl);
++	return __posix_lock_file_conf(filp->f_dentry->d_inode, fl, NULL);
++}
++EXPORT_SYMBOL(posix_lock_file);
++
++/**
++ * posix_lock_file_conf - Apply a POSIX-style lock to a file
++ * @filp: The file to apply the lock to
++ * @fl: The lock to be applied
++ * @conflock: Place to return a copy of the conflicting lock, if found.
++ *
++ * Except for the conflock parameter, acts just like posix_lock_file.
++ */
++int posix_lock_file_conf(struct file *filp, struct file_lock *fl,
++			struct file_lock *conflock)
++{
++	return __posix_lock_file_conf(filp->f_dentry->d_inode, fl, conflock);
+ }
++EXPORT_SYMBOL(posix_lock_file_conf);
+ 
+ /**
+  * posix_lock_file_wait - Apply a POSIX-style lock to a file
+@@ -1004,7 +1020,7 @@ int posix_lock_file_wait(struct file *filp, struct file_lock *fl)
+ 	int error;
+ 	might_sleep ();
+ 	for (;;) {
+-		error = __posix_lock_file(filp->f_dentry->d_inode, fl);
++		error = posix_lock_file(filp, fl);
+ 		if ((error != -EAGAIN) || !(fl->fl_flags & FL_SLEEP))
+ 			break;
+ 		error = wait_event_interruptible(fl->fl_wait, !fl->fl_next);
+@@ -1076,7 +1092,7 @@ int locks_mandatory_area(int read_write, struct inode *inode,
+ 	fl.fl_end = offset + count - 1;
+ 
+ 	for (;;) {
+-		error = __posix_lock_file(inode, &fl);
++		error = __posix_lock_file_conf(inode, &fl, NULL);
+ 		if (error != -EAGAIN)
+ 			break;
+ 		if (!(fl.fl_flags & FL_SLEEP))
+@@ -1689,7 +1705,7 @@ int fcntl_setlk(unsigned int fd, struct file *filp, unsigned int cmd,
+ 		error = filp->f_op->lock(filp, cmd, file_lock);
+ 	else {
+ 		for (;;) {
+-			error = __posix_lock_file(inode, file_lock);
++			error = posix_lock_file(filp, file_lock);
+ 			if ((error != -EAGAIN) || (cmd == F_SETLK))
+ 				break;
+ 			error = wait_event_interruptible(file_lock->fl_wait,
+@@ -1832,7 +1848,7 @@ int fcntl_setlk64(unsigned int fd, struct file *filp, unsigned int cmd,
+ 		error = filp->f_op->lock(filp, cmd, file_lock);
+ 	else {
+ 		for (;;) {
+-			error = __posix_lock_file(inode, file_lock);
++			error = posix_lock_file(filp, file_lock);
+ 			if ((error != -EAGAIN) || (cmd == F_SETLK64))
+ 				break;
+ 			error = wait_event_interruptible(file_lock->fl_wait,
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 9674679525f9..ab67181a5a55 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -763,6 +763,7 @@ extern void locks_copy_lock(struct file_lock *, struct file_lock *);
+ extern void locks_remove_posix(struct file *, fl_owner_t);
+ extern void locks_remove_flock(struct file *);
+ extern int posix_test_lock(struct file *, struct file_lock *, struct file_lock *);
++extern int posix_lock_file_conf(struct file *, struct file_lock *, struct file_lock *);
+ extern int posix_lock_file(struct file *, struct file_lock *);
+ extern int posix_lock_file_wait(struct file *, struct file_lock *);
+ extern int posix_unblock_lock(struct file *, struct file_lock *);
+

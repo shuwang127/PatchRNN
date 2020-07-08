@@ -1,0 +1,343 @@
+commit df2dc878b401e77f7542f43614364b46906a1074
+Author: Eric Milkie <milkie@10gen.com>
+Date:   Wed Apr 23 14:04:20 2014 -0400
+
+    SERVER-13645 blow apart health.h and clean up headers
+
+diff --git a/src/mongo/db/repl/ghost_sync.h b/src/mongo/db/repl/ghost_sync.h
+index 619216109b..fb6c73eb76 100644
+--- a/src/mongo/db/repl/ghost_sync.h
++++ b/src/mongo/db/repl/ghost_sync.h
+@@ -28,7 +28,6 @@
+ 
+ #pragma once
+ 
+-#include "mongo/db/repl/health.h"
+ #include "mongo/db/repl/member.h"
+ #include "mongo/db/repl/oplogreader.h"
+ #include "mongo/db/repl/server.h"
+diff --git a/src/mongo/db/repl/health.cpp b/src/mongo/db/repl/health.cpp
+index 052f7b9d62..4c6822acdc 100644
+--- a/src/mongo/db/repl/health.cpp
++++ b/src/mongo/db/repl/health.cpp
+@@ -39,13 +39,13 @@
+ #include "mongo/db/repl/oplog.h"
+ #include "mongo/db/repl/oplogreader.h"
+ #include "mongo/db/repl/rs.h"
++#include "mongo/db/repl/replset_commands.h"
+ #include "mongo/util/background.h"
+ #include "mongo/util/concurrency/task.h"
+ #include "mongo/util/concurrency/value.h"
+ #include "mongo/util/goodies.h"
+ #include "mongo/util/mongoutils/html.h"
+ #include "mongo/util/ramlog.h"
+-#include "mongo/util/startup_test.h"
+ 
+ namespace mongo {
+     /* decls for connections.h */
+@@ -61,8 +61,6 @@ namespace mongo {
+     static RamLog * _rsLog = RamLog::get("rs");
+     Tee* rsLog = _rsLog;
+ 
+-    extern bool replSetBlind; // for testing
+-
+     string ago(time_t t) {
+         if( t == 0 ) return "";
+ 
+@@ -471,13 +469,4 @@ namespace mongo {
+         if( replSetBlind )
+             b.append("blind",true); // to avoid confusion if set...normally never set except for testing.
+     }
+-
+-    static struct Test : public StartupTest {
+-        void run() {
+-            HealthOptions a,b;
+-            verify( a == b );
+-            verify( a.isDefault() );
+-        }
+-    } test;
+-
+ }
+diff --git a/src/mongo/db/repl/health.h b/src/mongo/db/repl/health.h
+index 61df1e8751..1159764f45 100644
+--- a/src/mongo/db/repl/health.h
++++ b/src/mongo/db/repl/health.h
+@@ -28,47 +28,16 @@
+ 
+ #pragma once
+ 
+-#include "mongo/db/jsobj.h"
++#include <ctime>
++#include <string>
++
++#include "mongo/logger/tee.h"
+ 
+ namespace mongo {
+ 
+     // ramlog used for replSet actions
+-    extern Tee* rsLog;
+-
+-    // helper functions needed by member.cpp
+-    std::string ago(time_t t);
+-
+-    /* throws */
+-    bool requestHeartbeat(const std::string& setname,
+-                          const std::string& fromHost,
+-                          const std::string& memberFullName,
+-                          BSONObj& result,
+-                          int myConfigVersion,
+-                          int& theirConfigVersion,
+-                          bool checkEmpty = false);
+-
+-    struct HealthOptions {
+-        HealthOptions() :  
+-            heartbeatSleepMillis(2000), 
+-            heartbeatTimeoutMillis( 10000 ),
+-            heartbeatConnRetries(2) 
+-        { }
+-
+-        bool isDefault() const { return *this == HealthOptions(); }
+-
+-        // see http://dochub.mongodb.org/core/replicasetinternals
+-        unsigned heartbeatSleepMillis;
+-        unsigned heartbeatTimeoutMillis;
+-        unsigned heartbeatConnRetries ;
+-
+-        void check() {
+-            uassert(13112, "bad replset heartbeat option", heartbeatSleepMillis >= 10);
+-            uassert(13113, "bad replset heartbeat option", heartbeatTimeoutMillis >= 10);
+-        }
++    extern logger::Tee* rsLog;
+ 
+-        bool operator==(const HealthOptions& r) const {
+-            return heartbeatSleepMillis==r.heartbeatSleepMillis && heartbeatTimeoutMillis==r.heartbeatTimeoutMillis && heartbeatConnRetries==r.heartbeatConnRetries;
+-        }
+-    };
+-    
++    // helper function needed by member.cpp
++    std::string ago(time_t t);    
+ }
+diff --git a/src/mongo/db/repl/heartbeat.cpp b/src/mongo/db/repl/heartbeat.cpp
+index c5048d1a57..5e9ab7fd0b 100644
+--- a/src/mongo/db/repl/heartbeat.cpp
++++ b/src/mongo/db/repl/heartbeat.cpp
+@@ -35,7 +35,6 @@
+ #include "mongo/db/repl/bgsync.h"
+ #include "mongo/db/repl/connections.h"
+ #include "mongo/db/repl/ghost_sync.h"
+-#include "mongo/db/repl/health.h"
+ #include "mongo/db/repl/heartbeat_info.h"
+ #include "mongo/db/repl/repl_settings.h"  // replSettings
+ #include "mongo/db/repl/replset_commands.h"
+@@ -57,8 +56,6 @@ namespace mongo {
+     MONGO_FP_DECLARE(rsDelayHeartbeatResponse);
+     MONGO_FP_DECLARE(rsStopHeartbeatRequest);
+ 
+-    extern bool replSetBlind;
+-
+     unsigned int HeartbeatInfo::numPings;
+ 
+     /* { replSetHeartbeat : <setname> } */
+diff --git a/src/mongo/db/repl/heartbeat.h b/src/mongo/db/repl/heartbeat.h
+new file mode 100644
+index 0000000000..3c16feb213
+--- /dev/null
++++ b/src/mongo/db/repl/heartbeat.h
+@@ -0,0 +1,45 @@
++/**
++*    Copyright (C) 2008 10gen Inc.
++*
++*    This program is free software: you can redistribute it and/or  modify
++*    it under the terms of the GNU Affero General Public License, version 3,
++*    as published by the Free Software Foundation.
++*
++*    This program is distributed in the hope that it will be useful,
++*    but WITHOUT ANY WARRANTY; without even the implied warranty of
++*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++*    GNU Affero General Public License for more details.
++*
++*    You should have received a copy of the GNU Affero General Public License
++*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++*
++*    As a special exception, the copyright holders give permission to link the
++*    code of portions of this program with the OpenSSL library under certain
++*    conditions as described in each individual source file and distribute
++*    linked combinations including the program with the OpenSSL library. You
++*    must comply with the GNU Affero General Public License in all respects for
++*    all of the code used other than as permitted herein. If you modify file(s)
++*    with this exception, you may extend this exception to your version of the
++*    file(s), but you are not obligated to do so. If you do not wish to do so,
++*    delete this exception statement from your version. If you delete this
++*    exception statement from all source files in the program, then also delete
++*    it in the license file.
++*/
++
++#pragma once
++
++#include <string>
++
++namespace mongo {
++
++    class BSONObj;
++
++    /* throws */
++    bool requestHeartbeat(const std::string& setname,
++                          const std::string& fromHost,
++                          const std::string& memberFullName,
++                          BSONObj& result,
++                          int myConfigVersion,
++                          int& theirConfigVersion,
++                          bool checkEmpty = false);
++}
+diff --git a/src/mongo/db/repl/repl_set_health_poll_task.cpp b/src/mongo/db/repl/repl_set_health_poll_task.cpp
+index 39a890fd07..aa1b4a2140 100644
+--- a/src/mongo/db/repl/repl_set_health_poll_task.cpp
++++ b/src/mongo/db/repl/repl_set_health_poll_task.cpp
+@@ -30,6 +30,7 @@
+ 
+ #include "mongo/bson/bsonelement.h"
+ #include "mongo/db/repl/connections.h"
++#include "mongo/db/repl/heartbeat.h"
+ #include "mongo/db/repl/manager.h"
+ #include "mongo/db/repl/member.h"
+ #include "mongo/db/repl/rs.h"
+diff --git a/src/mongo/db/repl/replset_commands.cpp b/src/mongo/db/repl/replset_commands.cpp
+index 5b2888bd42..54de66225c 100644
+--- a/src/mongo/db/repl/replset_commands.cpp
++++ b/src/mongo/db/repl/replset_commands.cpp
+@@ -34,7 +34,6 @@
+ #include "mongo/db/auth/action_type.h"
+ #include "mongo/db/auth/authorization_manager.h"
+ #include "mongo/db/commands.h"
+-#include "mongo/db/repl/health.h"
+ #include "mongo/db/repl/oplog.h"
+ #include "mongo/db/repl/repl_settings.h"  // replSettings
+ #include "mongo/db/repl/replset_commands.h"
+diff --git a/src/mongo/db/repl/replset_commands.h b/src/mongo/db/repl/replset_commands.h
+index 3612382b6e..243e57a95f 100644
+--- a/src/mongo/db/repl/replset_commands.h
++++ b/src/mongo/db/repl/replset_commands.h
+@@ -36,6 +36,8 @@
+ 
+ namespace mongo {
+ 
++    extern bool replSetBlind;
++
+     /**
+      * Base class for repl set commands.  Checks basic things such if we're in
+      * rs mode before the command does its real work.
+diff --git a/src/mongo/db/repl/rs.h b/src/mongo/db/repl/rs.h
+index 8baac4a908..ade6e60025 100644
+--- a/src/mongo/db/repl/rs.h
++++ b/src/mongo/db/repl/rs.h
+@@ -35,7 +35,6 @@
+ #include "mongo/db/commands.h"
+ #include "mongo/db/index/index_descriptor.h"
+ #include "mongo/db/repl/consensus.h"
+-#include "mongo/db/repl/health.h"
+ #include "mongo/db/repl/heartbeat_info.h"
+ #include "mongo/db/repl/manager.h"
+ #include "mongo/db/repl/member.h"
+diff --git a/src/mongo/db/repl/rs_base.h b/src/mongo/db/repl/rs_base.h
+index 39fe830b91..3554ca18a3 100644
+--- a/src/mongo/db/repl/rs_base.h
++++ b/src/mongo/db/repl/rs_base.h
+@@ -28,6 +28,8 @@
+ 
+ #pragma once
+ 
++#include "mongo/db/repl/health.h"
++
+ namespace mongo {
+ 
+     /**
+diff --git a/src/mongo/db/repl/rs_config.cpp b/src/mongo/db/repl/rs_config.cpp
+index 75114f8046..c0e4c88d34 100644
+--- a/src/mongo/db/repl/rs_config.cpp
++++ b/src/mongo/db/repl/rs_config.cpp
+@@ -35,6 +35,7 @@
+ #include "mongo/db/dbhelpers.h"
+ #include "mongo/db/instance.h"
+ #include "mongo/db/repl/connections.h"
++#include "mongo/db/repl/heartbeat.h"
+ #include "mongo/db/repl/oplog.h"
+ #include "mongo/db/repl/repl_settings.h"  // replSettings
+ #include "mongo/db/repl/rs.h"
+diff --git a/src/mongo/db/repl/rs_config.h b/src/mongo/db/repl/rs_config.h
+index ee34904e99..27b3877418 100644
+--- a/src/mongo/db/repl/rs_config.h
++++ b/src/mongo/db/repl/rs_config.h
+@@ -32,7 +32,6 @@
+ 
+ #pragma once
+ 
+-#include "mongo/db/repl/health.h"
+ #include "mongo/util/concurrency/list.h"
+ #include "mongo/util/concurrency/race.h"
+ #include "mongo/util/net/hostandport.h"
+@@ -133,6 +132,29 @@ namespace mongo {
+         vector<MemberCfg> members;
+         string _id;
+         int version;
++
++        struct HealthOptions {
++        HealthOptions() :  heartbeatSleepMillis(2000), 
++                heartbeatTimeoutMillis( 10000 ),
++                heartbeatConnRetries(2) 
++            { }
++            
++            unsigned heartbeatSleepMillis;
++            unsigned heartbeatTimeoutMillis;
++            unsigned heartbeatConnRetries ;
++
++            void check() {
++                uassert(13112, "bad replset heartbeat option", heartbeatSleepMillis >= 10);
++                uassert(13113, "bad replset heartbeat option", heartbeatTimeoutMillis >= 10);
++            }
++
++            bool operator==(const HealthOptions& r) const {
++                return (heartbeatSleepMillis==r.heartbeatSleepMillis && 
++                        heartbeatTimeoutMillis==r.heartbeatTimeoutMillis &&
++                        heartbeatConnRetries==r.heartbeatConnRetries);
++            }
++        };
++
+         HealthOptions ho;
+         string md5;
+         BSONObj getLastErrorDefaults;
+diff --git a/src/mongo/db/repl/rs_initiate.cpp b/src/mongo/db/repl/rs_initiate.cpp
+index 100dc97177..5b4ffb2b4c 100644
+--- a/src/mongo/db/repl/rs_initiate.cpp
++++ b/src/mongo/db/repl/rs_initiate.cpp
+@@ -39,7 +39,7 @@
+ #include "mongo/db/auth/privilege.h"
+ #include "mongo/db/commands.h"
+ #include "mongo/db/dbhelpers.h"
+-#include "mongo/db/repl/health.h"
++#include "mongo/db/repl/heartbeat.h"
+ #include "mongo/db/repl/oplog.h"
+ #include "mongo/db/repl/repl_settings.h"  // replSettings
+ #include "mongo/db/repl/replset_commands.h"
+diff --git a/src/mongo/util/concurrency/list.h b/src/mongo/util/concurrency/list.h
+index 5bcb2a7ed9..37afe1736d 100644
+--- a/src/mongo/util/concurrency/list.h
++++ b/src/mongo/util/concurrency/list.h
+@@ -30,6 +30,8 @@
+ 
+ #pragma once
+ 
++#include "mongo/util/log.h"
++
+ namespace mongo {
+ 
+     /* DON'T USE THIS.  it was a dumb idea.
+@@ -99,7 +101,7 @@ namespace mongo {
+             }
+             prev = t->_next;
+             if( ++_orphans > 500 )
+-                log() << "warning List1 orphans=" << _orphans << endl;
++                log() << "warning List1 orphans=" << _orphans;
+         }
+ 
+     private:
+

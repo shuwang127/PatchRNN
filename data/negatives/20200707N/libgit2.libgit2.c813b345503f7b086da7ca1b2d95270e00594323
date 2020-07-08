@@ -1,0 +1,57 @@
+commit c813b345503f7b086da7ca1b2d95270e00594323
+Author: Russell Belfer <rb@github.com>
+Date:   Mon Apr 7 11:45:32 2014 -0700
+
+    Fix bug with multiple iconv conversions in one dir
+    
+    The internal buffer in the `git_path_iconv_t` structure was not
+    being reset before the calls to `iconv` were made to convert data,
+    so if there were multiple decomposed Unicode paths in a single
+    directory, paths after the first one were being appended to the
+    first instead of treated as independent data.
+
+diff --git a/src/path.c b/src/path.c
+index 1dccf90da..56b6c87f9 100644
+--- a/src/path.c
++++ b/src/path.c
+@@ -782,6 +782,8 @@ int git_path_iconv(git_path_iconv_t *ic, char **in, size_t *inlen)
+ 		!git_path_has_non_ascii(*in, *inlen))
+ 		return 0;
+ 
++	git_buf_truncate(&ic->buf, 0);
++
+ 	while (1) {
+ 		if (git_buf_grow(&ic->buf, wantlen + 1) < 0)
+ 			return -1;
+diff --git a/tests/core/iconv.c b/tests/core/iconv.c
+index 8aedab206..cb85f458a 100644
+--- a/tests/core/iconv.c
++++ b/tests/core/iconv.c
+@@ -39,8 +39,9 @@ void test_core_iconv__decomposed_to_precomposed(void)
+ {
+ #ifdef GIT_USE_ICONV
+ 	char *data = nfd;
+-	size_t datalen = strlen(nfd);
++	size_t datalen, nfdlen = strlen(nfd);
+ 
++	datalen = nfdlen;
+ 	cl_git_pass(git_path_iconv(&ic, &data, &datalen));
+ 	GIT_UNUSED(datalen);
+ 
+@@ -48,6 +49,15 @@ void test_core_iconv__decomposed_to_precomposed(void)
+ 	 * (on platforms where iconv is enabled, of course).
+ 	 */
+ 	cl_assert_equal_s(nfc, data);
++
++	/* should be able to do it multiple times with the same git_path_iconv_t */
++	data = nfd; datalen = nfdlen;
++	cl_git_pass(git_path_iconv(&ic, &data, &datalen));
++	cl_assert_equal_s(nfc, data);
++
++	data = nfd; datalen = nfdlen;
++	cl_git_pass(git_path_iconv(&ic, &data, &datalen));
++	cl_assert_equal_s(nfc, data);
+ #endif
+ }
+ 
+

@@ -1,0 +1,191 @@
+commit 1765246cf7917c4ef68aa19a77fe62d2f7260c91
+Author: Jacob Barthelmeh <jacob@wolfssl.com>
+Date:   Wed Jan 25 14:31:50 2017 -0700
+
+    bio gets test, certificate buffer tests, and increase max static memory bucket size with sessioncerts
+
+diff --git a/src/bio.c b/src/bio.c
+index 301c2854..e4bfe475 100644
+--- a/src/bio.c
++++ b/src/bio.c
+@@ -86,6 +86,32 @@ int wolfSSL_BIO_gets(WOLFSSL_BIO* bio, char* buf, int sz)
+             break;
+ #endif /* NO_FILESYSTEM */
+         case WOLFSSL_BIO_MEMORY:
++            {
++                const byte* c;
++                int   cSz;
++                cSz = wolfSSL_BIO_pending(bio);
++                if (cSz < 0) {
++                    ret = cSz;
++                    break;
++                }
++
++                if (wolfSSL_BIO_get_mem_data(bio, &c) <= 0) {
++                    ret = WOLFSSL_BIO_ERROR;
++                    break;
++                }
++
++                cSz = wolfSSL_getLineLength((char*)c, cSz);
++                /* check case where line was bigger then buffer and buffer
++                 * needs end terminator */
++                if (cSz > sz) {
++                    cSz = sz - 1;
++                    buf[cSz] = '\0';
++                }
++
++                ret = wolfSSL_BIO_read(bio, (void*)buf, cSz);
++                /* ret is read after the switch statment */
++                break;
++            }
+         case WOLFSSL_BIO_BIO:
+             {
+                 char* c;
+diff --git a/tests/api.c b/tests/api.c
+index 0ac46330..06c0305c 100644
+--- a/tests/api.c
++++ b/tests/api.c
+@@ -14964,6 +14964,43 @@ static void test_wolfSSL_X509_NAME_ENTRY(void)
+     #endif
+ }
+ 
++
++static void test_wolfSSL_BIO_gets(void)
++{
++    #if defined(OPENSSL_EXTRA)
++    BIO* bio;
++    BIO* bio2;
++    char msg[] = "\nhello wolfSSL\n security plus\t---...**adf\na...b.c";
++    char buffer[20];
++    int bufferSz = 20;
++
++    printf(testingFmt, "wolfSSL_X509_BIO_gets()");
++
++    AssertNotNull(bio = BIO_new_mem_buf((void*)msg, sizeof(msg)));
++    XMEMSET(buffer, 0, bufferSz);
++    AssertNotNull(BIO_push(bio, BIO_new(BIO_s_bio())));
++    AssertNull(bio2 = BIO_find_type(bio, BIO_TYPE_FILE));
++    AssertNotNull(bio2 = BIO_find_type(bio, BIO_TYPE_BIO));
++    AssertFalse(bio2 != BIO_next(bio));
++
++    /* BIO_gets reads a line of data */
++    AssertIntEQ(BIO_gets(bio, buffer, -3), 0);
++    AssertIntEQ(BIO_gets(bio, buffer, bufferSz), 1);
++    AssertIntEQ(BIO_gets(bio, buffer, bufferSz), 14);
++    AssertStrEQ(buffer, "hello wolfSSL\n");
++    AssertIntEQ(BIO_gets(bio, buffer, bufferSz), 19);
++    AssertIntEQ(BIO_gets(bio, buffer, bufferSz), 8);
++    AssertIntEQ(BIO_gets(bio, buffer, -1), 0);
++
++
++    BIO_free(bio);
++    BIO_free(bio2);
++
++    printf(resultFmt, passed);
++    #endif
++}
++
++
+ static void test_no_op_functions(void)
+ {
+     #if defined(OPENSSL_EXTRA)
+@@ -15767,6 +15804,7 @@ void ApiTest(void)
+     test_wolfSSL_HMAC();
+     test_wolfSSL_OBJ();
+     test_wolfSSL_X509_NAME_ENTRY();
++    test_wolfSSL_BIO_gets();
+ 
+     /* test the no op functions for compatibility */
+     test_no_op_functions();
+diff --git a/wolfcrypt/src/evp.c b/wolfcrypt/src/evp.c
+index 705a2c60..d9803d39 100644
+--- a/wolfcrypt/src/evp.c
++++ b/wolfcrypt/src/evp.c
+@@ -754,8 +754,6 @@ WOLFSSL_API int wolfSSL_EVP_PKEY_size(WOLFSSL_EVP_PKEY *pkey)
+     default:
+         return 0;
+     }
+-
+-    return 1;
+ }
+ 
+ WOLFSSL_API int wolfSSL_EVP_SignInit(WOLFSSL_EVP_MD_CTX *ctx, const WOLFSSL_EVP_MD *type)
+diff --git a/wolfcrypt/test/test.c b/wolfcrypt/test/test.c
+index 71c5ab2d..090505fd 100644
+--- a/wolfcrypt/test/test.c
++++ b/wolfcrypt/test/test.c
+@@ -10389,7 +10389,7 @@ static void show(const char *title, const char *p, unsigned int s) {
+ #define ERR_BASE_PKEY -5000
+ int openssl_pkey0_test(void)
+ {
+-#if !defined(NO_RSA) && !defined(HAVE_USER_RSA)
++#if !defined(NO_RSA) && !defined(HAVE_USER_RSA) && !defined(NO_SHA)
+     byte*   prvTmp;
+     byte*   pubTmp;
+     int prvBytes;
+@@ -10423,11 +10423,11 @@ int openssl_pkey0_test(void)
+ #ifdef USE_CERT_BUFFERS_1024
+     XMEMCPY(prvTmp, client_key_der_1024, sizeof_client_key_der_1024);
+     prvBytes = sizeof_client_key_der_1024;
+-    XMEMCPY(prvTmp, client_keypub_der_1024, sizeof_client_keypub_der_1024);
+-    prvBytes = sizeof_client_keypub_der_2048_der_1024;
++    XMEMCPY(pubTmp, client_keypub_der_1024, sizeof_client_keypub_der_1024);
++    pubBytes = sizeof_client_keypub_der_1024;
+ #elif defined(USE_CERT_BUFFERS_2048)
+-    XMEMCPY(pubTmp, client_key_der_2048, sizeof_client_key_der_2048);
+-    pubBytes = sizeof_client_key_der_2048;
++    XMEMCPY(prvTmp, client_key_der_2048, sizeof_client_key_der_2048);
++    prvBytes = sizeof_client_key_der_2048;
+     XMEMCPY(pubTmp, client_keypub_der_2048, sizeof_client_keypub_der_2048);
+     pubBytes = sizeof_client_keypub_der_2048;
+ #else
+@@ -10582,13 +10582,13 @@ int openssl_evpSig_test()
+ {
+ #if !defined(NO_RSA) && !defined(NO_SHA) && !defined(HAVE_USER_RSA)
+   	byte*   prvTmp;
+-	  byte*   pubTmp;
+-	  int prvBytes;
+-	  int pubBytes;
++	byte*   pubTmp;
++	int prvBytes;
++	int pubBytes;
+     RSA *prvRsa;
+-	  RSA *pubRsa;
+-	  EVP_PKEY *prvPkey;
+-	  EVP_PKEY *pubPkey;
++	RSA *pubRsa;
++	EVP_PKEY *prvPkey;
++	EVP_PKEY *pubPkey;
+ 
+     EVP_MD_CTX* sign;
+     EVP_MD_CTX* verf;
+@@ -10619,11 +10619,11 @@ int openssl_evpSig_test()
+ #ifdef USE_CERT_BUFFERS_1024
+     XMEMCPY(prvTmp, client_key_der_1024, sizeof_client_key_der_1024);
+     prvBytes = sizeof_client_key_der_1024;
+-    XMEMCPY(prvTmp, client_keypub_der_1024, sizeof_client_keypub_der_1024);
+-    prvBytes = sizeof_client_keypub_der_2048_der_1024;
++    XMEMCPY(pubTmp, client_keypub_der_1024, sizeof_client_keypub_der_1024);
++    pubBytes = sizeof_client_keypub_der_1024;
+ #elif defined(USE_CERT_BUFFERS_2048)
+-    XMEMCPY(pubTmp, client_key_der_2048, sizeof_client_key_der_2048);
+-    pubBytes = sizeof_client_key_der_2048;
++    XMEMCPY(prvTmp, client_key_der_2048, sizeof_client_key_der_2048);
++    prvBytes = sizeof_client_key_der_2048;
+     XMEMCPY(pubTmp, client_keypub_der_2048, sizeof_client_keypub_der_2048);
+     pubBytes = sizeof_client_keypub_der_2048;
+ #else
+diff --git a/wolfssl/wolfcrypt/memory.h b/wolfssl/wolfcrypt/memory.h
+index 40b0ed40..8d4161f5 100644
+--- a/wolfssl/wolfcrypt/memory.h
++++ b/wolfssl/wolfcrypt/memory.h
+@@ -97,7 +97,7 @@ WOLFSSL_API int wolfSSL_GetAllocators(wolfSSL_Malloc_cb*,
+         #ifndef SESSION_CERTS
+             #define WOLFMEM_BUCKETS 64,128,256,512,1024,2432,3456,4544,16128
+         #else
+-            #define WOLFMEM_BUCKETS 64,128,256,512,1024,2432,3456,4544,21072
++            #define WOLFMEM_BUCKETS 64,128,256,512,1024,2432,3456,4544,21552
+         #endif
+     #endif
+     #ifndef WOLFMEM_DIST
+

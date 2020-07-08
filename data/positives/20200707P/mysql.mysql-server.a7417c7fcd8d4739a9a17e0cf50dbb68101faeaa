@@ -1,0 +1,44 @@
+commit a7417c7fcd8d4739a9a17e0cf50dbb68101faeaa
+Author: Robert Golebiowski <robert.golebiowski@oracle.com>
+Date:   Thu Jan 22 10:51:42 2015 +0100
+
+    Bug #20118980 CONNECT FAILURE WHEN TRY TO CONNECT SHA USER WITH PASSWORD
+    OF LENGTH>512 BYTES
+    
+    Description:
+    The part of the bug that mysql fails to connect when password length is
+    >= 512 bytes was discarded by Kristofer as not a bug.
+    
+    Tha valid part of this bug is the memory leak:
+    If we execute the above test without specifying client option
+    MYSQL_SERVER_PUBLIC_KEY then there is also a memory leak of 168 bytes.
+    
+    Analyzis:
+    There was a leak of memory allocated for public_key if the password was
+    to long.
+    Fix:
+    The memory for public_key is freed before return if the key is to long.
+
+diff --git a/sql-common/client_authentication.cc b/sql-common/client_authentication.cc
+index d08d10c1018..00bb304ac22 100644
+--- a/sql-common/client_authentication.cc
++++ b/sql-common/client_authentication.cc
+@@ -231,6 +231,8 @@ int sha256_password_auth_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
+       if (passwd_len > sizeof(passwd_scramble))
+       {
+         /* password too long for the buffer */
++        if (got_public_key_from_server)
++          RSA_free(public_key);
+         DBUG_RETURN(CR_ERROR);
+       }
+       memmove(passwd_scramble, mysql->passwd, passwd_len);
+@@ -247,6 +249,8 @@ int sha256_password_auth_client(MYSQL_PLUGIN_VIO *vio, MYSQL *mysql)
+       if (passwd_len + 41 >= (unsigned) cipher_length)
+       {
+         /* password message is to long */
++        if (got_public_key_from_server)
++          RSA_free(public_key);
+         DBUG_RETURN(CR_ERROR);
+       }
+       RSA_public_encrypt(passwd_len, (unsigned char *) passwd_scramble,
+

@@ -1,0 +1,82 @@
+commit d5705c4ab5035be618a34c95505727acac2e70ec
+Author: Nicholas Bellinger <nab@linux-iscsi.org>
+Date:   Fri Sep 6 20:46:50 2013 -0700
+
+    iscsi-target: Fix race with thread_pre_handler flush_signals + ISCSI_THREAD_SET_DIE
+    
+    This patch addresses an long standing race in iscsi_[rx,tx]_thread_pre_handler()
+    use of flush_signals(), and between iscsi_deallocate_extra_thread_sets() setting
+    ISCSI_THREAD_SET_DIE before calling kthread_stop().
+    
+    It addresses the issue by both holding ts_state_lock before calling send_sig()
+    in iscsi_deallocate_extra_thread_sets(), as well as only calling flush_signals()
+    when ts->status != ISCSI_THREAD_SET_DIE within iscsi_[rx,tx]_thread_pre_handler()
+    code.
+    
+    v2 changes:
+      - Add explicit complete(&ts->[rx,tx]_start_comp); before kthread_stop() in
+        iscsi_deallocate_extra_thread_sets()
+      - Drop left-over send_sig() calls in iscsi_deallocate_extra_thread_sets()
+      - Add kthread_should_stop() check in iscsi_signal_thread_pre_handler()
+    
+    Signed-off-by: Nicholas Bellinger <nab@linux-iscsi.org>
+
+diff --git a/drivers/target/iscsi/iscsi_target_tq.c b/drivers/target/iscsi/iscsi_target_tq.c
+index 81289520f96b..1a5bbec03f3e 100644
+--- a/drivers/target/iscsi/iscsi_target_tq.c
++++ b/drivers/target/iscsi/iscsi_target_tq.c
+@@ -189,16 +189,20 @@ static void iscsi_deallocate_extra_thread_sets(void)
+ 
+ 		spin_lock_bh(&ts->ts_state_lock);
+ 		ts->status = ISCSI_THREAD_SET_DIE;
+-		spin_unlock_bh(&ts->ts_state_lock);
+ 
+ 		if (ts->rx_thread) {
+-			send_sig(SIGINT, ts->rx_thread, 1);
++			complete(&ts->rx_start_comp);
++			spin_unlock_bh(&ts->ts_state_lock);
+ 			kthread_stop(ts->rx_thread);
++			spin_lock_bh(&ts->ts_state_lock);
+ 		}
+ 		if (ts->tx_thread) {
+-			send_sig(SIGINT, ts->tx_thread, 1);
++			complete(&ts->tx_start_comp);
++			spin_unlock_bh(&ts->ts_state_lock);
+ 			kthread_stop(ts->tx_thread);
++			spin_lock_bh(&ts->ts_state_lock);
+ 		}
++		spin_unlock_bh(&ts->ts_state_lock);
+ 		/*
+ 		 * Release this thread_id in the thread_set_bitmap
+ 		 */
+@@ -400,7 +404,8 @@ static void iscsi_check_to_add_additional_sets(void)
+ static int iscsi_signal_thread_pre_handler(struct iscsi_thread_set *ts)
+ {
+ 	spin_lock_bh(&ts->ts_state_lock);
+-	if ((ts->status == ISCSI_THREAD_SET_DIE) || signal_pending(current)) {
++	if (ts->status == ISCSI_THREAD_SET_DIE || kthread_should_stop() ||
++	    signal_pending(current)) {
+ 		spin_unlock_bh(&ts->ts_state_lock);
+ 		return -1;
+ 	}
+@@ -419,7 +424,8 @@ struct iscsi_conn *iscsi_rx_thread_pre_handler(struct iscsi_thread_set *ts)
+ 		goto sleep;
+ 	}
+ 
+-	flush_signals(current);
++	if (ts->status != ISCSI_THREAD_SET_DIE)
++		flush_signals(current);
+ 
+ 	if (ts->delay_inactive && (--ts->thread_count == 0)) {
+ 		spin_unlock_bh(&ts->ts_state_lock);
+@@ -472,7 +478,8 @@ struct iscsi_conn *iscsi_tx_thread_pre_handler(struct iscsi_thread_set *ts)
+ 		goto sleep;
+ 	}
+ 
+-	flush_signals(current);
++	if (ts->status != ISCSI_THREAD_SET_DIE)
++		flush_signals(current);
+ 
+ 	if (ts->delay_inactive && (--ts->thread_count == 0)) {
+ 		spin_unlock_bh(&ts->ts_state_lock);
+

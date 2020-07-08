@@ -1,0 +1,69 @@
+commit e7df56e4a00358b6975fae3b70dc9df1282d427a
+Author: Avi Kivity <avi@qumranet.com>
+Date:   Wed Mar 14 15:54:54 2007 +0200
+
+    KVM: Remove extraneous guest entry on mmio read
+    
+    When emulating an mmio read, we actually emulate twice: once to determine
+    the physical address of the mmio, and, after we've exited to userspace to
+    get the mmio value, we emulate again to place the value in the result
+    register and update any flags.
+    
+    But we don't really need to enter the guest again for that, only to take
+    an immediate vmexit.  So, if we detect that we're doing an mmio read,
+    emulate a single instruction before entering the guest again.
+    
+    Signed-off-by: Avi Kivity <avi@qumranet.com>
+
+diff --git a/drivers/kvm/kvm.h b/drivers/kvm/kvm.h
+index f99e89e185b2..41634fde8e13 100644
+--- a/drivers/kvm/kvm.h
++++ b/drivers/kvm/kvm.h
+@@ -310,6 +310,7 @@ struct kvm_vcpu {
+ 	int mmio_size;
+ 	unsigned char mmio_data[8];
+ 	gpa_t mmio_phys_addr;
++	gva_t mmio_fault_cr2;
+ 	struct kvm_pio_request pio;
+ 	void *pio_data;
+ 
+diff --git a/drivers/kvm/kvm_main.c b/drivers/kvm/kvm_main.c
+index cdf0b176851d..f267dbb52845 100644
+--- a/drivers/kvm/kvm_main.c
++++ b/drivers/kvm/kvm_main.c
+@@ -1186,6 +1186,7 @@ int emulate_instruction(struct kvm_vcpu *vcpu,
+ 	int r;
+ 	int cs_db, cs_l;
+ 
++	vcpu->mmio_fault_cr2 = cr2;
+ 	kvm_arch_ops->cache_regs(vcpu);
+ 
+ 	kvm_arch_ops->get_cs_db_l_bits(vcpu, &cs_db, &cs_l);
+@@ -1804,14 +1805,23 @@ static int kvm_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
+ 			r = complete_pio(vcpu);
+ 			if (r)
+ 				goto out;
+-		} else {
++		} else if (!vcpu->mmio_is_write) {
+ 			memcpy(vcpu->mmio_data, kvm_run->mmio.data, 8);
+ 			vcpu->mmio_read_completed = 1;
++			vcpu->mmio_needed = 0;
++			r = emulate_instruction(vcpu, kvm_run,
++					    vcpu->mmio_fault_cr2, 0);
++			if (r == EMULATE_DO_MMIO) {
++				/*
++				 * Read-modify-write.  Back to userspace.
++				 */
++				kvm_run->exit_reason = KVM_EXIT_MMIO;
++				r = 0;
++				goto out;
++			}
+ 		}
+ 	}
+ 
+-	vcpu->mmio_needed = 0;
+-
+ 	if (kvm_run->exit_reason == KVM_EXIT_HYPERCALL) {
+ 		kvm_arch_ops->cache_regs(vcpu);
+ 		vcpu->regs[VCPU_REGS_RAX] = kvm_run->hypercall.ret;
+

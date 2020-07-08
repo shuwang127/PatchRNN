@@ -1,0 +1,106 @@
+commit 0791110fbee9d7dfcabd6e338c290e90aeb79644
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Fri Jan 22 12:09:38 2016 +0100
+
+    resolved: properly handle LLMNR/TCP connection errors
+    
+    The LLMNR spec suggests to do do reverse address lookups by doing direct LLMNR/TCP connections to the indicated
+    address, instead of doing any LLMNR multicast queries. When we do this and the peer doesn't actually implement LLMNR
+    this will result in a TCP connection error, which we need to handle. In contrast to most LLMNR lookups this will give
+    us a quick response on whether we can find a suitable name. Report this as new transaction state, since this should
+    mostly be treated like an NXDOMAIN rcode, except that it's not one.
+
+diff --git a/src/basic/fd-util.h b/src/basic/fd-util.h
+index 973413ff4..20890e327 100644
+--- a/src/basic/fd-util.h
++++ b/src/basic/fd-util.h
+@@ -74,5 +74,6 @@ void cmsg_close_all(struct msghdr *mh);
+ 
+ bool fdname_is_valid(const char *s);
+ 
++/* Hint: ENETUNREACH happens if we try to connect to "non-existing" special IP addresses, such as ::5 */
+ #define ERRNO_IS_DISCONNECT(r) \
+-        IN_SET(r, ENOTCONN, ECONNRESET, ECONNREFUSED, ECONNABORTED, EPIPE)
++        IN_SET(r, ENOTCONN, ECONNRESET, ECONNREFUSED, ECONNABORTED, EPIPE, ENETUNREACH)
+diff --git a/src/resolve/resolved-bus.c b/src/resolve/resolved-bus.c
+index 2cb622885..3a21773da 100644
+--- a/src/resolve/resolved-bus.c
++++ b/src/resolve/resolved-bus.c
+@@ -62,6 +62,11 @@ static int reply_query_state(DnsQuery *q) {
+         case DNS_TRANSACTION_NETWORK_DOWN:
+                 return sd_bus_reply_method_errorf(q->request, BUS_ERROR_NETWORK_DOWN, "Network is down");
+ 
++        case DNS_TRANSACTION_NOT_FOUND:
++                /* We return this as NXDOMAIN. This is only generated when a host doesn't implement LLMNR/TCP, and we
++                 * thus quickly know that we cannot resolve an in-addr.arpa or ip6.arpa address. */
++                return sd_bus_reply_method_errorf(q->request, _BUS_ERROR_DNS "NXDOMAIN", "'%s' not found", dns_query_string(q));
++
+         case DNS_TRANSACTION_RCODE_FAILURE: {
+                 _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+ 
+diff --git a/src/resolve/resolved-dns-query.c b/src/resolve/resolved-dns-query.c
+index 2f9dd1c47..734b6ff77 100644
+--- a/src/resolve/resolved-dns-query.c
++++ b/src/resolve/resolved-dns-query.c
+@@ -563,7 +563,8 @@ static int dns_query_synthesize_reply(DnsQuery *q, DnsTransactionState *state) {
+                     DNS_TRANSACTION_NO_SERVERS,
+                     DNS_TRANSACTION_TIMEOUT,
+                     DNS_TRANSACTION_ATTEMPTS_MAX_REACHED,
+-                    DNS_TRANSACTION_NETWORK_DOWN))
++                    DNS_TRANSACTION_NETWORK_DOWN,
++                    DNS_TRANSACTION_NOT_FOUND))
+                 return 0;
+ 
+         r = dns_synthesize_answer(
+diff --git a/src/resolve/resolved-dns-transaction.c b/src/resolve/resolved-dns-transaction.c
+index 9ff8145ac..43ee783ba 100644
+--- a/src/resolve/resolved-dns-transaction.c
++++ b/src/resolve/resolved-dns-transaction.c
+@@ -432,6 +432,13 @@ static int on_stream_complete(DnsStream *s, int error) {
+         if (ERRNO_IS_DISCONNECT(error)) {
+                 usec_t usec;
+ 
++                if (t->scope->protocol == DNS_PROTOCOL_LLMNR) {
++                        /* If the LLMNR/TCP connection failed, the host doesn't support LLMNR, and we cannot answer the
++                         * question on this scope. */
++                        dns_transaction_complete(t, DNS_TRANSACTION_NOT_FOUND);
++                        return 0;
++                }
++
+                 log_debug_errno(error, "Connection failure for DNS TCP stream: %m");
+                 assert_se(sd_event_now(t->scope->manager->event, clock_boottime_or_monotonic(), &usec) >= 0);
+                 dns_server_packet_lost(t->server, IPPROTO_TCP, t->current_feature_level, usec - t->start_usec);
+@@ -1463,6 +1470,12 @@ int dns_transaction_go(DnsTransaction *t) {
+                 dns_transaction_complete(t, DNS_TRANSACTION_RR_TYPE_UNSUPPORTED);
+                 return 0;
+         }
++        if (t->scope->protocol == DNS_PROTOCOL_LLMNR && ERRNO_IS_DISCONNECT(-r)) {
++                /* On LLMNR, if we cannot connect to a host via TCP when doing revers lookups. This means we cannot
++                 * answer this request with this protocol. */
++                dns_transaction_complete(t, DNS_TRANSACTION_NOT_FOUND);
++                return 0;
++        }
+         if (r < 0) {
+                 if (t->scope->protocol != DNS_PROTOCOL_DNS) {
+                         dns_transaction_complete(t, DNS_TRANSACTION_RESOURCES);
+@@ -2989,6 +3002,7 @@ static const char* const dns_transaction_state_table[_DNS_TRANSACTION_STATE_MAX]
+         [DNS_TRANSACTION_NO_TRUST_ANCHOR] = "no-trust-anchor",
+         [DNS_TRANSACTION_RR_TYPE_UNSUPPORTED] = "rr-type-unsupported",
+         [DNS_TRANSACTION_NETWORK_DOWN] = "network-down",
++        [DNS_TRANSACTION_NOT_FOUND] = "not-found",
+ };
+ DEFINE_STRING_TABLE_LOOKUP(dns_transaction_state, DnsTransactionState);
+ 
+diff --git a/src/resolve/resolved-dns-transaction.h b/src/resolve/resolved-dns-transaction.h
+index 80a2591fb..ab5717c4d 100644
+--- a/src/resolve/resolved-dns-transaction.h
++++ b/src/resolve/resolved-dns-transaction.h
+@@ -41,6 +41,7 @@ enum DnsTransactionState {
+         DNS_TRANSACTION_NO_TRUST_ANCHOR,
+         DNS_TRANSACTION_RR_TYPE_UNSUPPORTED,
+         DNS_TRANSACTION_NETWORK_DOWN,
++        DNS_TRANSACTION_NOT_FOUND, /* like NXDOMAIN, but when LLMNR/TCP connections fail */
+         _DNS_TRANSACTION_STATE_MAX,
+         _DNS_TRANSACTION_STATE_INVALID = -1
+ };
+

@@ -1,0 +1,43 @@
+commit fe48a5c00f3c8087fc0a447caee2b5f9f97cf238
+Author: Miao Xie <miaox@cn.fujitsu.com>
+Date:   Wed Sep 3 21:35:39 2014 +0800
+
+    Btrfs: fix unprotected system chunk array insertion
+    
+    We didn't protect the system chunk array when we added a new
+    system chunk into it, it would cause the array be corrupted
+    if someone remove/add some system chunk into array at the same
+    time. Fix it by chunk lock.
+    
+    Signed-off-by: Miao Xie <miaox@cn.fujitsu.com>
+    Signed-off-by: Chris Mason <clm@fb.com>
+
+diff --git a/fs/btrfs/volumes.c b/fs/btrfs/volumes.c
+index 41da102cdcc0..9f22398d465f 100644
+--- a/fs/btrfs/volumes.c
++++ b/fs/btrfs/volumes.c
+@@ -4054,10 +4054,13 @@ static int btrfs_add_system_chunk(struct btrfs_root *root,
+ 	u32 array_size;
+ 	u8 *ptr;
+ 
++	lock_chunks(root);
+ 	array_size = btrfs_super_sys_array_size(super_copy);
+ 	if (array_size + item_size + sizeof(disk_key)
+-			> BTRFS_SYSTEM_CHUNK_ARRAY_SIZE)
++			> BTRFS_SYSTEM_CHUNK_ARRAY_SIZE) {
++		unlock_chunks(root);
+ 		return -EFBIG;
++	}
+ 
+ 	ptr = super_copy->sys_chunk_array + array_size;
+ 	btrfs_cpu_key_to_disk(&disk_key, key);
+@@ -4066,6 +4069,8 @@ static int btrfs_add_system_chunk(struct btrfs_root *root,
+ 	memcpy(ptr, chunk, item_size);
+ 	item_size += sizeof(disk_key);
+ 	btrfs_set_super_sys_array_size(super_copy, array_size + item_size);
++	unlock_chunks(root);
++
+ 	return 0;
+ }
+ 
+

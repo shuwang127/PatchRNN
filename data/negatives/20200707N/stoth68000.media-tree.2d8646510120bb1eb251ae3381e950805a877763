@@ -1,0 +1,80 @@
+commit 2d8646510120bb1eb251ae3381e950805a877763
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Sun Sep 8 20:18:44 2013 -0400
+
+    introduce kern_path_mountpoint()
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/namei.c b/fs/namei.c
+index 11184df3307e..e412421210cc 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -2360,6 +2360,20 @@ path_mountpoint(int dfd, const char *name, struct path *path, unsigned int flags
+ 	return err;
+ }
+ 
++static int
++filename_mountpoint(int dfd, struct filename *s, struct path *path,
++			unsigned int flags)
++{
++	int error = path_mountpoint(dfd, s->name, path, flags | LOOKUP_RCU);
++	if (unlikely(error == -ECHILD))
++		error = path_mountpoint(dfd, s->name, path, flags);
++	if (unlikely(error == -ESTALE))
++		error = path_mountpoint(dfd, s->name, path, flags | LOOKUP_REVAL);
++	if (likely(!error))
++		audit_inode(s, path->dentry, 0);
++	return error;
++}
++
+ /**
+  * user_path_mountpoint_at - lookup a path from userland in order to umount it
+  * @dfd:	directory file descriptor
+@@ -2380,23 +2394,22 @@ user_path_mountpoint_at(int dfd, const char __user *name, unsigned int flags,
+ {
+ 	struct filename *s = getname(name);
+ 	int error;
+-
+ 	if (IS_ERR(s))
+ 		return PTR_ERR(s);
+-
+-	error = path_mountpoint(dfd, s->name, path, flags | LOOKUP_RCU);
+-	if (unlikely(error == -ECHILD))
+-		error = path_mountpoint(dfd, s->name, path, flags);
+-	if (unlikely(error == -ESTALE))
+-		error = path_mountpoint(dfd, s->name, path, flags | LOOKUP_REVAL);
+-
+-	if (likely(!error))
+-		audit_inode(s, path->dentry, 0);
+-
++	error = filename_mountpoint(dfd, s, path, flags);
+ 	putname(s);
+ 	return error;
+ }
+ 
++int
++kern_path_mountpoint(int dfd, const char *name, struct path *path,
++			unsigned int flags)
++{
++	struct filename s = {.name = name};
++	return filename_mountpoint(dfd, &s, path, flags);
++}
++EXPORT_SYMBOL(kern_path_mountpoint);
++
+ /*
+  * It's inline, so penalty for filesystems that don't use sticky bit is
+  * minimal.
+diff --git a/include/linux/namei.h b/include/linux/namei.h
+index 53c18f00d9fb..8e47bc7a1665 100644
+--- a/include/linux/namei.h
++++ b/include/linux/namei.h
+@@ -70,6 +70,7 @@ extern struct dentry *kern_path_create(int, const char *, struct path *, unsigne
+ extern struct dentry *user_path_create(int, const char __user *, struct path *, unsigned int);
+ extern void done_path_create(struct path *, struct dentry *);
+ extern struct dentry *kern_path_locked(const char *, struct path *);
++extern int kern_path_mountpoint(int, const char *, struct path *, unsigned int);
+ 
+ extern struct dentry *lookup_one_len(const char *, struct dentry *, int);
+ 
+

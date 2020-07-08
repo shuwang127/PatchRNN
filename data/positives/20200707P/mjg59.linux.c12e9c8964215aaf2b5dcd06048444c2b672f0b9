@@ -1,0 +1,57 @@
+commit c12e9c8964215aaf2b5dcd06048444c2b672f0b9
+Author: Lars Ellenberg <lars.ellenberg@linbit.com>
+Date:   Tue Jun 19 09:40:00 2012 +0200
+
+    drbd: fix potential access after free
+    
+    Occasionally, if we disconnect, we triggered this assert:
+      block drbd7: ASSERT FAILED tl_hash[27] == c30b0f04, expected NULL
+    
+    hlist_del() happens only on master bio completion.
+    
+    We used to wait for pending IO to complete before freeing tl_hash
+    on disconnect. We no longer do so, since we learned to "freeze"
+    IO on disconnect.
+    
+    If the local disk is too slow, we may reach C_STANDALONE early,
+    and there are still some requests pending locally when we call
+    drbd_free_tl_hash().
+    
+    If we now free the tl_hash, and later the local IO completion completes
+    the master bio, which then does hlist_del() and clobbers freed memory.
+    
+    Do hlist_del_init() and hlist_add_fake() before kfree(tl_hash),
+    so the hlist_del() on master bio completion is harmless.
+    
+    Signed-off-by: Philipp Reisner <philipp.reisner@linbit.com>
+    Signed-off-by: Lars Ellenberg <lars.ellenberg@linbit.com>
+
+diff --git a/drivers/block/drbd/drbd_receiver.c b/drivers/block/drbd/drbd_receiver.c
+index ea4836e0ae98..83d99133f94b 100644
+--- a/drivers/block/drbd/drbd_receiver.c
++++ b/drivers/block/drbd/drbd_receiver.c
+@@ -3801,11 +3801,18 @@ void drbd_free_tl_hash(struct drbd_conf *mdev)
+ 	mdev->ee_hash = NULL;
+ 	mdev->ee_hash_s = 0;
+ 
+-	/* paranoia code */
+-	for (h = mdev->tl_hash; h < mdev->tl_hash + mdev->tl_hash_s; h++)
+-		if (h->first)
+-			dev_err(DEV, "ASSERT FAILED tl_hash[%u] == %p, expected NULL\n",
+-				(int)(h - mdev->tl_hash), h->first);
++	/* We may not have had the chance to wait for all locally pending
++	 * application requests. The hlist_add_fake() prevents access after
++	 * free on master bio completion. */
++	for (h = mdev->tl_hash; h < mdev->tl_hash + mdev->tl_hash_s; h++) {
++		struct drbd_request *req;
++		struct hlist_node *pos, *n;
++		hlist_for_each_entry_safe(req, pos, n, h, collision) {
++			hlist_del_init(&req->collision);
++			hlist_add_fake(&req->collision);
++		}
++	}
++
+ 	kfree(mdev->tl_hash);
+ 	mdev->tl_hash = NULL;
+ 	mdev->tl_hash_s = 0;
+

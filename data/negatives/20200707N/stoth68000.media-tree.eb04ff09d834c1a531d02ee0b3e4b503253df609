@@ -1,0 +1,81 @@
+commit eb04ff09d834c1a531d02ee0b3e4b503253df609
+Author: Mike Marciniszyn <mike.marciniszyn@intel.com>
+Date:   Wed Feb 8 05:26:08 2017 -0800
+
+    IB/hfi1: Ensure read of producer s_head is correct
+    
+    The read of s_head in the hfi1_make_rc_req() and
+    qib_make_rc_req() lack the necesary barrier instuctions.
+    
+    Correct other ACCESS_ONCE() warnings in the same file.
+    
+    Reviewed-by: Ashutosh Dixit <ashutosh.dixit@intel.com>
+    Signed-off-by: Mike Marciniszyn <mike.marciniszyn@intel.com>
+    Signed-off-by: Dennis Dalessandro <dennis.dalessandro@intel.com>
+    Signed-off-by: Doug Ledford <dledford@redhat.com>
+
+diff --git a/drivers/infiniband/hw/hfi1/rc.c b/drivers/infiniband/hw/hfi1/rc.c
+index 1dd999e9349c..6446179843e9 100644
+--- a/drivers/infiniband/hw/hfi1/rc.c
++++ b/drivers/infiniband/hw/hfi1/rc.c
+@@ -414,7 +414,7 @@ int hfi1_make_rc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
+ 			goto bail;
+ 		/* We are in the error state, flush the work request. */
+ 		smp_read_barrier_depends(); /* see post_one_send() */
+-		if (qp->s_last == ACCESS_ONCE(qp->s_head))
++		if (qp->s_last == READ_ONCE(qp->s_head))
+ 			goto bail;
+ 		/* If DMAs are in progress, we can't flush immediately. */
+ 		if (iowait_sdma_pending(&priv->s_iowait)) {
+@@ -457,7 +457,8 @@ int hfi1_make_rc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
+ 		newreq = 0;
+ 		if (qp->s_cur == qp->s_tail) {
+ 			/* Check if send work queue is empty. */
+-			if (qp->s_tail == qp->s_head) {
++			smp_read_barrier_depends(); /* see post_one_send() */
++			if (qp->s_tail == READ_ONCE(qp->s_head)) {
+ 				clear_ahg(qp);
+ 				goto bail;
+ 			}
+@@ -1590,7 +1591,7 @@ static void rc_rcv_resp(struct hfi1_ibport *ibp,
+ 
+ 	/* Ignore invalid responses. */
+ 	smp_read_barrier_depends(); /* see post_one_send */
+-	if (cmp_psn(psn, ACCESS_ONCE(qp->s_next_psn)) >= 0)
++	if (cmp_psn(psn, READ_ONCE(qp->s_next_psn)) >= 0)
+ 		goto ack_done;
+ 
+ 	/* Ignore duplicate responses. */
+diff --git a/drivers/infiniband/hw/qib/qib_rc.c b/drivers/infiniband/hw/qib/qib_rc.c
+index 031433cb7206..696bcd0d087c 100644
+--- a/drivers/infiniband/hw/qib/qib_rc.c
++++ b/drivers/infiniband/hw/qib/qib_rc.c
+@@ -257,7 +257,7 @@ int qib_make_rc_req(struct rvt_qp *qp, unsigned long *flags)
+ 			goto bail;
+ 		/* We are in the error state, flush the work request. */
+ 		smp_read_barrier_depends(); /* see post_one_send() */
+-		if (qp->s_last == ACCESS_ONCE(qp->s_head))
++		if (qp->s_last == READ_ONCE(qp->s_head))
+ 			goto bail;
+ 		/* If DMAs are in progress, we can't flush immediately. */
+ 		if (atomic_read(&priv->s_dma_busy)) {
+@@ -303,7 +303,8 @@ int qib_make_rc_req(struct rvt_qp *qp, unsigned long *flags)
+ 		newreq = 0;
+ 		if (qp->s_cur == qp->s_tail) {
+ 			/* Check if send work queue is empty. */
+-			if (qp->s_tail == qp->s_head)
++			smp_read_barrier_depends(); /* see post_one_send() */
++			if (qp->s_tail == READ_ONCE(qp->s_head))
+ 				goto bail;
+ 			/*
+ 			 * If a fence is requested, wait for previous
+@@ -1390,7 +1391,7 @@ static void qib_rc_rcv_resp(struct qib_ibport *ibp,
+ 
+ 	/* Ignore invalid responses. */
+ 	smp_read_barrier_depends(); /* see post_one_send */
+-	if (qib_cmp24(psn, ACCESS_ONCE(qp->s_next_psn)) >= 0)
++	if (qib_cmp24(psn, READ_ONCE(qp->s_next_psn)) >= 0)
+ 		goto ack_done;
+ 
+ 	/* Ignore duplicate responses. */
+

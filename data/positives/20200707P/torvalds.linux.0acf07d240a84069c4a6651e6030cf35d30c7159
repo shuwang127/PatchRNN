@@ -1,0 +1,49 @@
+commit 0acf07d240a84069c4a6651e6030cf35d30c7159
+Author: Kees Cook <keescook@chromium.org>
+Date:   Wed Apr 16 10:54:34 2014 -0700
+
+    seccomp: fix memory leak on filter attach
+    
+    This sets the correct error code when final filter memory is unavailable,
+    and frees the raw filter no matter what.
+    
+    unreferenced object 0xffff8800d6ea4000 (size 512):
+      comm "sshd", pid 278, jiffies 4294898315 (age 46.653s)
+      hex dump (first 32 bytes):
+        21 00 00 00 04 00 00 00 15 00 01 00 3e 00 00 c0  !...........>...
+        06 00 00 00 00 00 00 00 21 00 00 00 00 00 00 00  ........!.......
+      backtrace:
+        [<ffffffff8151414e>] kmemleak_alloc+0x4e/0xb0
+        [<ffffffff811a3a40>] __kmalloc+0x280/0x320
+        [<ffffffff8110842e>] prctl_set_seccomp+0x11e/0x3b0
+        [<ffffffff8107bb6b>] SyS_prctl+0x3bb/0x4a0
+        [<ffffffff8152ef2d>] system_call_fastpath+0x1a/0x1f
+        [<ffffffffffffffff>] 0xffffffffffffffff
+    
+    Reported-by: Masami Ichikawa <masami256@gmail.com>
+    Signed-off-by: Kees Cook <keescook@chromium.org>
+    Tested-by: Masami Ichikawa <masami256@gmail.com>
+    Acked-by: Daniel Borkmann <dborkman@redhat.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/kernel/seccomp.c b/kernel/seccomp.c
+index 590c37925084..b35c21503a36 100644
+--- a/kernel/seccomp.c
++++ b/kernel/seccomp.c
+@@ -255,6 +255,7 @@ static long seccomp_attach_filter(struct sock_fprog *fprog)
+ 		goto free_prog;
+ 
+ 	/* Allocate a new seccomp_filter */
++	ret = -ENOMEM;
+ 	filter = kzalloc(sizeof(struct seccomp_filter) +
+ 			 sizeof(struct sock_filter_int) * new_len,
+ 			 GFP_KERNEL|__GFP_NOWARN);
+@@ -264,6 +265,7 @@ static long seccomp_attach_filter(struct sock_fprog *fprog)
+ 	ret = sk_convert_filter(fp, fprog->len, filter->insnsi, &new_len);
+ 	if (ret)
+ 		goto free_filter;
++	kfree(fp);
+ 
+ 	atomic_set(&filter->usage, 1);
+ 	filter->len = new_len;
+

@@ -1,0 +1,96 @@
+commit 8f4490e09694efaf7fe60ac6a1135530aa8c05ad
+Author: Bjorn Andersson <bjorn.andersson@sonymobile.com>
+Date:   Wed Feb 11 19:39:12 2015 -0800
+
+    regulator: core: Introduce set_load op
+    
+    Expose the requested load directly to the regulator implementation for
+    hardware that does not support the normal enum based set_mode().
+    
+    Signed-off-by: Bjorn Andersson <bjorn.andersson@sonymobile.com>
+    Signed-off-by: Mark Brown <broonie@kernel.org>
+
+diff --git a/drivers/regulator/core.c b/drivers/regulator/core.c
+index b899947d839d..f2452148c8da 100644
+--- a/drivers/regulator/core.c
++++ b/drivers/regulator/core.c
+@@ -648,10 +648,12 @@ static int drms_uA_update(struct regulator_dev *rdev)
+ 	if (err < 0)
+ 		return 0;
+ 
+-	if (!rdev->desc->ops->get_optimum_mode)
++	if (!rdev->desc->ops->get_optimum_mode &&
++	    !rdev->desc->ops->set_load)
+ 		return 0;
+ 
+-	if (!rdev->desc->ops->set_mode)
++	if (!rdev->desc->ops->set_mode &&
++	    !rdev->desc->ops->set_load)
+ 		return -EINVAL;
+ 
+ 	/* get output voltage */
+@@ -676,22 +678,29 @@ static int drms_uA_update(struct regulator_dev *rdev)
+ 	list_for_each_entry(sibling, &rdev->consumer_list, list)
+ 		current_uA += sibling->uA_load;
+ 
+-	/* now get the optimum mode for our new total regulator load */
+-	mode = rdev->desc->ops->get_optimum_mode(rdev, input_uV,
+-						  output_uV, current_uA);
++	if (rdev->desc->ops->set_load) {
++		/* set the optimum mode for our new total regulator load */
++		err = rdev->desc->ops->set_load(rdev, current_uA);
++		if (err < 0)
++			rdev_err(rdev, "failed to set load %d\n", current_uA);
++	} else {
++		/* now get the optimum mode for our new total regulator load */
++		mode = rdev->desc->ops->get_optimum_mode(rdev, input_uV,
++							 output_uV, current_uA);
++
++		/* check the new mode is allowed */
++		err = regulator_mode_constrain(rdev, &mode);
++		if (err < 0) {
++			rdev_err(rdev, "failed to get optimum mode @ %d uA %d -> %d uV\n",
++				 current_uA, input_uV, output_uV);
++			return err;
++		}
+ 
+-	/* check the new mode is allowed */
+-	err = regulator_mode_constrain(rdev, &mode);
+-	if (err < 0) {
+-		rdev_err(rdev, "failed to get optimum mode @ %d uA %d -> %d uV\n",
+-			 current_uA, input_uV, output_uV);
+-		return err;
++		err = rdev->desc->ops->set_mode(rdev, mode);
++		if (err < 0)
++			rdev_err(rdev, "failed to set optimum mode %x\n", mode);
+ 	}
+ 
+-	err = rdev->desc->ops->set_mode(rdev, mode);
+-	if (err < 0)
+-		rdev_err(rdev, "failed to set optimum mode %x\n", mode);
+-
+ 	return err;
+ }
+ 
+diff --git a/include/linux/regulator/driver.h b/include/linux/regulator/driver.h
+index d4ad5b5a02bb..8a0165f22f0a 100644
+--- a/include/linux/regulator/driver.h
++++ b/include/linux/regulator/driver.h
+@@ -98,6 +98,7 @@ struct regulator_linear_range {
+  *	REGULATOR_STATUS value (or negative errno)
+  * @get_optimum_mode: Get the most efficient operating mode for the regulator
+  *                    when running with the specified parameters.
++ * @set_load: Set the load for the regulator.
+  *
+  * @set_bypass: Set the regulator in bypass mode.
+  * @get_bypass: Get the regulator bypass mode state.
+@@ -167,6 +168,8 @@ struct regulator_ops {
+ 	/* get most efficient regulator operating mode for load */
+ 	unsigned int (*get_optimum_mode) (struct regulator_dev *, int input_uV,
+ 					  int output_uV, int load_uA);
++	/* set the load on the regulator */
++	int (*set_load)(struct regulator_dev *, int load_uA);
+ 
+ 	/* control and report on bypass mode */
+ 	int (*set_bypass)(struct regulator_dev *dev, bool enable);
+

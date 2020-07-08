@@ -1,0 +1,374 @@
+commit 1a1a3e97bad42e92cd2f32e81c396c8ee0bddb28
+Author: Christoph Hellwig <hch@infradead.org>
+Date:   Wed Oct 6 18:41:18 2010 +0000
+
+    xfs: remove xfs_buf wrappers
+    
+    Stop having two different names for many buffer functions and use
+    the more descriptive xfs_buf_* names directly.
+    
+    Signed-off-by: Christoph Hellwig <hch@lst.de>
+    Signed-off-by: Alex Elder <aelder@sgi.com>
+
+diff --git a/fs/xfs/linux-2.6/xfs_buf.c b/fs/xfs/linux-2.6/xfs_buf.c
+index 749d7d39d657..47ef97f46fe9 100644
+--- a/fs/xfs/linux-2.6/xfs_buf.c
++++ b/fs/xfs/linux-2.6/xfs_buf.c
+@@ -652,8 +652,7 @@ void
+ xfs_buf_readahead(
+ 	xfs_buftarg_t		*target,
+ 	xfs_off_t		ioff,
+-	size_t			isize,
+-	xfs_buf_flags_t		flags)
++	size_t			isize)
+ {
+ 	struct backing_dev_info *bdi;
+ 
+@@ -661,8 +660,8 @@ xfs_buf_readahead(
+ 	if (bdi_read_congested(bdi))
+ 		return;
+ 
+-	flags |= (XBF_TRYLOCK|XBF_ASYNC|XBF_READ_AHEAD);
+-	xfs_buf_read(target, ioff, isize, flags);
++	xfs_buf_read(target, ioff, isize,
++		     XBF_TRYLOCK|XBF_ASYNC|XBF_READ_AHEAD|XBF_DONT_BLOCK);
+ }
+ 
+ /*
+@@ -691,7 +690,7 @@ xfs_buf_read_uncached(
+ 	XFS_BUF_BUSY(bp);
+ 
+ 	xfsbdstrat(mp, bp);
+-	error = xfs_iowait(bp);
++	error = xfs_buf_iowait(bp);
+ 	if (error || bp->b_error) {
+ 		xfs_buf_relse(bp);
+ 		return NULL;
+@@ -1073,7 +1072,7 @@ xfs_bdwrite(
+ 
+ /*
+  * Called when we want to stop a buffer from getting written or read.
+- * We attach the EIO error, muck with its flags, and call biodone
++ * We attach the EIO error, muck with its flags, and call xfs_buf_ioend
+  * so that the proper iodone callbacks get called.
+  */
+ STATIC int
+@@ -1090,21 +1089,21 @@ xfs_bioerror(
+ 	XFS_BUF_ERROR(bp, EIO);
+ 
+ 	/*
+-	 * We're calling biodone, so delete XBF_DONE flag.
++	 * We're calling xfs_buf_ioend, so delete XBF_DONE flag.
+ 	 */
+ 	XFS_BUF_UNREAD(bp);
+ 	XFS_BUF_UNDELAYWRITE(bp);
+ 	XFS_BUF_UNDONE(bp);
+ 	XFS_BUF_STALE(bp);
+ 
+-	xfs_biodone(bp);
++	xfs_buf_ioend(bp, 0);
+ 
+ 	return EIO;
+ }
+ 
+ /*
+  * Same as xfs_bioerror, except that we are releasing the buffer
+- * here ourselves, and avoiding the biodone call.
++ * here ourselves, and avoiding the xfs_buf_ioend call.
+  * This is meant for userdata errors; metadata bufs come with
+  * iodone functions attached, so that we can track down errors.
+  */
+@@ -1938,7 +1937,7 @@ xfs_flush_buftarg(
+ 			bp = list_first_entry(&wait_list, struct xfs_buf, b_list);
+ 
+ 			list_del_init(&bp->b_list);
+-			xfs_iowait(bp);
++			xfs_buf_iowait(bp);
+ 			xfs_buf_relse(bp);
+ 		}
+ 	}
+diff --git a/fs/xfs/linux-2.6/xfs_buf.h b/fs/xfs/linux-2.6/xfs_buf.h
+index 161333785f69..131c0ebf2c0d 100644
+--- a/fs/xfs/linux-2.6/xfs_buf.h
++++ b/fs/xfs/linux-2.6/xfs_buf.h
+@@ -218,8 +218,7 @@ extern xfs_buf_t *xfs_buf_get_empty(size_t, xfs_buftarg_t *);
+ extern xfs_buf_t *xfs_buf_get_uncached(struct xfs_buftarg *, size_t, int);
+ extern int xfs_buf_associate_memory(xfs_buf_t *, void *, size_t);
+ extern void xfs_buf_hold(xfs_buf_t *);
+-extern void xfs_buf_readahead(xfs_buftarg_t *, xfs_off_t, size_t,
+-				xfs_buf_flags_t);
++extern void xfs_buf_readahead(xfs_buftarg_t *, xfs_off_t, size_t);
+ struct xfs_buf *xfs_buf_read_uncached(struct xfs_mount *mp,
+ 				struct xfs_buftarg *target,
+ 				xfs_daddr_t daddr, size_t length, int flags);
+@@ -247,6 +246,8 @@ extern int xfs_buf_iorequest(xfs_buf_t *);
+ extern int xfs_buf_iowait(xfs_buf_t *);
+ extern void xfs_buf_iomove(xfs_buf_t *, size_t, size_t, void *,
+ 				xfs_buf_rw_t);
++#define xfs_buf_zero(bp, off, len) \
++	    xfs_buf_iomove((bp), (off), (len), NULL, XBRW_ZERO)
+ 
+ static inline int xfs_buf_geterror(xfs_buf_t *bp)
+ {
+@@ -359,21 +360,6 @@ static inline void xfs_buf_relse(xfs_buf_t *bp)
+ 	xfs_buf_rele(bp);
+ }
+ 
+-#define xfs_biodone(bp)		xfs_buf_ioend(bp, 0)
+-
+-#define xfs_biomove(bp, off, len, data, rw) \
+-	    xfs_buf_iomove((bp), (off), (len), (data), \
+-		((rw) == XBF_WRITE) ? XBRW_WRITE : XBRW_READ)
+-
+-#define xfs_biozero(bp, off, len) \
+-	    xfs_buf_iomove((bp), (off), (len), NULL, XBRW_ZERO)
+-
+-#define xfs_iowait(bp)	xfs_buf_iowait(bp)
+-
+-#define xfs_baread(target, rablkno, ralen)  \
+-	xfs_buf_readahead((target), (rablkno), (ralen), XBF_DONT_BLOCK)
+-
+-
+ /*
+  *	Handling of buftargs.
+  */
+diff --git a/fs/xfs/linux-2.6/xfs_super.c b/fs/xfs/linux-2.6/xfs_super.c
+index 48d5f8206549..fa1e40ac4b35 100644
+--- a/fs/xfs/linux-2.6/xfs_super.c
++++ b/fs/xfs/linux-2.6/xfs_super.c
+@@ -644,7 +644,7 @@ xfs_barrier_test(
+ 	XFS_BUF_ORDERED(sbp);
+ 
+ 	xfsbdstrat(mp, sbp);
+-	error = xfs_iowait(sbp);
++	error = xfs_buf_iowait(sbp);
+ 
+ 	/*
+ 	 * Clear all the flags we set and possible error state in the
+diff --git a/fs/xfs/quota/xfs_qm.c b/fs/xfs/quota/xfs_qm.c
+index a3f8f95d33ea..d109cc557bed 100644
+--- a/fs/xfs/quota/xfs_qm.c
++++ b/fs/xfs/quota/xfs_qm.c
+@@ -1433,7 +1433,7 @@ xfs_qm_dqiterate(
+ 				rablkcnt =  map[i+1].br_blockcount;
+ 				rablkno = map[i+1].br_startblock;
+ 				while (rablkcnt--) {
+-					xfs_baread(mp->m_ddev_targp,
++					xfs_buf_readahead(mp->m_ddev_targp,
+ 					       XFS_FSB_TO_DADDR(mp, rablkno),
+ 					       mp->m_quotainfo->qi_dqchunklen);
+ 					rablkno++;
+diff --git a/fs/xfs/xfs_attr.c b/fs/xfs/xfs_attr.c
+index 905d390c1e5c..c86375378810 100644
+--- a/fs/xfs/xfs_attr.c
++++ b/fs/xfs/xfs_attr.c
+@@ -1986,7 +1986,7 @@ xfs_attr_rmtval_get(xfs_da_args_t *args)
+ 
+ 			tmp = (valuelen < XFS_BUF_SIZE(bp))
+ 				? valuelen : XFS_BUF_SIZE(bp);
+-			xfs_biomove(bp, 0, tmp, dst, XBF_READ);
++			xfs_buf_iomove(bp, 0, tmp, dst, XBRW_READ);
+ 			xfs_buf_relse(bp);
+ 			dst += tmp;
+ 			valuelen -= tmp;
+@@ -2116,9 +2116,9 @@ xfs_attr_rmtval_set(xfs_da_args_t *args)
+ 
+ 		tmp = (valuelen < XFS_BUF_SIZE(bp)) ? valuelen :
+ 							XFS_BUF_SIZE(bp);
+-		xfs_biomove(bp, 0, tmp, src, XBF_WRITE);
++		xfs_buf_iomove(bp, 0, tmp, src, XBRW_WRITE);
+ 		if (tmp < XFS_BUF_SIZE(bp))
+-			xfs_biozero(bp, tmp, XFS_BUF_SIZE(bp) - tmp);
++			xfs_buf_zero(bp, tmp, XFS_BUF_SIZE(bp) - tmp);
+ 		if ((error = xfs_bwrite(mp, bp))) {/* GROT: NOTE: synchronous write */
+ 			return (error);
+ 		}
+diff --git a/fs/xfs/xfs_btree.c b/fs/xfs/xfs_btree.c
+index 735dc2e671b1..04f9cca8da7e 100644
+--- a/fs/xfs/xfs_btree.c
++++ b/fs/xfs/xfs_btree.c
+@@ -656,7 +656,7 @@ xfs_btree_reada_bufl(
+ 
+ 	ASSERT(fsbno != NULLFSBLOCK);
+ 	d = XFS_FSB_TO_DADDR(mp, fsbno);
+-	xfs_baread(mp->m_ddev_targp, d, mp->m_bsize * count);
++	xfs_buf_readahead(mp->m_ddev_targp, d, mp->m_bsize * count);
+ }
+ 
+ /*
+@@ -676,7 +676,7 @@ xfs_btree_reada_bufs(
+ 	ASSERT(agno != NULLAGNUMBER);
+ 	ASSERT(agbno != NULLAGBLOCK);
+ 	d = XFS_AGB_TO_DADDR(mp, agno, agbno);
+-	xfs_baread(mp->m_ddev_targp, d, mp->m_bsize * count);
++	xfs_buf_readahead(mp->m_ddev_targp, d, mp->m_bsize * count);
+ }
+ 
+ STATIC int
+diff --git a/fs/xfs/xfs_buf_item.c b/fs/xfs/xfs_buf_item.c
+index ee7557611b6e..2686d0d54c5b 100644
+--- a/fs/xfs/xfs_buf_item.c
++++ b/fs/xfs/xfs_buf_item.c
+@@ -973,7 +973,7 @@ xfs_buf_iodone_callbacks(
+ 			xfs_buf_do_callbacks(bp, lip);
+ 			XFS_BUF_SET_FSPRIVATE(bp, NULL);
+ 			XFS_BUF_CLR_IODONE_FUNC(bp);
+-			xfs_biodone(bp);
++			xfs_buf_ioend(bp, 0);
+ 			return;
+ 		}
+ 
+@@ -1032,7 +1032,7 @@ xfs_buf_iodone_callbacks(
+ 	xfs_buf_do_callbacks(bp, lip);
+ 	XFS_BUF_SET_FSPRIVATE(bp, NULL);
+ 	XFS_BUF_CLR_IODONE_FUNC(bp);
+-	xfs_biodone(bp);
++	xfs_buf_ioend(bp, 0);
+ }
+ 
+ /*
+diff --git a/fs/xfs/xfs_da_btree.c b/fs/xfs/xfs_da_btree.c
+index 30fa0e206fba..1c00bedb3175 100644
+--- a/fs/xfs/xfs_da_btree.c
++++ b/fs/xfs/xfs_da_btree.c
+@@ -2042,7 +2042,7 @@ xfs_da_do_buf(
+ 				mappedbno, nmapped, 0, &bp);
+ 			break;
+ 		case 3:
+-			xfs_baread(mp->m_ddev_targp, mappedbno, nmapped);
++			xfs_buf_readahead(mp->m_ddev_targp, mappedbno, nmapped);
+ 			error = 0;
+ 			bp = NULL;
+ 			break;
+diff --git a/fs/xfs/xfs_dir2_leaf.c b/fs/xfs/xfs_dir2_leaf.c
+index 504be8640e91..ae891223be90 100644
+--- a/fs/xfs/xfs_dir2_leaf.c
++++ b/fs/xfs/xfs_dir2_leaf.c
+@@ -961,7 +961,7 @@ xfs_dir2_leaf_getdents(
+ 				if (i > ra_current &&
+ 				    map[ra_index].br_blockcount >=
+ 				    mp->m_dirblkfsbs) {
+-					xfs_baread(mp->m_ddev_targp,
++					xfs_buf_readahead(mp->m_ddev_targp,
+ 						XFS_FSB_TO_DADDR(mp,
+ 						   map[ra_index].br_startblock +
+ 						   ra_offset),
+diff --git a/fs/xfs/xfs_ialloc.c b/fs/xfs/xfs_ialloc.c
+index 5371d2dc360e..0626a32c3447 100644
+--- a/fs/xfs/xfs_ialloc.c
++++ b/fs/xfs/xfs_ialloc.c
+@@ -212,7 +212,7 @@ xfs_ialloc_inode_init(
+ 		 *	to log a whole cluster of inodes instead of all the
+ 		 *	individual transactions causing a lot of log traffic.
+ 		 */
+-		xfs_biozero(fbuf, 0, ninodes << mp->m_sb.sb_inodelog);
++		xfs_buf_zero(fbuf, 0, ninodes << mp->m_sb.sb_inodelog);
+ 		for (i = 0; i < ninodes; i++) {
+ 			int	ioffset = i << mp->m_sb.sb_inodelog;
+ 			uint	isize = sizeof(struct xfs_dinode);
+diff --git a/fs/xfs/xfs_inode.c b/fs/xfs/xfs_inode.c
+index 4fc72c9e3729..493d6b0cbef2 100644
+--- a/fs/xfs/xfs_inode.c
++++ b/fs/xfs/xfs_inode.c
+@@ -2724,7 +2724,7 @@ xfs_iflush_cluster(
+ 			XFS_BUF_UNDONE(bp);
+ 			XFS_BUF_STALE(bp);
+ 			XFS_BUF_ERROR(bp,EIO);
+-			xfs_biodone(bp);
++			xfs_buf_ioend(bp, 0);
+ 		} else {
+ 			XFS_BUF_STALE(bp);
+ 			xfs_buf_relse(bp);
+diff --git a/fs/xfs/xfs_log.c b/fs/xfs/xfs_log.c
+index c8a309424307..f4fd49c9b987 100644
+--- a/fs/xfs/xfs_log.c
++++ b/fs/xfs/xfs_log.c
+@@ -1310,7 +1310,7 @@ xlog_bdstrat(
+ 	if (iclog->ic_state & XLOG_STATE_IOERROR) {
+ 		XFS_BUF_ERROR(bp, EIO);
+ 		XFS_BUF_STALE(bp);
+-		xfs_biodone(bp);
++		xfs_buf_ioend(bp, 0);
+ 		/*
+ 		 * It would seem logical to return EIO here, but we rely on
+ 		 * the log state machine to propagate I/O errors instead of
+diff --git a/fs/xfs/xfs_log_recover.c b/fs/xfs/xfs_log_recover.c
+index 351d71117f16..966d3f97458c 100644
+--- a/fs/xfs/xfs_log_recover.c
++++ b/fs/xfs/xfs_log_recover.c
+@@ -168,7 +168,7 @@ xlog_bread_noalign(
+ 	XFS_BUF_SET_TARGET(bp, log->l_mp->m_logdev_targp);
+ 
+ 	xfsbdstrat(log->l_mp, bp);
+-	error = xfs_iowait(bp);
++	error = xfs_buf_iowait(bp);
+ 	if (error)
+ 		xfs_ioerror_alert("xlog_bread", log->l_mp,
+ 				  bp, XFS_BUF_ADDR(bp));
+@@ -328,7 +328,7 @@ xlog_recover_iodone(
+ 					SHUTDOWN_META_IO_ERROR);
+ 	}
+ 	XFS_BUF_CLR_IODONE_FUNC(bp);
+-	xfs_biodone(bp);
++	xfs_buf_ioend(bp, 0);
+ }
+ 
+ /*
+@@ -3816,7 +3816,7 @@ xlog_do_recover(
+ 	XFS_BUF_READ(bp);
+ 	XFS_BUF_UNASYNC(bp);
+ 	xfsbdstrat(log->l_mp, bp);
+-	error = xfs_iowait(bp);
++	error = xfs_buf_iowait(bp);
+ 	if (error) {
+ 		xfs_ioerror_alert("xlog_do_recover",
+ 				  log->l_mp, bp, XFS_BUF_ADDR(bp));
+diff --git a/fs/xfs/xfs_mount.c b/fs/xfs/xfs_mount.c
+index 00538b7e694a..b1498ab5a399 100644
+--- a/fs/xfs/xfs_mount.c
++++ b/fs/xfs/xfs_mount.c
+@@ -1607,7 +1607,7 @@ xfs_unmountfs_writesb(xfs_mount_t *mp)
+ 		XFS_BUF_UNASYNC(sbp);
+ 		ASSERT(XFS_BUF_TARGET(sbp) == mp->m_ddev_targp);
+ 		xfsbdstrat(mp, sbp);
+-		error = xfs_iowait(sbp);
++		error = xfs_buf_iowait(sbp);
+ 		if (error)
+ 			xfs_ioerror_alert("xfs_unmountfs_writesb",
+ 					  mp, sbp, XFS_BUF_ADDR(sbp));
+diff --git a/fs/xfs/xfs_trans_buf.c b/fs/xfs/xfs_trans_buf.c
+index 90af025e6839..c47918c302a5 100644
+--- a/fs/xfs/xfs_trans_buf.c
++++ b/fs/xfs/xfs_trans_buf.c
+@@ -336,7 +336,7 @@ xfs_trans_read_buf(
+ 			ASSERT(!XFS_BUF_ISASYNC(bp));
+ 			XFS_BUF_READ(bp);
+ 			xfsbdstrat(tp->t_mountp, bp);
+-			error = xfs_iowait(bp);
++			error = xfs_buf_iowait(bp);
+ 			if (error) {
+ 				xfs_ioerror_alert("xfs_trans_read_buf", mp,
+ 						  bp, blkno);
+diff --git a/fs/xfs/xfs_vnodeops.c b/fs/xfs/xfs_vnodeops.c
+index f82c8032db52..f4195f6b8bc4 100644
+--- a/fs/xfs/xfs_vnodeops.c
++++ b/fs/xfs/xfs_vnodeops.c
+@@ -2460,7 +2460,7 @@ xfs_zero_remaining_bytes(
+ 		XFS_BUF_READ(bp);
+ 		XFS_BUF_SET_ADDR(bp, xfs_fsb_to_db(ip, imap.br_startblock));
+ 		xfsbdstrat(mp, bp);
+-		error = xfs_iowait(bp);
++		error = xfs_buf_iowait(bp);
+ 		if (error) {
+ 			xfs_ioerror_alert("xfs_zero_remaining_bytes(read)",
+ 					  mp, bp, XFS_BUF_ADDR(bp));
+@@ -2473,7 +2473,7 @@ xfs_zero_remaining_bytes(
+ 		XFS_BUF_UNREAD(bp);
+ 		XFS_BUF_WRITE(bp);
+ 		xfsbdstrat(mp, bp);
+-		error = xfs_iowait(bp);
++		error = xfs_buf_iowait(bp);
+ 		if (error) {
+ 			xfs_ioerror_alert("xfs_zero_remaining_bytes(write)",
+ 					  mp, bp, XFS_BUF_ADDR(bp));
+

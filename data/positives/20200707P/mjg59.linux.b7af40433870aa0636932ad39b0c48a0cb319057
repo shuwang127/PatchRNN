@@ -1,0 +1,69 @@
+commit b7af40433870aa0636932ad39b0c48a0cb319057
+Author: Takuya Yoshikawa <yoshikawa.takuya@oss.ntt.co.jp>
+Date:   Tue Mar 9 14:55:19 2010 +0900
+
+    KVM: SVM: Fix memory leaks that happen when svm_create_vcpu() fails
+    
+    svm_create_vcpu() does not free the pages allocated during the creation
+    when it fails to complete the allocations. This patch fixes it.
+    
+    Signed-off-by: Takuya Yoshikawa <yoshikawa.takuya@oss.ntt.co.jp>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index 445c59411ed0..2ba58206812a 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -706,29 +706,28 @@ static struct kvm_vcpu *svm_create_vcpu(struct kvm *kvm, unsigned int id)
+ 	if (err)
+ 		goto free_svm;
+ 
++	err = -ENOMEM;
+ 	page = alloc_page(GFP_KERNEL);
+-	if (!page) {
+-		err = -ENOMEM;
++	if (!page)
+ 		goto uninit;
+-	}
+ 
+-	err = -ENOMEM;
+ 	msrpm_pages = alloc_pages(GFP_KERNEL, MSRPM_ALLOC_ORDER);
+ 	if (!msrpm_pages)
+-		goto uninit;
++		goto free_page1;
+ 
+ 	nested_msrpm_pages = alloc_pages(GFP_KERNEL, MSRPM_ALLOC_ORDER);
+ 	if (!nested_msrpm_pages)
+-		goto uninit;
+-
+-	svm->msrpm = page_address(msrpm_pages);
+-	svm_vcpu_init_msrpm(svm->msrpm);
++		goto free_page2;
+ 
+ 	hsave_page = alloc_page(GFP_KERNEL);
+ 	if (!hsave_page)
+-		goto uninit;
++		goto free_page3;
++
+ 	svm->nested.hsave = page_address(hsave_page);
+ 
++	svm->msrpm = page_address(msrpm_pages);
++	svm_vcpu_init_msrpm(svm->msrpm);
++
+ 	svm->nested.msrpm = page_address(nested_msrpm_pages);
+ 
+ 	svm->vmcb = page_address(page);
+@@ -744,6 +743,12 @@ static struct kvm_vcpu *svm_create_vcpu(struct kvm *kvm, unsigned int id)
+ 
+ 	return &svm->vcpu;
+ 
++free_page3:
++	__free_pages(nested_msrpm_pages, MSRPM_ALLOC_ORDER);
++free_page2:
++	__free_pages(msrpm_pages, MSRPM_ALLOC_ORDER);
++free_page1:
++	__free_page(page);
+ uninit:
+ 	kvm_vcpu_uninit(&svm->vcpu);
+ free_svm:
+

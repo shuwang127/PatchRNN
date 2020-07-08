@@ -1,0 +1,54 @@
+commit cddd5d17642cc6881352732693c2ae6930e9ce65
+Author: Tejun Heo <tj@kernel.org>
+Date:   Sat Aug 16 08:02:24 2014 -0400
+
+    blk-mq: blk_mq_freeze_queue() should allow nesting
+    
+    While converting to percpu_ref for freezing, add703fda981 ("blk-mq:
+    use percpu_ref for mq usage count") incorrectly made
+    blk_mq_freeze_queue() misbehave when freezing is nested due to
+    percpu_ref_kill() being invoked on an already killed ref.
+    
+    Fix it by making blk_mq_freeze_queue() kill and kick the queue only
+    for the outermost freeze attempt.  All the nested ones can simply wait
+    for the ref to reach zero.
+    
+    While at it, remove unnecessary @wake initialization from
+    blk_mq_unfreeze_queue().
+    
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Reported-by: Ming Lei <ming.lei@canonical.com>
+    Signed-off-by: Jens Axboe <axboe@fb.com>
+
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index a0565bb20fd5..7950f8d7c1bb 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -112,18 +112,22 @@ static void blk_mq_usage_counter_release(struct percpu_ref *ref)
+  */
+ void blk_mq_freeze_queue(struct request_queue *q)
+ {
++	bool freeze;
++
+ 	spin_lock_irq(q->queue_lock);
+-	q->mq_freeze_depth++;
++	freeze = !q->mq_freeze_depth++;
+ 	spin_unlock_irq(q->queue_lock);
+ 
+-	percpu_ref_kill(&q->mq_usage_counter);
+-	blk_mq_run_queues(q, false);
++	if (freeze) {
++		percpu_ref_kill(&q->mq_usage_counter);
++		blk_mq_run_queues(q, false);
++	}
+ 	wait_event(q->mq_freeze_wq, percpu_ref_is_zero(&q->mq_usage_counter));
+ }
+ 
+ static void blk_mq_unfreeze_queue(struct request_queue *q)
+ {
+-	bool wake = false;
++	bool wake;
+ 
+ 	spin_lock_irq(q->queue_lock);
+ 	wake = !--q->mq_freeze_depth;
+

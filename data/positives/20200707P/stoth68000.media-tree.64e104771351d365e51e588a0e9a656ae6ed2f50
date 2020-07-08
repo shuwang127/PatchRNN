@@ -1,0 +1,67 @@
+commit 64e104771351d365e51e588a0e9a656ae6ed2f50
+Author: Aristeu Rozanski <aris@redhat.com>
+Date:   Tue Nov 6 07:25:04 2012 -0800
+
+    device_cgroup: fix unchecked cgroup parent usage
+    
+    In 4cef7299b478687 ("device_cgroup: add proper checking when changing
+    default behavior") the cgroup parent usage is unchecked.  root will not
+    have a parent and trying to use device.{allow,deny} will cause problems.
+    For some reason my stressing scripts didn't test the root directory so I
+    didn't catch it on my regular tests.
+    
+    Signed-off-by: Aristeu Rozanski <aris@redhat.com>
+    Cc: Li Zefan <lizefan@huawei.com>
+    Cc: James Morris <jmorris@namei.org>
+    Cc: Pavel Emelyanov <xemul@openvz.org>
+    Acked-by: Serge E. Hallyn <serge.hallyn@ubuntu.com>
+    Cc: Jiri Slaby <jslaby@suse.cz>
+    Cc: Tejun Heo <tj@kernel.org>
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+
+diff --git a/security/device_cgroup.c b/security/device_cgroup.c
+index 842c254396db..96d87eab1660 100644
+--- a/security/device_cgroup.c
++++ b/security/device_cgroup.c
+@@ -352,6 +352,8 @@ static int parent_has_perm(struct dev_cgroup *childcg,
+  */
+ static inline int may_allow_all(struct dev_cgroup *parent)
+ {
++	if (!parent)
++		return 1;
+ 	return parent->behavior == DEVCG_DEFAULT_ALLOW;
+ }
+ 
+@@ -376,11 +378,14 @@ static int devcgroup_update_access(struct dev_cgroup *devcgroup,
+ 	int count, rc;
+ 	struct dev_exception_item ex;
+ 	struct cgroup *p = devcgroup->css.cgroup;
+-	struct dev_cgroup *parent = cgroup_to_devcgroup(p->parent);
++	struct dev_cgroup *parent = NULL;
+ 
+ 	if (!capable(CAP_SYS_ADMIN))
+ 		return -EPERM;
+ 
++	if (p->parent)
++		parent = cgroup_to_devcgroup(p->parent);
++
+ 	memset(&ex, 0, sizeof(ex));
+ 	b = buffer;
+ 
+@@ -391,11 +396,14 @@ static int devcgroup_update_access(struct dev_cgroup *devcgroup,
+ 			if (!may_allow_all(parent))
+ 				return -EPERM;
+ 			dev_exception_clean(devcgroup);
++			devcgroup->behavior = DEVCG_DEFAULT_ALLOW;
++			if (!parent)
++				break;
++
+ 			rc = dev_exceptions_copy(&devcgroup->exceptions,
+ 						 &parent->exceptions);
+ 			if (rc)
+ 				return rc;
+-			devcgroup->behavior = DEVCG_DEFAULT_ALLOW;
+ 			break;
+ 		case DEVCG_DENY:
+ 			dev_exception_clean(devcgroup);
+

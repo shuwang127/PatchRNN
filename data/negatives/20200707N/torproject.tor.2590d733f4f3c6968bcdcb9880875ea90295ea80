@@ -1,0 +1,41 @@
+commit 2590d733f4f3c6968bcdcb9880875ea90295ea80
+Author: Nick Mathewson <nickm@torproject.org>
+Date:   Mon Jan 25 14:09:58 2010 -0500
+
+    Try to untangle the logic in server_port_flush
+    
+    It's a bit confusing to have a loop where another function,
+    confusingly named "*_free", is responsible for advancing the loop
+    variable (or rather, for altering a structure so that the next time
+    the loop variable's initializer is evaluated it evaluates to something
+    different.)
+    
+    Not only has this confused people: it's also confused coverity scan.
+    Let's fix that.
+
+diff --git a/src/or/eventdns.c b/src/or/eventdns.c
+index a504224c5..06add11b1 100644
+--- a/src/or/eventdns.c
++++ b/src/or/eventdns.c
+@@ -1293,8 +1293,8 @@ server_port_read(struct evdns_server_port *s) {
+ static void
+ server_port_flush(struct evdns_server_port *port)
+ {
+-	while (port->pending_replies) {
+-		struct server_request *req = port->pending_replies;
++	struct server_request *req = port->pending_replies;
++	while (req) {
+ 		ssize_t r = sendto(port->socket, req->response, req->response_len, 0,
+                        (struct sockaddr*) &req->addr, (socklen_t)req->addrlen);
+ 		if (r < 0) {
+@@ -1306,6 +1306,9 @@ server_port_flush(struct evdns_server_port *port)
+ 		if (server_request_free(req)) {
+ 			/* we released the last reference to req->port. */
+ 			return;
++		} else {
++			assert(port->pending_replies != req);
++			req = port->pending_replies;
+ 		}
+ 	}
+ 
+

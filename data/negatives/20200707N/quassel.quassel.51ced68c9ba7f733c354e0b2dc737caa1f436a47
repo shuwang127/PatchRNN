@@ -1,0 +1,276 @@
+commit 51ced68c9ba7f733c354e0b2dc737caa1f436a47
+Author: Shane Synan <digitalcircuit36939@gmail.com>
+Date:   Wed Feb 17 14:03:01 2016 -0600
+
+    Add support for away-notify capability
+    
+    Add support for away-notify. As nicks change status, update ircuser
+    objects with new away status and messages, no /whois needed.
+    
+    Modify automatic WHO polling when away-notify is active to poll all
+    channels ONCE regardless of polling settings and nick-limit.  This
+    captures away state for existing nicks in the channel.  Channels
+    joined after this will queue a separate one-off WHO poll.
+    
+    Queue one-time WHO of nicks who join a channel when away-notify is
+    active as some servers won't send an :away message in this situation.
+    To support this, autoWhoQueue can now check specific users.
+    
+    See http://ircv3.net/specs/extensions/away-notify-3.1.html
+
+diff --git a/src/common/eventmanager.h b/src/common/eventmanager.h
+index ec140649..79b37ff2 100644
+--- a/src/common/eventmanager.h
++++ b/src/common/eventmanager.h
+@@ -88,6 +88,7 @@ public :
+ 
+         IrcEvent                    = 0x00030000,
+         IrcEventAuthenticate,
++        IrcEventAway,
+         IrcEventCap,
+         IrcEventInvite,
+         IrcEventJoin,
+diff --git a/src/core/corenetwork.cpp b/src/core/corenetwork.cpp
+index ecf2a2d9..4784edb7 100644
+--- a/src/core/corenetwork.cpp
++++ b/src/core/corenetwork.cpp
+@@ -300,7 +300,7 @@ void CoreNetwork::putCmd(const QString &cmd, const QList<QList<QByteArray>> &par
+ 
+ void CoreNetwork::setChannelJoined(const QString &channel)
+ {
+-    _autoWhoQueue.prepend(channel.toLower()); // prepend so this new chan is the first to be checked
++    queueAutoWhoOneshot(channel); // check this new channel first
+ 
+     Core::setChannelPersistent(userId(), networkId(), channel, true);
+     Core::setPersistentChannelKey(userId(), networkId(), channel, _channelKeys[channel.toLower()]);
+@@ -889,6 +889,10 @@ void CoreNetwork::addCap(const QString &capability, const QString &value)
+ 
+     // Handle special cases here
+     // TODO Use events if it makes sense
++    if (capability == "away-notify") {
++        // away-notify enabled, stop the automatic timers, handle manually
++        setAutoWhoEnabled(false);
++    }
+ }
+ 
+ void CoreNetwork::removeCap(const QString &capability)
+@@ -901,6 +905,10 @@ void CoreNetwork::removeCap(const QString &capability)
+ 
+     // Handle special cases here
+     // TODO Use events if it makes sense
++    if (capability == "away-notify") {
++        // away-notify disabled, enable autowho according to configuration
++        setAutoWhoEnabled(networkConfig()->autoWhoEnabled());
++    }
+ }
+ 
+ QString CoreNetwork::capValue(const QString &capability) const
+@@ -944,6 +952,19 @@ void CoreNetwork::startAutoWhoCycle()
+     _autoWhoQueue = channels();
+ }
+ 
++void CoreNetwork::queueAutoWhoOneshot(const QString &channelOrNick)
++{
++    // Prepend so these new channels/nicks are the first to be checked
++    // Don't allow duplicates
++    if (!_autoWhoQueue.contains(channelOrNick.toLower())) {
++        _autoWhoQueue.prepend(channelOrNick.toLower());
++    }
++    if (useCapAwayNotify()) {
++        // When away-notify is active, the timer's stopped.  Start a new cycle to who this channel.
++        setAutoWhoEnabled(true);
++    }
++}
++
+ 
+ void CoreNetwork::setAutoWhoDelay(int delay)
+ {
+@@ -975,19 +996,43 @@ void CoreNetwork::sendAutoWho()
+         return;
+ 
+     while (!_autoWhoQueue.isEmpty()) {
+-        QString chan = _autoWhoQueue.takeFirst();
+-        IrcChannel *ircchan = ircChannel(chan);
+-        if (!ircchan) continue;
+-        if (networkConfig()->autoWhoNickLimit() > 0 && ircchan->ircUsers().count() >= networkConfig()->autoWhoNickLimit())
++        QString chanOrNick = _autoWhoQueue.takeFirst();
++        // Check if it's a known channel or nick
++        IrcChannel *ircchan = ircChannel(chanOrNick);
++        IrcUser *ircuser = ircUser(chanOrNick);
++        if (ircchan) {
++            // Apply channel limiting rules
++            // If using away-notify, don't impose channel size limits in order to capture away
++            // state of everyone.  Auto-who won't run on a timer so network impact is minimal.
++            if (networkConfig()->autoWhoNickLimit() > 0
++                && ircchan->ircUsers().count() >= networkConfig()->autoWhoNickLimit()
++                && !useCapAwayNotify())
++                continue;
++            _autoWhoPending[chanOrNick.toLower()]++;
++        } else if (ircuser) {
++            // Checking a nick, add it to the pending list
++            _autoWhoPending[ircuser->nick().toLower()]++;
++        } else {
++            // Not a channel or a nick, skip it
++            qDebug() << "Skipping who polling of unknown channel or nick" << chanOrNick;
+             continue;
+-        _autoWhoPending[chan]++;
+-        putRawLine("WHO " + serverEncode(chan));
++        }
++        // TODO Use WHO extended to poll away users and/or user accounts
++        // If a server supports it, supports("WHOX") will be true
++        // See: http://faerion.sourceforge.net/doc/irc/whox.var and HexChat
++        putRawLine("WHO " + serverEncode(chanOrNick));
+         break;
+     }
+-    if (_autoWhoQueue.isEmpty() && networkConfig()->autoWhoEnabled() && !_autoWhoCycleTimer.isActive()) {
++
++    if (_autoWhoQueue.isEmpty() && networkConfig()->autoWhoEnabled() && !_autoWhoCycleTimer.isActive()
++        && !useCapAwayNotify()) {
+         // Timer was stopped, means a new cycle is due immediately
++        // Don't run a new cycle if using away-notify; server will notify as appropriate
+         _autoWhoCycleTimer.start();
+         startAutoWhoCycle();
++    } else if (useCapAwayNotify() && _autoWhoCycleTimer.isActive()) {
++        // Don't run another who cycle if away-notify is enabled
++        _autoWhoCycleTimer.stop();
+     }
+ }
+ 
+diff --git a/src/core/corenetwork.h b/src/core/corenetwork.h
+index cc64d711..88ea9bd5 100644
+--- a/src/core/corenetwork.h
++++ b/src/core/corenetwork.h
+@@ -141,6 +141,15 @@ public:
+      */
+     inline bool useCapSASL() const { return capEnabled("sasl"); }
+ 
++    /**
++     * Gets the status of the away-notify capability.
++     *
++     * http://ircv3.net/specs/extensions/away-notify-3.1.html
++     *
++     * @returns True if away-notify is enabled, otherwise false
++     */
++    inline bool useCapAwayNotify() const { return capEnabled("away-notify"); }
++
+ public slots:
+     virtual void setMyNick(const QString &mynick);
+ 
+@@ -217,6 +226,16 @@ public slots:
+     void setAutoWhoInterval(int interval);
+     void setAutoWhoDelay(int delay);
+ 
++    /**
++     * Appends the given channel/nick to the front of the AutoWho queue.
++     *
++     * When 'away-notify' is enabled, this will trigger an immediate AutoWho since regular
++     * who-cycles are disabled as per IRCv3 specifications.
++     *
++     * @param[in] channelOrNick Channel or nickname to WHO
++     */
++    void queueAutoWhoOneshot(const QString &channelOrNick);
++
+     bool setAutoWhoDone(const QString &channel);
+ 
+     void updateIssuedModes(const QString &requestedModes);
+diff --git a/src/core/coresessioneventprocessor.cpp b/src/core/coresessioneventprocessor.cpp
+index a47b2c05..e553e862 100644
+--- a/src/core/coresessioneventprocessor.cpp
++++ b/src/core/coresessioneventprocessor.cpp
+@@ -191,6 +191,9 @@ void CoreSessionEventProcessor::processIrcEventCap(IrcEvent *e)
+                     // Only request SASL if it's enabled
+                     if (coreNet->networkInfo().useSasl)
+                         queueCurrentCap = true;
++                } else if (availableCapPair.at(0).startsWith("away-notify")) {
++                    // Always request these capabilities if available
++                    queueCurrentCap = true;
+                 }
+                 if (queueCurrentCap) {
+                     if(availableCapPair.count() >= 2)
+@@ -250,6 +253,26 @@ void CoreSessionEventProcessor::processIrcEventCap(IrcEvent *e)
+ }
+ 
+ 
++/* IRCv3 away-notify - ":nick!user@host AWAY [:message]" */
++void CoreSessionEventProcessor::processIrcEventAway(IrcEvent *e)
++{
++    if (!checkParamCount(e, 2))
++        return;
++
++    // Nick is sent as part of parameters in order to split user/server decoding
++    IrcUser *ircuser = e->network()->ircUser(e->params().at(0));
++    if (ircuser) {
++        if (!e->params().at(1).isEmpty()) {
++            ircuser->setAway(true);
++            ircuser->setAwayMessage(e->params().at(1));
++        } else {
++            ircuser->setAway(false);
++        }
++    } else {
++        qDebug() << "Received away-notify data for unknown user" << e->params().at(0);
++    }
++}
++
+ void CoreSessionEventProcessor::processIrcEventInvite(IrcEvent *e)
+ {
+     if (checkParamCount(e, 2)) {
+@@ -277,6 +300,12 @@ void CoreSessionEventProcessor::processIrcEventJoin(IrcEvent *e)
+             break;
+     }
+ 
++    // If using away-notify, check new users.  Works around buggy IRC servers
++    // forgetting to send :away messages for users who join channels when away.
++    if (coreNetwork(e)->useCapAwayNotify()) {
++        coreNetwork(e)->queueAutoWhoOneshot(ircuser->nick());
++    }
++
+     if (!handledByNetsplit)
+         ircuser->joinChannel(channel);
+     else
+@@ -857,8 +886,12 @@ void CoreSessionEventProcessor::processIrcEvent352(IrcEvent *e)
+         ircuser->setRealName(e->params().last().section(" ", 1));
+     }
+ 
+-    if (coreNetwork(e)->isAutoWhoInProgress(channel))
++    // Check if channel name has a who in progress.
++    // If not, then check if user nick exists and has a who in progress.
++    if (coreNetwork(e)->isAutoWhoInProgress(channel) ||
++        (ircuser && coreNetwork(e)->isAutoWhoInProgress(ircuser->nick()))) {
+         e->setFlag(EventManager::Silent);
++    }
+ }
+ 
+ 
+diff --git a/src/core/coresessioneventprocessor.h b/src/core/coresessioneventprocessor.h
+index 18d853a4..2053db89 100644
+--- a/src/core/coresessioneventprocessor.h
++++ b/src/core/coresessioneventprocessor.h
+@@ -48,6 +48,7 @@ public:
+ 
+     Q_INVOKABLE void processIrcEventAuthenticate(IrcEvent *event); /// SASL authentication
+     Q_INVOKABLE void processIrcEventCap(IrcEvent *event);          /// CAP framework negotiation
++    Q_INVOKABLE void processIrcEventAway(IrcEvent *event);         /// away-notify received
+     Q_INVOKABLE void processIrcEventInvite(IrcEvent *event);
+     Q_INVOKABLE void processIrcEventJoin(IrcEvent *event);
+     Q_INVOKABLE void lateProcessIrcEventKick(IrcEvent *event);
+diff --git a/src/core/ircparser.cpp b/src/core/ircparser.cpp
+index 9e8461f3..bc10d93e 100644
+--- a/src/core/ircparser.cpp
++++ b/src/core/ircparser.cpp
+@@ -273,6 +273,15 @@ void IrcParser::processNetworkIncoming(NetworkDataEvent *e)
+         }
+         break;
+ 
++    case EventManager::IrcEventAway:
++        {
++            QString nick = nickFromMask(prefix);
++            decParams << nick;
++            decParams << (params.count() >= 1 ? net->userDecode(nick, params.at(0)) : QString());
++            net->updateNickFromMask(prefix);
++        }
++        break;
++
+     case EventManager::IrcEventNumeric:
+         switch (num) {
+         case 301: /* RPL_AWAY */
+

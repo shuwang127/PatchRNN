@@ -1,0 +1,59 @@
+commit 3e49c4f4cf786b70bbc369b99e590de4bebac1b3
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Mon Feb 9 11:31:41 2009 +0000
+
+    drm: Free the object ref on error.
+    
+    Ensure that the object is unreferenced if we fail to allocate during
+    drm_gem_flink_ioctl().
+    
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Signed-off-by: Eric Anholt <eric@anholt.net>
+    Signed-off-by: Dave Airlie <airlied@linux.ie>
+
+diff --git a/drivers/gpu/drm/drm_gem.c b/drivers/gpu/drm/drm_gem.c
+index 308fe1e207f5..e5a8ebf9a662 100644
+--- a/drivers/gpu/drm/drm_gem.c
++++ b/drivers/gpu/drm/drm_gem.c
+@@ -295,8 +295,10 @@ drm_gem_flink_ioctl(struct drm_device *dev, void *data,
+ 		return -EBADF;
+ 
+ again:
+-	if (idr_pre_get(&dev->object_name_idr, GFP_KERNEL) == 0)
+-		return -ENOMEM;
++	if (idr_pre_get(&dev->object_name_idr, GFP_KERNEL) == 0) {
++		ret = -ENOMEM;
++		goto err;
++	}
+ 
+ 	spin_lock(&dev->object_name_lock);
+ 	if (obj->name) {
+@@ -310,12 +312,8 @@ drm_gem_flink_ioctl(struct drm_device *dev, void *data,
+ 	if (ret == -EAGAIN)
+ 		goto again;
+ 
+-	if (ret != 0) {
+-		mutex_lock(&dev->struct_mutex);
+-		drm_gem_object_unreference(obj);
+-		mutex_unlock(&dev->struct_mutex);
+-		return ret;
+-	}
++	if (ret != 0)
++		goto err;
+ 
+ 	/*
+ 	 * Leave the reference from the lookup around as the
+@@ -324,6 +322,12 @@ drm_gem_flink_ioctl(struct drm_device *dev, void *data,
+ 	args->name = (uint64_t) obj->name;
+ 
+ 	return 0;
++
++err:
++	mutex_lock(&dev->struct_mutex);
++	drm_gem_object_unreference(obj);
++	mutex_unlock(&dev->struct_mutex);
++	return ret;
+ }
+ 
+ /**
+

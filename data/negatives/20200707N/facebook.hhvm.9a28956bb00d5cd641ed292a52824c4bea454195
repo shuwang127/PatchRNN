@@ -1,0 +1,95 @@
+commit 9a28956bb00d5cd641ed292a52824c4bea454195
+Author: Jordan DeLong <jdelong@fb.com>
+Date:   Thu Dec 4 11:52:08 2014 -0800
+
+    Basic support for interfaces in HHBBC subtypeOf
+    
+    Reviewed By: @paroski, @elgenie
+    
+    Differential Revision: D1719649
+    
+    Signature: t1:1719649:1417817263:4c8ac18096750c5b553c855e0809cfd287135c45
+
+diff --git a/hphp/hhbbc/index.cpp b/hphp/hhbbc/index.cpp
+index a0eae4fb7d..00fae606dd 100644
+--- a/hphp/hhbbc/index.cpp
++++ b/hphp/hhbbc/index.cpp
+@@ -316,6 +316,12 @@ struct ClassInfo {
+    */
+   std::vector<borrowed_ptr<const ClassInfo>> declInterfaces;
+ 
++  /*
++   * A (case-insensitive) map from interface names supported by this class to
++   * their ClassInfo structures, flattened across the hierarchy.
++   */
++  ISStringToOneT<borrowed_ptr<const ClassInfo>> implInterfaces;
++
+   /*
+    * A (case-sensitive) map from class constant name to the php::Const
+    * that it came from.  This map is flattened across the inheritance
+@@ -436,6 +442,16 @@ bool Class::subtypeOf(const Class& o) const {
+   if (s1 || s2) return s1 == s2;
+   auto c1 = val.right();
+   auto c2 = o.val.right();
++
++  // If c2 is an interface, see if c1 declared it.
++  if (c2->cls->attrs & AttrInterface) {
++    if (c1->implInterfaces.count(c2->cls->name)) {
++      return true;
++    }
++    return false;
++  }
++
++  // Otherwise check for direct inheritance.
+   if (c1->baseList.size() >= c2->baseList.size()) {
+     return c1->baseList[c2->baseList.size() - 1] == c2;
+   }
+@@ -711,6 +727,13 @@ bool build_cls_info_rec(borrowed_ptr<ClassInfo> rleaf,
+ 
+   auto const isIface = rparent->cls->attrs & AttrInterface;
+ 
++  /*
++   * Make a flattened table of all the interfaces implemented by the class.
++   */
++  if (isIface) {
++    rleaf->implInterfaces[rparent->cls->name] = rparent;
++  }
++
+   /*
+    * Make a table of all the constants on this class.
+    *
+diff --git a/hphp/hhbbc/test/type-system.cpp b/hphp/hhbbc/test/type-system.cpp
+index a81aa7a0f0..292c8a11dc 100644
+--- a/hphp/hhbbc/test/type-system.cpp
++++ b/hphp/hhbbc/test/type-system.cpp
+@@ -1300,22 +1300,18 @@ TEST(Type, Interface) {
+   auto const subObjAATy  = subObj(*clsAA);
+   auto const subClsAATy  = subCls(*clsAA);
+ 
+-  // we don't support interfaces quite yet so let's put few tests
+-  // that will fail once interfaces are supported
+-
+-  // first 2 are "not precise" - should be true
+-  EXPECT_FALSE(subClsATy.subtypeOf(objcls(subObjIATy)));
+-  EXPECT_FALSE(objcls(subObjATy).strictSubtypeOf(subClsIATy));
++  EXPECT_TRUE(subClsATy.subtypeOf(objcls(subObjIATy)));
+   EXPECT_TRUE(subClsATy.couldBe(objcls(subObjIATy)));
+-
+-  // first 2 are "not precise" - should be true
+-  EXPECT_FALSE(subClsAATy.subtypeOf(objcls(subObjIAATy)));
+-  EXPECT_FALSE(objcls(subObjAATy).strictSubtypeOf(objcls(subObjIAATy)));
++  EXPECT_TRUE(objcls(subObjATy).strictSubtypeOf(subClsIATy));
++  EXPECT_TRUE(subClsAATy.subtypeOf(objcls(subObjIAATy)));
+   EXPECT_TRUE(subClsAATy.couldBe(objcls(subObjIAATy)));
++  EXPECT_TRUE(objcls(subObjAATy).strictSubtypeOf(objcls(subObjIAATy)));
+ 
+-  // 3rd one is not precise - should be false
+   EXPECT_FALSE(subClsATy.subtypeOf(objcls(subObjIAATy)));
+   EXPECT_FALSE(objcls(subObjATy).strictSubtypeOf(objcls(subObjIAATy)));
++
++  // We don't support couldBe intelligently for interfaces quite yet, so here's
++  // a test that will start failing if we ever do:
+   EXPECT_TRUE(clsExactATy.couldBe(objcls(subObjIAATy)));
+ }
+ 
+

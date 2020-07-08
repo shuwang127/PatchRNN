@@ -1,0 +1,120 @@
+commit c11271349ad5d4647e69e511fc481b2dd390efc4
+Author: Hans de Goede <hdegoede@redhat.com>
+Date:   Sun Jul 3 11:50:51 2011 -0300
+
+    [media] pwc: Allow dqbuf / read to complete while waiting for controls
+    
+    Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+
+diff --git a/drivers/media/video/pwc/pwc-if.c b/drivers/media/video/pwc/pwc-if.c
+index 1d5a6db915fa..fdf113fe51c3 100644
+--- a/drivers/media/video/pwc/pwc-if.c
++++ b/drivers/media/video/pwc/pwc-if.c
+@@ -1160,6 +1160,7 @@ static int usb_pwc_probe(struct usb_interface *intf, const struct usb_device_id
+ 	pwc_construct(pdev); /* set min/max sizes correct */
+ 
+ 	mutex_init(&pdev->modlock);
++	mutex_init(&pdev->udevlock);
+ 	spin_lock_init(&pdev->queued_bufs_lock);
+ 	INIT_LIST_HEAD(&pdev->queued_bufs);
+ 
+@@ -1297,6 +1298,7 @@ static void usb_pwc_disconnect(struct usb_interface *intf)
+ {
+ 	struct pwc_device *pdev  = usb_get_intfdata(intf);
+ 
++	mutex_lock(&pdev->udevlock);
+ 	mutex_lock(&pdev->modlock);
+ 
+ 	usb_set_intfdata(intf, NULL);
+@@ -1306,6 +1308,7 @@ static void usb_pwc_disconnect(struct usb_interface *intf)
+ 	pdev->udev = NULL;
+ 
+ 	mutex_unlock(&pdev->modlock);
++	mutex_unlock(&pdev->udevlock);
+ 
+ 	pwc_remove_sysfs_files(pdev);
+ 	video_unregister_device(&pdev->vdev);
+diff --git a/drivers/media/video/pwc/pwc-v4l.c b/drivers/media/video/pwc/pwc-v4l.c
+index 986dd5d6187a..537657283e79 100644
+--- a/drivers/media/video/pwc/pwc-v4l.c
++++ b/drivers/media/video/pwc/pwc-v4l.c
+@@ -526,8 +526,24 @@ static int pwc_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
+ 		container_of(ctrl->handler, struct pwc_device, ctrl_handler);
+ 	int ret = 0;
+ 
+-	if (!pdev->udev)
+-		return -ENODEV;
++	/*
++	 * Sometimes it can take quite long for the pwc to complete usb control
++	 * transfers, so release the modlock to give streaming by another
++	 * process / thread the chance to continue with a dqbuf.
++	 */
++	mutex_unlock(&pdev->modlock);
++
++	/*
++	 * Take the udev-lock to protect against the disconnect handler
++	 * completing and setting dev->udev to NULL underneath us. Other code
++	 * does not need to do this since it is protected by the modlock.
++	 */
++	mutex_lock(&pdev->udevlock);
++
++	if (!pdev->udev) {
++		ret = -ENODEV;
++		goto leave;
++	}
+ 
+ 	switch (ctrl->id) {
+ 	case V4L2_CID_AUTO_WHITE_BALANCE:
+@@ -590,6 +606,9 @@ static int pwc_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
+ 	if (ret)
+ 		PWC_ERROR("g_ctrl %s error %d\n", ctrl->name, ret);
+ 
++leave:
++	mutex_unlock(&pdev->udevlock);
++	mutex_lock(&pdev->modlock);
+ 	return ret;
+ }
+ 
+@@ -751,8 +770,14 @@ static int pwc_s_ctrl(struct v4l2_ctrl *ctrl)
+ 		container_of(ctrl->handler, struct pwc_device, ctrl_handler);
+ 	int ret = 0;
+ 
+-	if (!pdev->udev)
+-		return -ENODEV;
++	/* See the comments on locking in pwc_g_volatile_ctrl */
++	mutex_unlock(&pdev->modlock);
++	mutex_lock(&pdev->udevlock);
++
++	if (!pdev->udev) {
++		ret = -ENODEV;
++		goto leave;
++	}
+ 
+ 	switch (ctrl->id) {
+ 	case V4L2_CID_BRIGHTNESS:
+@@ -841,6 +866,9 @@ static int pwc_s_ctrl(struct v4l2_ctrl *ctrl)
+ 	if (ret)
+ 		PWC_ERROR("s_ctrl %s error %d\n", ctrl->name, ret);
+ 
++leave:
++	mutex_unlock(&pdev->udevlock);
++	mutex_lock(&pdev->modlock);
+ 	return ret;
+ }
+ 
+diff --git a/drivers/media/video/pwc/pwc.h b/drivers/media/video/pwc/pwc.h
+index 601a549988b5..e02dbf745155 100644
+--- a/drivers/media/video/pwc/pwc.h
++++ b/drivers/media/video/pwc/pwc.h
+@@ -200,6 +200,9 @@ struct pwc_device
+ 
+ 	/* Pointer to our usb_device, may be NULL after unplug */
+ 	struct usb_device *udev;
++	/* Protects the setting of udev to NULL by our disconnect handler */
++	struct mutex udevlock;
++
+ 	/* type of cam (645, 646, 675, 680, 690, 720, 730, 740, 750) */
+ 	int type;
+ 	int release;		/* release number */
+

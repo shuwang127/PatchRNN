@@ -1,0 +1,170 @@
+commit 7306a0b9b3e2056a616c84841288ca2431a05627
+Author: Dustin Kirkland <dustin.kirkland@us.ibm.com>
+Date:   Wed Nov 16 15:53:13 2005 +0000
+
+    [PATCH] Miscellaneous bug and warning fixes
+    
+    This patch fixes a couple of bugs revealed in new features recently
+    added to -mm1:
+    * fixes warnings due to inconsistent use of const struct inode *inode
+    * fixes bug that prevent a kernel from booting with audit on, and SELinux off
+      due to a missing function in security/dummy.c
+    * fixes a bug that throws spurious audit_panic() messages due to a missing
+      return just before an error_path label
+    * some reasonable house cleaning in audit_ipc_context(),
+      audit_inode_context(), and audit_log_task_context()
+    
+    Signed-off-by: Dustin Kirkland <dustin.kirkland@us.ibm.com>
+    Signed-off-by: David Woodhouse <dwmw2@infradead.org>
+
+diff --git a/include/linux/security.h b/include/linux/security.h
+index ec0bbbc3ffc2..2a502250eb5c 100644
+--- a/include/linux/security.h
++++ b/include/linux/security.h
+@@ -1173,8 +1173,8 @@ struct security_operations {
+ 	int (*inode_getxattr) (struct dentry *dentry, char *name);
+ 	int (*inode_listxattr) (struct dentry *dentry);
+ 	int (*inode_removexattr) (struct dentry *dentry, char *name);
+-	char *(*inode_xattr_getsuffix) (void);
+-  	int (*inode_getsecurity)(struct inode *inode, const char *name, void *buffer, size_t size, int err);
++	const char *(*inode_xattr_getsuffix) (void);
++  	int (*inode_getsecurity)(const struct inode *inode, const char *name, void *buffer, size_t size, int err);
+   	int (*inode_setsecurity)(struct inode *inode, const char *name, const void *value, size_t size, int flags);
+   	int (*inode_listsecurity)(struct inode *inode, char *buffer, size_t buffer_size);
+ 
+@@ -1686,7 +1686,7 @@ static inline const char *security_inode_xattr_getsuffix(void)
+ 	return security_ops->inode_xattr_getsuffix();
+ }
+ 
+-static inline int security_inode_getsecurity(struct inode *inode, const char *name, void *buffer, size_t size, int err)
++static inline int security_inode_getsecurity(const struct inode *inode, const char *name, void *buffer, size_t size, int err)
+ {
+ 	if (unlikely (IS_PRIVATE (inode)))
+ 		return 0;
+@@ -2338,7 +2338,7 @@ static inline const char *security_inode_xattr_getsuffix (void)
+ 	return NULL ;
+ }
+ 
+-static inline int security_inode_getsecurity(struct inode *inode, const char *name, void *buffer, size_t size, int err)
++static inline int security_inode_getsecurity(const struct inode *inode, const char *name, void *buffer, size_t size, int err)
+ {
+ 	return -EOPNOTSUPP;
+ }
+diff --git a/kernel/auditsc.c b/kernel/auditsc.c
+index 4e2256ec7cf3..4ef14515da35 100644
+--- a/kernel/auditsc.c
++++ b/kernel/auditsc.c
+@@ -892,21 +892,20 @@ static void audit_log_task_context(struct audit_buffer *ab, gfp_t gfp_mask)
+ 	}
+ 
+ 	ctx = kmalloc(len, gfp_mask);
+-	if (!ctx) {
++	if (!ctx)
+ 		goto error_path;
+-		return;
+-	}
+ 
+ 	len = security_getprocattr(current, "current", ctx, len);
+ 	if (len < 0 )
+ 		goto error_path;
+ 
+ 	audit_log_format(ab, " subj=%s", ctx);
++	return;
+ 
+ error_path:
+ 	if (ctx)
+ 		kfree(ctx);
+-	audit_panic("security_getprocattr error in audit_log_task_context");
++	audit_panic("error in audit_log_task_context");
+ 	return;
+ }
+ 
+@@ -1304,13 +1303,16 @@ void audit_putname(const char *name)
+ void audit_inode_context(int idx, const struct inode *inode)
+ {
+ 	struct audit_context *context = current->audit_context;
++	const char *suffix = security_inode_xattr_getsuffix();
+ 	char *ctx = NULL;
+ 	int len = 0;
+ 
+-	if (!security_inode_xattr_getsuffix())
+-		return;
++	if (!suffix)
++		goto ret;
+ 
+-	len = security_inode_getsecurity(inode, (char *)security_inode_xattr_getsuffix(), NULL, 0, 0);
++	len = security_inode_getsecurity(inode, suffix, NULL, 0, 0);
++	if (len == -EOPNOTSUPP)
++		goto ret;
+ 	if (len < 0) 
+ 		goto error_path;
+ 
+@@ -1318,18 +1320,19 @@ void audit_inode_context(int idx, const struct inode *inode)
+ 	if (!ctx) 
+ 		goto error_path;
+ 
+-	len = security_inode_getsecurity(inode, (char *)security_inode_xattr_getsuffix(), ctx, len, 0);
++	len = security_inode_getsecurity(inode, suffix, ctx, len, 0);
+ 	if (len < 0)
+ 		goto error_path;
+ 
+ 	kfree(context->names[idx].ctx);
+ 	context->names[idx].ctx = ctx;
+-	return;
++	goto ret;
+ 
+ error_path:
+ 	if (ctx)
+ 		kfree(ctx);
+ 	audit_panic("error in audit_inode_context");
++ret:
+ 	return;
+ }
+ 
+diff --git a/security/dummy.c b/security/dummy.c
+index 6febe7d39fa0..0a553d39729f 100644
+--- a/security/dummy.c
++++ b/security/dummy.c
+@@ -378,7 +378,7 @@ static int dummy_inode_removexattr (struct dentry *dentry, char *name)
+ 	return 0;
+ }
+ 
+-static int dummy_inode_getsecurity(struct inode *inode, const char *name, void *buffer, size_t size, int err)
++static int dummy_inode_getsecurity(const struct inode *inode, const char *name, void *buffer, size_t size, int err)
+ {
+ 	return -EOPNOTSUPP;
+ }
+@@ -393,6 +393,11 @@ static int dummy_inode_listsecurity(struct inode *inode, char *buffer, size_t bu
+ 	return 0;
+ }
+ 
++static const char *dummy_inode_xattr_getsuffix(void)
++{
++	return NULL;
++}
++
+ static int dummy_file_permission (struct file *file, int mask)
+ {
+ 	return 0;
+@@ -930,6 +935,7 @@ void security_fixup_ops (struct security_operations *ops)
+ 	set_to_dummy_if_null(ops, inode_getxattr);
+ 	set_to_dummy_if_null(ops, inode_listxattr);
+ 	set_to_dummy_if_null(ops, inode_removexattr);
++	set_to_dummy_if_null(ops, inode_xattr_getsuffix);
+ 	set_to_dummy_if_null(ops, inode_getsecurity);
+ 	set_to_dummy_if_null(ops, inode_setsecurity);
+ 	set_to_dummy_if_null(ops, inode_listsecurity);
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 9c08a19cc81b..81b726b1a419 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -2247,7 +2247,7 @@ static const char *selinux_inode_xattr_getsuffix(void)
+  *
+  * Permission check is handled by selinux_inode_getxattr hook.
+  */
+-static int selinux_inode_getsecurity(struct inode *inode, const char *name, void *buffer, size_t size, int err)
++static int selinux_inode_getsecurity(const struct inode *inode, const char *name, void *buffer, size_t size, int err)
+ {
+ 	struct inode_security_struct *isec = inode->i_security;
+ 
+

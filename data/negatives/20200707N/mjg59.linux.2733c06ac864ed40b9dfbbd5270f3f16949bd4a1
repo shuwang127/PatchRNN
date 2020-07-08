@@ -1,0 +1,84 @@
+commit 2733c06ac864ed40b9dfbbd5270f3f16949bd4a1
+Author: KOSAKI Motohiro <kosaki.motohiro@jp.fujitsu.com>
+Date:   Wed Jan 7 18:08:23 2009 -0800
+
+    memcg: protect prev_priority
+    
+    Currently, mem_cgroup doesn't have own lock and almost its member doesn't
+    need.  (e.g.  mem_cgroup->info is protected by zone lock, mem_cgroup->stat
+    is per cpu variable)
+    
+    However, there is one explict exception.  mem_cgroup->prev_priorit need
+    lock, but doesn't protect.  Luckly, this is NOT bug because prev_priority
+    isn't used for current reclaim code.
+    
+    However, we plan to use prev_priority future again.  Therefore, fixing is
+    better.
+    
+    In addition, we plan to reuse this lock for another member.  Then
+    "reclaim_param_lock" name is better than "prev_priority_lock".
+    
+    Acked-by: KAMEZAWA Hiroyuki <kamezawa.hiroyu@jp.fujitsu.com>
+    Signed-off-by: KOSAKI Motohiro <kosaki.motohiro@jp.fujitsu.com>
+    Cc: Balbir Singh <balbir@in.ibm.com>
+    Cc: Daisuke Nishimura <nishimura@mxp.nes.nec.co.jp>
+    Cc: Hugh Dickins <hugh@veritas.com>
+    Cc: KOSAKI Motohiro <kosaki.motohiro@jp.fujitsu.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/memcontrol.c b/mm/memcontrol.c
+index af28e128b749..027c0dd7a83e 100644
+--- a/mm/memcontrol.c
++++ b/mm/memcontrol.c
+@@ -144,6 +144,11 @@ struct mem_cgroup {
+ 	 */
+ 	struct mem_cgroup_lru_info info;
+ 
++	/*
++	  protect against reclaim related member.
++	*/
++	spinlock_t reclaim_param_lock;
++
+ 	int	prev_priority;	/* for recording reclaim priority */
+ 
+ 	/*
+@@ -400,18 +405,28 @@ int mem_cgroup_calc_mapped_ratio(struct mem_cgroup *mem)
+  */
+ int mem_cgroup_get_reclaim_priority(struct mem_cgroup *mem)
+ {
+-	return mem->prev_priority;
++	int prev_priority;
++
++	spin_lock(&mem->reclaim_param_lock);
++	prev_priority = mem->prev_priority;
++	spin_unlock(&mem->reclaim_param_lock);
++
++	return prev_priority;
+ }
+ 
+ void mem_cgroup_note_reclaim_priority(struct mem_cgroup *mem, int priority)
+ {
++	spin_lock(&mem->reclaim_param_lock);
+ 	if (priority < mem->prev_priority)
+ 		mem->prev_priority = priority;
++	spin_unlock(&mem->reclaim_param_lock);
+ }
+ 
+ void mem_cgroup_record_reclaim_priority(struct mem_cgroup *mem, int priority)
+ {
++	spin_lock(&mem->reclaim_param_lock);
+ 	mem->prev_priority = priority;
++	spin_unlock(&mem->reclaim_param_lock);
+ }
+ 
+ int mem_cgroup_inactive_anon_is_low(struct mem_cgroup *memcg, struct zone *zone)
+@@ -2076,6 +2091,7 @@ mem_cgroup_create(struct cgroup_subsys *ss, struct cgroup *cont)
+ 	}
+ 	mem_cgroup_set_inactive_ratio(mem);
+ 	mem->last_scanned_child = NULL;
++	spin_lock_init(&mem->reclaim_param_lock);
+ 
+ 	return &mem->css;
+ free_out:
+

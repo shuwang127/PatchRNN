@@ -1,0 +1,46 @@
+commit 95ccb0f3bdc4438bf470c25450e6a8a6090ca253
+Author: Thomas Hellstrom <thellstrom@vmware.com>
+Date:   Thu Nov 11 10:04:53 2010 +0100
+
+    drm/ttm: Fix up a theoretical deadlock
+    
+    A process suspended waiting for a higher sequence or no sequence to unreserve,
+    a bo may be beaten to the reservation by a process with a lower sequence.
+    In that case the first process should give up trying to reserve and
+    return -EAGAIN. In order for that to happen, we must wake waiting processes
+    when we change sequence, so that they have a chance to detect the new
+    sequence.
+    
+    Signed-off-by: Thomas Hellstrom <thellstrom@vmware.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/ttm/ttm_bo.c b/drivers/gpu/drm/ttm/ttm_bo.c
+index 3ca77dc03915..148a322d8f5d 100644
+--- a/drivers/gpu/drm/ttm/ttm_bo.c
++++ b/drivers/gpu/drm/ttm/ttm_bo.c
+@@ -224,6 +224,9 @@ int ttm_bo_reserve_locked(struct ttm_buffer_object *bo,
+ 	int ret;
+ 
+ 	while (unlikely(atomic_cmpxchg(&bo->reserved, 0, 1) != 0)) {
++		/**
++		 * Deadlock avoidance for multi-bo reserving.
++		 */
+ 		if (use_sequence && bo->seq_valid &&
+ 			(sequence - bo->val_seq < (1 << 31))) {
+ 			return -EAGAIN;
+@@ -241,6 +244,14 @@ int ttm_bo_reserve_locked(struct ttm_buffer_object *bo,
+ 	}
+ 
+ 	if (use_sequence) {
++		/**
++		 * Wake up waiters that may need to recheck for deadlock,
++		 * if we decreased the sequence number.
++		 */
++		if (unlikely((bo->val_seq - sequence < (1 << 31))
++			     || !bo->seq_valid))
++			wake_up_all(&bo->event_queue);
++
+ 		bo->val_seq = sequence;
+ 		bo->seq_valid = true;
+ 	} else {
+

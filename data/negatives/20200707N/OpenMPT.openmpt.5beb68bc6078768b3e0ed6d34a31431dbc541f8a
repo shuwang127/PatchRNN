@@ -1,0 +1,128 @@
+commit 5beb68bc6078768b3e0ed6d34a31431dbc541f8a
+Author: Johannes Schultz <saga-games@users.sourceforge.net>
+Date:   Sat Dec 6 19:15:40 2014 +0000
+
+    [Imp] Allow soundfonts to be previewed in the sample browser and to be loaded as instruments. Useful for browsing through single-instrument banks.
+    
+    git-svn-id: https://source.openmpt.org/svn/openmpt/trunk/OpenMPT@4636 56274372-70c3-4bfc-bfc3-4c3a0b034d27
+
+diff --git a/mptrack/Ctrl_ins.cpp b/mptrack/Ctrl_ins.cpp
+index 3c0168b82..1b3618282 100644
+--- a/mptrack/Ctrl_ins.cpp
++++ b/mptrack/Ctrl_ins.cpp
+@@ -1698,10 +1698,12 @@ void CCtrlInstruments::OnInstrumentOpen()
+ 		.AllowMultiSelect()
+ 		.EnableAudioPreview()
+ 		.ExtensionFilter(
+-			"All Instruments|*.xi;*.pat;*.iti;*.flac;*.wav;*.aif;*.aiff|"
++			"All Instruments|*.xi;*.pat;*.iti;*.flac;*.wav;*.aif;*.aiff;*.sf2;*.sbk;*.dls|"
+ 			"FastTracker II Instruments (*.xi)|*.xi|"
+ 			"GF1 Patches (*.pat)|*.pat|"
+ 			"Impulse Tracker Instruments (*.iti)|*.iti|"
++			"SoundFont 2.0 Banks (*.sf2)|*.sf2;*.sbk|"
++			"DLS Sound Banks (*.dls)|*.dls|"
+ 			"All Files (*.*)|*.*||")
+ 		.WorkingDirectory(TrackerDirectories::Instance().GetWorkingDirectory(DIR_INSTRUMENTS))
+ 		.FilterIndex(&nLastIndex);
+diff --git a/mptrack/View_tre.cpp b/mptrack/View_tre.cpp
+index e38b32064..dc8b38c9e 100644
+--- a/mptrack/View_tre.cpp
++++ b/mptrack/View_tre.cpp
+@@ -1806,6 +1806,9 @@ void CModTree::FillInstrumentLibrary()
+ 					// Instruments
+ 					if ((!strcmp(s, "xi"))
+ 						|| (!strcmp(s, "iti"))
++						|| (!strcmp(s, "sf2"))
++						|| (!strcmp(s, "sbk"))
++						|| (!strcmp(s, "dls"))
+ 						|| (!strcmp(s, "pat")) )
+ 					{
+ 						if (IsSampleBrowser())
+diff --git a/soundlib/Dlsbank.cpp b/soundlib/Dlsbank.cpp
+index dea1f3845..481089268 100644
+--- a/soundlib/Dlsbank.cpp
++++ b/soundlib/Dlsbank.cpp
+@@ -1150,6 +1150,17 @@ bool CDLSBank::ConvertSF2ToDLS(void *pvsf2info)
+ 
+ bool CDLSBank::Open(const mpt::PathString &filename)
+ //--------------------------------------------------
++{
++	if(filename.empty()) return false;
++	m_szFileName = filename;
++	CMappedFile MapFile;
++	if (!MapFile.Open(filename)) return false;
++	return Open(FileReader(MapFile.Lock(), MapFile.GetLength(), &m_szFileName));
++}
++
++
++bool CDLSBank::Open(FileReader file)
++//----------------------------------
+ {
+ 	SF2LOADERINFO sf2info;
+ 	const BYTE *lpMemFile;	// Pointer to memory-mapped file
+@@ -1157,15 +1168,11 @@ bool CDLSBank::Open(const mpt::PathString &filename)
+ 	DWORD dwMemPos, dwMemLength;
+ 	UINT nInsDef;
+ 
+-	if(filename.empty()) return false;
+-	m_szFileName = filename;
+-	lpMemFile = NULL;
+-	// Memory-Mapped file
+-	CMappedFile MapFile;
+-	if (!MapFile.Open(filename)) return false;
+-	dwMemLength = MapFile.GetLength();
+-	if (dwMemLength >= 256) lpMemFile = (const BYTE *)MapFile.Lock();
+-	if (!lpMemFile)
++	file.Rewind();
++	m_szFileName = file.GetFileName();
++	lpMemFile = reinterpret_cast<const BYTE *>(file.GetRawData());
++	dwMemLength = file.GetLength();
++	if (!lpMemFile || dwMemLength < 256)
+ 	{
+ 		return false;
+ 	}
+diff --git a/soundlib/Dlsbank.h b/soundlib/Dlsbank.h
+index a9d6ae5ed..78719576c 100644
+--- a/soundlib/Dlsbank.h
++++ b/soundlib/Dlsbank.h
+@@ -139,6 +139,7 @@ public:
+ 
+ public:
+ 	bool Open(const mpt::PathString &filename);
++	bool Open(FileReader file);
+ 	mpt::PathString GetFileName() const { return m_szFileName; }
+ 	UINT GetBankType() const { return m_nType; }
+ 	UINT GetBankInfo(SOUNDBANKINFO *pBankInfo=NULL) const { if (pBankInfo) *pBankInfo = m_BankInfo; return m_nType; }
+diff --git a/soundlib/SampleFormats.cpp b/soundlib/SampleFormats.cpp
+index 13be296b1..c98a58fbc 100644
+--- a/soundlib/SampleFormats.cpp
++++ b/soundlib/SampleFormats.cpp
+@@ -14,6 +14,7 @@
+ #ifdef MODPLUG_TRACKER
+ #include "../mptrack/Moddoc.h"
+ #include "../mptrack/TrackerSettings.h"
++#include "Dlsbank.h"
+ #endif //MODPLUG_TRACKER
+ #include "../common/AudioCriticalSection.h"
+ #ifndef MODPLUG_NO_FILESAVE
+@@ -106,7 +107,18 @@ bool CSoundFile::ReadInstrumentFromFile(INSTRUMENTINDEX nInstr, FileReader &file
+ 		&& !ReadXIInstrument(nInstr, file)
+ 		&& !ReadITIInstrument(nInstr, file)
+ 		// Generic read
+-		&& !ReadSampleAsInstrument(nInstr, file, mayNormalize)) return false;
++		&& !ReadSampleAsInstrument(nInstr, file, mayNormalize))
++	{
++		bool ok = false;
++#ifdef MODPLUG_TRACKER
++		CDLSBank bank;
++		if(bank.Open(file))
++		{
++			ok = bank.ExtractInstrument(*this, nInstr, 0, 0);
++		}
++#endif // MODPLUG_TRACKER
++		if(!ok) return false;
++	}
+ 
+ 	if(nInstr > GetNumInstruments()) m_nInstruments = nInstr;
+ 	return true;
+

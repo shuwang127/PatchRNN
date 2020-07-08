@@ -1,0 +1,78 @@
+commit 09719c500ca798fea989867f50cf29d4dbed0c89
+Author: nulltoken <emeric.fermas@gmail.com>
+Date:   Wed Mar 14 12:13:03 2012 +0100
+
+    reference: Fix creation of references with extended ASCII characters in their name
+
+diff --git a/src/fileops.c b/src/fileops.c
+index f1f820ab7..b3bb3890e 100644
+--- a/src/fileops.c
++++ b/src/fileops.c
+@@ -62,7 +62,18 @@ int git_futils_creat_withpath(const char *path, const mode_t dirmode, const mode
+ 
+ int git_futils_creat_locked(const char *path, const mode_t mode)
+ {
+-	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY | O_EXCL, mode);
++	int fd;
++
++#ifdef GIT_WIN32
++	wchar_t* buf;
++
++	buf = gitwin_to_utf16(path);
++	fd = _wopen(buf, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY | O_EXCL, mode);
++	git__free(buf);
++#else
++	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY | O_EXCL, mode);
++#endif
++
+ 	if (fd < 0) {
+ 		giterr_set(GITERR_OS, "Failed to create locked file '%s'", path);
+ 		return -1;
+diff --git a/tests-clar/refs/unicode.c b/tests-clar/refs/unicode.c
+new file mode 100644
+index 000000000..16d77a4b7
+--- /dev/null
++++ b/tests-clar/refs/unicode.c
+@@ -0,0 +1,41 @@
++#include "clar_libgit2.h"
++
++static git_repository *repo;
++
++void test_refs_unicode__initialize(void)
++{
++	cl_fixture_sandbox("testrepo.git");
++
++	cl_git_pass(git_repository_open(&repo, "testrepo.git"));
++}
++
++void test_refs_unicode__cleanup(void)
++{
++	git_repository_free(repo);
++	cl_fixture_cleanup("testrepo.git");
++}
++
++void test_refs_unicode__create_and_lookup(void)
++{
++	git_reference *ref, *ref2;
++	git_repository *repo2;
++
++	const char *REFNAME = "refs/heads/" "\305" "ngstr" "\366" "m";
++	const char *master = "refs/heads/master";
++
++	/* Create the reference */
++	cl_git_pass(git_reference_lookup(&ref, repo, master));
++	cl_git_pass(git_reference_create_oid(&ref, repo, REFNAME, git_reference_oid(ref), 0));
++	cl_assert(strcmp(REFNAME, git_reference_name(ref)) == 0);
++
++	/* Lookup the reference in a different instance of the repository */
++	cl_git_pass(git_repository_open(&repo2, "testrepo.git"));
++	cl_git_pass(git_reference_lookup(&ref2, repo2, REFNAME));
++
++	cl_assert(git_oid_cmp(git_reference_oid(ref), git_reference_oid(ref2)) == 0);
++	cl_assert(strcmp(REFNAME, git_reference_name(ref2)) == 0);
++
++	git_reference_free(ref);
++	git_reference_free(ref2);
++	git_repository_free(repo2);
++}
+

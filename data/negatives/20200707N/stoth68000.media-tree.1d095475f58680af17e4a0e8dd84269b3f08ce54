@@ -1,0 +1,225 @@
+commit 1d095475f58680af17e4a0e8dd84269b3f08ce54
+Author: Eliad Peller <eliad@wizery.com>
+Date:   Mon Oct 10 10:12:49 2011 +0200
+
+    wl12xx: refactor fw init into a new function
+    
+    The fw boot and initialization currently happens inside the
+    add_interface() callback. This is wrong, as add_interface is
+    called for each new vif. However, we due to some fw limitation
+    (we have to know the actual mac address on boot), we can't
+    completely move it into the start() callback.
+    
+    Until the fw will be fixed, refactor the fw init into
+    a new function, and call it from add_interface()
+    
+    Signed-off-by: Eliad Peller <eliad@wizery.com>
+    Signed-off-by: Luciano Coelho <coelho@ti.com>
+
+diff --git a/drivers/net/wireless/wl12xx/main.c b/drivers/net/wireless/wl12xx/main.c
+index 194d7cc366de..3667acf0a031 100644
+--- a/drivers/net/wireless/wl12xx/main.c
++++ b/drivers/net/wireless/wl12xx/main.c
+@@ -1888,60 +1888,12 @@ static int wl12xx_init_vif_data(struct ieee80211_vif *vif)
+ 	return 0;
+ }
+ 
+-static int wl1271_op_add_interface(struct ieee80211_hw *hw,
+-				   struct ieee80211_vif *vif)
++static bool wl12xx_init_fw(struct wl1271 *wl)
+ {
+-	struct wl1271 *wl = hw->priv;
+-	struct wiphy *wiphy = hw->wiphy;
+-	struct wl12xx_vif *wlvif = wl12xx_vif_to_data(vif);
+ 	int retries = WL1271_BOOT_RETRIES;
+-	int ret = 0;
+-	u8 role_type;
+ 	bool booted = false;
+-
+-	wl1271_debug(DEBUG_MAC80211, "mac80211 add interface type %d mac %pM",
+-		     ieee80211_vif_type_p2p(vif), vif->addr);
+-
+-	mutex_lock(&wl->mutex);
+-	if (wl->vif) {
+-		wl1271_debug(DEBUG_MAC80211,
+-			     "multiple vifs are not supported yet");
+-		ret = -EBUSY;
+-		goto out;
+-	}
+-
+-	/*
+-	 * in some very corner case HW recovery scenarios its possible to
+-	 * get here before __wl1271_op_remove_interface is complete, so
+-	 * opt out if that is the case.
+-	 */
+-	if (test_bit(WL1271_FLAG_IF_INITIALIZED, &wl->flags)) {
+-		ret = -EBUSY;
+-		goto out;
+-	}
+-
+-	ret = wl12xx_init_vif_data(vif);
+-	if (ret < 0)
+-		goto out;
+-
+-	wlvif->wl = wl;
+-	role_type = wl12xx_get_role_type(wl, wlvif);
+-	if (role_type == WL12XX_INVALID_ROLE_TYPE) {
+-		ret = -EINVAL;
+-		goto out;
+-	}
+-	/*
+-	 * we still need this in order to configure the fw
+-	 * while uploading the nvs
+-	 */
+-	memcpy(wl->mac_addr, vif->addr, ETH_ALEN);
+-
+-	if (wl->state != WL1271_STATE_OFF) {
+-		wl1271_error("cannot start because not in off state: %d",
+-			     wl->state);
+-		ret = -EBUSY;
+-		goto out;
+-	}
++	struct wiphy *wiphy = wl->hw->wiphy;
++	int ret;
+ 
+ 	while (retries) {
+ 		retries--;
+@@ -1957,30 +1909,6 @@ static int wl1271_op_add_interface(struct ieee80211_hw *hw,
+ 		if (ret < 0)
+ 			goto irq_disable;
+ 
+-		if (wlvif->bss_type == BSS_TYPE_STA_BSS ||
+-		    wlvif->bss_type == BSS_TYPE_IBSS) {
+-			/*
+-			 * The device role is a special role used for
+-			 * rx and tx frames prior to association (as
+-			 * the STA role can get packets only from
+-			 * its associated bssid)
+-			 */
+-			ret = wl12xx_cmd_role_enable(wl, vif->addr,
+-							 WL1271_ROLE_DEVICE,
+-							 &wlvif->dev_role_id);
+-			if (ret < 0)
+-				goto irq_disable;
+-		}
+-
+-		ret = wl12xx_cmd_role_enable(wl, vif->addr,
+-					     role_type, &wlvif->role_id);
+-		if (ret < 0)
+-			goto irq_disable;
+-
+-		ret = wl1271_init_vif_specific(wl, vif);
+-		if (ret < 0)
+-			goto irq_disable;
+-
+ 		booted = true;
+ 		break;
+ 
+@@ -2007,9 +1935,6 @@ static int wl1271_op_add_interface(struct ieee80211_hw *hw,
+ 		goto out;
+ 	}
+ 
+-	wl->vif = vif;
+-	wl->state = WL1271_STATE_ON;
+-	set_bit(WL1271_FLAG_IF_INITIALIZED, &wl->flags);
+ 	wl1271_info("firmware booted (%s)", wl->chip.fw_ver_str);
+ 
+ 	/* update hw/fw version info in wiphy struct */
+@@ -2027,6 +1952,96 @@ static int wl1271_op_add_interface(struct ieee80211_hw *hw,
+ 	wl1271_debug(DEBUG_MAC80211, "11a is %ssupported",
+ 		     wl->enable_11a ? "" : "not ");
+ 
++	wl->state = WL1271_STATE_ON;
++out:
++	return booted;
++}
++
++static int wl1271_op_add_interface(struct ieee80211_hw *hw,
++				   struct ieee80211_vif *vif)
++{
++	struct wl1271 *wl = hw->priv;
++	struct wl12xx_vif *wlvif = wl12xx_vif_to_data(vif);
++	int ret = 0;
++	u8 role_type;
++	bool booted = false;
++
++	wl1271_debug(DEBUG_MAC80211, "mac80211 add interface type %d mac %pM",
++		     ieee80211_vif_type_p2p(vif), vif->addr);
++
++	mutex_lock(&wl->mutex);
++	if (wl->vif) {
++		wl1271_debug(DEBUG_MAC80211,
++			     "multiple vifs are not supported yet");
++		ret = -EBUSY;
++		goto out;
++	}
++
++	/*
++	 * in some very corner case HW recovery scenarios its possible to
++	 * get here before __wl1271_op_remove_interface is complete, so
++	 * opt out if that is the case.
++	 */
++	if (test_bit(WL1271_FLAG_IF_INITIALIZED, &wl->flags)) {
++		ret = -EBUSY;
++		goto out;
++	}
++
++	ret = wl12xx_init_vif_data(vif);
++	if (ret < 0)
++		goto out;
++
++	wlvif->wl = wl;
++	role_type = wl12xx_get_role_type(wl, wlvif);
++	if (role_type == WL12XX_INVALID_ROLE_TYPE) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	/*
++	 * TODO: after the nvs issue will be solved, move this block
++	 * to start(), and make sure here the driver is ON.
++	 */
++	if (wl->state == WL1271_STATE_OFF) {
++		/*
++		 * we still need this in order to configure the fw
++		 * while uploading the nvs
++		 */
++		memcpy(wl->mac_addr, vif->addr, ETH_ALEN);
++
++		booted = wl12xx_init_fw(wl);
++		if (!booted) {
++			ret = -EINVAL;
++			goto out;
++		}
++	}
++
++	if (wlvif->bss_type == BSS_TYPE_STA_BSS ||
++	    wlvif->bss_type == BSS_TYPE_IBSS) {
++		/*
++		 * The device role is a special role used for
++		 * rx and tx frames prior to association (as
++		 * the STA role can get packets only from
++		 * its associated bssid)
++		 */
++		ret = wl12xx_cmd_role_enable(wl, vif->addr,
++						 WL1271_ROLE_DEVICE,
++						 &wlvif->dev_role_id);
++		if (ret < 0)
++			goto out;
++	}
++
++	ret = wl12xx_cmd_role_enable(wl, vif->addr,
++				     role_type, &wlvif->role_id);
++	if (ret < 0)
++		goto out;
++
++	ret = wl1271_init_vif_specific(wl, vif);
++	if (ret < 0)
++		goto out;
++
++	wl->vif = vif;
++	set_bit(WL1271_FLAG_IF_INITIALIZED, &wl->flags);
+ out:
+ 	mutex_unlock(&wl->mutex);
+ 
+

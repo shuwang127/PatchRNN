@@ -1,0 +1,70 @@
+commit dabc4a5c60f796a8e7171272284ba077f9c1e439
+Author: Jaegeuk Kim <jaegeuk@kernel.org>
+Date:   Fri Jan 23 17:41:39 2015 -0800
+
+    f2fs: fix not to drop mount options when retrying fill_super
+    
+    If wrong mount option was requested, f2fs tries to fill_super again.
+    But, during the next trial, f2fs has no valid mount options, since
+    parse_options deleted all the separators in the original string.
+    
+    Reviewed-by: Chao Yu <chao2.yu@samsung.com>
+    Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+
+diff --git a/fs/f2fs/super.c b/fs/f2fs/super.c
+index c3aa72f9c8c8..146e310fbf04 100644
+--- a/fs/f2fs/super.c
++++ b/fs/f2fs/super.c
+@@ -951,6 +951,7 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
+ 	struct inode *root;
+ 	long err = -EINVAL;
+ 	bool retry = true;
++	char *options = NULL;
+ 	int i;
+ 
+ try_onemore:
+@@ -982,9 +983,15 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
+ 	set_opt(sbi, POSIX_ACL);
+ #endif
+ 	/* parse mount options */
+-	err = parse_options(sb, (char *)data);
+-	if (err)
++	options = kstrdup((const char *)data, GFP_KERNEL);
++	if (data && !options) {
++		err = -ENOMEM;
+ 		goto free_sb_buf;
++	}
++
++	err = parse_options(sb, options);
++	if (err)
++		goto free_options;
+ 
+ 	sb->s_maxbytes = max_file_size(le32_to_cpu(raw_super->log_blocksize));
+ 	sb->s_max_links = F2FS_LINK_MAX;
+@@ -1028,7 +1035,7 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
+ 	if (IS_ERR(sbi->meta_inode)) {
+ 		f2fs_msg(sb, KERN_ERR, "Failed to read F2FS meta data inode");
+ 		err = PTR_ERR(sbi->meta_inode);
+-		goto free_sb_buf;
++		goto free_options;
+ 	}
+ 
+ 	err = get_valid_checkpoint(sbi);
+@@ -1153,6 +1160,7 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
+ 		if (err)
+ 			goto free_kobj;
+ 	}
++	kfree(options);
+ 	return 0;
+ 
+ free_kobj:
+@@ -1177,6 +1185,8 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
+ free_meta_inode:
+ 	make_bad_inode(sbi->meta_inode);
+ 	iput(sbi->meta_inode);
++free_options:
++	kfree(options);
+ free_sb_buf:
+ 	brelse(raw_super_buf);
+ free_sbi:
+

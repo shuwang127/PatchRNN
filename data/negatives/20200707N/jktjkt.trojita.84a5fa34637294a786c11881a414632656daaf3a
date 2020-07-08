@@ -1,0 +1,311 @@
+commit 84a5fa34637294a786c11881a414632656daaf3a
+Author: Jan Kundrát <jkt@gentoo.org>
+Date:   Tue May 12 21:02:09 2009 +0200
+
+    Load message structure in parallel
+
+diff --git a/Imap/Model/Model.cpp b/Imap/Model/Model.cpp
+index 23d2046b..97822b57 100644
+--- a/Imap/Model/Model.cpp
++++ b/Imap/Model/Model.cpp
+@@ -817,19 +817,43 @@ void Model::_askForNumberOfMessages( TreeItemMsgList* item )
+ 
+ void Model::_askForMsgMetadata( TreeItemMessage* item )
+ {
+-    Q_ASSERT( item->parent() ); // TreeItemMsgList
+-    Q_ASSERT( item->parent()->parent() ); // TreeItemMailbox
+-    TreeItemMailbox* mailboxPtr = dynamic_cast<TreeItemMailbox*>( item->parent()->parent() );
++    TreeItemMsgList* list = dynamic_cast<TreeItemMsgList*>( item->parent() );
++    Q_ASSERT( list );
++    TreeItemMailbox* mailboxPtr = dynamic_cast<TreeItemMailbox*>( list->parent() );
+     Q_ASSERT( mailboxPtr );
+ 
+     int order = item->row();
+ 
+-    if ( networkPolicy() == NETWORK_OFFLINE ) {
+-        item->_fetchStatus = TreeItem::UNAVAILABLE;
+-    } else {
+-        ParserPtr parser = _getParser( mailboxPtr, ReadOnly );
+-        CommandHandle cmd = parser->fetch( Sequence( order + 1 ), _onlineMessageFetch );
+-        _parsers[ parser.get() ].commandMap[ cmd ] = Task( Task::FETCH, item );
++    switch ( networkPolicy() ) {
++        case NETWORK_OFFLINE:
++            item->_fetchStatus = TreeItem::UNAVAILABLE;
++            break;
++        case NETWORK_EXPENSIVE:
++        {
++            ParserPtr parser = _getParser( mailboxPtr, ReadOnly );
++            CommandHandle cmd = parser->fetch( Sequence( order + 1 ), _onlineMessageFetch );
++            _parsers[ parser.get() ].commandMap[ cmd ] = Task( Task::FETCH, item );
++            break;
++        }
++        case NETWORK_ONLINE:
++        {
++            // preload
++            Sequence seq( order + 1 );
++            for ( int i = qMax( 1, order + 1 - StructurePreload );
++                  i < qMin( item->parent()->_children.size() - 1, order + 1 + StructurePreload );
++                  ++i ) {
++                TreeItemMessage* message = dynamic_cast<TreeItemMessage*>( list->_children[i] );
++                Q_ASSERT( message );
++                if ( item != message && ! message->fetched() && ! message->loading() ) {
++                    message->_fetchStatus = TreeItem::LOADING;
++                    seq.add( message->row() + 1 );
++                }
++            }
++            ParserPtr parser = _getParser( mailboxPtr, ReadOnly );
++            CommandHandle cmd = parser->fetch( seq, _onlineMessageFetch );
++            _parsers[ parser.get() ].commandMap[ cmd ] = Task( Task::FETCH, item );
++            break;
++        }
+     }
+ }
+ 
+diff --git a/Imap/Model/Model.h b/Imap/Model/Model.h
+index 5a017747..6a20afb3 100644
+--- a/Imap/Model/Model.h
++++ b/Imap/Model/Model.h
+@@ -95,9 +95,19 @@ class Model: public QAbstractItemModel {
+         Task(): kind(NONE) {};
+     };
+ 
+-    enum RWMode { ReadOnly, ReadWrite };
++    /** @short How to open a mailbox */
++    enum RWMode {
++        ReadOnly /**< @short Use EXAMINE or leave it in SELECTed mode*/,
++        ReadWrite /**< @short Invoke SELECT if necessarry */
++    };
++
++    enum {
++        /** @short Don't request message structures etc when the number of messages we'd ask for is greater than this */
++        StructureFetchLimit = 100 };
+ 
+-    enum { StructureFetchLimit = 100 };
++    enum {
++        /** @short How many messages before and after to preload when structure of one is being requested */
++        StructurePreload = 50 };
+ 
+     /** @short IMAP state of a connection */
+     enum ConnectionState {
+diff --git a/Imap/Parser/Parser.cpp b/Imap/Parser/Parser.cpp
+index 7457c7b0..42abc667 100644
+--- a/Imap/Parser/Parser.cpp
++++ b/Imap/Parser/Parser.cpp
+@@ -625,21 +625,65 @@ void Parser::enableLiteralPlus( const bool enabled )
+     _literalPlus = enabled;
+ }
+ 
++Sequence::Sequence( const uint num ): _kind(DISTINCT)
++{
++    _list << num;
++}
++
+ Sequence Sequence::startingAt( const uint lo )
+ {
+-    Sequence res( lo, 0 );
+-    res._upperUnlimited = true;
++    Sequence res( lo );
++    res._lo = lo;
++    res._kind = UNLIMITED;
+     return res;
+ }
+ 
+ QString Sequence::toString() const
+ {
+-    if ( _upperUnlimited )
+-        return QString::number( _lo ) + ":*";
+-    else if ( _lo == _hi )
+-        return QString::number( _lo );
+-    else
+-        return QString::number( _lo ) + ':' + QString::number( _hi );
++    switch ( _kind ) {
++        case DISTINCT:
++        {
++            Q_ASSERT( ! _list.isEmpty() );
++
++            QStringList res;
++            int i = 0;
++            while ( i < _list.size() ) {
++                int old = i;
++                while ( i < _list.size() - 1 &&
++                        _list[i] == _list[ i + 1 ] - 1 )
++                    ++i;
++                if ( old != i ) {
++                    // we've found a sequence
++                    res << QString::number( _list[old] ) + QLatin1Char(':') + QString::number( _list[i] );
++                } else {
++                    res << QString::number( _list[i] );
++                }
++                ++i;
++            }
++            return res.join( QLatin1String(",") );
++            break;
++        }
++        case RANGE:
++            Q_ASSERT( _lo <= _hi );
++            if ( _lo == _hi )
++                return QString::number( _lo );
++            else
++                return QString::number( _lo ) + QLatin1Char(':') + QString::number( _hi );
++        case UNLIMITED:
++            return QString::number( _lo ) + QLatin1String(":*");
++    }
++    // fix gcc warning
++    Q_ASSERT( false );
++    return QString();
++}
++
++Sequence& Sequence::add( uint num )
++{
++    Q_ASSERT( _kind == DISTINCT );
++    QList<uint>::iterator it = qLowerBound( _list.begin(), _list.end(), num );
++    if ( *it != num )
++        _list.insert( it, num );
++    return *this;
+ }
+ 
+ QTextStream& operator<<( QTextStream& stream, const Sequence& s )
+diff --git a/Imap/Parser/Parser.h b/Imap/Parser/Parser.h
+index 71a76f50..8623db73 100644
+--- a/Imap/Parser/Parser.h
++++ b/Imap/Parser/Parser.h
+@@ -52,15 +52,50 @@ namespace Imap {
+ 
+     Q_ENUMS( ThreadAlgorithm )
+ 
+-    /** @short Class specifying a set of messagess to access */
++    /** @short Class specifying a set of messagess to access
++
++      Although named a sequence, there's no reason for a sequence to contain
++      only consecutive ranges of numbers. For example, a set of
++      { 1, 2, 3, 10, 15, 16, 17 } is perfectly valid sequence.
++*/
+     class Sequence {
+         uint _lo, _hi;
+-        bool _upperUnlimited;
++        QList<uint> _list;
++        enum { DISTINCT, RANGE, UNLIMITED } _kind;
+     public:
+-        Sequence( const uint num ): _lo(num), _hi(num), _upperUnlimited(false) {};
+-        Sequence( const uint lo, const uint hi ): _lo(lo), _hi(hi), _upperUnlimited(false) {};
++        /** @short Construct an invalid sequence */
++        Sequence(): _kind(DISTINCT) {}
++
++        /** @short Construct a sequence holding only one number
++
++          Such a sequence can be subsequently expanded by using its add() method.
++          There's no way to turn it into an unlimited sequence, though -- use
++          the startingAt() for creating sequences that grow to the "infinite".
++*/
++        Sequence( const uint num );
++
++        /** @short Construct a sequence holding a set of numbers between upper and lower bound
++
++          This sequence can't be expanded ever after. Calling add() on it will
++          assert().
++*/
++        Sequence( const uint lo, const uint hi ): _lo(lo), _hi(hi), _kind(RANGE) {}
++
++        /** @short Create an "unlimited" sequence
++
++          That's a sequence that starts at the specified offset and grow to the
++          current maximal boundary. There's no way to add a distinct item to
++          this set; doing so via the add() method will assert */
+         static Sequence startingAt( const uint lo );
+ 
++        /** @short Add another number to the sequence
++
++          Note that you can only add numbers to a sequence created by the
++          Sequence( const uint num ) constructor. Attempting to do so on other
++          kinds of sequences will assert().
++*/
++        Sequence& add( const uint num );
++
+         /** @short Converts sequence to string suitable for sending over the wire */
+         QString toString() const;
+     };
+diff --git a/tests/test_Imap_Parser_parse.cpp b/tests/test_Imap_Parser_parse.cpp
+index 7977587f..205f9009 100644
+--- a/tests/test_Imap_Parser_parse.cpp
++++ b/tests/test_Imap_Parser_parse.cpp
+@@ -26,6 +26,7 @@
+ 
+ Q_DECLARE_METATYPE(std::tr1::shared_ptr<Imap::Responses::AbstractResponse>)
+ Q_DECLARE_METATYPE(Imap::Responses::State)
++Q_DECLARE_METATYPE(Imap::Sequence)
+ 
+ void ImapParserParseTest::initTestCase()
+ {
+@@ -410,6 +411,57 @@ void ImapParserParseTest::testParseUntagged_data()
+ 
+ }
+ 
++void ImapParserParseTest::testSequences()
++{
++    QFETCH( Imap::Sequence, sequence );
++    QFETCH( QString, muster );
++    QCOMPARE( sequence.toString(), muster );
++}
++
++void ImapParserParseTest::testSequences_data()
++{
++    QTest::addColumn<Imap::Sequence>("sequence");
++    QTest::addColumn<QString>("muster");
++
++    QTest::newRow("sequence-one") <<
++            Imap::Sequence( 33 ) << "33";
++
++    QTest::newRow("sequence-unlimited") <<
++            Imap::Sequence::startingAt(666) << "666:*";
++
++    QTest::newRow("sequence-range") <<
++            Imap::Sequence( 333, 666 ) << "333:666";
++
++    QTest::newRow("sequence-distinct") <<
++            Imap::Sequence( 20 ).add( 10 ).add( 30 ) << "10,20,30";
++
++    QTest::newRow("sequence-collapsed-2") <<
++            Imap::Sequence( 10 ).add( 11 ) << "10:11";
++
++    QTest::newRow("sequence-collapsed-3") <<
++            Imap::Sequence( 10 ).add( 11 ).add( 12 ) << "10:12";
++
++    QTest::newRow("sequence-head-and-collapsed") <<
++            Imap::Sequence( 3 ).add( 31 ).add( 32 ).add( 33 ) << "3,31:33";
++
++    QTest::newRow("sequence-collapsed-and-tail") <<
++            Imap::Sequence( 666 ).add( 31 ).add( 32 ).add( 33 ) << "31:33,666";
++
++    QTest::newRow("sequence-head-collapsed-tail") <<
++            Imap::Sequence( 666 ).add( 31 ).add( 32 ).add( 1 ).add( 33 ) << "1,31:33,666";
++
++    QTest::newRow("sequence-same") <<
++            Imap::Sequence( 2 ).add( 2 ) << "2";
++
++    QTest::newRow("sequence-multiple-consequent") <<
++            Imap::Sequence( 2 ).add( 3 ).add( 4 ).add( 6 ).add( 7 ) << "2:4,6:7";
++
++    QTest::newRow("sequence-complex") <<
++            Imap::Sequence( 2 ).add( 3 ).add( 4 ).add( 6 ).add( 7 ).add( 1 )
++            .add( 100 ).add( 101 ).add( 102 ).add( 99 ).add( 666 ).add( 333 ).add( 666 ) <<
++            "1:4,6:7,99:102,333,666";
++}
++
+ QTEST_KDEMAIN_CORE( ImapParserParseTest )
+ 
+ namespace QTest {
+diff --git a/tests/test_Imap_Parser_parse.h b/tests/test_Imap_Parser_parse.h
+index e2433223..a526c8c6 100644
+--- a/tests/test_Imap_Parser_parse.h
++++ b/tests/test_Imap_Parser_parse.h
+@@ -37,6 +37,9 @@ private Q_SLOTS:
+     /** @short Test parsing of untagged responses */
+     void testParseUntagged();
+     void testParseUntagged_data();
++    /** @short Test sequence output */
++    void testSequences();
++    void testSequences_data();
+     void initTestCase();
+ };
+ 
+

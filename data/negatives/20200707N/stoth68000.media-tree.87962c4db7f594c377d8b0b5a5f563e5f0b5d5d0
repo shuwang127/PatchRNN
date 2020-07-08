@@ -1,0 +1,58 @@
+commit 87962c4db7f594c377d8b0b5a5f563e5f0b5d5d0
+Author: Max Filippov <jcmvbkbc@gmail.com>
+Date:   Wed May 15 19:02:06 2013 +0400
+
+    xtensa: flush TLB entries for pages of non-current mm correctly
+    
+    Sometimes under high memory pressure one process gets a page of another
+    process, which manifests itself with an invalid instruction exception.
+    
+    This happens because flush_tlb_page fails to clear TLB entries when
+    called with vma that does not belong to current mm, because it does not
+    set RASID appropriately. When page reclaiming mechanism swaps physical
+    pages out replacing their PTEs with none or swap PTEs, it calls
+    flush_tlb_page. Later physical page may be reused elsewhere, but the
+    stale TLB mapping still refers to it, allowing process that owned the
+    mapping to see the new state of that physical page.
+    
+    Put ASID of the mm that owns vma to the RASID to fix that issue.
+    Also replace otherwise meaningless local_save_flags with local_irq_save.
+    
+    Signed-off-by: Max Filippov <jcmvbkbc@gmail.com>
+    Signed-off-by: Chris Zankel <chris@zankel.net>
+
+diff --git a/arch/xtensa/mm/tlb.c b/arch/xtensa/mm/tlb.c
+index 5411aa67c68e..743346150eea 100644
+--- a/arch/xtensa/mm/tlb.c
++++ b/arch/xtensa/mm/tlb.c
+@@ -64,7 +64,7 @@ void flush_tlb_mm(struct mm_struct *mm)
+ {
+ 	if (mm == current->active_mm) {
+ 		unsigned long flags;
+-		local_save_flags(flags);
++		local_irq_save(flags);
+ 		__get_new_mmu_context(mm);
+ 		__load_mmu_context(mm);
+ 		local_irq_restore(flags);
+@@ -94,7 +94,7 @@ void flush_tlb_range (struct vm_area_struct *vma,
+ 	printk("[tlbrange<%02lx,%08lx,%08lx>]\n",
+ 			(unsigned long)mm->context, start, end);
+ #endif
+-	local_save_flags(flags);
++	local_irq_save(flags);
+ 
+ 	if (end-start + (PAGE_SIZE-1) <= _TLB_ENTRIES << PAGE_SHIFT) {
+ 		int oldpid = get_rasid_register();
+@@ -128,9 +128,10 @@ void flush_tlb_page (struct vm_area_struct *vma, unsigned long page)
+ 	if(mm->context == NO_CONTEXT)
+ 		return;
+ 
+-	local_save_flags(flags);
++	local_irq_save(flags);
+ 
+ 	oldpid = get_rasid_register();
++	set_rasid_register(ASID_INSERT(mm->context));
+ 
+ 	if (vma->vm_flags & VM_EXEC)
+ 		invalidate_itlb_mapping(page);
+

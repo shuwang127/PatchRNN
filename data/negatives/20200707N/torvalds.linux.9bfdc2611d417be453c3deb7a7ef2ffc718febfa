@@ -1,0 +1,90 @@
+commit 9bfdc2611d417be453c3deb7a7ef2ffc718febfa
+Author: Adam Borowski <kilobyte@angband.pl>
+Date:   Wed Jul 18 04:10:44 2018 +0200
+
+    vt: selection: take screen contents from uniscr if available
+    
+    This preserves whatever was written even if we can't currently display the
+    given glyph.  Mouse paste won't corrupt any character of wcwidth() == 1
+    anymore.
+    
+    Note that for now uniscr doesn't get allocated until something reads
+    /dev/vcsuN for that console, making this code dormant for most users.
+    
+    Signed-off-by: Adam Borowski <kilobyte@angband.pl>
+    Acked-by: Nicolas Pitre <nico@linaro.org>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/tty/vt/selection.c b/drivers/tty/vt/selection.c
+index 69ca337d3220..07496c711d7d 100644
+--- a/drivers/tty/vt/selection.c
++++ b/drivers/tty/vt/selection.c
+@@ -57,11 +57,13 @@ static inline void highlight_pointer(const int where)
+ 	complement_pos(sel_cons, where);
+ }
+ 
+-static u16
++static u32
+ sel_pos(int n)
+ {
++	if (use_unicode)
++		return screen_glyph_unicode(sel_cons, n / 2);
+ 	return inverse_translate(sel_cons, screen_glyph(sel_cons, n),
+-				use_unicode);
++				0);
+ }
+ 
+ /**
+@@ -90,7 +92,8 @@ static u32 inwordLut[]={
+   0x07FFFFFE, /* lowercase         */
+ };
+ 
+-static inline int inword(const u16 c) {
++static inline int inword(const u32 c)
++{
+ 	return c > 0x7f || (( inwordLut[c>>5] >> (c & 0x1F) ) & 1);
+ }
+ 
+@@ -167,7 +170,7 @@ int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *t
+ 	struct tiocl_selection v;
+ 	char *bp, *obp;
+ 	int i, ps, pe, multiplier;
+-	u16 c;
++	u32 c;
+ 	int mode;
+ 
+ 	poke_blanked_console();
+diff --git a/drivers/tty/vt/vt.c b/drivers/tty/vt/vt.c
+index 846dfedb657d..7adcb6dcc50c 100644
+--- a/drivers/tty/vt/vt.c
++++ b/drivers/tty/vt/vt.c
+@@ -4543,6 +4543,16 @@ u16 screen_glyph(struct vc_data *vc, int offset)
+ }
+ EXPORT_SYMBOL_GPL(screen_glyph);
+ 
++u32 screen_glyph_unicode(struct vc_data *vc, int n)
++{
++	struct uni_screen *uniscr = get_vc_uniscr(vc);
++
++	if (uniscr)
++		return uniscr->lines[n / vc->vc_cols][n % vc->vc_cols];
++	return inverse_translate(vc, screen_glyph(vc, n * 2), 1);
++}
++EXPORT_SYMBOL_GPL(screen_glyph_unicode);
++
+ /* used by vcs - note the word offset */
+ unsigned short *screen_pos(struct vc_data *vc, int w_offset, int viewed)
+ {
+diff --git a/include/linux/selection.h b/include/linux/selection.h
+index 067d2e99c79f..a8f5b97b216f 100644
+--- a/include/linux/selection.h
++++ b/include/linux/selection.h
+@@ -32,6 +32,7 @@ extern unsigned char default_blu[];
+ 
+ extern unsigned short *screen_pos(struct vc_data *vc, int w_offset, int viewed);
+ extern u16 screen_glyph(struct vc_data *vc, int offset);
++extern u32 screen_glyph_unicode(struct vc_data *vc, int offset);
+ extern void complement_pos(struct vc_data *vc, int offset);
+ extern void invert_screen(struct vc_data *vc, int offset, int count, int shift);
+ 
+

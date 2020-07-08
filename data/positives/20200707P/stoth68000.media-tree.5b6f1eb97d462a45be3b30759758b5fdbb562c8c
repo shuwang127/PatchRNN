@@ -1,0 +1,61 @@
+commit 5b6f1eb97d462a45be3b30759758b5fdbb562c8c
+Author: Alain Knaff <alain@knaff.lu>
+Date:   Mon Nov 10 17:08:08 2008 -0800
+
+    vfs: lseek(fd, 0, SEEK_CUR) race condition
+    
+    This patch fixes a race condition in lseek. While it is expected that
+    unpredictable behaviour may result while repositioning the offset of a
+    file descriptor concurrently with reading/writing to the same file
+    descriptor, this should not happen when merely *reading* the file
+    descriptor's offset.
+    
+    Unfortunately, the only portable way in Unix to read a file
+    descriptor's offset is lseek(fd, 0, SEEK_CUR); however executing this
+    concurrently with read/write may mess up the position.
+    
+    [with fixes from akpm]
+    
+    Signed-off-by: Alain Knaff <alain@knaff.lu>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/read_write.c b/fs/read_write.c
+index 969a6d9c020b..5cc6924eb158 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -50,6 +50,14 @@ generic_file_llseek_unlocked(struct file *file, loff_t offset, int origin)
+ 		offset += inode->i_size;
+ 		break;
+ 	case SEEK_CUR:
++		/*
++		 * Here we special-case the lseek(fd, 0, SEEK_CUR)
++		 * position-querying operation.  Avoid rewriting the "same"
++		 * f_pos value back to the file because a concurrent read(),
++		 * write() or lseek() might have altered it
++		 */
++		if (offset == 0)
++			return file->f_pos;
+ 		offset += file->f_pos;
+ 		break;
+ 	}
+@@ -105,6 +113,10 @@ loff_t default_llseek(struct file *file, loff_t offset, int origin)
+ 			offset += i_size_read(file->f_path.dentry->d_inode);
+ 			break;
+ 		case SEEK_CUR:
++			if (offset == 0) {
++				retval = file->f_pos;
++				goto out;
++			}
+ 			offset += file->f_pos;
+ 	}
+ 	retval = -EINVAL;
+@@ -115,6 +127,7 @@ loff_t default_llseek(struct file *file, loff_t offset, int origin)
+ 		}
+ 		retval = offset;
+ 	}
++out:
+ 	unlock_kernel();
+ 	return retval;
+ }
+

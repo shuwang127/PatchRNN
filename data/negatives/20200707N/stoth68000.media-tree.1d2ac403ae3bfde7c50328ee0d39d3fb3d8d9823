@@ -1,0 +1,203 @@
+commit 1d2ac403ae3bfde7c50328ee0d39d3fb3d8d9823
+Author: Daniel Vetter <daniel.vetter@ffwll.ch>
+Date:   Tue Apr 26 19:29:41 2016 +0200
+
+    drm: Protect dev->filelist with its own mutex
+    
+    amdgpu gained dev->struct_mutex usage, and that's because it's walking
+    the dev->filelist list. Protect that list with it's own lock to take
+    one more step towards getting rid of struct_mutex usage in drivers
+    once and for all.
+    
+    While doing the conversion I noticed that 2 debugfs files in i915
+    completely lacked appropriate locking. Fix that up too.
+    
+    v2: don't forget to switch to drm_gem_object_unreference_unlocked.
+    
+    Cc: Alex Deucher <alexander.deucher@amd.com>
+    Reviewed-by: Alex Deucher <alexander.deucher@amd.com>
+    Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Signed-off-by: Daniel Vetter <daniel.vetter@intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/1461691808-12414-9-git-send-email-daniel.vetter@ffwll.ch
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c
+index fa6a27bff298..a087b9638cde 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c
+@@ -93,7 +93,7 @@ void amdgpu_gem_force_release(struct amdgpu_device *adev)
+ 	struct drm_device *ddev = adev->ddev;
+ 	struct drm_file *file;
+ 
+-	mutex_lock(&ddev->struct_mutex);
++	mutex_lock(&ddev->filelist_mutex);
+ 
+ 	list_for_each_entry(file, &ddev->filelist, lhead) {
+ 		struct drm_gem_object *gobj;
+@@ -103,13 +103,13 @@ void amdgpu_gem_force_release(struct amdgpu_device *adev)
+ 		spin_lock(&file->table_lock);
+ 		idr_for_each_entry(&file->object_idr, gobj, handle) {
+ 			WARN_ONCE(1, "And also active allocations!\n");
+-			drm_gem_object_unreference(gobj);
++			drm_gem_object_unreference_unlocked(gobj);
+ 		}
+ 		idr_destroy(&file->object_idr);
+ 		spin_unlock(&file->table_lock);
+ 	}
+ 
+-	mutex_unlock(&ddev->struct_mutex);
++	mutex_unlock(&ddev->filelist_mutex);
+ }
+ 
+ /*
+@@ -769,7 +769,7 @@ static int amdgpu_debugfs_gem_info(struct seq_file *m, void *data)
+ 	struct drm_file *file;
+ 	int r;
+ 
+-	r = mutex_lock_interruptible(&dev->struct_mutex);
++	r = mutex_lock_interruptible(&dev->filelist_mutex);
+ 	if (r)
+ 		return r;
+ 
+@@ -793,7 +793,7 @@ static int amdgpu_debugfs_gem_info(struct seq_file *m, void *data)
+ 		spin_unlock(&file->table_lock);
+ 	}
+ 
+-	mutex_unlock(&dev->struct_mutex);
++	mutex_unlock(&dev->filelist_mutex);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/drm_drv.c b/drivers/gpu/drm/drm_drv.c
+index e1fb52d4f72c..bff89226a344 100644
+--- a/drivers/gpu/drm/drm_drv.c
++++ b/drivers/gpu/drm/drm_drv.c
+@@ -590,6 +590,7 @@ struct drm_device *drm_dev_alloc(struct drm_driver *driver,
+ 	spin_lock_init(&dev->buf_lock);
+ 	spin_lock_init(&dev->event_lock);
+ 	mutex_init(&dev->struct_mutex);
++	mutex_init(&dev->filelist_mutex);
+ 	mutex_init(&dev->ctxlist_mutex);
+ 	mutex_init(&dev->master_mutex);
+ 
+diff --git a/drivers/gpu/drm/drm_fops.c b/drivers/gpu/drm/drm_fops.c
+index c3d0aaac0669..7af7f8bcb355 100644
+--- a/drivers/gpu/drm/drm_fops.c
++++ b/drivers/gpu/drm/drm_fops.c
+@@ -297,9 +297,9 @@ static int drm_open_helper(struct file *filp, struct drm_minor *minor)
+ 	}
+ 	mutex_unlock(&dev->master_mutex);
+ 
+-	mutex_lock(&dev->struct_mutex);
++	mutex_lock(&dev->filelist_mutex);
+ 	list_add(&priv->lhead, &dev->filelist);
+-	mutex_unlock(&dev->struct_mutex);
++	mutex_unlock(&dev->filelist_mutex);
+ 
+ #ifdef __alpha__
+ 	/*
+@@ -447,8 +447,11 @@ int drm_release(struct inode *inode, struct file *filp)
+ 
+ 	DRM_DEBUG("open_count = %d\n", dev->open_count);
+ 
+-	mutex_lock(&dev->struct_mutex);
++	mutex_lock(&dev->filelist_mutex);
+ 	list_del(&file_priv->lhead);
++	mutex_unlock(&dev->filelist_mutex);
++
++	mutex_lock(&dev->struct_mutex);
+ 	if (file_priv->magic)
+ 		idr_remove(&file_priv->master->magic_map, file_priv->magic);
+ 	mutex_unlock(&dev->struct_mutex);
+diff --git a/drivers/gpu/drm/drm_info.c b/drivers/gpu/drm/drm_info.c
+index cbb4fc0fc969..5d469b2f26f4 100644
+--- a/drivers/gpu/drm/drm_info.c
++++ b/drivers/gpu/drm/drm_info.c
+@@ -174,7 +174,7 @@ int drm_clients_info(struct seq_file *m, void *data)
+ 	/* dev->filelist is sorted youngest first, but we want to present
+ 	 * oldest first (i.e. kernel, servers, clients), so walk backwardss.
+ 	 */
+-	mutex_lock(&dev->struct_mutex);
++	mutex_lock(&dev->filelist_mutex);
+ 	list_for_each_entry_reverse(priv, &dev->filelist, lhead) {
+ 		struct task_struct *task;
+ 
+@@ -190,7 +190,7 @@ int drm_clients_info(struct seq_file *m, void *data)
+ 			   priv->magic);
+ 		rcu_read_unlock();
+ 	}
+-	mutex_unlock(&dev->struct_mutex);
++	mutex_unlock(&dev->filelist_mutex);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 85933940fe9c..c298312f83f6 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -498,6 +498,10 @@ static int i915_gem_object_info(struct seq_file *m, void* data)
+ 
+ 	seq_putc(m, '\n');
+ 	print_batch_pool_stats(m, dev_priv);
++
++	mutex_unlock(&dev->struct_mutex);
++
++	mutex_lock(&dev->filelist_mutex);
+ 	list_for_each_entry_reverse(file, &dev->filelist, lhead) {
+ 		struct file_stats stats;
+ 		struct task_struct *task;
+@@ -518,8 +522,7 @@ static int i915_gem_object_info(struct seq_file *m, void* data)
+ 		print_file_stats(m, task ? task->comm : "<unknown>", stats);
+ 		rcu_read_unlock();
+ 	}
+-
+-	mutex_unlock(&dev->struct_mutex);
++	mutex_unlock(&dev->filelist_mutex);
+ 
+ 	return 0;
+ }
+@@ -2325,6 +2328,7 @@ static int i915_ppgtt_info(struct seq_file *m, void *data)
+ 	else if (INTEL_INFO(dev)->gen >= 6)
+ 		gen6_ppgtt_info(m, dev);
+ 
++	mutex_lock(&dev->filelist_mutex);
+ 	list_for_each_entry_reverse(file, &dev->filelist, lhead) {
+ 		struct drm_i915_file_private *file_priv = file->driver_priv;
+ 		struct task_struct *task;
+@@ -2339,6 +2343,7 @@ static int i915_ppgtt_info(struct seq_file *m, void *data)
+ 		idr_for_each(&file_priv->context_idr, per_file_ctx,
+ 			     (void *)(unsigned long)m);
+ 	}
++	mutex_unlock(&dev->filelist_mutex);
+ 
+ out_put:
+ 	intel_runtime_pm_put(dev_priv);
+@@ -2374,6 +2379,8 @@ static int i915_rps_boost_info(struct seq_file *m, void *data)
+ 		   intel_gpu_freq(dev_priv, dev_priv->rps.min_freq_softlimit),
+ 		   intel_gpu_freq(dev_priv, dev_priv->rps.max_freq_softlimit),
+ 		   intel_gpu_freq(dev_priv, dev_priv->rps.max_freq));
++
++	mutex_lock(&dev->filelist_mutex);
+ 	spin_lock(&dev_priv->rps.client_lock);
+ 	list_for_each_entry_reverse(file, &dev->filelist, lhead) {
+ 		struct drm_i915_file_private *file_priv = file->driver_priv;
+@@ -2396,6 +2403,7 @@ static int i915_rps_boost_info(struct seq_file *m, void *data)
+ 		   list_empty(&dev_priv->rps.mmioflips.link) ? "" : ", active");
+ 	seq_printf(m, "Kernel boosts: %d\n", dev_priv->rps.boosts);
+ 	spin_unlock(&dev_priv->rps.client_lock);
++	mutex_unlock(&dev->filelist_mutex);
+ 
+ 	return 0;
+ }
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index 5de4cff05ac9..7901768bb47c 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -769,6 +769,7 @@ struct drm_device {
+ 	atomic_t buf_alloc;		/**< Buffer allocation in progress */
+ 	/*@} */
+ 
++	struct mutex filelist_mutex;
+ 	struct list_head filelist;
+ 
+ 	/** \name Memory management */
+

@@ -1,0 +1,56 @@
+commit e6b4a19a546e0a171a416261cb06dfcc8e607e7b
+Author: Tom Yu <tlyu@mit.edu>
+Date:   Mon Aug 8 09:06:16 2016 -0400
+
+    Fix MPOOL_IGNOREPIN to ease btree debugging
+    
+    Various libdb2 test programs use the MPOOL_IGNOREPIN flag to examine
+    arbitrary mpool pages that may or may not be pinned.  This flag is
+    apparently intended to allow fetching pages that are already pinned,
+    and to avoid setting the MPOOL_PINNED flag.  When there was a cache
+    hit, mpool_get was setting MPOOL_PINNED anyway, causing aborts when
+    using debugging programs such as dbtest and bttest.
+    
+    Fix this inconsistency by not setting MPOOL_PINNED when returning a
+    cached page when the caller requested MPOOL_IGNOREPIN.  In bttest, add
+    MPOOL_IGNOREPIN to allow dumping of pages while they are pinned
+    without disrupting their pinned status.
+    
+    ticket: 8478
+
+diff --git a/src/plugins/kdb/db2/libdb2/mpool/mpool.c b/src/plugins/kdb/db2/libdb2/mpool/mpool.c
+index 8dcda693e..79ad61316 100644
+--- a/src/plugins/kdb/db2/libdb2/mpool/mpool.c
++++ b/src/plugins/kdb/db2/libdb2/mpool/mpool.c
+@@ -214,7 +214,8 @@ mpool_get(mp, pgno, flags)
+ 		TAILQ_INSERT_TAIL(&mp->lqh, bp, q);
+ 
+ 		/* Return a pinned page. */
+-		bp->flags |= MPOOL_PINNED;
++		if (!(flags & MPOOL_IGNOREPIN))
++			bp->flags |= MPOOL_PINNED;
+ 		return (bp->page);
+ 	}
+ 
+diff --git a/src/plugins/kdb/db2/libdb2/test/btree.tests/main.c b/src/plugins/kdb/db2/libdb2/test/btree.tests/main.c
+index 78195d6e6..5b9890b8a 100644
+--- a/src/plugins/kdb/db2/libdb2/test/btree.tests/main.c
++++ b/src/plugins/kdb/db2/libdb2/test/btree.tests/main.c
+@@ -785,7 +785,7 @@ show(db, argv)
+ 
+ 	pg = atoi(argv[1]);
+ 	t = db->internal;
+-	if ((h = mpool_get(t->bt_mp, pg, 0)) == NULL) {
++	if ((h = mpool_get(t->bt_mp, pg, MPOOL_IGNOREPIN)) == NULL) {
+ 		(void)printf("getpage of %ld failed\n", pg);
+ 		return;
+ 	}
+@@ -793,7 +793,6 @@ show(db, argv)
+ 		__bt_dmpage(h);
+ 	else
+ 		__bt_dpage(db, h);
+-	mpool_put(t->bt_mp, h, 0);
+ }
+ #endif
+ 
+

@@ -1,0 +1,254 @@
+commit 163f0881dcfd03ab023ae8db7b45f7aa930c1298
+Author: matyhtf <mikan.tenny@gmail.com>
+Date:   Thu Dec 7 15:25:20 2017 +0800
+
+    Automatically resolve domain name
+
+diff --git a/include/Client.h b/include/Client.h
+index 7652b2c5..e09e3b49 100644
+--- a/include/Client.h
++++ b/include/Client.h
+@@ -73,6 +73,7 @@ typedef struct _swClient
+     uint32_t redirect :1;
+     uint32_t http2 :1;
+     uint32_t sleep :1;
++    uint32_t wait_dns :1;
+ 
+     /**
+      * one package: length check
+@@ -87,6 +88,8 @@ typedef struct _swClient
+     uint32_t reuse_count;
+ 
+     char *server_str;
++    char *server_host;
++    int server_port;
+     void *ptr;
+     void *params;
+ 
+diff --git a/include/async.h b/include/async.h
+index 4826b383..83f48c35 100644
+--- a/include/async.h
++++ b/include/async.h
+@@ -45,6 +45,8 @@ typedef struct _swAio_event
+     void *req;
+     int ret;
+     int error;
++    void *object;
++    void (*callback)(struct _swAio_event *event);
+ } swAio_event;
+ 
+ typedef struct
+@@ -70,6 +72,7 @@ int swAio_init(void);
+ void swAio_free(void);
+ int swAioBase_init(int max_aio_events);
+ int swAio_dns_lookup(void *hostname, void *ip_addr, size_t size);
++int swAio_dispatch(swAio_event *_event);
+ 
+ #ifdef HAVE_GCC_AIO
+ int swAioGcc_init(int max_aio_events);
+diff --git a/include/error.h b/include/error.h
+index 6aeb29b9..2fc8b493 100644
+--- a/include/error.h
++++ b/include/error.h
+@@ -32,6 +32,7 @@ enum swErrorCode
+     SW_ERROR_FILE_TOO_LARGE,
+     SW_ERROR_FILE_EMPTY,
+     SW_ERROR_DNSLOOKUP_DUPLICATE_REQUEST,
++    SW_ERROR_DNSLOOKUP_RESOLVE_FAILED,
+ 
+     /**
+      * connection error
+diff --git a/src/network/Client.c b/src/network/Client.c
+index 366944ba..69401b75 100644
+--- a/src/network/Client.c
++++ b/src/network/Client.c
+@@ -18,6 +18,7 @@
+ #include "Server.h"
+ #include "Client.h"
+ #include "socks5.h"
++#include "async.h"
+ 
+ static int swClient_inet_addr(swClient *cli, char *host, int port);
+ static int swClient_tcp_connect_sync(swClient *cli, char *host, int port, double _timeout, int udp_connect);
+@@ -40,6 +41,7 @@ static int swClient_onStreamRead(swReactor *reactor, swEvent *event);
+ static int swClient_onWrite(swReactor *reactor, swEvent *event);
+ static int swClient_onError(swReactor *reactor, swEvent *event);
+ static void swClient_onTimeout(swTimer *timer, swTimer_node *tnode);
++static void swClient_onResolveCompleted(swAio_event *event);
+ 
+ static sw_inline void execute_onConnect(swClient *cli)
+ {
+@@ -304,6 +306,9 @@ static int swClient_inet_addr(swClient *cli, char *host, int port)
+         port = cli->http_proxy->proxy_port;
+     }
+ 
++    cli->server_host = host;
++    cli->server_port = port;
++
+     void *s_addr = NULL;
+     if (cli->type == SW_SOCK_TCP || cli->type == SW_SOCK_UDP)
+     {
+@@ -341,13 +346,16 @@ static int swClient_inet_addr(swClient *cli, char *host, int port)
+     {
+         return SW_ERR;
+     }
+-    if (cli->async)
++    if (!cli->async)
+     {
+-        swWarn("DNS lookup will block the process. Please use swoole_async_dns_lookup.");
++        if (swoole_gethostbyname(cli->_sock_domain, host, s_addr) < 0)
++        {
++            return SW_ERR;
++        }
+     }
+-    if (swoole_gethostbyname(cli->_sock_domain, host, s_addr) < 0)
++    else
+     {
+-        return SW_ERR;
++        cli->wait_dns = 1;
+     }
+     return SW_OK;
+ }
+@@ -558,13 +566,17 @@ static int swClient_tcp_connect_sync(swClient *cli, char *host, int port, double
+ static int swClient_tcp_connect_async(swClient *cli, char *host, int port, double timeout, int nonblock)
+ {
+     int ret;
++
+     cli->timeout = timeout;
+ 
+-    //alloc input memory buffer
+-    cli->buffer = swString_new(cli->buffer_input_size);
+     if (!cli->buffer)
+     {
+-        return SW_ERR;
++        //alloc input memory buffer
++        cli->buffer = swString_new(cli->buffer_input_size);
++        if (!cli->buffer)
++        {
++            return SW_ERR;
++        }
+     }
+ 
+     if (!(cli->onConnect && cli->onError && cli->onClose))
+@@ -583,6 +595,36 @@ static int swClient_tcp_connect_async(swClient *cli, char *host, int port, doubl
+         return SW_ERR;
+     }
+ 
++    if (cli->wait_dns)
++    {
++        swAio_event ev;
++        bzero(&ev, sizeof(swAio_event));
++
++        if (strlen(cli->server_host) < SW_IP_MAX_LENGTH)
++        {
++            ev.nbytes = SW_IP_MAX_LENGTH;
++        }
++        else
++        {
++            ev.nbytes = strlen(host) + 1;
++        }
++
++        ev.buf = sw_malloc(ev.nbytes);
++        if (!ev.buf)
++        {
++            swWarn("malloc failed.");
++            return SW_ERR;
++        }
++
++        memcpy(ev.buf, cli->server_host, strlen(cli->server_host));
++
++        ev.type = SW_AIO_DNS_LOOKUP;
++        ev.object = cli;
++        ev.callback = swClient_onResolveCompleted;
++
++        return swAio_dispatch(&ev);
++    }
++
+     while (1)
+     {
+         ret = connect(cli->socket->fd, (struct sockaddr *) &cli->server_addr.addr, cli->server_addr.len);
+@@ -1227,6 +1269,28 @@ static void swClient_onTimeout(swTimer *timer, swTimer_node *tnode)
+     }
+ }
+ 
++static void swClient_onResolveCompleted(swAio_event *event)
++{
++    swClient *cli = event->object;
++    cli->wait_dns = 0;
++
++    if (event->ret == 0)
++    {
++        swClient_tcp_connect_async(cli, event->buf, cli->server_port, cli->timeout, 1);
++    }
++    else
++    {
++        SwooleG.error = SW_ERROR_DNSLOOKUP_RESOLVE_FAILED;
++        cli->socket->removed = 1;
++        cli->close(cli);
++        if (cli->onError)
++        {
++            cli->onError(cli);
++        }
++    }
++    sw_free(event->buf);
++}
++
+ static int swClient_onWrite(swReactor *reactor, swEvent *event)
+ {
+     swClient *cli = event->socket->object;
+diff --git a/src/os/base.c b/src/os/base.c
+index f3dbd5f5..ea08925f 100644
+--- a/src/os/base.c
++++ b/src/os/base.c
+@@ -143,7 +143,14 @@ static int swAioBase_onFinish(swReactor *reactor, swEvent *event)
+     }
+     for (i = 0; i < n / sizeof(swAio_event*); i++)
+     {
+-        SwooleAIO.callback(events[i]);
++        if (events[i]->callback)
++        {
++            events[i]->callback(events[i]);
++        }
++        else
++        {
++            SwooleAIO.callback(events[i]);
++        }
+         SwooleAIO.task_num--;
+         sw_free(events[i]);
+     }
+@@ -363,6 +370,34 @@ int swAio_dns_lookup(void *hostname, void *ip_addr, size_t size)
+     }
+ }
+ 
++int swAio_dispatch(swAio_event *_event)
++{
++    if (SwooleAIO.init == 0)
++    {
++        swAio_init();
++    }
++
++    _event->task_id = SwooleAIO.current_id++;
++
++    swAio_event *event = (swAio_event *) sw_malloc(sizeof(swAio_event));
++    if (event == NULL)
++    {
++        swWarn("malloc failed.");
++        return SW_ERR;
++    }
++    memcpy(event, _event, sizeof(swAio_event));
++
++    if (swThreadPool_dispatch(&swAioBase_thread_pool, event, sizeof(event)) < 0)
++    {
++        return SW_ERR;
++    }
++    else
++    {
++        SwooleAIO.task_num++;
++        return _event->task_id;
++    }
++}
++
+ static int swAioBase_read(int fd, void *inbuf, size_t size, off_t offset)
+ {
+     swAio_event *aio_ev = (swAio_event *) sw_malloc(sizeof(swAio_event));
+

@@ -1,0 +1,52 @@
+commit e64259e860a84c9527ffbe6d9bd2f6eeab6fdac4
+Author: Nick Kralevich <nnk@google.com>
+Date:   Wed Jul 11 17:34:04 2012 -0700
+
+    memmove: Don't call memcpy if regions overlap
+    
+    memmove() unconditionally calls memcpy() if "dst" < "src". For
+    example, in the code below, memmove() would end up calling memcpy(),
+    even though the regions of memory overlap.
+    
+    int main() {
+      char buf3[0x800];
+      char *dst  = &buf3[1];
+      char *src = &buf3[0x400];
+      memset(buf3, 0, sizeof(buf3));
+      memmove(dst, src, 0x400);
+      printf("1: %s\n", buf3);
+      return 0;
+    }
+    
+    Calling memcpy() on overlaping regions only works if you assume
+    that memcpy() copies from start to finish. On some architectures,
+    it's more efficient to call memcpy() from finish to start.
+    
+    This is also triggering a failure in some of my code.
+    
+    More reading:
+    * http://lwn.net/Articles/414467/
+    * https://bugzilla.redhat.com/show_bug.cgi?id=638477#c31 (comment 31)
+    
+    Change-Id: I65a51ae3a52dd4af335fe5c278056b8c2cbd8948
+
+diff --git a/libc/string/memmove.c b/libc/string/memmove.c
+index 072104b6c..fb1d9753e 100644
+--- a/libc/string/memmove.c
++++ b/libc/string/memmove.c
+@@ -32,10 +32,11 @@ void *memmove(void *dst, const void *src, size_t n)
+ {
+   const char *p = src;
+   char *q = dst;
+-  /* We can use the optimized memcpy if the destination is below the
+-   * source (i.e. q < p), or if it is completely over it (i.e. q >= p+n).
++  /* We can use the optimized memcpy if the source and destination
++   * don't overlap.
+    */
+-  if (__builtin_expect((q < p) || ((size_t)(q - p) >= n), 1)) {
++  if (__builtin_expect(((q < p) && ((size_t)(p - q) >= n))
++                    || ((p < q) && ((size_t)(q - p) >= n)), 1)) {
+     return memcpy(dst, src, n);
+   } else {
+     bcopy(src, dst, n);
+

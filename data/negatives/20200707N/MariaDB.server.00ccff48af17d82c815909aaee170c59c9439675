@@ -1,0 +1,92 @@
+commit 00ccff48af17d82c815909aaee170c59c9439675
+Author: Andrei Elkin <andrei.elkin@mariadb.com>
+Date:   Sun Mar 18 21:01:41 2018 +0200
+
+    MDEV-14014 Multi-Slave Replication Fail: bogus data in log event
+    
+    MDEV-7257 made a dump thread to read from binlog concurrently with
+    writers as long as the read bytes are below a water-mark
+    (MYSQL_BIN_LOG::binlog_end_pos). However it appeared to be possible a
+    dump thread reader reach out for bytes past the water mark through a
+    feature of IO_CACHE that fills in the internal buffer and while doing
+    so it could read what the reader is not supposed to see (the bytes
+    above MYSQL_BIN_LOG::binlog_end_pos).
+    
+    The issue is fixed with constraining the IO_CACHE buffer fill to respect
+    the watermark.
+    
+    An added unit test proves reading from file is bound to an external
+    parameter
+    passed to {IO_CACHE::end_of_file} cache member.
+
+diff --git a/sql/sql_repl.cc b/sql/sql_repl.cc
+index 4ec70bf31da..35cdc98e0f4 100644
+--- a/sql/sql_repl.cc
++++ b/sql/sql_repl.cc
+@@ -2538,6 +2538,7 @@ static int send_events(binlog_send_info *info, IO_CACHE* log, LOG_INFO* linfo,
+   linfo->pos= my_b_tell(log);
+   info->last_pos= my_b_tell(log);
+ 
++  log->end_of_file= end_pos;
+   while (linfo->pos < end_pos)
+   {
+     if (should_stop(info))
+diff --git a/unittest/sql/mf_iocache-t.cc b/unittest/sql/mf_iocache-t.cc
+index 9f2e4b1b303..34717f04e33 100644
+--- a/unittest/sql/mf_iocache-t.cc
++++ b/unittest/sql/mf_iocache-t.cc
+@@ -253,10 +253,43 @@ void mdev10259()
+ 
+ }
+ 
++void mdev14014()
++{
++  int res;
++  uchar buf_o[200];
++  uchar buf_i[200];
++  memset(buf_i,    0, sizeof( buf_i));
++  memset(buf_o, FILL, sizeof(buf_o));
++
++  diag("MDEV-14014 Dump thread reads past last 'officially' written byte");
++
++  init_io_cache_encryption();
++
++  res= open_cached_file(&info, 0, 0, CACHE_SIZE, 0);
++  ok(res == 0, "open_cached_file" INFO_TAIL);
++
++  res= my_b_write(&info, buf_o, sizeof(buf_o));
++  ok(res == 0, "buffer is written" INFO_TAIL);
++
++  res= my_b_flush_io_cache(&info, 1);
++  ok(res == 0, "flush" INFO_TAIL);
++
++  res= reinit_io_cache(&info, READ_CACHE, 0, 0, 0);
++  ok(res == 0, "reinit READ_CACHE" INFO_TAIL);
++
++  info.end_of_file= 100;
++  res= my_b_read(&info, buf_i, sizeof(buf_i));
++  ok(res == 1 && buf_i[100] == 0 && buf_i[200-1] == 0,
++     "short read leaves buf_i[100..200-1] == 0");
++
++  close_cached_file(&info);
++}
++
++
+ int main(int argc __attribute__((unused)),char *argv[])
+ {
+   MY_INIT(argv[0]);
+-  plan(46);
++  plan(51);
+ 
+   /* temp files with and without encryption */
+   encrypt_tmp_files= 1;
+@@ -272,6 +305,8 @@ int main(int argc __attribute__((unused)),char *argv[])
+   mdev10259();
+   encrypt_tmp_files= 0;
+ 
++  mdev14014();
++
+   my_end(0);
+   return exit_status();
+ }
+

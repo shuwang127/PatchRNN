@@ -1,0 +1,168 @@
+commit a4468aa86bed36bb3ce816fcdaaa28c3c63177d9
+Author: Andrew Cagney <cagney@gnu.org>
+Date:   Mon Oct 3 14:31:15 2016 -0400
+
+    pluto: merge crypto_get_hasher()/ike_alg_get_hasher() into ikev1_alg_get_hasher()
+
+diff --git a/programs/pluto/cavp.c b/programs/pluto/cavp.c
+index d3662b3a1..e9b46532e 100644
+--- a/programs/pluto/cavp.c
++++ b/programs/pluto/cavp.c
+@@ -129,7 +129,7 @@ void hash(struct cavp_entry *entry,
+ 	  const char *value UNUSED)
+ {
+ 	strcpy(hasher_name, entry->key);
+-	hasher = ike_alg_get_hasher(entry->value);
++	hasher = ikev1_alg_get_hasher(entry->value);
+ 	if (hasher == NULL) {
+ 		fprintf(stderr, "hasher %s not found\n", entry->key);
+ 	}
+diff --git a/programs/pluto/crypto.c b/programs/pluto/crypto.c
+index 7b647dbf7..c149137c3 100644
+--- a/programs/pluto/crypto.c
++++ b/programs/pluto/crypto.c
+@@ -352,16 +352,6 @@ static void do_3des(u_int8_t *buf, size_t buf_len,
+ }
+ 
+ /* hash and prf routines */
+-/*==========================================================
+- *
+- *  ike_alg linked list
+- *
+- *==========================================================
+- */
+-const struct hash_desc *crypto_get_hasher(oakley_hash_t alg)
+-{
+-	return (const struct hash_desc *) ikev1_alg_find(IKE_ALG_HASH, alg);
+-}
+ 
+ const struct encrypt_desc *crypto_get_encrypter(int alg)
+ {
+diff --git a/programs/pluto/crypto.h b/programs/pluto/crypto.h
+index 6691a60e6..5886e3bd2 100644
+--- a/programs/pluto/crypto.h
++++ b/programs/pluto/crypto.h
+@@ -68,7 +68,6 @@ struct state;   /* forward declaration, dammit */
+ struct encrypt_desc;	/* forward */
+ struct hash_desc;	/* forward */
+ const struct encrypt_desc *crypto_get_encrypter(int alg);
+-const struct hash_desc *crypto_get_hasher(oakley_hash_t alg);
+ 
+ void crypto_cbc_encrypt(const struct encrypt_desc *e, bool enc, u_int8_t *buf,
+ 			size_t size, struct state *st);
+diff --git a/programs/pluto/ike_alg.c b/programs/pluto/ike_alg.c
+index c64ca5b75..8524dd54a 100644
+--- a/programs/pluto/ike_alg.c
++++ b/programs/pluto/ike_alg.c
+@@ -74,7 +74,7 @@ bool ike_alg_enc_present(int ealg)
+ /*	check if IKE hash algo is present */
+ bool ike_alg_hash_present(int halg)
+ {
+-	const struct hash_desc *hash_desc = ike_alg_get_hasher(halg);
++	const struct hash_desc *hash_desc = ikev1_alg_get_hasher(halg);
+ 
+ 	return hash_desc != NULL && hash_desc->hash_digest_len != 0;
+ }
+@@ -185,6 +185,11 @@ const struct ike_alg *ikev1_alg_find(unsigned algo_type, unsigned algo_id)
+ 	return e;
+ }
+ 
++const struct hash_desc *ikev1_alg_get_hasher(int alg)
++{
++	return (const struct hash_desc *) ikev1_alg_find(IKE_ALG_HASH, alg);
++}
++
+ static const struct ike_alg *ikev2_alg_find(unsigned algo_type,
+ 					    enum ikev2_trans_type_encr algo_v2id)
+ {
+diff --git a/programs/pluto/ike_alg.h b/programs/pluto/ike_alg.h
+index 0c44cd083..a8bc479e2 100644
+--- a/programs/pluto/ike_alg.h
++++ b/programs/pluto/ike_alg.h
+@@ -143,16 +143,13 @@ extern bool ike_alg_register_hash(struct hash_desc *a);
+ extern const struct ike_alg *ikev1_alg_find(unsigned algo_type,
+ 			     unsigned algo_id);
+ 
+-static __inline__ const struct hash_desc *ike_alg_get_hasher(int alg)
+-{
+-	return (const struct hash_desc *) ikev1_alg_find(IKE_ALG_HASH, alg);
+-}
+-
+ static __inline__ const struct encrypt_desc *ike_alg_get_encrypter(int alg)
+ {
+ 	return (const struct encrypt_desc *) ikev1_alg_find(IKE_ALG_ENCRYPT, alg);
+ }
+ 
++const struct hash_desc *ikev1_alg_get_hasher(int alg);
++
+ const struct encrypt_desc *ikev2_alg_get_encrypter(int alg);
+ const struct hash_desc *ikev2_alg_get_hasher(int alg);
+ const struct hash_desc *ikev2_alg_get_integ(int alg);
+diff --git a/programs/pluto/ikev1_prf.c b/programs/pluto/ikev1_prf.c
+index 45a527964..801ca74bb 100644
+--- a/programs/pluto/ikev1_prf.c
++++ b/programs/pluto/ikev1_prf.c
+@@ -196,7 +196,7 @@ static void calc_skeyids_iv(struct pcr_skeyid_q *skq,
+ {
+ 	oakley_auth_t auth = skq->auth;
+ 	oakley_hash_t hash = skq->prf_hash;
+-	const struct hash_desc *hasher = crypto_get_hasher(hash);
++	const struct hash_desc *hasher = ikev1_alg_get_hasher(hash);
+ 	chunk_t ni;
+ 	chunk_t nr;
+ 	chunk_t gi;
+diff --git a/programs/pluto/ikev1_spdb_struct.c b/programs/pluto/ikev1_spdb_struct.c
+index 187a91774..1c36aa07f 100644
+--- a/programs/pluto/ikev1_spdb_struct.c
++++ b/programs/pluto/ikev1_spdb_struct.c
+@@ -1062,12 +1062,12 @@ notification_t parse_isakmp_sa_body(pb_stream *sa_pbs,		/* body of input SA Payl
+ 			case OAKLEY_HASH_ALGORITHM | ISAKMP_ATTR_AF_TV:
+ 				if (ike_alg_hash_present(val)) {
+ 					ta.prf_hash = val;
+-					ta.prf_hasher = crypto_get_hasher(val);
++					ta.prf_hasher = ikev1_alg_get_hasher(val);
+ 				} else switch (val) {
+ 				case OAKLEY_MD5:
+ 				case OAKLEY_SHA1:
+ 					ta.prf_hash = val;
+-					ta.prf_hasher = crypto_get_hasher(val);
++					ta.prf_hasher = ikev1_alg_get_hasher(val);
+ 					break;
+ 				default:
+ 					ugh = builddiag("%s is not supported",
+@@ -1514,7 +1514,7 @@ bool init_aggr_st_oakley(struct state *st, lset_t policy)
+ 
+ 	passert(hash->type.oakley == OAKLEY_HASH_ALGORITHM);
+ 	ta.prf_hash = hash->val;           /* OAKLEY_HASH_ALGORITHM */
+-	ta.prf_hasher = crypto_get_hasher(ta.prf_hash);
++	ta.prf_hasher = ikev1_alg_get_hasher(ta.prf_hash);
+ 	passert(ta.prf_hasher != NULL);
+ 
+ 	passert(auth->type.oakley == OAKLEY_AUTHENTICATION_METHOD);
+diff --git a/programs/pluto/ikev2_spdb_struct.c b/programs/pluto/ikev2_spdb_struct.c
+index 5a99efa77..35e2e53ca 100644
+--- a/programs/pluto/ikev2_spdb_struct.c
++++ b/programs/pluto/ikev2_spdb_struct.c
+@@ -1934,7 +1934,7 @@ void ikev2_proposals_from_alg_info_ike(const char *name, const char *what,
+ 			}
+ 		}
+ 
+-		const struct hash_desc *halg = ike_alg_get_hasher(ike_info->ike_halg);
++		const struct hash_desc *halg = ikev1_alg_get_hasher(ike_info->ike_halg);
+ 		if (halg == NULL) {
+ 			if (ike_info->ike_halg != 0) {
+ 				loglog(RC_LOG_SERIOUS, "dropping proposal containing unknown hash algorithm %d", ike_info->ike_halg);
+diff --git a/programs/pluto/plutoalg.c b/programs/pluto/plutoalg.c
+index 0559210a2..89c228be4 100644
+--- a/programs/pluto/plutoalg.c
++++ b/programs/pluto/plutoalg.c
+@@ -348,7 +348,7 @@ static int snprint_ike_info(char *buf, size_t buflen, struct ike_info *ike_info,
+ {
+ 	const struct encrypt_desc *enc_desc = ike_alg_get_encrypter(ike_info->ike_ealg);
+ 	passert(!fix_zero || enc_desc != NULL);
+-	const struct hash_desc *hash_desc = ike_alg_get_hasher(ike_info->ike_halg);
++	const struct hash_desc *hash_desc = ikev1_alg_get_hasher(ike_info->ike_halg);
+ 	passert(!fix_zero || hash_desc != NULL);
+ 
+ 	int eklen = ike_info->ike_eklen;
+

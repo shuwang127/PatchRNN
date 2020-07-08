@@ -1,0 +1,243 @@
+commit 6fa74e09736dbe70269ae016dbd05e3fda994965
+Author: Ken Thompson <ken@golang.org>
+Date:   Fri Dec 19 14:04:25 2008 -0800
+
+    portability bug
+    cant assign to closed array
+    
+    R=r
+    OCL=21634
+    CL=21634
+
+diff --git a/src/cmd/6g/align.c b/src/cmd/6g/align.c
+index 392ad3d0c4..2a930523b4 100644
+--- a/src/cmd/6g/align.c
++++ b/src/cmd/6g/align.c
+@@ -151,7 +151,7 @@ dowidth(Type *t)
+ 		if(t->type == T)
+ 			break;
+ 		dowidth(t->type);
+-		w = sizeof(Array);
++		w = sizeof_Array;
+ 		if(t->bound >= 0)
+ 			w = t->bound * t->type->width;
+ 		break;
+@@ -259,5 +259,10 @@ belexinit(int lextype)
+ 
+ 	symstringo = lookup(".stringo");	// strings
+ 
++	Array_array = rnd(0, types[tptr]->width);
++	Array_nel = rnd(Array_array+types[tptr]->width, types[TUINT32]->width);
++	Array_cap = rnd(Array_nel+types[TUINT32]->width, types[TUINT32]->width);
++	sizeof_Array = rnd(Array_cap+types[TUINT32]->width, maxround);
++
+ 	listinit();
+ }
+diff --git a/src/cmd/6g/cgen.c b/src/cmd/6g/cgen.c
+index bb5cb24612..c0a665c072 100644
+--- a/src/cmd/6g/cgen.c
++++ b/src/cmd/6g/cgen.c
+@@ -189,14 +189,14 @@ cgen(Node *n, Node *res)
+ 			// convert dynamic array to static array
+ 			n2 = n1;
+ 			n2.op = OINDREG;
+-			n2.xoffset = offsetof(Array,array);
++			n2.xoffset = Array_array;
+ 			n2.type = types[tptr];
+ 			gins(AMOVQ, &n2, &n1);
+ 		}
+ 		if(isptrdarray(n->type) && isptrsarray(nl->type)) {
+ 			// conver static array to dynamic array
+ 			// it is assumed that the dope is just before the array
+-			nodconst(&n2, types[tptr], sizeof(Array));
++			nodconst(&n2, types[tptr], sizeof_Array);
+ 			gins(ASUBQ, &n2, &n1);
+ 		}
+ 		gmove(&n1, res);
+@@ -247,7 +247,7 @@ cgen(Node *n, Node *res)
+ 			cgen(nl, &n1);
+ 			n1.op = OINDREG;
+ 			n1.type = types[TUINT32];
+-			n1.xoffset = offsetof(Array,nel);
++			n1.xoffset = Array_nel;
+ 			gmove(&n1, res);
+ 			regfree(&n1);
+ 			break;
+@@ -257,7 +257,7 @@ cgen(Node *n, Node *res)
+ 			agen(nl, &n1);
+ 			n1.op = OINDREG;
+ 			n1.type = types[TUINT32];
+-			n1.xoffset = offsetof(Array,nel);
++			n1.xoffset = Array_nel;
+ 			gmove(&n1, res);
+ 			regfree(&n1);
+ 			break;
+@@ -271,7 +271,7 @@ cgen(Node *n, Node *res)
+ 			cgen(nl, &n1);
+ 			n1.op = OINDREG;
+ 			n1.type = types[TUINT32];
+-			n1.xoffset = offsetof(Array,cap);
++			n1.xoffset = Array_cap;
+ 			gmove(&n1, res);
+ 			regfree(&n1);
+ 			break;
+@@ -281,7 +281,7 @@ cgen(Node *n, Node *res)
+ 			agen(nl, &n1);
+ 			n1.op = OINDREG;
+ 			n1.type = types[TUINT32];
+-			n1.xoffset = offsetof(Array,cap);
++			n1.xoffset = Array_cap;
+ 			gmove(&n1, res);
+ 			regfree(&n1);
+ 			break;
+@@ -491,7 +491,7 @@ agen(Node *n, Node *res)
+ 					n1 = n3;
+ 					n1.op = OINDREG;
+ 					n1.type = types[tptr];
+-					n1.xoffset = offsetof(Array, nel);
++					n1.xoffset = Array_nel;
+ 					nodconst(&n2, types[TUINT64], v);
+ 					gins(optoas(OCMP, types[TUINT32]), &n1, &n2);
+ 					p1 = gbranch(optoas(OGT, types[TUINT32]), T);
+@@ -502,7 +502,7 @@ agen(Node *n, Node *res)
+ 				n1 = n3;
+ 				n1.op = OINDREG;
+ 				n1.type = types[tptr];
+-				n1.xoffset = offsetof(Array, array);
++				n1.xoffset = Array_array;
+ 				gmove(&n1, &n3);
+ 			} else
+ 			if(!debug['B']) {
+@@ -540,7 +540,7 @@ agen(Node *n, Node *res)
+ 				n1 = n3;
+ 				n1.op = OINDREG;
+ 				n1.type = types[tptr];
+-				n1.xoffset = offsetof(Array, nel);
++				n1.xoffset = Array_nel;
+ 			} else {
+ 				nodconst(&n1, types[TUINT64], nl->type->bound);
+ 				if(isptrsarray(nl->type))
+@@ -556,7 +556,7 @@ agen(Node *n, Node *res)
+ 			n1 = n3;
+ 			n1.op = OINDREG;
+ 			n1.type = types[tptr];
+-			n1.xoffset = offsetof(Array, array);
++			n1.xoffset = Array_array;
+ 			gmove(&n1, &n3);
+ 		}
+ 
+@@ -756,7 +756,7 @@ bgen(Node *n, int true, Prog *to)
+ 			agen(nl, &n1);
+ 			n2 = n1;
+ 			n2.op = OINDREG;
+-			n2.xoffset = offsetof(Array,array);
++			n2.xoffset = Array_array;
+ 			nodconst(&tmp, types[tptr], 0);
+ 			gins(optoas(OCMP, types[tptr]), &n2, &tmp);
+ 			patch(gbranch(a, types[tptr]), to);
+diff --git a/src/cmd/6g/gg.h b/src/cmd/6g/gg.h
+index 80a548f8aa..8d44d67d4a 100644
+--- a/src/cmd/6g/gg.h
++++ b/src/cmd/6g/gg.h
+@@ -119,6 +119,22 @@ EXTERN	Node*	newproc;
+ EXTERN	Node*	throwindex;
+ EXTERN	Node*	throwreturn;
+ 
++/*
++ * note this is the runtime representation
++ * of the compilers arrays.
++ *
++ * typedef	struct
++ * {				// must not move anything
++ * 	uchar	array[8];	// pointer to data
++ * 	uchar	nel[4];		// number of elements
++ * 	uchar	cap[4];		// allocated number of elements
++ * } Array;
++ */
++EXTERN	int	Array_array;	// runtime offsetof(Array,array)
++EXTERN	int	Array_nel;	// runtime offsetof(Array,nel)
++EXTERN	int	Array_cap;	// runtime offsetof(Array,cap)
++EXTERN	int	sizeof_Array;	// runtime sizeof(Array)
++
+ /*
+  * gen.c
+  */
+diff --git a/src/cmd/6g/gsubr.c b/src/cmd/6g/gsubr.c
+index daaf713212..e19e85d5fe 100644
+--- a/src/cmd/6g/gsubr.c
++++ b/src/cmd/6g/gsubr.c
+@@ -1965,7 +1965,7 @@ oindex:
+ 			n2 = *reg;
+ 			n2.op = OINDREG;
+ 			n2.type = types[tptr];
+-			n2.xoffset = offsetof(Array, nel);
++			n2.xoffset = Array_nel;
+ 		} else {
+ 			nodconst(&n2, types[TUINT64], l->type->bound);
+ 			if(o & OPtrto)
+@@ -1981,7 +1981,7 @@ oindex:
+ 		n2 = *reg;
+ 		n2.op = OINDREG;
+ 		n2.type = types[tptr];
+-		n2.xoffset = offsetof(Array, array);
++		n2.xoffset = Array_array;
+ 		gmove(&n2, reg);
+ 	}
+ 
+@@ -2011,7 +2011,7 @@ oindex_const:
+ 			n1 = *reg;
+ 			n1.op = OINDREG;
+ 			n1.type = types[tptr];
+-			n1.xoffset = offsetof(Array, nel);
++			n1.xoffset = Array_nel;
+ 			nodconst(&n2, types[TUINT64], v);
+ 			gins(optoas(OCMP, types[TUINT32]), &n1, &n2);
+ 			p1 = gbranch(optoas(OGT, types[TUINT32]), T);
+@@ -2022,7 +2022,7 @@ oindex_const:
+ 		n1 = *reg;
+ 		n1.op = OINDREG;
+ 		n1.type = types[tptr];
+-		n1.xoffset = offsetof(Array, array);
++		n1.xoffset = Array_array;
+ 		gmove(&n1, reg);
+ 
+ 	} else
+diff --git a/src/cmd/gc/go.h b/src/cmd/gc/go.h
+index 6cd2eab5a6..c0faddd478 100644
+--- a/src/cmd/gc/go.h
++++ b/src/cmd/gc/go.h
+@@ -61,20 +61,6 @@ struct	String
+ 	char	s[3];	// variable
+ };
+ 
+-/*
+- * note this is the runtime representation
+- * of the compilers arrays. it is probably
+- * insafe to use it this way, but it puts
+- * all the changes in one place.
+- */
+-typedef	struct	Array	Array;
+-struct	Array
+-{				// must not move anything
+-	uchar	array[8];	// pointer to data
+-	uchar	nel[4];		// number of elements
+-	uchar	cap[4];		// allocated number of elements
+-};
+-
+ /*
+  * note this is the runtime representation
+  * of hashmap iterator. it is probably
+diff --git a/src/cmd/gc/walk.c b/src/cmd/gc/walk.c
+index 35d062524c..be0dd25505 100644
+--- a/src/cmd/gc/walk.c
++++ b/src/cmd/gc/walk.c
+@@ -1873,6 +1873,8 @@ ascompat(Type *t1, Type *t2)
+ //	if(eqtype(t2, nilptr, 0))
+ //		return 1;
+ 
++	if(issarray(t1))
++		return 0;
+ 	if(isnilinter(t1))
+ 		return 1;
+ 	if(isinter(t1)) {
+

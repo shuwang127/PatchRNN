@@ -1,0 +1,350 @@
+commit 1290932728e5253459d51d90726cde9559bf263b
+Author: Amir Shehata <amir.shehata@intel.com>
+Date:   Mon Feb 22 17:29:02 2016 -0500
+
+    staging: lustre: Dynamic LNet Configuration (DLC) IOCTL changes
+    
+    This is the fourth patch of a set of patches that enables DLC.
+    
+    This patch changes the IOCTL infrastructure in preparation of
+    adding extra IOCTL communication between user and kernel space.
+    The changes include:
+    - adding a common header to be passed to ioctl infra functions
+      instead of passing an exact structure.  This header is meant
+      to be included in all structures to be passed through that
+      interface.  The IOCTL handler casts this header to a particular
+      type that it expects
+    - All sanity testing on the past in structure is performed in the
+      generic ioctl infrastructure code.
+    - All ioctl handlers changed to take the header instead of a
+      particular structure type
+    
+    Signed-off-by: Amir Shehata <amir.shehata@intel.com>
+    Intel-bug-id: https://jira.hpdd.intel.com/browse/LU-2456
+    Reviewed-on: http://review.whamcloud.com/8021
+    Reviewed-by: Doug Oucharek <doug.s.oucharek@intel.com>
+    Reviewed-by: James Simmons <uja.ornl@gmail.com>
+    Reviewed-by: John L. Hammond <john.hammond@intel.com>
+    Reviewed-by: Oleg Drokin <oleg.drokin@intel.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/staging/lustre/include/linux/libcfs/libcfs_ioctl.h b/drivers/staging/lustre/include/linux/libcfs/libcfs_ioctl.h
+index e4463ada0343..0598702367b5 100644
+--- a/drivers/staging/lustre/include/linux/libcfs/libcfs_ioctl.h
++++ b/drivers/staging/lustre/include/linux/libcfs/libcfs_ioctl.h
+@@ -43,9 +43,13 @@
+ 
+ #define LIBCFS_IOCTL_VERSION 0x0001000a
+ 
+-struct libcfs_ioctl_data {
++struct libcfs_ioctl_hdr {
+ 	__u32 ioc_len;
+ 	__u32 ioc_version;
++};
++
++struct libcfs_ioctl_data {
++	struct libcfs_ioctl_hdr ioc_hdr;
+ 
+ 	__u64 ioc_nid;
+ 	__u64 ioc_u64[1];
+@@ -70,11 +74,6 @@ struct libcfs_ioctl_data {
+ 
+ #define ioc_priority ioc_u32[0]
+ 
+-struct libcfs_ioctl_hdr {
+-	__u32 ioc_len;
+-	__u32 ioc_version;
+-};
+-
+ struct libcfs_debug_ioctl_data {
+ 	struct libcfs_ioctl_hdr hdr;
+ 	unsigned int subs;
+@@ -90,7 +89,7 @@ do {						    \
+ 
+ struct libcfs_ioctl_handler {
+ 	struct list_head item;
+-	int (*handle_ioctl)(unsigned int cmd, struct libcfs_ioctl_data *data);
++	int (*handle_ioctl)(unsigned int cmd, struct libcfs_ioctl_hdr *hdr);
+ };
+ 
+ #define DECLARE_IOCTL_HANDLER(ident, func)		      \
+@@ -148,9 +147,9 @@ static inline int libcfs_ioctl_packlen(struct libcfs_ioctl_data *data)
+ 	return len;
+ }
+ 
+-static inline int libcfs_ioctl_is_invalid(struct libcfs_ioctl_data *data)
++static inline bool libcfs_ioctl_is_invalid(struct libcfs_ioctl_data *data)
+ {
+-	if (data->ioc_len > (1<<30)) {
++	if (data->ioc_hdr.ioc_len > (1 << 30)) {
+ 		CERROR("LIBCFS ioctl: ioc_len larger than 1<<30\n");
+ 		return 1;
+ 	}
+@@ -186,7 +185,7 @@ static inline int libcfs_ioctl_is_invalid(struct libcfs_ioctl_data *data)
+ 		CERROR("LIBCFS ioctl: plen2 nonzero but no pbuf2 pointer\n");
+ 		return 1;
+ 	}
+-	if ((__u32)libcfs_ioctl_packlen(data) != data->ioc_len) {
++	if ((__u32)libcfs_ioctl_packlen(data) != data->ioc_hdr.ioc_len) {
+ 		CERROR("LIBCFS ioctl: packlen != ioc_len\n");
+ 		return 1;
+ 	}
+@@ -206,7 +205,9 @@ static inline int libcfs_ioctl_is_invalid(struct libcfs_ioctl_data *data)
+ 
+ int libcfs_register_ioctl(struct libcfs_ioctl_handler *hand);
+ int libcfs_deregister_ioctl(struct libcfs_ioctl_handler *hand);
+-int libcfs_ioctl_getdata(char *buf, char *end, void __user *arg);
++int libcfs_ioctl_getdata_len(const struct libcfs_ioctl_hdr __user *arg,
++			     __u32 *buf_len);
+ int libcfs_ioctl_popdata(void __user *arg, void *buf, int size);
++int libcfs_ioctl_data_adjust(struct libcfs_ioctl_data *data);
+ 
+ #endif /* __LIBCFS_IOCTL_H__ */
+diff --git a/drivers/staging/lustre/lnet/lnet/module.c b/drivers/staging/lustre/lnet/lnet/module.c
+index cd3730328117..46f5241a6e82 100644
+--- a/drivers/staging/lustre/lnet/lnet/module.c
++++ b/drivers/staging/lustre/lnet/lnet/module.c
+@@ -84,7 +84,7 @@ lnet_unconfigure(void)
+ }
+ 
+ static int
+-lnet_ioctl(unsigned int cmd, struct libcfs_ioctl_data *data)
++lnet_ioctl(unsigned int cmd, struct libcfs_ioctl_hdr *hdr)
+ {
+ 	int rc;
+ 
+@@ -103,7 +103,7 @@ lnet_ioctl(unsigned int cmd, struct libcfs_ioctl_data *data)
+ 		 */
+ 		rc = LNetNIInit(LNET_PID_ANY);
+ 		if (rc >= 0) {
+-			rc = LNetCtl(cmd, data);
++			rc = LNetCtl(cmd, hdr);
+ 			LNetNIFini();
+ 		}
+ 		return rc;
+diff --git a/drivers/staging/lustre/lnet/selftest/conctl.c b/drivers/staging/lustre/lnet/selftest/conctl.c
+index 210e24e6db0d..90b7771ac7c6 100644
+--- a/drivers/staging/lustre/lnet/selftest/conctl.c
++++ b/drivers/staging/lustre/lnet/selftest/conctl.c
+@@ -801,15 +801,20 @@ static int lst_test_add_ioctl(lstio_test_args_t *args)
+ }
+ 
+ int
+-lstcon_ioctl_entry(unsigned int cmd, struct libcfs_ioctl_data *data)
++lstcon_ioctl_entry(unsigned int cmd, struct libcfs_ioctl_hdr *hdr)
+ {
+ 	char   *buf;
+-	int     opc = data->ioc_u32[0];
++	struct libcfs_ioctl_data *data;
++	int     opc;
+ 	int     rc;
+ 
+ 	if (cmd != IOC_LIBCFS_LNETST)
+ 		return -EINVAL;
+ 
++	data = container_of(hdr, struct libcfs_ioctl_data, ioc_hdr);
++
++	opc = data->ioc_u32[0];
++
+ 	if (data->ioc_plen1 > PAGE_CACHE_SIZE)
+ 		return -EINVAL;
+ 
+diff --git a/drivers/staging/lustre/lnet/selftest/console.c b/drivers/staging/lustre/lnet/selftest/console.c
+index 1385dc0baef9..badc6965f5ed 100644
+--- a/drivers/staging/lustre/lnet/selftest/console.c
++++ b/drivers/staging/lustre/lnet/selftest/console.c
+@@ -1983,7 +1983,7 @@ static void lstcon_init_acceptor_service(void)
+ 	lstcon_acceptor_service.sv_wi_total = SFW_FRWK_WI_MAX;
+ }
+ 
+-extern int lstcon_ioctl_entry(unsigned int cmd, struct libcfs_ioctl_data *data);
++extern int lstcon_ioctl_entry(unsigned int cmd, struct libcfs_ioctl_hdr *hdr);
+ 
+ static DECLARE_IOCTL_HANDLER(lstcon_ioctl_handler, lstcon_ioctl_entry);
+ 
+diff --git a/drivers/staging/lustre/lnet/selftest/console.h b/drivers/staging/lustre/lnet/selftest/console.h
+index b7e14e4a1f70..c9d1081d9f38 100644
+--- a/drivers/staging/lustre/lnet/selftest/console.h
++++ b/drivers/staging/lustre/lnet/selftest/console.h
+@@ -184,7 +184,6 @@ lstcon_id2hash(lnet_process_id_t id, struct list_head *hash)
+ }
+ 
+ int lstcon_console_init(void);
+-int lstcon_ioctl_entry(unsigned int cmd, struct libcfs_ioctl_data *data);
+ int lstcon_console_fini(void);
+ int lstcon_session_match(lst_sid_t sid);
+ int lstcon_session_new(char *name, int key, unsigned version,
+diff --git a/drivers/staging/lustre/lustre/libcfs/linux/linux-module.c b/drivers/staging/lustre/lustre/libcfs/linux/linux-module.c
+index ff9077249716..f62c5bcd3d1b 100644
+--- a/drivers/staging/lustre/lustre/libcfs/linux/linux-module.c
++++ b/drivers/staging/lustre/lustre/libcfs/linux/linux-module.c
+@@ -40,41 +40,10 @@
+ 
+ #define LNET_MINOR 240
+ 
+-int libcfs_ioctl_getdata(char *buf, char *end, void __user *arg)
++int libcfs_ioctl_data_adjust(struct libcfs_ioctl_data *data)
+ {
+-	struct libcfs_ioctl_hdr   *hdr;
+-	struct libcfs_ioctl_data  *data;
+-	int orig_len;
+-
+-	hdr = (struct libcfs_ioctl_hdr *)buf;
+-	data = (struct libcfs_ioctl_data *)buf;
+-
+-	if (copy_from_user(buf, arg, sizeof(*hdr)))
+-		return -EFAULT;
+-
+-	if (hdr->ioc_version != LIBCFS_IOCTL_VERSION) {
+-		CERROR("PORTALS: version mismatch kernel vs application\n");
+-		return -EINVAL;
+-	}
+-
+-	if (hdr->ioc_len >= end - buf) {
+-		CERROR("PORTALS: user buffer exceeds kernel buffer\n");
+-		return -EINVAL;
+-	}
+-
+-	if (hdr->ioc_len < sizeof(struct libcfs_ioctl_data)) {
+-		CERROR("PORTALS: user buffer too small for ioctl\n");
+-		return -EINVAL;
+-	}
+-
+-	orig_len = hdr->ioc_len;
+-	if (copy_from_user(buf, arg, hdr->ioc_len))
+-		return -EFAULT;
+-	if (orig_len != data->ioc_len)
+-		return -EINVAL;
+-
+ 	if (libcfs_ioctl_is_invalid(data)) {
+-		CERROR("PORTALS: ioctl not correctly formatted\n");
++		CERROR("LNET: ioctl not correctly formatted\n");
+ 		return -EINVAL;
+ 	}
+ 
+@@ -88,6 +57,25 @@ int libcfs_ioctl_getdata(char *buf, char *end, void __user *arg)
+ 	return 0;
+ }
+ 
++int libcfs_ioctl_getdata_len(const struct libcfs_ioctl_hdr __user *arg,
++			     __u32 *len)
++{
++	struct libcfs_ioctl_hdr hdr;
++
++	if (copy_from_user(&hdr, arg, sizeof(hdr)))
++		return -EFAULT;
++
++	if (hdr.ioc_version != LIBCFS_IOCTL_VERSION) {
++		CERROR("LNET: version mismatch expected %#x, got %#x\n",
++		       LIBCFS_IOCTL_VERSION, hdr.ioc_version);
++		return -EINVAL;
++	}
++
++	*len = hdr.ioc_len;
++
++	return 0;
++}
++
+ int libcfs_ioctl_popdata(void __user *arg, void *data, int size)
+ {
+ 	if (copy_to_user(arg, data, size))
+diff --git a/drivers/staging/lustre/lustre/libcfs/module.c b/drivers/staging/lustre/lustre/libcfs/module.c
+index ea3dc9bdc99b..1cb6c80b9f50 100644
+--- a/drivers/staging/lustre/lustre/libcfs/module.c
++++ b/drivers/staging/lustre/lustre/libcfs/module.c
+@@ -54,6 +54,8 @@
+ 
+ # define DEBUG_SUBSYSTEM S_LNET
+ 
++#define LIBCFS_MAX_IOCTL_BUF_LEN 2048
++
+ #include "../../include/linux/libcfs/libcfs.h"
+ #include <asm/div64.h>
+ 
+@@ -115,11 +117,20 @@ int libcfs_deregister_ioctl(struct libcfs_ioctl_handler *hand)
+ }
+ EXPORT_SYMBOL(libcfs_deregister_ioctl);
+ 
+-static int libcfs_ioctl_int(struct cfs_psdev_file *pfile, unsigned long cmd,
+-			    void __user *arg, struct libcfs_ioctl_data *data)
++static int libcfs_ioctl_handle(struct cfs_psdev_file *pfile, unsigned long cmd,
++			       void *arg, struct libcfs_ioctl_hdr *hdr)
+ {
++	struct libcfs_ioctl_data *data = NULL;
+ 	int err = -EINVAL;
+ 
++	if ((cmd <= IOC_LIBCFS_LNETST) ||
++	    (cmd >= IOC_LIBCFS_REGISTER_MYNID)) {
++		data = container_of(hdr, struct libcfs_ioctl_data, ioc_hdr);
++		err = libcfs_ioctl_data_adjust(data);
++		if (err)
++			return err;
++	}
++
+ 	switch (cmd) {
+ 	case IOC_LIBCFS_CLEAR_DEBUG:
+ 		libcfs_debug_clear_buffer();
+@@ -141,11 +152,11 @@ static int libcfs_ioctl_int(struct cfs_psdev_file *pfile, unsigned long cmd,
+ 		err = -EINVAL;
+ 		down_read(&ioctl_list_sem);
+ 		list_for_each_entry(hand, &ioctl_list, item) {
+-			err = hand->handle_ioctl(cmd, data);
++			err = hand->handle_ioctl(cmd, hdr);
+ 			if (err != -EINVAL) {
+ 				if (err == 0)
+ 					err = libcfs_ioctl_popdata(arg,
+-							data, sizeof(*data));
++							hdr, hdr->ioc_len);
+ 				break;
+ 			}
+ 		}
+@@ -160,26 +171,38 @@ static int libcfs_ioctl_int(struct cfs_psdev_file *pfile, unsigned long cmd,
+ static int libcfs_ioctl(struct cfs_psdev_file *pfile, unsigned long cmd,
+ 			void __user *arg)
+ {
+-	char    *buf;
+-	struct libcfs_ioctl_data *data;
++	struct libcfs_ioctl_hdr *hdr;
+ 	int err = 0;
++	__u32 buf_len;
+ 
+-	LIBCFS_ALLOC_GFP(buf, 1024, GFP_KERNEL);
+-	if (!buf)
++	err = libcfs_ioctl_getdata_len(arg, &buf_len);
++	if (err)
++		return err;
++
++	/*
++	 * do a check here to restrict the size of the memory
++	 * to allocate to guard against DoS attacks.
++	 */
++	if (buf_len > LIBCFS_MAX_IOCTL_BUF_LEN) {
++		CERROR("LNET: user buffer exceeds kernel buffer\n");
++		return -EINVAL;
++	}
++
++	LIBCFS_ALLOC_GFP(hdr, buf_len, GFP_KERNEL);
++	if (!hdr)
+ 		return -ENOMEM;
+ 
+ 	/* 'cmd' and permissions get checked in our arch-specific caller */
+-	if (libcfs_ioctl_getdata(buf, buf + 800, arg)) {
+-		CERROR("PORTALS ioctl: data error\n");
+-		err = -EINVAL;
++	if (copy_from_user(hdr, arg, buf_len)) {
++		CERROR("LNET ioctl: data error\n");
++		err = -EFAULT;
+ 		goto out;
+ 	}
+-	data = (struct libcfs_ioctl_data *)buf;
+ 
+-	err = libcfs_ioctl_int(pfile, cmd, arg, data);
++	err = libcfs_ioctl_handle(pfile, cmd, arg, hdr);
+ 
+ out:
+-	LIBCFS_FREE(buf, 1024);
++	LIBCFS_FREE(hdr, buf_len);
+ 	return err;
+ }
+ 
+

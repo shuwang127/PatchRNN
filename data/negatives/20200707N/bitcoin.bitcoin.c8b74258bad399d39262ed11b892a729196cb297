@@ -1,0 +1,158 @@
+commit c8b74258bad399d39262ed11b892a729196cb297
+Author: Gavin Andresen <gavinandresen@gmail.com>
+Date:   Thu Nov 21 14:07:55 2013 +1000
+
+    setgenerate creates multiple blocks in -regtest mode
+    
+    I'm writing some wallet regression tests using -regtest mode, and
+    need to generate an initial multi-hundred-block chain. Repeatedly
+    calling setgenerate to generate one block is slow and doesn't
+    work properly, because block creation happens asynchronously.
+    
+    This adds two features to setgenerate in -regtest mode:
+    
+    1) Instead of being interpreted as number of threads to start, the
+    third argument is the number of blocks to generate.
+    
+    2) setgenerate will not return until the block creation threads
+    have created the requested number of blocks.
+
+diff --git a/src/bitcoinrpc.cpp b/src/bitcoinrpc.cpp
+index a1e7d14dc..3fe9f7eb9 100644
+--- a/src/bitcoinrpc.cpp
++++ b/src/bitcoinrpc.cpp
+@@ -238,7 +238,7 @@ static const CRPCCommand vRPCCommands[] =
+     { "getdifficulty",          &getdifficulty,          true,      false,      false },
+     { "getnetworkhashps",       &getnetworkhashps,       true,      false,      false },
+     { "getgenerate",            &getgenerate,            true,      false,      false },
+-    { "setgenerate",            &setgenerate,            true,      false,      true },
++    { "setgenerate",            &setgenerate,            true,      true,       false },
+     { "gethashespersec",        &gethashespersec,        true,      false,      false },
+     { "getinfo",                &getinfo,                true,      false,      false },
+     { "getmininginfo",          &getmininginfo,          true,      false,      false },
+diff --git a/src/init.cpp b/src/init.cpp
+index b2e7ddf33..16eccc6de 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -112,7 +112,7 @@ void Shutdown()
+     ShutdownRPCMining();
+     if (pwalletMain)
+         bitdb.Flush(false);
+-    GenerateBitcoins(false, NULL);
++    GenerateBitcoins(false, NULL, 0);
+     StopNode();
+     {
+         LOCK(cs_main);
+@@ -1050,7 +1050,7 @@ bool AppInit2(boost::thread_group& threadGroup, bool fForceServer)
+ 
+     // Generate coins in the background
+     if (pwalletMain)
+-        GenerateBitcoins(GetBoolArg("-gen", false), pwalletMain);
++        GenerateBitcoins(GetBoolArg("-gen", false), pwalletMain, GetArg("-genproclimit", -1));
+ 
+     // ********************************************************* Step 12: finished
+ 
+diff --git a/src/miner.cpp b/src/miner.cpp
+index 97f434851..b01b60cc3 100644
+--- a/src/miner.cpp
++++ b/src/miner.cpp
+@@ -650,11 +650,10 @@ void static BitcoinMiner(CWallet *pwallet)
+     }
+ }
+ 
+-void GenerateBitcoins(bool fGenerate, CWallet* pwallet)
++void GenerateBitcoins(bool fGenerate, CWallet* pwallet, int nThreads)
+ {
+     static boost::thread_group* minerThreads = NULL;
+ 
+-    int nThreads = GetArg("-genproclimit", -1);
+     if (nThreads < 0) {
+         if (Params().NetworkID() == CChainParams::REGTEST)
+             nThreads = 1;
+diff --git a/src/miner.h b/src/miner.h
+index 4879f55d5..26151f6cd 100644
+--- a/src/miner.h
++++ b/src/miner.h
+@@ -16,7 +16,7 @@ class CScript;
+ class CWallet;
+ 
+ /** Run the miner threads */
+-void GenerateBitcoins(bool fGenerate, CWallet* pwallet);
++void GenerateBitcoins(bool fGenerate, CWallet* pwallet, int nThreads);
+ /** Generate a new block, without valid proof-of-work */
+ CBlockTemplate* CreateNewBlock(const CScript& scriptPubKeyIn);
+ CBlockTemplate* CreateNewBlockWithKey(CReserveKey& reservekey);
+diff --git a/src/rpcmining.cpp b/src/rpcmining.cpp
+index e4fa7ed85..16c8a504b 100644
+--- a/src/rpcmining.cpp
++++ b/src/rpcmining.cpp
+@@ -133,6 +133,7 @@ Value setgenerate(const Array& params, bool fHelp)
+             "\nArguments:\n"
+             "1. generate         (boolean, required) Set to true to turn on generation, off to turn off.\n"
+             "2. genproclimit     (numeric, optional) Set the processor limit for when generation is on. Can be -1 for unlimited.\n"
++            "                    Note: in -regtest mode, genproclimit controls how many blocks are generated immediately.\n"
+             "\nExamples:\n"
+             "\nSet the generation on with a limit of one processor\n"
+             + HelpExampleCli("setgenerate", "true 1") +
+@@ -144,21 +145,55 @@ Value setgenerate(const Array& params, bool fHelp)
+             + HelpExampleRpc("setgenerate", "true, 1")
+         );
+ 
++    if (pwalletMain == NULL)
++        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (disabled)");
++
+     bool fGenerate = true;
+     if (params.size() > 0)
+         fGenerate = params[0].get_bool();
+ 
++    int nGenProcLimit = -1;
+     if (params.size() > 1)
+     {
+-        int nGenProcLimit = params[1].get_int();
+-        mapArgs["-genproclimit"] = itostr(nGenProcLimit);
++        nGenProcLimit = params[1].get_int();
+         if (nGenProcLimit == 0)
+             fGenerate = false;
+     }
+-    mapArgs["-gen"] = (fGenerate ? "1" : "0");
+ 
+-    assert(pwalletMain != NULL);
+-    GenerateBitcoins(fGenerate, pwalletMain);
++    // -regtest mode: don't return until nGenProcLimit blocks are generated
++    if (fGenerate && Params().NetworkID() == CChainParams::REGTEST)
++    {
++        int nHeightStart = 0;
++        int nHeightEnd = 0;
++        int nHeight = 0;
++        int nGenerate = (nGenProcLimit > 0 ? nGenProcLimit : 1);
++        {   // Don't keep cs_main locked
++            LOCK(cs_main);
++            nHeightStart = chainActive.Height();
++            nHeight = nHeightStart;
++            nHeightEnd = nHeightStart+nGenerate;
++        }
++        int nHeightLast = -1;
++        while (nHeight < nHeightEnd)
++        {
++            if (nHeightLast != nHeight)
++            {
++                nHeightLast = nHeight;
++                GenerateBitcoins(fGenerate, pwalletMain, 1);
++            }
++            MilliSleep(1);
++            {   // Don't keep cs_main locked
++                LOCK(cs_main);
++                nHeight = chainActive.Height();
++            }
++        }
++    }
++    else // Not -regtest: start generate thread, return immediately
++    {
++        mapArgs["-gen"] = (fGenerate ? "1" : "0");
++        GenerateBitcoins(fGenerate, pwalletMain, nGenProcLimit);
++    }
++
+     return Value::null;
+ }
+ 
+

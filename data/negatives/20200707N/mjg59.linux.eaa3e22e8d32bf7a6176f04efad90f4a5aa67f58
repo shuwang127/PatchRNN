@@ -1,0 +1,49 @@
+commit eaa3e22e8d32bf7a6176f04efad90f4a5aa67f58
+Author: Andi Kleen <ak@suse.de>
+Date:   Sun Jan 13 17:41:43 2008 +0100
+
+    [SCSI] sg: Only print SCSI data direction warning once for a command
+    
+    When I use cdparanoia my logs get spammed a lot by
+    
+    printk: 464 messages suppressed.
+    sg_write: data in/out 30576/30576 bytes for SCSI command 0xbe--guessing data in;
+       program cdparanoia not setting count and/or reply_len properly
+    printk: 1078 messages suppressed.
+    
+    and many more of those. With this patch the message is only printed once
+    for a command in a row.
+    
+    v1->v2: Prevent rate limit messages too (pointed out by jejb)
+    
+    Signed-off-by: Andi Kleen <ak@suse.de>
+    Acked-by: Douglas Gilbert <dougg@torque.net>
+    Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+
+diff --git a/drivers/scsi/sg.c b/drivers/scsi/sg.c
+index f1871ea04045..e65f5d432662 100644
+--- a/drivers/scsi/sg.c
++++ b/drivers/scsi/sg.c
+@@ -602,8 +602,9 @@ sg_write(struct file *filp, const char __user *buf, size_t count, loff_t * ppos)
+ 	 * but is is possible that the app intended SG_DXFER_TO_DEV, because there
+ 	 * is a non-zero input_size, so emit a warning.
+ 	 */
+-	if (hp->dxfer_direction == SG_DXFER_TO_FROM_DEV)
+-		if (printk_ratelimit())
++	if (hp->dxfer_direction == SG_DXFER_TO_FROM_DEV) {
++		static char cmd[TASK_COMM_LEN];
++		if (strcmp(current->comm, cmd) && printk_ratelimit()) {
+ 			printk(KERN_WARNING
+ 			       "sg_write: data in/out %d/%d bytes for SCSI command 0x%x--"
+ 			       "guessing data in;\n" KERN_WARNING "   "
+@@ -611,6 +612,9 @@ sg_write(struct file *filp, const char __user *buf, size_t count, loff_t * ppos)
+ 			       old_hdr.reply_len - (int)SZ_SG_HEADER,
+ 			       input_size, (unsigned int) cmnd[0],
+ 			       current->comm);
++			strcpy(cmd, current->comm);
++		}
++	}
+ 	k = sg_common_write(sfp, srp, cmnd, sfp->timeout, blocking);
+ 	return (k < 0) ? k : count;
+ }
+

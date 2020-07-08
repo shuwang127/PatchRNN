@@ -1,0 +1,355 @@
+commit d3100dd88bd0e035d67a3dae2c95a6e4aa8caca4
+Author: Abhishek Lekshmanan <abhishek@suse.com>
+Date:   Fri Aug 25 11:55:46 2017 +0200
+
+    rgw_lc: support for object tagging in LC policies
+    
+    - rgw_lc_s3:
+      + LCFilter class now has an obj_tags member which shall store
+      the object tags, the related methods like empty() is updated to account
+      for object tags as well
+      + LCFilter_S3: parsing now accounts for the <And> xml tag which
+      specifies if multiple conditions are allowed, since we parse tags as
+      an iterator, we keep a count of the tags and actually validate that
+      the And tag was supplied if we see multiple tags.
+    
+    - rgw_lc: add support for tagging
+      + lc_op has obj_tags implemented as a boost::optional, which gets
+      populated only when rule has tags
+      + we use std::includes to compare that all the tags in policy are a
+      part of the object. We only read object tags if tags are a part of the
+      LC rule
+    
+    - rgw_lc: have consistent log message styles when using __func__
+    
+    Signed-off-by: Abhishek Lekshmanan <abhishek@suse.com>
+
+diff --git a/src/rgw/rgw_lc.cc b/src/rgw/rgw_lc.cc
+index cdcfaffff7..38e5c811ae 100644
+--- a/src/rgw/rgw_lc.cc
++++ b/src/rgw/rgw_lc.cc
+@@ -74,6 +74,10 @@ bool RGWLifecycleConfiguration::_add_rule(LCRule *rule)
+   } else {
+     prefix = rule->get_prefix();
+   }
++
++  if (rule->get_filter().has_tags()){
++    op.obj_tags = rule->get_filter().get_tags();
++  }
+   auto ret = prefix_map.emplace(std::move(prefix), std::move(op));
+   return ret.second;
+ }
+@@ -318,6 +322,15 @@ int RGWLC::handle_multipart_expiration(RGWRados::Bucket *target, const map<strin
+   return 0;
+ }
+ 
++static int read_obj_tags(RGWRados *store, RGWBucketInfo& bucket_info, rgw_obj& obj, RGWObjectCtx& ctx, bufferlist& tags_bl)
++{
++  RGWRados::Object op_target(store, bucket_info, ctx, obj);
++  RGWRados::Object::Read read_op(&op_target);
++
++  return read_op.get_attr(RGW_ATTR_TAGS, tags_bl);
++}
++
++
+ int RGWLC::bucket_lc_process(string& shard_id)
+ {
+   RGWLifecycleConfiguration  config(cct);
+@@ -355,7 +368,7 @@ int RGWLC::bucket_lc_process(string& shard_id)
+   try {
+       config.decode(iter);
+     } catch (const buffer::error& e) {
+-      ldout(cct, 0) << __func__ <<  "decode life cycle config failed" << dendl;
++      ldout(cct, 0) << __func__ <<  "() decode life cycle config failed" << dendl;
+       return -1;
+     }
+ 
+@@ -388,6 +401,34 @@ int RGWLC::bucket_lc_process(string& shard_id)
+         bool is_expired;
+         for (auto obj_iter = objs.begin(); obj_iter != objs.end(); ++obj_iter) {
+           rgw_obj_key key(obj_iter->key);
++          RGWObjState *state;
++          rgw_obj obj(bucket_info.bucket, key);
++          RGWObjectCtx rctx(store);
++          if (prefix_iter->second.obj_tags != boost::none) {
++            bufferlist tags_bl;
++            int ret = read_obj_tags(store, bucket_info, obj, rctx, tags_bl);
++            if (ret < 0) {
++              if (ret != -ENODATA)
++                ldout(cct, 5) << "ERROR: read_obj_tags returned r=" << ret << dendl;
++              continue;
++            }
++            RGWObjTags dest_obj_tags;
++            try {
++              auto iter = tags_bl.begin();
++              dest_obj_tags.decode(iter);
++            } catch (buffer::error& err) {
++               ldout(cct,0) << "ERROR: caught buffer::error, couldn't decode TagSet" << dendl;
++              return -EIO;
++            }
++
++            if (!includes(dest_obj_tags.get_tags().begin(),
++                          dest_obj_tags.get_tags().end(),
++                          prefix_iter->second.obj_tags->get_tags().begin(),
++                          prefix_iter->second.obj_tags->get_tags().end())){
++              ldout(cct, 20) << __func__ << "() skipping obj " << key << " as tags do not match" << dendl;
++              continue;
++            }
++          }
+ 
+           if (!key.ns.empty()) {
+             continue;
+@@ -399,15 +440,15 @@ int RGWLC::bucket_lc_process(string& shard_id)
+             is_expired = obj_has_expired(now - ceph::real_clock::to_time_t(obj_iter->meta.mtime), prefix_iter->second.expiration);
+           }
+           if (is_expired) {
+-            RGWObjectCtx rctx(store);
+-            rgw_obj obj(bucket_info.bucket, key);
+-            RGWObjState *state;
+             int ret = store->get_obj_state(&rctx, bucket_info, obj, &state, false);
+             if (ret < 0) {
+               return ret;
+             }
+-            if (state->mtime != obj_iter->meta.mtime)//Check mtime again to avoid delete a recently update object as much as possible
++            if (state->mtime != obj_iter->meta.mtime) {
++              //Check mtime again to avoid delete a recently update object as much as possible
++              ldout(cct, 20) << __func__ << "() skipping removal: state->mtime " << state->mtime << " obj->mtime " << obj_iter->meta.mtime << dendl;
+               continue;
++            }
+             ret = remove_expired_obj(bucket_info, obj_iter->key, true);
+             if (ret < 0) {
+               ldout(cct, 0) << "ERROR: remove_expired_obj " << dendl;
+@@ -578,7 +619,7 @@ int RGWLC::list_lc_progress(const string& marker, uint32_t max_entries, map<stri
+     int ret = cls_rgw_lc_list(store->lc_pool_ctx, obj_names[index], marker, max_entries, entries);
+     if (ret < 0) {
+       if (ret == -ENOENT) {
+-        dout(10) << __func__ << " ignoring unfound lc object="
++        dout(10) << __func__ << "() ignoring unfound lc object="
+                              << obj_names[index] << dendl;
+         continue;
+       } else {
+diff --git a/src/rgw/rgw_lc.h b/src/rgw/rgw_lc.h
+index 0a655c5c3e..e1435a5989 100644
+--- a/src/rgw/rgw_lc.h
++++ b/src/rgw/rgw_lc.h
+@@ -18,6 +18,7 @@
+ #include "rgw_rados.h"
+ #include "rgw_multi.h"
+ #include "cls/rgw/cls_rgw_types.h"
++#include "rgw_tag.h"
+ 
+ #include <atomic>
+ 
+@@ -95,36 +96,52 @@ class LCFilter
+ {
+  protected:
+   std::string prefix;
+-  // TODO add support for tagging
++  RGWObjTags obj_tags;
++
+  public:
+-  const std::string& get_prefix() const{
++
++  const std::string& get_prefix() const {
+     return prefix;
+   }
+ 
+-  void set_prefix(const string& _prefix){
+-    prefix = _prefix;
++  const RGWObjTags& get_tags() const {
++    return obj_tags;
+   }
+ 
+-  void set_prefix(std::string&& _prefix){
+-    prefix = std::move(_prefix);
++  bool empty() const {
++    return !(has_prefix() || has_tags());
+   }
+ 
+-  bool empty() const {
+-    return prefix.empty();
++  // Determine if we need AND tag when creating xml
++  bool has_multi_condition() const {
++    if (obj_tags.count() > 1)
++      return true;
++    else if (has_prefix() && has_tags())
++      return true;
++
++    return false;
+   }
+ 
+   bool has_prefix() const {
+     return !prefix.empty();
+   }
+ 
++  bool has_tags() const {
++    return !obj_tags.empty();
++  }
++
+   void encode(bufferlist& bl) const {
+-    ENCODE_START(1, 1, bl);
++    ENCODE_START(2, 1, bl);
+     ::encode(prefix, bl);
++    ::encode(obj_tags, bl);
+     ENCODE_FINISH(bl);
+   }
+   void decode(bufferlist::iterator& bl) {
+-    DECODE_START(1, bl);
++    DECODE_START(2, bl);
+     ::decode(prefix, bl);
++    if (struct_v >= 2) {
++      ::decode(obj_tags, bl);
++    }
+     DECODE_FINISH(bl);
+   }
+ };
+@@ -256,7 +273,7 @@ struct lc_op
+   int noncur_expiration;
+   int mp_expiration;
+   boost::optional<ceph::real_time> expiration_date;
+-
++  boost::optional<RGWObjTags> obj_tags;
+   lc_op() : status(false), dm_expiration(false), expiration(0), noncur_expiration(0), mp_expiration(0) {}
+   
+ };
+diff --git a/src/rgw/rgw_lc_s3.cc b/src/rgw/rgw_lc_s3.cc
+index b03c4c32b9..a1973e0d4d 100644
+--- a/src/rgw/rgw_lc_s3.cc
++++ b/src/rgw/rgw_lc_s3.cc
+@@ -67,6 +67,36 @@ bool RGWLifecycleConfiguration_S3::xml_end(const char *el) {
+   return true;
+ }
+ 
++bool LCFilter_S3::xml_end(const char* el) {
++
++  XMLObj *o = find_first("And");
++  bool single_cond = false;
++  int num_conditions = 0;
++  // If there is an AND condition, every tag is a child of and
++  // else we only support single conditions and return false if we see multiple
++
++  if (o == nullptr){
++    o = this;
++    single_cond = true;
++  }
++
++  RGWXMLDecoder::decode_xml("Prefix", prefix, o);
++  if (!prefix.empty())
++    num_conditions++;
++  auto tags_iter = o->find("Tag");
++  obj_tags.clear();
++  while (auto tag_xml =tags_iter.get_next()){
++    std::string _key,_val;
++    RGWXMLDecoder::decode_xml("Key", _key, tag_xml);
++    RGWXMLDecoder::decode_xml("Value", _val, tag_xml);
++    obj_tags.emplace_tag(std::move(_key), std::move(_val));
++    num_conditions++;
++  }
++
++  return !(single_cond && num_conditions > 1);
++}
++
++
+ bool LCRule_S3::xml_end(const char *el) {
+   LCID_S3 *lc_id;
+   LCPrefix_S3 *lc_prefix;
+@@ -74,7 +104,7 @@ bool LCRule_S3::xml_end(const char *el) {
+   LCExpiration_S3 *lc_expiration;
+   LCNoncurExpiration_S3 *lc_noncur_expiration;
+   LCMPExpiration_S3 *lc_mp_expiration;
+-
++  LCFilter_S3 *lc_filter;
+   id.clear();
+   prefix.clear();
+   status.clear();
+@@ -91,12 +121,10 @@ bool LCRule_S3::xml_end(const char *el) {
+   }
+ 
+ 
+-  XMLObj *obj = find_first("Filter");
++  lc_filter = static_cast<LCFilter_S3 *>(find_first("Filter"));
+ 
+-  if (obj){
+-    string _prefix;
+-    RGWXMLDecoder::decode_xml("Prefix", _prefix, obj);
+-    filter.set_prefix(std::move(_prefix));
++  if (lc_filter){
++    filter = *lc_filter;
+   } else {
+     // Ideally the following code should be deprecated and we should return
+     // False here, The new S3 LC configuration xml spec. makes Filter mandatory
+@@ -190,6 +218,8 @@ int RGWLifecycleConfiguration_S3::rebuild(RGWRados *store, RGWLifecycleConfigura
+   return ret;
+ }
+ 
++
++
+ void RGWLifecycleConfiguration_S3::dump_xml(Formatter *f) const
+ {
+ 	f->open_object_section_in_ns("LifecycleConfiguration", XMLNS_AWS_S3);
+@@ -213,6 +243,8 @@ XMLObj *RGWLCXMLParser_S3::alloc_obj(const char *el)
+     obj = new LCID_S3();
+   } else if (strcmp(el, "Prefix") == 0) {
+     obj = new LCPrefix_S3();
++  } else if (strcmp(el, "Filter") == 0) {
++    obj = new LCFilter_S3();
+   } else if (strcmp(el, "Status") == 0) {
+     obj = new LCStatus_S3();
+   } else if (strcmp(el, "Expiration") == 0) {
+diff --git a/src/rgw/rgw_lc_s3.h b/src/rgw/rgw_lc_s3.h
+index 7ff1bf71ba..bc2f29f615 100644
+--- a/src/rgw/rgw_lc_s3.h
++++ b/src/rgw/rgw_lc_s3.h
+@@ -9,6 +9,7 @@
+ #include "include/str_list.h"
+ #include "rgw_lc.h"
+ #include "rgw_xml.h"
++#include "rgw_tag_s3.h"
+ 
+ class LCID_S3 : public XMLObj
+ {
+@@ -33,16 +34,41 @@ class LCFilter_S3 : public LCFilter, public XMLObj
+   string& to_str() { return data; }
+   void to_xml(ostream& out){
+     out << "<Filter>";
+-      if (!prefix.empty())
+-        out << "<Prefix>" << prefix << "</Prefix>";
++    stringstream ss;
++    if (has_prefix())
++      out << "<Prefix>" << prefix << "</Prefix>";
++    if (has_tags()){
++      for (const auto&kv : obj_tags.get_tags()){
++        ss << "<Tag>";
++        ss << "<Key>" << kv.first << "</Key>";
++        ss << "<Value>" << kv.second << "</Value>";
++        ss << "</Tag>";
++      }
++    }
++
++    if (has_multi_condition()) {
++      out << "<And>" << ss.str() << "</And>";
++    } else {
++      out << ss.str();
++    }
++
+     out << "</Filter>";
+   }
+   void dump_xml(Formatter *f) const {
+     f->open_object_section("Filter");
++    if (has_multi_condition())
++      f->open_object_section("And");
+     if (!prefix.empty())
+       encode_xml("Prefix", prefix, f);
++    if (has_tags()){
++      const auto& tagset_s3 = static_cast<const RGWObjTagSet_S3 &>(obj_tags);
++      tagset_s3.dump_xml(f);
++    }
++    if (has_multi_condition())
++      f->close_section(); // And;
+     f->close_section(); // Filter
+   }
++  bool xml_end(const char *el) override;
+ };
+ 
+ class LCStatus_S3 : public XMLObj
+

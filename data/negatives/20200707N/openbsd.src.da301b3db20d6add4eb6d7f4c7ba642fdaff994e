@@ -1,0 +1,6238 @@
+commit da301b3db20d6add4eb6d7f4c7ba642fdaff994e
+Author: henning <henning@openbsd.org>
+Date:   Wed Jun 6 10:05:48 2007 +0000
+
+    bye bye
+    most of the IPX removal work done @ calgary airport
+
+diff --git a/sys/netipx/ipx.c b/sys/netipx/ipx.c
+deleted file mode 100644
+index 559e45d50e5..00000000000
+--- a/sys/netipx/ipx.c
++++ /dev/null
+@@ -1,377 +0,0 @@
+-/*	$OpenBSD: ipx.c,v 1.14 2006/03/05 21:48:57 miod Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- * 
+- *	@(#)ipx.c
+- *
+- * from FreeBSD Id: ipx.c,v 1.4 1996/03/11 15:13:46 davidg Exp
+- */
+-
+-#include <sys/param.h>
+-#include <sys/systm.h>
+-#include <sys/malloc.h>
+-#include <sys/ioctl.h>
+-#include <sys/protosw.h>
+-#include <sys/socket.h>
+-#include <sys/socketvar.h>
+-
+-#include <net/if.h>
+-#include <net/route.h>
+-
+-#include <netipx/ipx.h>
+-#include <netipx/ipx_if.h>
+-
+-/*
+- * Generic internet control operations (ioctl's).
+- */
+-/* ARGSUSED */
+-int
+-ipx_control(so, cmd, data, ifp)
+-	struct socket *so;
+-	u_long	cmd;
+-	caddr_t	data;
+-	struct ifnet *ifp;
+-{
+-	struct ifreq *ifr = (struct ifreq *)data;
+-	struct ipx_aliasreq *ifra = (struct ipx_aliasreq *)data;
+-	struct ipx_ifaddr *ia;
+-	int dstIsNew, hostIsNew;
+-	int error = 0;
+-
+-	/*
+-	 * Find address for this interface, if it exists.
+-	 */
+-	if (ifp)
+-		TAILQ_FOREACH(ia, &ipx_ifaddr, ia_list)
+-			if (ia->ia_ifp == ifp)
+-				break;
+-
+-	switch (cmd) {
+-	case SIOCAIFADDR:
+-	case SIOCDIFADDR:
+-		if (ifra->ifra_addr.sipx_family == AF_IPX)
+-			for (; ia != TAILQ_END(&ipx_ifaddr);
+-			    ia = TAILQ_NEXT(ia, ia_list)) {
+-				if (ia->ia_ifp == ifp  &&
+-				    ipx_neteq(ia->ia_addr.sipx_addr,
+-					      ifra->ifra_addr.sipx_addr))
+-					break;
+-			}
+-		if (cmd == SIOCDIFADDR && ia == 0)
+-			return (EADDRNOTAVAIL);
+-		/* FALLTHROUGH */
+-
+-	case SIOCSIFADDR:
+-	case SIOCSIFDSTADDR:
+-		if ((so->so_state & SS_PRIV) == 0)
+-			return (EPERM);
+-
+-		if (ia == (struct ipx_ifaddr *)NULL) {
+-			ia = (struct ipx_ifaddr *)
+-				malloc(sizeof(*ia), M_IFADDR, M_WAITOK);
+-			bzero((caddr_t)ia, sizeof(*ia));
+-			TAILQ_INSERT_TAIL(&ifp->if_addrlist,
+-				(struct ifaddr *)ia, ifa_list);
+-			TAILQ_INSERT_TAIL(&ipx_ifaddr, ia, ia_list);
+-			ia->ia_ifp = ifp;
+-			ia->ia_ifa.ifa_addr = (struct sockaddr *)&ia->ia_addr;
+-
+-			ia->ia_ifa.ifa_netmask =
+-				(struct sockaddr *)&ipx_netmask;
+-
+-			ia->ia_ifa.ifa_dstaddr =
+-				(struct sockaddr *)&ia->ia_dstaddr;
+-			if (ifp->if_flags & IFF_BROADCAST) {
+-				ia->ia_broadaddr.sipx_family = AF_IPX;
+-				ia->ia_broadaddr.sipx_len =
+-				    sizeof(ia->ia_addr);
+-				ia->ia_broadaddr.sipx_addr.ipx_host =
+-				    ipx_broadhost;
+-			}
+-		}
+-		break;
+-
+-	case SIOCSIFBRDADDR:
+-		if ((so->so_state & SS_PRIV) == 0)
+-			return (EPERM);
+-		/* FALLTHROUGH */
+-
+-	case SIOCGIFADDR:
+-	case SIOCGIFDSTADDR:
+-	case SIOCGIFBRDADDR:
+-		if (ia == (struct ipx_ifaddr *)NULL)
+-			return (EADDRNOTAVAIL);
+-		break;
+-	}
+-
+-	switch (cmd) {
+-
+-	case SIOCGIFADDR:
+-		*(struct sockaddr_ipx *)&ifr->ifr_addr = ia->ia_addr;
+-		return (0);
+-
+-	case SIOCGIFBRDADDR:
+-		if ((ifp->if_flags & IFF_BROADCAST) == 0)
+-			return (EINVAL);
+-		*(struct sockaddr_ipx *)&ifr->ifr_dstaddr = ia->ia_broadaddr;
+-		return (0);
+-
+-	case SIOCGIFDSTADDR:
+-		if ((ifp->if_flags & IFF_POINTOPOINT) == 0)
+-			return (EINVAL);
+-		*(struct sockaddr_ipx *)&ifr->ifr_dstaddr = ia->ia_dstaddr;
+-		return (0);
+-
+-	case SIOCSIFDSTADDR:
+-		if ((ifp->if_flags & IFF_POINTOPOINT) == 0)
+-			return (EINVAL);
+-		if (ia->ia_flags & IFA_ROUTE) {
+-			rtinit(&(ia->ia_ifa), (int)RTM_DELETE, RTF_HOST);
+-			ia->ia_flags &= ~IFA_ROUTE;
+-		}
+-		if (ifp->if_ioctl) {
+-			error = (*ifp->if_ioctl)(ifp, SIOCSIFDSTADDR,
+-			    (void *)ia);
+-			if (error)
+-				return (error);
+-		}
+-		*(struct sockaddr *)&ia->ia_dstaddr = ifr->ifr_dstaddr;
+-		return (0);
+-
+-	case SIOCSIFADDR:
+-		return (ipx_ifinit(ifp, ia,
+-				(struct sockaddr_ipx *)&ifr->ifr_addr, 1));
+-
+-	case SIOCDIFADDR:
+-		ipx_ifscrub(ifp, ia);
+-		TAILQ_REMOVE(&ifp->if_addrlist, (struct ifaddr *)ia, ifa_list);
+-		TAILQ_REMOVE(&ipx_ifaddr, ia, ia_list);
+-		IFAFREE((&ia->ia_ifa));
+-		return (0);
+-	
+-	case SIOCAIFADDR:
+-		dstIsNew = 0; hostIsNew = 1;
+-		if (ia->ia_addr.sipx_family == AF_IPX) {
+-			if (ifra->ifra_addr.sipx_len == 0) {
+-				ifra->ifra_addr = ia->ia_addr;
+-				hostIsNew = 0;
+-			} else if (ipx_neteq(ifra->ifra_addr.sipx_addr,
+-					 ia->ia_addr.sipx_addr))
+-				hostIsNew = 0;
+-		}
+-		if ((ifp->if_flags & IFF_POINTOPOINT) &&
+-		    (ifra->ifra_dstaddr.sipx_family == AF_IPX)) {
+-			if (hostIsNew == 0)
+-				ipx_ifscrub(ifp, ia);
+-			ia->ia_dstaddr = ifra->ifra_dstaddr;
+-			dstIsNew  = 1;
+-		}
+-		if (ifra->ifra_addr.sipx_family == AF_IPX &&
+-					    (hostIsNew || dstIsNew))
+-			error = ipx_ifinit(ifp, ia, &ifra->ifra_addr, 0);
+-		return (error);
+-
+-	default:
+-		if (ifp->if_ioctl == 0)
+-			return (EOPNOTSUPP);
+-		return ((*ifp->if_ioctl)(ifp, cmd, data));
+-	}
+-}
+-
+-/*
+- * Delete any previous route for an old address.
+- */
+-void
+-ipx_ifscrub(ifp, ia)
+-	struct ifnet *ifp;
+-	struct ipx_ifaddr *ia; 
+-{
+-	if (ia->ia_flags & IFA_ROUTE) {
+-		if (ifp->if_flags & IFF_POINTOPOINT) {
+-			rtinit(&(ia->ia_ifa), (int)RTM_DELETE, RTF_HOST);
+-		} else
+-			rtinit(&(ia->ia_ifa), (int)RTM_DELETE, 0);
+-		ia->ia_flags &= ~IFA_ROUTE;
+-	}
+-}
+-
+-/*
+- * Initialize an interface's IPX address
+- * and routing table entry.
+- */
+-int
+-ipx_ifinit(ifp, ia, sipx, scrub)
+-	struct ifnet *ifp;
+-	struct ipx_ifaddr *ia;
+-	struct sockaddr_ipx *sipx;
+-	int scrub;
+-{
+-	struct sockaddr_ipx oldaddr;
+-	int s = splnet(), error;
+-
+-	/*
+-	 * Set up new addresses.
+-	 */
+-	oldaddr = ia->ia_addr;
+-	ia->ia_addr = *sipx;
+-
+-	/*
+-	 * The convention we shall adopt for naming is that
+-	 * a supplied address of zero means that "we don't care".
+-	 * Use the MAC address of the interface. If it is an
+-	 * interface without a MAC address, like a serial line, the
+-	 * address must be supplied.
+-	 *
+-	 * Give the interface a chance to initialize
+-	 * if this is its first address,
+-	 * and to validate the address if necessary.
+-	 */
+-	if (ifp->if_ioctl != NULL &&
+-	    (error = (*ifp->if_ioctl)(ifp, SIOCSIFADDR, (void *)ia))) {
+-		ia->ia_addr = oldaddr;
+-		splx(s);
+-		return (error);
+-	}
+-	ia->ia_ifa.ifa_metric = ifp->if_metric;
+-	/*
+-	 * Add route for the network.
+-	 */
+-	if (scrub) {
+-		ia->ia_ifa.ifa_addr = (struct sockaddr *)&oldaddr;
+-		ipx_ifscrub(ifp, ia);
+-		ia->ia_ifa.ifa_addr = (struct sockaddr *)&ia->ia_addr;
+-	}
+-	if (ifp->if_flags & IFF_POINTOPOINT)
+-		rtinit(&(ia->ia_ifa), (int)RTM_ADD, RTF_HOST|RTF_UP);
+-	else {
+-		ia->ia_broadaddr.sipx_addr.ipx_net =
+-		    ia->ia_addr.sipx_addr.ipx_net;
+-		rtinit(&(ia->ia_ifa), (int)RTM_ADD, RTF_UP);
+-	}
+-	ia->ia_flags |= IFA_ROUTE;
+-	splx(s);
+-	return (0);
+-}
+-
+-/*
+- * Return address info for specified IPX network.
+- */
+-struct ipx_ifaddr *
+-ipx_iaonnetof(dst)
+-	struct ipx_addr *dst;
+-{
+-	struct ipx_ifaddr *ia;
+-	struct ipx_addr *compare;
+-	struct ifnet *ifp;
+-	struct ipx_ifaddr *ia_maybe = NULL;
+-	union ipx_net net = dst->ipx_net;
+-
+-	TAILQ_FOREACH(ia, &ipx_ifaddr, ia_list) {
+-		if ((ifp = ia->ia_ifp)) {
+-			if (ifp->if_flags & IFF_POINTOPOINT) {
+-				compare = &satoipx_addr(ia->ia_dstaddr);
+-				if (ipx_hosteq(*dst, *compare))
+-					return (ia);
+-				if (ipx_neteqnn(net,
+-				    ia->ia_addr.sipx_addr.ipx_net))
+-					ia_maybe = ia;
+-			} else {
+-				if (ipx_neteqnn(net,
+-				    ia->ia_addr.sipx_addr.ipx_net))
+-					return (ia);
+-			}
+-		}
+-	}
+-	return (ia_maybe);
+-}
+-
+-void
+-ipx_printhost(addr)
+-register struct ipx_addr *addr;
+-{
+-	u_short port;
+-	struct ipx_addr work = *addr;
+-	char *p;
+-	u_char *q;
+-	char *net = "", *host = "";
+-	char cport[10], chost[15], cnet[15];
+-
+-	port = ntohs(work.ipx_port);
+-
+-	if (ipx_nullnet(work) && ipx_nullhost(work)) {
+-
+-		if (port)
+-			printf("*.%x", port);
+-		else
+-			printf("*.*");
+-
+-		return;
+-	}
+-
+-	if (ipx_wildnet(work))
+-		net = "any";
+-	else if (ipx_nullnet(work))
+-		net = "*";
+-	else {
+-		q = work.ipx_net.c_net;
+-		snprintf(cnet, sizeof(cnet), "%x%x%x%x",
+-			q[0], q[1], q[2], q[3]);
+-		for (p = cnet; *p == '0' && p < cnet + 8; p++)
+-			continue;
+-		net = p;
+-	}
+-
+-	if (ipx_wildhost(work))
+-		host = "any";
+-	else if (ipx_nullhost(work))
+-		host = "*";
+-	else {
+-		q = work.ipx_host.c_host;
+-		snprintf(chost, sizeof(chost), "%x%x%x%x%x%x",
+-			q[0], q[1], q[2], q[3], q[4], q[5]);
+-		for (p = chost; *p == '0' && p < chost + 12; p++)
+-			continue;
+-		host = p;
+-	}
+-
+-	if (port) {
+-		if (strcmp(host, "*") == 0) {
+-			host = "";
+-			snprintf(cport, sizeof(cport), "%x", port);
+-		} else
+-			snprintf(cport, sizeof(cport), ".%x", port);
+-	} else
+-		*cport = 0;
+-
+-	printf("%s.%s%s", net, host, cport);
+-}
+-
+diff --git a/sys/netipx/ipx.h b/sys/netipx/ipx.h
+deleted file mode 100644
+index 27908dffb59..00000000000
+--- a/sys/netipx/ipx.h
++++ /dev/null
+@@ -1,250 +0,0 @@
+-/*	$OpenBSD: ipx.h,v 1.18 2003/10/26 17:01:11 avsm Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx.h
+- *
+- * from FreeBSD Id: ipx.h,v 1.7 1996/01/30 22:58:48 mpp Exp
+- */
+-
+-#ifndef _NETIPX_IPX_H_
+-#define	_NETIPX_IPX_H_
+-
+-/*
+- * Constants and Structures
+- */
+-
+-/*
+- * Protocols
+- */
+-#define IPXPROTO_UNKWN		0	/* Unknown */
+-#define IPXPROTO_RI		1	/* RIP Routing Information */
+-#define IPXPROTO_PXP		4	/* IPX Packet Exchange Protocol */
+-#define IPXPROTO_SPX		5	/* SPX Sequenced Packet */
+-#define IPXPROTO_NCP		17	/* NCP NetWare Core */
+-#define IPXPROTO_NETBIOS	20	/* Propagated Packet */
+-#define IPXPROTO_RAW		255	/* Placemarker*/
+-#define IPXPROTO_MAX		256	/* Placemarker*/
+-
+-/*
+- * Port/Socket numbers: network standard functions
+- */
+-
+-#define IPXPORT_RI		1	/* NS RIP Routing Information */
+-#define IPXPORT_ECHO		2	/* NS Echo */
+-#define IPXPORT_RE		3	/* NS Router Error */
+-#define IPXPORT_FSP		0x0451	/* NW NCP Core Protocol */
+-#define IPXPORT_SAP		0x0452	/* NW SAP Service Advertising */
+-#define IPXPORT_RIP		0x0453	/* NW RIP Routing Information */
+-#define IPXPORT_NETBIOS		0x0455	/* NW NetBIOS */
+-#define IPXPORT_DIAGS		0x0456	/* NW Diagnostics */
+-#define IPXPORT_SERIAL		0x0457	/* NW Serialization */
+-#define IPXPORT_NLSP		0x9001	/* NW NLSP */
+-#define IPXPORT_WAN		0x9004	/* NW IPXWAN */
+-#define IPXPORT_PING		0x9086	/* NW IPX Ping */
+-#define IPXPORT_MOBILE		0x9088	/* NW Mobile IPX Socket */
+-/*
+- * Ports < IPXPORT_RESERVED are reserved for privileged
+- */
+-#define IPXPORT_RESERVED	0x4000
+-/*
+- * Ports > IPXPORT_WELLKNOWN are reserved for privileged
+- * processes (e.g. root).
+- */
+-#define IPXPORT_WELLKNOWN	0x6000
+-
+-/* flags passed to ipx_outputfl as last parameter */
+-
+-#define IPX_FORWARDING		0x1	/* most of ipx header exists */
+-#define IPX_ROUTETOIF		0x10	/* same as SO_DONTROUTE */
+-#define IPX_ALLOWBROADCAST	SO_BROADCAST   /* can send broadcast packets */
+-
+-#define IPX_MAXHOPS		15
+-
+-/* flags passed to get/set socket option */
+-#define SO_HEADERS_ON_INPUT	1
+-#define SO_HEADERS_ON_OUTPUT	2
+-#define SO_DEFAULT_HEADERS	3
+-#define SO_LAST_HEADER		4
+-#define SO_IPXIP_ROUTE		5
+-#define SO_SEQNO		6
+-#define SO_ALL_PACKETS		7
+-#define SO_MTU			8
+-#define SO_IPXTUN_ROUTE		9
+-#define SO_IPX_CHECKSUM		10
+-
+-/*
+- * IPX addressing
+- */
+-#define IPX_HOSTADDRLEN	6
+-#define IPX_NETADDRLEN	4
+-
+-typedef
+-union ipx_host {
+-	u_int8_t	c_host[IPX_HOSTADDRLEN]		__packed;
+-	u_int16_t	s_host[IPX_HOSTADDRLEN/2]	__packed;
+-} ipx_host_t;
+-
+-typedef
+-union ipx_net {
+-	u_int8_t	c_net[IPX_NETADDRLEN]		__packed;
+-	u_int16_t	s_net[IPX_NETADDRLEN/2]		__packed;
+-	u_int32_t	l_net				__packed;
+-} ipx_net_t;
+-
+-typedef	u_int16_t	ipx_port_t;
+-
+-typedef
+-struct ipx_addr {
+-	ipx_net_t	ipx_net				__packed;
+-	ipx_host_t	ipx_host			__packed;
+-	ipx_port_t	ipx_port			__packed;
+-} ipx_addr_t;
+-
+-/*
+- * Socket address
+- */
+-struct sockaddr_ipx {
+-	u_int8_t	sipx_len;
+-	u_int8_t	sipx_family;
+-	u_int16_t	sipx_type;
+-	struct ipx_addr	sipx_addr;
+-};
+-#define sipx_net  sipx_addr.ipx_net
+-#define sipx_network  sipx_addr.ipx_net.l_net
+-#define sipx_node sipx_addr.ipx_host.c_host
+-#define sipx_port sipx_addr.ipx_port
+-
+-/*
+- * Definitions for IPX Internet Datagram Protocol
+- */
+-struct ipx {
+-	u_int16_t  ipx_sum __packed;	/* Checksum */
+-	u_int16_t  ipx_len __packed;	/* Length, in bytes, including header */
+-	u_int8_t   ipx_tc  __packed;	/* Transport Control (i.e. hop count) */
+-	u_int8_t   ipx_pt  __packed;	/* Packet Type (i.e. lev 2 protocol) */
+-	ipx_addr_t ipx_dna __packed;	/* Destination Network Address */
+-	ipx_addr_t ipx_sna __packed;	/* Source Network Address */
+-};
+-
+-#define ipx_neteqnn(a,b) \
+-	(((a).s_net[0]==(b).s_net[0]) && ((a).s_net[1]==(b).s_net[1]))
+-#define ipx_neteq(a,b) ipx_neteqnn((a).ipx_net, (b).ipx_net)
+-#define satoipx_addr(sa) (((struct sockaddr_ipx *)&(sa))->sipx_addr)
+-#define ipx_hosteqnh(s,t) ((s).s_host[0] == (t).s_host[0] && \
+-	(s).s_host[1] == (t).s_host[1] && (s).s_host[2] == (t).s_host[2])
+-#define ipx_hosteq(s,t) (ipx_hosteqnh((s).ipx_host,(t).ipx_host))
+-#define ipx_nullnet(x) \
+-	(((x).ipx_net.s_net[0]==0) && ((x).ipx_net.s_net[1]==0))
+-#define ipx_nullhost(x) (((x).ipx_host.s_host[0]==0) && \
+-	((x).ipx_host.s_host[1]==0) && ((x).ipx_host.s_host[2]==0))
+-#define ipx_wildnet(x) (((x).ipx_net.s_net[0]==0xffff) && \
+-	((x).ipx_net.s_net[1]==0xffff))
+-#define ipx_wildhost(x) (((x).ipx_host.s_host[0]==0xffff) && \
+-	((x).ipx_host.s_host[1]==0xffff) && ((x).ipx_host.s_host[2]==0xffff))
+-
+-/*
+- * Definitions for inet sysctl operations.
+- *
+- * Third level is protocol number.
+- * Fourth level is desired variable within that protocol.
+- */
+-#define IPXPROTO_MAXID	(IPXPROTO_SPX + 1)	/* don't list to IPPROTO_MAX */
+-
+-#define CTL_IPXPROTO_NAMES { \
+-	{ "ipx", CTLTYPE_NODE }, \
+-	{ 0, 0 }, \
+-	{ 0, 0 }, \
+-	{ 0, 0 }, \
+-	{ 0, 0 }, \
+-	{ "spx", CTLTYPE_NODE }, \
+-}
+-
+-#ifdef _KERNEL
+-
+-#define	satosipx(a)	((struct sockaddr_ipx *)(a))
+-#define	sipxtosa(a)	((struct sockaddr *)(a))
+-
+-extern int ipxcksum;
+-extern int ipxforwarding;
+-extern int ipxnetbios;
+-extern struct domain ipxdomain;
+-extern struct sockaddr_ipx ipx_netmask;
+-extern struct sockaddr_ipx ipx_hostmask;
+-
+-extern union ipx_net	ipx_zeronet;
+-extern union ipx_host	ipx_zerohost;
+-extern union ipx_net	ipx_broadnet;
+-extern union ipx_host	ipx_broadhost;
+-
+-extern u_long ipx_pexseq;
+-extern u_char ipxctlerrmap[];
+-
+-struct route;
+-struct sockaddr;
+-struct socket;
+-struct ipxpcb;
+-void	ipx_abort(struct ipxpcb *ipxp);
+-u_short	ipx_cksum(struct mbuf *m, int len);
+-int	ipx_control(struct socket *so, u_long cmd, caddr_t data,
+-			 struct ifnet *ifp);
+-void	*ipx_ctlinput(int cmd, struct sockaddr *arg_as_sa, void *dummy);
+-int	ipx_ctloutput(int req, struct socket *so, int level, int name,
+-			   struct mbuf **value);
+-int	ipx_do_route(struct ipx_addr *src, struct route *ro);
+-void	ipx_drop(struct ipxpcb *ipxp, int errno);
+-void	ipx_forward(struct mbuf *m);
+-void	ipx_init(void);
+-void	ipx_input(struct mbuf *, ...);
+-void	ipxintr(void);
+-int	ipx_output(struct mbuf *m0, ...);
+-int	ipx_outputfl(struct mbuf *m0, struct route *ro, int flags);
+-int	ipx_output_type20(struct mbuf *m);
+-int	ipx_raw_usrreq(struct socket *so, int req, struct mbuf *m,
+-			    struct mbuf *nam, struct mbuf *control);
+-void	ipx_undo_route(struct route *ro);
+-int	ipx_usrreq(struct socket *so, int req, struct mbuf *m,
+-			struct mbuf *nam, struct mbuf *control);
+-void	ipx_watch_output(struct mbuf *m, struct ifnet *ifp);
+-int	ipx_sysctl(int *, u_int, void *, size_t *, void *, size_t);
+-void	ipx_printhost(struct ipx_addr *addr);
+-
+-#endif /* _KERNEL */
+-
+-#include <sys/cdefs.h>
+-
+-__BEGIN_DECLS
+-struct	ipx_addr ipx_addr(const char *);
+-char	*ipx_ntoa(struct ipx_addr);
+-__END_DECLS
+-
+-#endif /* !_NETIPX_IPX_H_ */
+diff --git a/sys/netipx/ipx_cksum.c b/sys/netipx/ipx_cksum.c
+deleted file mode 100644
+index 5a0911af22b..00000000000
+--- a/sys/netipx/ipx_cksum.c
++++ /dev/null
+@@ -1,209 +0,0 @@
+-/*	$OpenBSD: ipx_cksum.c,v 1.6 2003/12/10 07:22:43 itojun Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1982, 1992, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx_cksum.c
+- *
+- * from FreeBSD Id: ipx_cksum.c,v 1.3 1995/11/04 09:02:40 julian Exp
+- */
+-
+-#include <sys/param.h>
+-#include <sys/mbuf.h>
+-
+-#include <netipx/ipx.h>
+-
+-/*
+- * Checksum routine for Internetwork Packet Exchange Packets (Big-Endian).
+- *
+- * This routine is very heavily used in the network
+- * code and should be modified for each CPU to be as fast as possible.
+- */
+-
+-#define ADDCARRY(x)  { if ((x) > 65535) (x) -= 65535; }
+-#define FOLD(x) {l_util.l = (x); (x) = l_util.s[0] + l_util.s[1]; ADDCARRY(x);}
+-
+-u_short
+-ipx_cksum(m, len)
+-	struct mbuf *m;
+-	int len;
+-{
+-	u_short *w;
+-	int sum = 0;
+-	int mlen = 0;
+-	int sum2;
+-
+-	union {
+-		u_short s[2];
+-		long	l;
+-	} l_util;
+-
+-	for (;m && len; m = m->m_next) {
+-		if (m->m_len == 0)
+-			continue;
+-		/*
+-		 * Each trip around loop adds in
+-		 * word from one mbuf segment.
+-		 */
+-		w = mtod(m, u_short *);
+-		if (mlen == -1) {
+-			/*
+-			 * There is a byte left from the last segment;
+-			 * ones-complement add it into the checksum.
+-			 */
+-#if BYTE_ORDER == BIG_ENDIAN
+-			sum  += *(u_char *)w;
+-#else
+-			sum  += *(u_char *)w << 8;
+-#endif
+-			sum += sum;
+-			w = (u_short *)(1 + (char *)w);
+-			mlen = m->m_len - 1;
+-			len--;
+-			FOLD(sum);
+-		} else
+-			mlen = m->m_len;
+-		if (len < mlen)
+-			mlen = len;
+-		len -= mlen;
+-		/*
+-		 * We can do a 16 bit ones complement sum using
+-		 * 32 bit arithmetic registers for adding,
+-		 * with carries from the low added
+-		 * into the high (by normal carry-chaining)
+-		 * so long as we fold back before 16 carries have occurred.
+-		 */
+-		if (1 & (long) w)
+-			goto uuuuglyy;
+-#ifndef TINY
+-/* -DTINY reduces the size from 1250 to 550, but slows it down by 22% */
+-		while ((mlen -= 32) >= 0) {
+-			sum += w[0]; sum += sum; sum += w[1]; sum += sum;
+-			sum += w[2]; sum += sum; sum += w[3]; sum += sum;
+-			sum += w[4]; sum += sum; sum += w[5]; sum += sum;
+-			sum += w[6]; sum += sum; sum += w[7]; sum += sum;
+-			FOLD(sum);
+-			sum += w[8]; sum += sum; sum += w[9]; sum += sum;
+-			sum += w[10]; sum += sum; sum += w[11]; sum += sum;
+-			sum += w[12]; sum += sum; sum += w[13]; sum += sum;
+-			sum += w[14]; sum += sum; sum += w[15]; sum += sum;
+-			FOLD(sum);
+-			w += 16;
+-		}
+-		mlen += 32;
+-#endif
+-		while ((mlen -= 8) >= 0) {
+-			sum += w[0]; sum += sum; sum += w[1]; sum += sum;
+-			sum += w[2]; sum += sum; sum += w[3]; sum += sum;
+-			FOLD(sum);
+-			w += 4;
+-		}
+-		mlen += 8;
+-		while ((mlen -= 2) >= 0) {
+-			sum += *w++; sum += sum;
+-		}
+-		goto commoncase;
+-uuuuglyy:
+-#if BYTE_ORDER == BIG_ENDIAN
+-#define ww(n) (((u_char *)w)[n + n + 1])
+-#define vv(n) (((u_char *)w)[n + n])
+-#else
+-#if BYTE_ORDER == LITTLE_ENDIAN
+-#define vv(n) (((u_char *)w)[n + n + 1])
+-#define ww(n) (((u_char *)w)[n + n])
+-#endif
+-#endif
+-		sum2 = 0;
+-#ifndef TINY
+-		while ((mlen -= 32) >= 0) {
+-		    sum += ww(0); sum += sum; sum += ww(1); sum += sum;
+-		    sum += ww(2); sum += sum; sum += ww(3); sum += sum;
+-		    sum += ww(4); sum += sum; sum += ww(5); sum += sum;
+-		    sum += ww(6); sum += sum; sum += ww(7); sum += sum;
+-		    FOLD(sum);
+-		    sum += ww(8); sum += sum; sum += ww(9); sum += sum;
+-		    sum += ww(10); sum += sum; sum += ww(11); sum += sum;
+-		    sum += ww(12); sum += sum; sum += ww(13); sum += sum;
+-		    sum += ww(14); sum += sum; sum += ww(15); sum += sum;
+-		    FOLD(sum);
+-		    sum2 += vv(0); sum2 += sum2; sum2 += vv(1); sum2 += sum2;
+-		    sum2 += vv(2); sum2 += sum2; sum2 += vv(3); sum2 += sum2;
+-		    sum2 += vv(4); sum2 += sum2; sum2 += vv(5); sum2 += sum2;
+-		    sum2 += vv(6); sum2 += sum2; sum2 += vv(7); sum2 += sum2;
+-		    FOLD(sum2);
+-		    sum2 += vv(8); sum2 += sum2; sum2 += vv(9); sum2 += sum2;
+-		    sum2 += vv(10); sum2 += sum2; sum2 += vv(11); sum2 += sum2;
+-		    sum2 += vv(12); sum2 += sum2; sum2 += vv(13); sum2 += sum2;
+-		    sum2 += vv(14); sum2 += sum2; sum2 += vv(15); sum2 += sum2;
+-		    FOLD(sum2);
+-		    w += 16;
+-		}
+-		mlen += 32;
+-#endif
+-		while ((mlen -= 8) >= 0) {
+-		    sum += ww(0); sum += sum; sum += ww(1); sum += sum;
+-		    sum += ww(2); sum += sum; sum += ww(3); sum += sum;
+-		    FOLD(sum);
+-		    sum2 += vv(0); sum2 += sum2; sum2 += vv(1); sum2 += sum2;
+-		    sum2 += vv(2); sum2 += sum2; sum2 += vv(3); sum2 += sum2;
+-		    FOLD(sum2);
+-		    w += 4;
+-		}
+-		mlen += 8;
+-		while ((mlen -= 2) >= 0) {
+-			sum += ww(0); sum += sum;
+-			sum2 += vv(0); sum2 += sum2;
+-			w++;
+-		}
+-		sum += (sum2 << 8);
+-commoncase:
+-		if (mlen == -1) {
+-#if BYTE_ORDER == BIG_ENDIAN
+-			sum += *(u_char *)w << 8;
+-#else
+-			sum += *(u_char *)w;
+-#endif
+-		}
+-		FOLD(sum);
+-	}
+-	if (mlen == -1) {
+-		/* We had an odd number of bytes to sum; assume a garbage
+-		   byte of zero and clean up */
+-		sum += sum;
+-		FOLD(sum);
+-	}
+-	/*
+-	 * sum has already been kept to low sixteen bits.
+-	 * just examine result and exit.
+-	 */
+-	if(sum==0xffff) sum = 0;
+-	return (sum);
+-}
+diff --git a/sys/netipx/ipx_if.h b/sys/netipx/ipx_if.h
+deleted file mode 100644
+index 01bf79be1ea..00000000000
+--- a/sys/netipx/ipx_if.h
++++ /dev/null
+@@ -1,100 +0,0 @@
+-/*	$OpenBSD: ipx_if.h,v 1.6 2003/06/02 23:28:16 millert Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- * 
+- *	@(#)ipx_if.h
+- *
+- * from FreeBSD Id: ipx_if.h,v 1.5 1995/11/24 12:25:05 bde Exp
+- */
+-
+-#ifndef _NETIPX_IPX_IF_H_
+-#define	_NETIPX_IPX_IF_H_
+-
+-/*
+- * Interface address.  One of these structures
+- * is allocated for each interface with an internet address.
+- * The ifaddr structure contains the protocol-independent part
+- * of the structure and is assumed to be first.
+- */
+-
+-struct ipx_ifaddr {
+-	struct	ifaddr ia_ifa;		/* protocol-independent info */
+-#define	ia_ifp		ia_ifa.ifa_ifp
+-#define	ia_flags	ia_ifa.ifa_flags
+-	TAILQ_ENTRY(ipx_ifaddr)	ia_list;/* list of IPX addresses */
+-	struct	sockaddr_ipx ia_addr;	/* reserve space for my address */
+-	struct	sockaddr_ipx ia_dstaddr;/* space for my broadcast address */
+-#define ia_broadaddr	ia_dstaddr
+-	struct	sockaddr_ipx ia_netmask;/* space for my network mask */
+-};
+-
+-struct	ipx_aliasreq {
+-	char	ifra_name[IFNAMSIZ];		/* if name, e.g. "en0" */
+-	struct	sockaddr_ipx ifra_addr;
+-	struct	sockaddr_ipx ifra_dstaddr;
+-#define ifra_broadaddr ifra_dstaddr
+-};
+-/*
+- * Given a pointer to an ipx_ifaddr (ifaddr),
+- * return a pointer to the addr as a sockadd_ipx.
+- */
+-
+-#define	IA_SIPX(ia) (&(((struct ipx_ifaddr *)(ia))->ia_addr))
+-
+-#define IPX_ETHERTYPE_8023	0x0001	/* Ethernet_802.3 */
+-#define IPX_ETHERTYPE_8022	0x0004	/* Ethernet_802.2 */
+-#define	IPX_ETHERTYPE_SNAP	0x0005	/* Ethernet_SNAP, internal use only */
+-#define	IPX_ETHERTYPE_8022TR	0x0011	/* Ethernet_802.2 w/ trailers */
+-#define IPX_ETHERTYPE_II	0x8137	/* Ethernet_II */
+-#define IPX_ETHERTYPE_IPX	IPX_ETHERTYPE_II
+-
+-#ifdef	IPXIP
+-struct ipxip_req {
+-	struct sockaddr rq_ipx;	/* must be ipx format destination */
+-	struct sockaddr rq_ip;	/* must be ip format gateway */
+-	u_int16_t	rq_flags;
+-};
+-#endif
+-
+-#ifdef	_KERNEL
+-TAILQ_HEAD(ipx_ifaddrhead, ipx_ifaddr);
+-extern struct	ifqueue	ipxintrq;	/* IPX input packet queue */
+-extern struct	ipx_ifaddrhead ipx_ifaddr;
+-
+-struct ipx_ifaddr *
+-	ipx_iaonnetof(struct ipx_addr *dst);
+-int	ipx_ifinit(struct ifnet *ifp, struct ipx_ifaddr *ia,
+-			struct sockaddr_ipx *sipx, int scrub);
+-void	ipx_ifscrub(struct ifnet *ifp, struct ipx_ifaddr *ia);
+-#endif
+-
+-#endif /* !_NETIPX_IPX_IF_H_ */
+diff --git a/sys/netipx/ipx_input.c b/sys/netipx/ipx_input.c
+deleted file mode 100644
+index 5c6d5c61371..00000000000
+--- a/sys/netipx/ipx_input.c
++++ /dev/null
+@@ -1,490 +0,0 @@
+-/*	$OpenBSD: ipx_input.c,v 1.21 2006/03/05 21:48:57 miod Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx_input.c
+- *
+- * from FreeBSD Id: ipx_input.c,v 1.8 1996/03/11 15:13:48 davidg Exp
+- */
+-
+-#include <sys/param.h>
+-#include <sys/systm.h>
+-#include <sys/kernel.h>
+-#include <sys/mbuf.h>
+-#include <sys/protosw.h>
+-#include <sys/socket.h>
+-#include <sys/socketvar.h>
+-
+-#include <net/if.h>
+-#include <net/route.h>
+-#include <net/netisr.h>
+-
+-#include <netipx/ipx.h>
+-#include <netipx/spx.h>
+-#include <netipx/ipx_if.h>
+-#include <netipx/ipx_pcb.h>
+-#include <netipx/ipx_var.h>
+-
+-#ifndef IPXPRINTFS
+-#define IPXPRINTFS	1	/* printing forwarding information */
+-#endif
+-
+-int ipxprintfs = IPXPRINTFS;
+-int ipxcksum = 0;
+-int ipxdonosocks = 0;
+-int ipxforwarding = 0;
+-int ipxnetbios = 0;
+-
+-union ipx_net	ipx_zeronet;
+-union ipx_host	ipx_zerohost;
+-
+-union ipx_net	ipx_broadnet;
+-union ipx_host	ipx_broadhost;
+-
+-struct ipxstat ipxstat;
+-struct sockaddr_ipx ipx_netmask, ipx_hostmask;
+-
+-static u_int16_t	allones[] = {0xffff, 0xffff, 0xffff};
+-
+-#ifndef	IPXCBHASHSIZE
+-#define	IPXCBHASHSIZE	32
+-#endif
+-struct ipxpcbtable	ipxrawcbtable;
+-int			ipxrawcbhashsize = IPXCBHASHSIZE;
+-
+-struct ipx_ifaddrhead	ipx_ifaddr;
+-struct ifqueue	ipxintrq;
+-int	ipxqmaxlen = IFQ_MAXLEN;
+-
+-u_long	ipx_pexseq;
+-
+-/*
+- * IPX initialization.
+- */
+-
+-void
+-ipx_init()
+-{
+-	ipx_broadnet = * (union ipx_net *) allones;
+-	ipx_broadhost = * (union ipx_host *) allones;
+-
+-	ipx_pexseq = arc4random();
+-	ipxintrq.ifq_maxlen = ipxqmaxlen;
+-
+-	ipx_netmask.sipx_len = 6;
+-	ipx_netmask.sipx_addr.ipx_net = ipx_broadnet;
+-
+-	ipx_hostmask.sipx_len = 12;
+-	ipx_hostmask.sipx_addr.ipx_net = ipx_broadnet;
+-	ipx_hostmask.sipx_addr.ipx_host = ipx_broadhost;
+-
+-	ipx_pcbinit(&ipxrawcbtable, ipxrawcbhashsize);
+-
+-	TAILQ_INIT(&ipx_ifaddr);
+-}
+-
+-/*
+- * IPX input routine.  Pass to next level.
+- */
+-void
+-ipxintr()
+-{
+-	struct ipx *ipx;
+-	struct mbuf *m;
+-	struct ipxpcb *ipxp;
+-	struct ipx_ifaddr *ia;
+-	int len, s;
+-
+-next:
+-	/*
+-	 * Get next datagram off input queue and get IPX header
+-	 * in first mbuf.
+-	 */
+-	s = splnet();
+-	IF_DEQUEUE(&ipxintrq, m);
+-	splx(s);
+-	if (m == NULL) {
+-		return;
+-	}
+-
+-	ipxstat.ipxs_total++;
+-
+-	if ((m->m_flags & M_EXT || m->m_len < sizeof(struct ipx)) &&
+-	    (m = m_pullup(m, sizeof(struct ipx))) == 0) {
+-		ipxstat.ipxs_toosmall++;
+-		goto next;
+-	}
+-
+-	/*
+-	 * Give any raw listeners a crack at the packet
+-	 */
+-	CIRCLEQ_FOREACH(ipxp, &ipxrawcbtable.input_queue, ipxp_queue) {
+-		struct mbuf *m1 = m_copy(m, 0, (int)M_COPYALL);
+-		if (m1)
+-			ipx_input(m1, ipxp);
+-	}
+-
+-	ipx = mtod(m, struct ipx *);
+-	len = ntohs(ipx->ipx_len);
+-	/*
+-	 * Check that the amount of data in the buffers
+-	 * is as at least much as the IPX header would have us expect.
+-	 * Trim mbufs if longer than we expect.
+-	 * Drop packet if shorter than we expect.
+-	 */
+-	if (m->m_pkthdr.len < len) {
+-		ipxstat.ipxs_tooshort++;
+-		goto bad;
+-	}
+-	if (m->m_pkthdr.len > len) {
+-		if (m->m_len == m->m_pkthdr.len) {
+-			m->m_len = len;
+-			m->m_pkthdr.len = len;
+-		} else
+-			m_adj(m, len - m->m_pkthdr.len);
+-	}
+-	if (ipxcksum && ipx->ipx_sum != 0xffff) {
+-		if (ipx->ipx_sum != ipx_cksum(m, len)) {
+-			ipxstat.ipxs_badsum++;
+-			goto bad;
+-		}
+-	}
+-
+-	/*
+-	 * Propagated (Netbios) packets (type 20) has to be handled  
+-	 * different. :-(
+-	 */
+-	if (ipx->ipx_pt == IPXPROTO_NETBIOS) {
+-		if (ipxnetbios) {
+-			ipx_output_type20(m);
+-			goto next;
+-		} else
+-			goto bad;
+-	}
+-
+-	/*
+-	 * Is this a directed broadcast?
+-	 */
+-	if (ipx_hosteqnh(ipx_broadhost,ipx->ipx_dna.ipx_host)) {
+-		if ((!ipx_neteq(ipx->ipx_dna, ipx->ipx_sna)) &&
+-		    (!ipx_neteqnn(ipx->ipx_dna.ipx_net, ipx_broadnet)) &&
+-		    (!ipx_neteqnn(ipx->ipx_sna.ipx_net, ipx_zeronet)) &&
+-		    (!ipx_neteqnn(ipx->ipx_dna.ipx_net, ipx_zeronet)) ) {
+-			/*
+-			 * If it is a broadcast to the net where it was
+-			 * received from, treat it as ours.
+-			 */
+-			TAILQ_FOREACH(ia, &ipx->if_addr, ia_list)
+-				if((ia->ia_ifa.ifa_ifp == m->m_pkthdr.rcvif) &&
+-				    ipx_neteq(ia->ia_addr.sipx_addr, 
+-				    ipx->ipx_dna))
+-                                       goto ours;
+-
+-			/*
+-			 * Look to see if I need to eat this packet.
+-			 * Algorithm is to forward all young packets
+-			 * and prematurely age any packets which will
+-			 * by physically broadcasted.
+-			 * Any very old packets eaten without forwarding
+-			 * would die anyway.
+-			 *
+-			 * Suggestion of Bill Nesheim, Cornell U.
+-			 */
+-			if (ipx->ipx_tc < IPX_MAXHOPS) {
+-				ipx_forward(m);
+-				goto next;
+-			}
+-		}
+-	/*
+-	 * Is this our packet? If not, forward.
+-	 */
+-	} else {
+-		TAILQ_FOREACH(ia, &ipx_ifaddr, ia_list)
+-			if (ipx_hosteq(ipx->ipx_dna, ia->ia_addr.sipx_addr) &&
+-			    (ipx_neteq(ipx->ipx_dna, ia->ia_addr.sipx_addr) ||
+-			    ipx_neteqnn(ipx->ipx_dna.ipx_net, ipx_zeronet)))
+-				break;
+-
+-		if (ia == NULL) {
+-			ipx_forward(m);
+-			goto next;
+-		}
+-	}
+-ours:
+-	/*
+-	 * Locate pcb for datagram.
+-	 */
+-	ipxp = ipx_pcblookup(&ipx->ipx_sna, ipx->ipx_dna.ipx_port,
+-	    IPX_WILDCARD);
+-	/*
+-	 * Switch out to protocol's input routine.
+-	 */
+-	if (ipxp) {
+-		ipxstat.ipxs_delivered++;
+-		if ((ipxp->ipxp_flags & IPXP_ALL_PACKETS) == 0)
+-			switch (ipx->ipx_pt) {
+-
+-			    case IPXPROTO_SPX:
+-				    spx_input(m, ipxp);
+-				    goto next;
+-			}
+-		ipx_input(m, ipxp);
+-	} else
+-		goto bad;
+-
+-	goto next;
+-
+-bad:
+-	m_freem(m);
+-	goto next;
+-}
+-
+-void *
+-ipx_ctlinput(cmd, arg_as_sa, dummy)
+-	int cmd;
+-	struct sockaddr *arg_as_sa;	/* XXX should be swapped with dummy */
+-	void *dummy;
+-{
+-	caddr_t arg = (/* XXX */ caddr_t)arg_as_sa;
+-	struct ipx_addr *ipx;
+-
+-	if (cmd < 0 || cmd >= PRC_NCMDS)
+-		return NULL;
+-	switch (cmd) {
+-		struct sockaddr_ipx *sipx;
+-
+-	case PRC_IFDOWN:
+-	case PRC_HOSTDEAD:
+-	case PRC_HOSTUNREACH:
+-		sipx = (struct sockaddr_ipx *)arg;
+-		if (sipx == NULL || sipx->sipx_family != AF_IPX)
+-			return NULL;
+-		ipx = &sipx->sipx_addr;
+-		break;
+-
+-	default:
+-		break;
+-	}
+-	return NULL;
+-}
+-
+-/*
+- * Forward a packet.  If some error occurs return the sender
+- * an error packet.  Note we can't always generate a meaningful
+- * error message because the IPX errors don't have a large enough repetoire
+- * of codes and types.
+- */
+-struct route ipx_droute;
+-struct route ipx_sroute;
+-
+-void
+-ipx_forward(m)
+-struct mbuf *m;
+-{
+-	struct ipx *ipx = mtod(m, struct ipx *);
+-	int error;
+-	int agedelta = 1;
+-	int flags = IPX_FORWARDING;
+-	int ok_there = 0;
+-	int ok_back = 0;
+-
+-	if (ipxforwarding == 0) {
+-		ipxstat.ipxs_cantforward++;
+-		m_freem(m);
+-		goto cleanup;
+-	}
+-	ipx->ipx_tc++;
+-	if (ipx->ipx_tc > IPX_MAXHOPS) {
+-		ipxstat.ipxs_cantforward++;
+-		m_freem(m);
+-		goto cleanup;
+-	}
+-
+-	if ((ok_there = ipx_do_route(&ipx->ipx_dna,&ipx_droute)) == 0) {
+-		ipxstat.ipxs_noroute++;
+-		m_freem(m);
+-		goto cleanup;
+-	}
+-	/*
+-	 * Here we think about  forwarding  broadcast packets,
+-	 * so we try to insure that it doesn't go back out
+-	 * on the interface it came in on.  Also, if we
+-	 * are going to physically broadcast this, let us
+-	 * age the packet so we can eat it safely the second time around.
+-	 */
+-	if (ipx->ipx_dna.ipx_host.c_host[0] & 0x1) {
+-		struct ipx_ifaddr *ia = ipx_iaonnetof(&ipx->ipx_dna);
+-		struct ifnet *ifp;
+-		if (ia) {
+-			/* I'm gonna hafta eat this packet */
+-			agedelta += IPX_MAXHOPS - ipx->ipx_tc;
+-			ipx->ipx_tc = IPX_MAXHOPS;
+-		}
+-		if ((ok_back = ipx_do_route(&ipx->ipx_sna,&ipx_sroute)) == 0) {
+-			/* error = ENETUNREACH; He'll never get it! */
+-			ipxstat.ipxs_noroute++;
+-			m_freem(m);
+-			goto cleanup;
+-		}
+-		if (ipx_droute.ro_rt &&
+-		    (ifp=ipx_droute.ro_rt->rt_ifp) &&
+-		    ipx_sroute.ro_rt &&
+-		    (ifp!=ipx_sroute.ro_rt->rt_ifp)) {
+-			flags |= IPX_ALLOWBROADCAST;
+-		} else {
+-			ipxstat.ipxs_noroute++;
+-			m_freem(m);
+-			goto cleanup;
+-		}
+-	}
+-	/*
+-	 * We don't need to recompute checksum because ipx_tc field
+-	 * is ignored by checksum calculation routine, however
+-	 * it may be desirable to reset checksum if ipxcksum == 0
+-	 */
+-#if 0
+-	if (!ipxcksum)
+-		ipx->ipx_sum = 0xffff;
+-#endif
+-
+-	error = ipx_outputfl(m, &ipx_droute, flags);
+-	if (error == 0) {
+-		ipxstat.ipxs_forward++;
+-
+-		if (ipxprintfs) {
+-			printf("forward: ");
+-			ipx_printhost(&ipx->ipx_sna);
+-			printf(" to ");
+-			ipx_printhost(&ipx->ipx_dna);
+-			printf(" hops %d\n", ipx->ipx_tc);
+-		}
+-	} else {
+-		switch (error) {
+-
+-		case ENETUNREACH:
+-		case EHOSTDOWN:
+-		case EHOSTUNREACH:
+-		case ENETDOWN:
+-		case EPERM:
+-			ipxstat.ipxs_noroute++;
+-			break;
+-
+-		case EMSGSIZE:
+-			ipxstat.ipxs_mtutoosmall++;
+-			break;
+-
+-		case ENOBUFS:
+-			ipxstat.ipxs_odropped++;
+-			break;
+-		}
+-		m_freem(m);
+-	}
+-cleanup:
+-	if (ok_there)
+-		ipx_undo_route(&ipx_droute);
+-	if (ok_back)
+-		ipx_undo_route(&ipx_sroute);
+-}
+-
+-int
+-ipx_do_route(src, ro)
+-struct ipx_addr *src;
+-struct route *ro;
+-{
+-	struct sockaddr_ipx *dst;
+-
+-	bzero((caddr_t)ro, sizeof(*ro));
+-	dst = (struct sockaddr_ipx *)&ro->ro_dst;
+-
+-	dst->sipx_len = sizeof(*dst);
+-	dst->sipx_family = AF_IPX;
+-	dst->sipx_addr = *src;
+-	dst->sipx_addr.ipx_port = 0;
+-	rtalloc(ro);
+-	if (ro->ro_rt == 0 || ro->ro_rt->rt_ifp == 0) {
+-		return (0);
+-	}
+-	ro->ro_rt->rt_use++;
+-	return (1);
+-}
+-
+-void
+-ipx_undo_route(ro)
+-register struct route *ro;
+-{
+-	if (ro->ro_rt) {
+-		RTFREE(ro->ro_rt);
+-	}
+-}
+-
+-void
+-ipx_watch_output(m, ifp)
+-struct mbuf *m;
+-struct ifnet *ifp;
+-{
+-	struct ipxpcb *ipxp;
+-	struct ifaddr *ifa;
+-	struct ipx_ifaddr *ia;
+-	/*
+-	 * Give any raw listeners a crack at the packet
+-	 */
+-	CIRCLEQ_FOREACH(ipxp, &ipxrawcbtable.ipxpt_queue, ipxp_queue) {
+-		struct mbuf *m0 = m_copy(m, 0, (int)M_COPYALL);
+-		if (m0) {
+-			struct ipx *ipx;
+-
+-			M_PREPEND(m0, sizeof(*ipx), M_DONTWAIT);
+-			if (m0 == NULL)
+-				continue;
+-			ipx = mtod(m0, struct ipx *);
+-			ipx->ipx_sna.ipx_net = ipx_zeronet;
+-			TAILQ_FOREACH(ia, &ipx_ifaddr, ia_list)
+-				if (ifp == ia->ia_ifp)
+-					break;
+-			if (ia == NULL)
+-				ipx->ipx_sna.ipx_host = ipx_zerohost;
+-			else
+-				ipx->ipx_sna.ipx_host =
+-				    ia->ia_addr.sipx_addr.ipx_host;
+-
+-			if (ifp && (ifp->if_flags & IFF_POINTOPOINT))
+-			    TAILQ_FOREACH(ifa, &ifp->if_addrlist, ifa_list) {
+-				if (ifa->ifa_addr->sa_family == AF_IPX) {
+-				    ipx->ipx_sna = IA_SIPX(ifa)->sipx_addr;
+-				    break;
+-				}
+-			    }
+-			ipx->ipx_len = ntohl(m0->m_pkthdr.len);
+-			ipx_input(m0, ipxp);
+-		}
+-	}
+-}
+diff --git a/sys/netipx/ipx_ip.c b/sys/netipx/ipx_ip.c
+deleted file mode 100644
+index 738ecb744d0..00000000000
+--- a/sys/netipx/ipx_ip.c
++++ /dev/null
+@@ -1,455 +0,0 @@
+-/*	$OpenBSD: ipx_ip.c,v 1.22 2006/06/15 10:08:34 pascoe Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx_ip.c
+- *
+- * from FreeBSD Id: ipx_ip.c,v 1.7 1996/03/11 15:13:50 davidg Exp
+- */
+-
+-/*
+- * Software interface driver for encapsulating IPX in IP.
+- */
+-
+-#ifdef IPXIP
+-#ifndef INET
+-#error The option IPXIP requires option INET.
+-#endif
+-
+-#include <sys/param.h>
+-#include <sys/queue.h>
+-#include <sys/systm.h>
+-#include <sys/malloc.h>
+-#include <sys/mbuf.h>
+-#include <sys/socket.h>
+-#include <sys/socketvar.h>
+-#include <sys/errno.h>
+-#include <sys/ioctl.h>
+-#include <sys/protosw.h>
+-
+-#include <net/if.h>
+-#include <net/if_types.h>
+-#include <net/netisr.h>
+-#include <net/route.h>
+-
+-#include <netinet/in.h>
+-#include <netinet/in_systm.h>
+-#include <netinet/in_var.h>
+-#include <netinet/ip.h>
+-#include <netinet/ip_var.h>
+-
+-#include <netipx/ipx.h>
+-#include <netipx/ipx_if.h>
+-#include <netipx/ipx_ip.h>
+-
+-#include <sys/stdarg.h>
+-
+-struct ifnet ipxipif;
+-struct ifnet_en *ipxip_list; /* list of all hosts and gateways or broadcast addrs */
+-
+-void
+-ipxipprotoinit(void)
+-{
+-	(void) ipxipattach();
+-}
+-
+-struct ifnet_en *
+-ipxipattach(void)
+-{
+-	struct ifnet_en *m;
+-	struct ifnet *ifp;
+-
+-	if (ipxipif.if_mtu == 0) {
+-		ifp = &ipxipif;
+-		snprintf(ifp->if_xname, sizeof ifp->if_xname, "ipx0");
+-		ifp->if_mtu = LOMTU;
+-		ifp->if_ioctl = ipxipioctl;
+-		ifp->if_output = ipxipoutput;
+-		ifp->if_start = ipxipstart;
+-		ifp->if_flags = IFF_POINTOPOINT;
+-		ifp->if_type = IFT_NSIP;
+-	}
+-
+-	MALLOC((m), struct ifnet_en *, sizeof(*m), M_PCB, M_NOWAIT);
+-	if (m == NULL)
+-		return (NULL);
+-	bzero(m, sizeof(*m));
+-	m->ifen_next = ipxip_list;
+-	ipxip_list = m;
+-	ifp = &m->ifen_ifnet;
+-
+-	snprintf(ifp->if_xname, sizeof ifp->if_xname, "ipx0");
+-	ifp->if_mtu = LOMTU;
+-	ifp->if_ioctl = ipxipioctl;
+-	ifp->if_output = ipxipoutput;
+-	ifp->if_start = ipxipstart;
+-	ifp->if_flags = IFF_POINTOPOINT;
+-	if_attach(ifp);
+-
+-	return (m);
+-}
+-
+-
+-/*
+- * Process an ioctl request.
+- */
+-/* ARGSUSED */
+-int
+-ipxipioctl(ifp, cmd, data)
+-	struct ifnet *ifp;
+-	u_long cmd;
+-	caddr_t data;
+-{
+-	int error = 0;
+-	struct ifreq *ifr;
+-
+-	switch (cmd) {
+-
+-	case SIOCSIFADDR:
+-		ifp->if_flags |= IFF_UP;
+-		/* FALLTHROUGH */
+-
+-	case SIOCSIFDSTADDR:
+-		/*
+-		 * Everything else is done at a higher level.
+-		 */
+-		break;
+-
+-	case SIOCSIFFLAGS:
+-		ifr = (struct ifreq *)data;
+-		if ((ifr->ifr_flags & IFF_UP) == 0)
+-			error = ipxip_free(ifp);
+-
+-	default:
+-		error = EINVAL;
+-	}
+-	return (error);
+-}
+-
+-struct mbuf *ipxip_badlen;
+-
+-void
+-ipxip_input( struct mbuf *m, ...)
+-{
+-	struct ifnet *ifp;
+-	struct ip *ip;
+-	struct ipx *ipx;
+-	struct ifqueue *ifq = &ipxintrq;
+-	int len, s;
+-	va_list	ap;
+-
+-	va_start(ap, m);
+-	ifp = va_arg(ap, struct ifnet *);
+-	va_end(ap);
+-
+-	/*
+-	 * Get IP and IPX header together in first mbuf.
+-	 */
+-	ipxipif.if_ipackets++;
+-	s = sizeof(struct ip) + sizeof(struct ipx);
+-	if (((m->m_flags & M_EXT) || m->m_len < s) &&
+-	    (m = m_pullup(m, s)) == NULL) {
+-		ipxipif.if_ierrors++;
+-		return;
+-	}
+-	ip = mtod(m, struct ip *);
+-	if (ip->ip_hl > (sizeof(struct ip) >> 2)) {
+-		ip_stripoptions(m, (struct mbuf *)0);
+-		if (m->m_len < s) {
+-			if ((m = m_pullup(m, s)) == NULL) {
+-				ipxipif.if_ierrors++;
+-				return;
+-			}
+-			ip = mtod(m, struct ip *);
+-		}
+-	}
+-
+-	/*
+-	 * Make mbuf data length reflect IPX length.
+-	 * If not enough data to reflect IPX length, drop.
+-	 */
+-	m->m_data += sizeof(struct ip);
+-	m->m_len -= sizeof(struct ip);
+-	m->m_pkthdr.len -= sizeof(struct ip);
+-	ipx = mtod(m, struct ipx *);
+-	len = ntohs(ipx->ipx_len);
+-	if (len & 1)
+-		len++;		/* Preserve Garbage Byte */
+-	if (ntohs(ip->ip_len) - (ip->ip_hl << 2) != len) {
+-		if (len > ntohs(ip->ip_len) - (ip->ip_hl << 2)) {
+-			ipxipif.if_ierrors++;
+-			if (ipxip_badlen)
+-				m_freem(ipxip_badlen);
+-			ipxip_badlen = m;
+-			return;
+-		}
+-		/* Any extra will be trimmed off by the IPX routines */
+-	}
+-
+-	/*
+-	 * Place interface pointer before the data
+-	 * for the receiving protocol.
+-	 */
+-	m->m_pkthdr.rcvif = ifp;
+-	/*
+-	 * Deliver to IPX
+-	 */
+-	s = splnet();
+-	if (IF_QFULL(ifq)) {
+-		IF_DROP(ifq);
+-		m_freem(m);
+-		splx(s);
+-		return;
+-	}
+-	IF_ENQUEUE(ifq, m);
+-	schednetisr(NETISR_IPX);
+-	splx(s);
+-	return;
+-}
+-
+-/* ARGSUSED */
+-int
+-ipxipoutput(ifp, m, dst, rt)
+-	struct ifnet *ifp;
+-	struct mbuf *m;
+-	struct sockaddr *dst;
+-	struct rtentry *rt;
+-{
+-	struct ifnet_en *ifn = (struct ifnet_en *)ifp;
+-	struct ip *ip;
+-	struct route *ro = &(ifn->ifen_route);
+-	int len = 0;
+-	struct ipx *ipx = mtod(m, struct ipx *);
+-	int error;
+-
+-	ifn->ifen_ifnet.if_opackets++;
+-	ipxipif.if_opackets++;
+-
+-	/*
+-	 * Calculate data length and make space
+-	 * for IP header.
+-	 */
+-	len =  ntohs(ipx->ipx_len);
+-	if (len & 1)
+-		len++;		/* Preserve Garbage Byte */
+-	/* following clause not necessary on vax */
+-	if (3 & (long)m->m_data) {
+-		/* force longword alignment of ip hdr */
+-		struct mbuf *m0 = m_gethdr(M_DONTWAIT, MT_HEADER);
+-		if (m0 == NULL) {
+-			m_freem(m);
+-			return (ENOBUFS);
+-		}
+-		MH_ALIGN(m0, sizeof(struct ip));
+-		m0->m_flags = m->m_flags & M_COPYFLAGS;
+-		m0->m_next = m;
+-		m0->m_len = sizeof(struct ip);
+-		m0->m_pkthdr.len = m0->m_len + m->m_len;
+-		m0->m_pkthdr.tags = m->m_pkthdr.tags;
+-		m->m_flags &= ~M_PKTHDR;
+-		m_tag_init(m);
+-	} else {
+-		M_PREPEND(m, sizeof(struct ip), M_DONTWAIT);
+-		if (m == NULL)
+-			return (ENOBUFS);
+-	}
+-	/*
+-	 * Fill in IP header.
+-	 */
+-	ip = mtod(m, struct ip *);
+-	*(long *)ip = 0;
+-	ip->ip_p = IPPROTO_IDP;
+-	ip->ip_src = ifn->ifen_src;
+-	ip->ip_dst = ifn->ifen_dst;
+-	if (len + sizeof(struct ip) > IP_MAXPACKET) {
+-		m_freem(m);
+-		return EMSGSIZE;
+-	}
+-	ip->ip_len = htons(len + sizeof(struct ip));
+-	ip->ip_ttl = MAXTTL;
+-
+-	/*
+-	 * Output final datagram.
+-	 */
+-	error = ip_output(m, NULL, ro, SO_BROADCAST, NULL, NULL);
+-	if (error) {
+-		ifn->ifen_ifnet.if_oerrors++;
+-		ifn->ifen_ifnet.if_ierrors = error;
+-	}
+-	return (error);
+-}
+-
+-void
+-ipxipstart(ifp)
+-	struct ifnet *ifp;
+-{
+-	panic("ipxip_start called");
+-}
+-
+-struct ifreq ifr_ipxip = {"ipx0"};
+-
+-int
+-ipxip_route(m)
+-	struct mbuf *m;
+-{
+-	struct ipxip_req *rq = mtod(m, struct ipxip_req *);
+-	struct sockaddr_ipx *ipx_dst = (struct sockaddr_ipx *)&rq->rq_ipx;
+-	struct sockaddr_in *ip_dst = (struct sockaddr_in *)&rq->rq_ip;
+-	struct route ro;
+-	struct ifnet_en *ifn;
+-	struct sockaddr_in *src;
+-
+-	/*
+-	 * First, make sure we already have an IPX address.
+-	 */
+-	if (TAILQ_EMPTY(&ipx_ifaddr))
+-		return (EADDRNOTAVAIL);
+-	/*
+-	 * Now, determine if we can get to the destination
+-	 */
+-	bzero((caddr_t)&ro, sizeof(ro));
+-	ro.ro_dst = *(struct sockaddr *)ip_dst;
+-	rtalloc(&ro);
+-	if (ro.ro_rt == NULL || ro.ro_rt->rt_ifp == NULL) {
+-		return (ENETUNREACH);
+-	}
+-
+-	/*
+-	 * And see how he's going to get back to us:
+-	 * i.e., what return ip address do we use?
+-	 */
+-	{
+-		struct in_ifaddr *ia;
+-		struct ifnet *ifp = ro.ro_rt->rt_ifp;
+-
+-		TAILQ_FOREACH(ia, &in_ifaddr, ia_list)
+-			if (ia->ia_ifp == ifp)
+-				break;
+-		if (ia == NULL)
+-			ia = TAILQ_FIRST(&in_ifaddr);
+-		if (ia == NULL) {
+-			RTFREE(ro.ro_rt);
+-			return (EADDRNOTAVAIL);
+-		}
+-		src = (struct sockaddr_in *)&ia->ia_addr;
+-	}
+-
+-	/*
+-	 * Is there a free (pseudo-)interface or space?
+-	 */
+-	for (ifn = ipxip_list; ifn; ifn = ifn->ifen_next) {
+-		if ((ifn->ifen_ifnet.if_flags & IFF_UP) == 0)
+-			break;
+-	}
+-	if (ifn == NULL)
+-		ifn = ipxipattach();
+-	if (ifn == NULL) {
+-		RTFREE(ro.ro_rt);
+-		return (ENOBUFS);
+-	}
+-	ifn->ifen_route = ro;
+-	ifn->ifen_dst =  ip_dst->sin_addr;
+-	ifn->ifen_src = src->sin_addr;
+-
+-	/*
+-	 * now configure this as a point to point link
+-	 */
+-	ifr_ipxip.ifr_dstaddr = * (struct sockaddr *) ipx_dst;
+-	ipx_control((struct socket *)0, (int)SIOCSIFDSTADDR,
+-		(caddr_t)&ifr_ipxip, (struct ifnet *)ifn);
+-
+-	satoipx_addr(ifr_ipxip.ifr_addr).ipx_host =
+-	    TAILQ_FIRST(&ipx_ifaddr)->ia_addr.sipx_addr.ipx_host;
+-
+-	return (ipx_control((struct socket *)0, (int)SIOCSIFADDR,
+-			(caddr_t)&ifr_ipxip, (struct ifnet *)ifn));
+-}
+-
+-int
+-ipxip_free(ifp)
+-	struct ifnet *ifp;
+-{
+-	struct ifnet_en *ifn = (struct ifnet_en *)ifp;
+-	struct route *ro = & ifn->ifen_route;
+-
+-	if (ro->ro_rt) {
+-		RTFREE(ro->ro_rt);
+-		ro->ro_rt = NULL;
+-	}
+-	ifp->if_flags &= ~IFF_UP;
+-	return (0);
+-}
+-
+-void *
+-ipxip_ctlinput(cmd, sa, dummy)
+-	int cmd;
+-	struct sockaddr *sa;
+-	void *dummy;
+-{
+-	struct sockaddr_in *sin;
+-
+-	if ((unsigned)cmd >= PRC_NCMDS)
+-		return NULL;
+-	if (sa->sa_family != AF_INET && sa->sa_family != AF_IMPLINK)
+-		return NULL;
+-	sin = (struct sockaddr_in *)sa;
+-	if (sin->sin_addr.s_addr == INADDR_ANY)
+-		return NULL;
+-
+-	switch (cmd) {
+-
+-	case PRC_ROUTEDEAD:
+-	case PRC_REDIRECT_NET:
+-	case PRC_REDIRECT_HOST:
+-	case PRC_REDIRECT_TOSNET:
+-	case PRC_REDIRECT_TOSHOST:
+-		ipxip_rtchange(&sin->sin_addr);
+-		break;
+-	}
+-	return NULL;
+-}
+-
+-void
+-ipxip_rtchange(dst)
+-	struct in_addr *dst;
+-{
+-	struct ifnet_en *ifn;
+-
+-	for (ifn = ipxip_list; ifn; ifn = ifn->ifen_next) {
+-		if (ifn->ifen_dst.s_addr == dst->s_addr &&
+-		    ifn->ifen_route.ro_rt) {
+-			RTFREE(ifn->ifen_route.ro_rt);
+-			ifn->ifen_route.ro_rt = NULL;
+-		}
+-	}
+-}
+-#endif /* IPXIP */
+diff --git a/sys/netipx/ipx_ip.h b/sys/netipx/ipx_ip.h
+deleted file mode 100644
+index 7abf42a86ac..00000000000
+--- a/sys/netipx/ipx_ip.h
++++ /dev/null
+@@ -1,71 +0,0 @@
+-/*	$OpenBSD: ipx_ip.h,v 1.4 2003/06/02 23:28:16 millert Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipxip.h
+- *
+- * from FreeBSD Id: ipx_ip.h,v 1.5 1995/12/16 03:43:49 bde Exp
+- */
+-
+-#ifndef _NETIPX_IPXIP_H_
+-#define	_NETIPX_IPXIP_H_
+-
+-struct ifnet_en {
+-	struct ifnet ifen_ifnet;
+-	struct route ifen_route;
+-	struct in_addr ifen_src;
+-	struct in_addr ifen_dst;
+-	struct ifnet_en *ifen_next;
+-};
+-
+-#define LOMTU	(1024+512)	/* XXX this is TINY_LOMTU */
+-
+-#ifdef _KERNEL
+-
+-extern struct ifnet ipxipif;
+-extern struct ifnet_en *ipxip_list;
+-
+-void	ipxipprotoinit(void);
+-struct ifnet_en * ipxipattach(void);
+-void	*ipxip_ctlinput(int cmd, struct sockaddr *sa, void *arg);
+-int	ipxip_free(struct ifnet *ifp);
+-void	ipxip_input(struct mbuf *m, ... );
+-int	ipxipioctl(struct ifnet *ifp, u_long cmd, caddr_t data);
+-int	ipxipoutput(struct ifnet *ifp, struct mbuf *m,
+-			 struct sockaddr *dst, struct rtentry *rt);
+-int	ipxip_route(struct mbuf *m);
+-void	ipxip_rtchange(struct in_addr *dst);
+-void	ipxipstart(struct ifnet *ifp);
+-
+-#endif /* _KERNEL */
+-
+-#endif /* !_NETIPX_IPXIP_H_ */
+diff --git a/sys/netipx/ipx_outputfl.c b/sys/netipx/ipx_outputfl.c
+deleted file mode 100644
+index e6ca65ca22c..00000000000
+--- a/sys/netipx/ipx_outputfl.c
++++ /dev/null
+@@ -1,263 +0,0 @@
+-/*	$OpenBSD: ipx_outputfl.c,v 1.8 2006/03/05 21:48:57 miod Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx_outputfl.c
+- *
+- * from FreeBSD Id: ipx_outputfl.c,v 1.4 1996/03/11 15:13:52 davidg Exp
+- */
+-
+-#include <sys/param.h>
+-#include <sys/queue.h>
+-#include <sys/systm.h>
+-#include <sys/malloc.h>
+-#include <sys/mbuf.h>
+-#include <sys/errno.h>
+-#include <sys/socket.h>
+-#include <sys/socketvar.h>
+-
+-#include <net/if.h>
+-#include <net/route.h>
+-
+-#include <netipx/ipx.h>
+-#include <netipx/ipx_if.h>
+-#include <netipx/ipx_var.h>
+-
+-int ipx_copy_output = 0;
+-
+-int
+-ipx_outputfl(m0, ro, flags)
+-	struct mbuf *m0;
+-	struct route *ro;
+-	int flags;
+-{
+-	struct ipx *ipx = mtod(m0, struct ipx *);
+-	struct ifnet *ifp = NULL;
+-	int error = 0;
+-	struct sockaddr_ipx *dst;
+-	struct route ipxroute;
+-
+-	/*
+-	 * Route packet.
+-	 */
+-	if (ro == NULL) {
+-		ro = &ipxroute;
+-		bzero((caddr_t)ro, sizeof(*ro));
+-	}
+-	dst = (struct sockaddr_ipx *)&ro->ro_dst;
+-	if (ro->ro_rt == NULL) {
+-		dst->sipx_family = AF_IPX;
+-		dst->sipx_len = sizeof(*dst);
+-		dst->sipx_addr = ipx->ipx_dna;
+-		dst->sipx_addr.ipx_port = 0;
+-		/*
+-		 * If routing to interface only,
+-		 * short circuit routing lookup.
+-		 */
+-		if (flags & IPX_ROUTETOIF) {
+-			struct ipx_ifaddr *ia = ipx_iaonnetof(&ipx->ipx_dna);
+-
+-			if (ia == NULL) {
+-				ipxstat.ipxs_noroute++;
+-				error = ENETUNREACH;
+-				goto bad;
+-			}
+-			ifp = ia->ia_ifp;
+-			goto gotif;
+-		}
+-		rtalloc(ro);
+-	} else if ((ro->ro_rt->rt_flags & RTF_UP) == 0) {
+-		/*
+-		 * The old route has gone away; try for a new one.
+-		 */
+-		rtfree(ro->ro_rt);
+-		ro->ro_rt = NULL;
+-		rtalloc(ro);
+-	}
+-	if (ro->ro_rt == NULL || (ifp = ro->ro_rt->rt_ifp) == NULL) {
+-		ipxstat.ipxs_noroute++;
+-		error = ENETUNREACH;
+-		goto bad;
+-	}
+-	ro->ro_rt->rt_use++;
+-	if (ro->ro_rt->rt_flags & (RTF_GATEWAY|RTF_HOST))
+-		dst = (struct sockaddr_ipx *)ro->ro_rt->rt_gateway;
+-gotif:
+-	/*
+-	 * Look for multicast addresses and
+-	 * verify user is allowed to send
+-	 * such a packet.
+-	 */
+-	if (dst->sipx_addr.ipx_host.c_host[0] & 1) {
+-		if ((ifp->if_flags & IFF_BROADCAST) == 0) {
+-			error = EADDRNOTAVAIL;
+-			goto bad;
+-		}
+-		if ((flags & IPX_ALLOWBROADCAST) == 0) {
+-			error = EACCES;
+-			goto bad;
+-		}
+-		m0->m_flags |= M_BCAST;
+-	}
+-
+-	if (htons(ipx->ipx_len) <= ifp->if_mtu) {
+-		ipxstat.ipxs_localout++;
+-		if (ipx_copy_output) {
+-			ipx_watch_output(m0, ifp);
+-		}
+-		error = (*ifp->if_output)(ifp, m0, (struct sockaddr *)dst,
+-		    ro->ro_rt);
+-		goto done;
+-	} else {
+-		ipxstat.ipxs_mtutoosmall++;
+-		error = EMSGSIZE;
+-	}
+-bad:
+-	if (ipx_copy_output) {
+-		ipx_watch_output(m0, ifp);
+-	}
+-	m_freem(m0);
+-done:
+-	if (ro == &ipxroute && (flags & IPX_ROUTETOIF) == 0 && ro->ro_rt) {
+-		RTFREE(ro->ro_rt);
+-		ro->ro_rt = NULL;
+-	}
+-	return (error);
+-}
+-
+-/*
+- * This will broadcast the type 20 (Netbios) packet to all the interfaces
+- * that have ipx configured and isn't in the list yet.
+- */
+-int
+-ipx_output_type20(m)
+-	struct mbuf *m;
+-{
+-	struct ipx *ipx;
+-	union ipx_net *nbnet;
+-	struct ipx_ifaddr *ia, *tia = NULL;
+-	int error = 0;
+-	struct mbuf *m1;
+-	int i;
+-	struct ifnet *ifp;
+-	struct sockaddr_ipx dst;
+-
+-	/*
+-	 * We have to get to the 32 bytes after the ipx header also, so
+-	 * that we can fill in the network address of the receiving
+-	 * interface.
+-	 */
+-	if ((m->m_flags & M_EXT || m->m_len < (sizeof(struct ipx) + 32)) &&
+-	    (m = m_pullup(m, sizeof(struct ipx) + 32)) == NULL) {
+-		ipxstat.ipxs_toosmall++;
+-		return (0);
+-	}
+-	ipx = mtod(m, struct ipx *);
+-	nbnet = (union ipx_net *)(ipx + 1);
+-
+-	if (ipx->ipx_tc >= 8)
+-		goto bad;
+-	/*
+-	 * Now see if we have already seen this.
+-	 */
+-	TAILQ_FOREACH(ia, &ipx_ifaddr, ia_list)
+-		if(ia->ia_ifa.ifa_ifp == m->m_pkthdr.rcvif) {
+-			if(tia == NULL)
+-				tia = ia;
+-
+-			for (i = 0; i < ipx->ipx_tc; i++, nbnet++)
+-				if(ipx_neteqnn(ia->ia_addr.sipx_addr.ipx_net,
+-				    *nbnet))
+-					goto bad;
+-		}
+-	/*
+-	 * Don't route the packet if the interface where it come from
+-	 * does not have an IPX address.
+-	 */
+-	if(tia == NULL)
+-		goto bad;
+-
+-	/*
+-	 * Add our receiving interface to the list.
+-	 */
+-        nbnet = (union ipx_net *)(ipx + 1);
+-	nbnet += ipx->ipx_tc;
+-	*nbnet = tia->ia_addr.sipx_addr.ipx_net;
+-
+-	/*
+-	 * Increment the hop count.
+-	 */
+-	ipx->ipx_tc++;
+-	ipxstat.ipxs_forward++;
+-
+-	/*
+-	 * Send to all directly connected ifaces not in list and
+-	 * not to the one it came from.
+-	 */
+-	m->m_flags &= ~M_BCAST;
+-	bzero(&dst, sizeof(dst));
+-	dst.sipx_family = AF_IPX;
+-	dst.sipx_len = sizeof(dst);
+-	dst.sipx_addr.ipx_host = ipx_broadhost;
+-
+-	TAILQ_FOREACH(ia, &ipx_ifaddr, ia_list)
+-		if(ia->ia_ifa.ifa_ifp != m->m_pkthdr.rcvif) {
+-        		nbnet = (union ipx_net *)(ipx + 1);
+-			for (i = 0; i < ipx->ipx_tc; i++, nbnet++)
+-				if(ipx_neteqnn(ia->ia_addr.sipx_addr.ipx_net,
+-				    *nbnet))
+-					goto skip_this;
+-
+-			/*
+-			 * Insert the net address of the dest net and
+-			 * calculate the new checksum if needed.
+-			 */
+-			ifp = ia->ia_ifa.ifa_ifp;
+-			dst.sipx_addr.ipx_net = ia->ia_addr.sipx_addr.ipx_net;
+-			ipx->ipx_dna.ipx_net = dst.sipx_addr.ipx_net;
+-			m1 = m_copym(m, 0, M_COPYALL, M_DONTWAIT);
+-
+-			if(ipx->ipx_sum != 0xffff)
+-				ipx->ipx_sum =
+-				    ipx_cksum(m, ntohs(ipx->ipx_len));
+-			if(m1) {
+-				error = (*ifp->if_output)(ifp, m1,
+-					(struct sockaddr *)&dst, NULL);
+-				/* XXX ipxstat.ipxs_localout++; */
+-			}
+-skip_this: ;
+-		}
+-
+-bad:
+-	m_freem(m);
+-	return (error);
+-}
+diff --git a/sys/netipx/ipx_pcb.c b/sys/netipx/ipx_pcb.c
+deleted file mode 100644
+index c6eef6355f2..00000000000
+--- a/sys/netipx/ipx_pcb.c
++++ /dev/null
+@@ -1,402 +0,0 @@
+-/*	$OpenBSD: ipx_pcb.c,v 1.13 2006/05/18 21:27:25 miod Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx_pcb.c
+- *
+- * from FreeBSD Id: ipx_pcb.c,v 1.5 1996/03/11 15:13:53 davidg Exp
+- */
+-
+-#include <sys/param.h>
+-#include <sys/systm.h>
+-#include <sys/mbuf.h>
+-#include <sys/socket.h>
+-#include <sys/socketvar.h>
+-
+-#include <net/if.h>
+-#include <net/route.h>
+-
+-#include <netipx/ipx.h>
+-#include <netipx/ipx_if.h>
+-#include <netipx/ipx_pcb.h>
+-
+-struct	ipx_addr zeroipx_addr;
+-
+-#define	IPXPCBHASH(table, faddr, fport, laddr, lport) \
+-	&(table)->ipxpt_hashtbl[(ntohl((faddr)->ipx_net.l_net) + \
+-	ntohs((fport)) + ntohs((lport))) & (table->ipxpt_hash)]
+-
+-void
+-ipx_pcbinit(table, hashsize)
+-	struct ipxpcbtable *table;
+-	int hashsize;
+-{
+-	CIRCLEQ_INIT(&table->ipxpt_queue);
+-	table->ipxpt_hashtbl =
+-	    hashinit(hashsize, M_PCB, M_WAITOK, &table->ipxpt_hash);
+-	table->ipxpt_lport = 0;
+-}
+-
+-int
+-ipx_pcballoc(so, head)
+-	struct socket *so;
+-	struct ipxpcbtable *head;
+-{
+-	struct ipxpcb *ipxp;
+-	int s;
+-
+-	ipxp = malloc(sizeof(*ipxp), M_PCB, M_DONTWAIT);
+-	if (ipxp == NULL)
+-		return (ENOBUFS);
+-	bzero((caddr_t)ipxp, sizeof(*ipxp));
+-	ipxp->ipxp_socket = so;
+-	ipxp->ipxp_table = head;
+-	s = splnet();
+-	CIRCLEQ_INSERT_HEAD(&head->ipxpt_queue, ipxp, ipxp_queue);
+-	LIST_INSERT_HEAD(IPXPCBHASH(head, &ipxp->ipxp_faddr, ipxp->ipxp_fport,
+-	    &ipxp->ipxp_laddr, ipxp->ipxp_lport), ipxp, ipxp_hash);
+-	splx(s);
+-	so->so_pcb = (caddr_t)ipxp;
+-	return (0);
+-}
+-	
+-int
+-ipx_pcbbind(ipxp, nam)
+-	struct ipxpcb *ipxp;
+-	struct mbuf *nam;
+-{
+-	struct sockaddr_ipx *sipx;
+-	u_short lport = 0;
+-
+-	if (ipxp->ipxp_lport || !ipx_nullhost(ipxp->ipxp_laddr))
+-		return (EINVAL);
+-	if (nam == 0)
+-		goto noname;
+-	sipx = mtod(nam, struct sockaddr_ipx *);
+-	if (nam->m_len != sizeof(*sipx))
+-		return (EINVAL);
+-	if (!ipx_nullhost(sipx->sipx_addr)) {
+-		int tport = sipx->sipx_port;
+-
+-		sipx->sipx_port = 0;		/* yech... */
+-		if (ifa_ifwithaddr((struct sockaddr *)sipx) == 0)
+-			return (EADDRNOTAVAIL);
+-		sipx->sipx_port = tport;
+-	}
+-	lport = sipx->sipx_port;
+-	if (lport) {
+-		u_short aport = ntohs(lport);
+-
+-		if (aport < IPXPORT_RESERVED &&
+-		    (ipxp->ipxp_socket->so_state & SS_PRIV) == 0)
+-			return (EACCES);
+-		if (ipx_pcblookup(&zeroipx_addr, lport, 0))
+-			return (EADDRINUSE);
+-	}
+-	ipxp->ipxp_laddr = sipx->sipx_addr;
+-noname:
+-	if (lport == 0)
+-		do {
+-			if ((ipxcbtable.ipxpt_lport++ < IPXPORT_RESERVED) ||
+-			    (ipxcbtable.ipxpt_lport >= IPXPORT_WELLKNOWN))
+-				ipxcbtable.ipxpt_lport = IPXPORT_RESERVED;
+-			lport = htons(ipxcbtable.ipxpt_lport);
+-		} while (ipx_pcblookup(&zeroipx_addr, lport, 0));
+-	ipxp->ipxp_lport = lport;
+-	return (0);
+-}
+-
+-/*
+- * Connect from a socket to a specified address.
+- * Both address and port must be specified in argument sipx.
+- * If don't have a local address for this socket yet,
+- * then pick one.
+- */
+-int
+-ipx_pcbconnect(ipxp, nam)
+-	struct ipxpcb *ipxp;
+-	struct mbuf *nam;
+-{
+-	struct ipx_ifaddr *ia;
+-	struct sockaddr_ipx *sipx = mtod(nam, struct sockaddr_ipx *);
+-	struct ipx_addr *dst;
+-	struct route *ro;
+-	struct ifnet *ifp;
+-
+-	if (nam->m_len != sizeof(*sipx))
+-		return (EINVAL);
+-	if (sipx->sipx_family != AF_IPX) {
+-#ifdef	DEBUG
+-		printf("ipx_connect: af=%x\n", sipx->sipx_family);
+-#endif
+-		return (EAFNOSUPPORT);
+-	}
+-	if (sipx->sipx_port==0 || ipx_nullhost(sipx->sipx_addr))
+-		return (EADDRNOTAVAIL);
+-	/*
+-	 * If we haven't bound which network number to use as ours,
+-	 * we will use the number of the outgoing interface.
+-	 * This depends on having done a routing lookup, which
+-	 * we will probably have to do anyway, so we might
+-	 * as well do it now.  On the other hand if we are
+-	 * sending to multiple destinations we may have already
+-	 * done the lookup, so see if we can use the route
+-	 * from before.  In any case, we only
+-	 * chose a port number once, even if sending to multiple
+-	 * destinations.
+-	 */
+-	ro = &ipxp->ipxp_route;
+-	dst = &satoipx_addr(ro->ro_dst);
+-	if (ipxp->ipxp_socket->so_options & SO_DONTROUTE)
+-		goto flush;
+-	if (!ipx_neteq(ipxp->ipxp_lastdst, sipx->sipx_addr))
+-		goto flush;
+-	if (!ipx_hosteq(ipxp->ipxp_lastdst, sipx->sipx_addr)) {
+-		if (ro->ro_rt && ! (ro->ro_rt->rt_flags & RTF_HOST)) {
+-			/* can patch route to avoid rtalloc */
+-			*dst = sipx->sipx_addr;
+-		} else {
+-	flush:
+-			if (ro->ro_rt)
+-				RTFREE(ro->ro_rt);
+-			ro->ro_rt = (struct rtentry *)0;
+-			ipxp->ipxp_laddr.ipx_net = ipx_zeronet;
+-		}
+-	}/* else cached route is ok; do nothing */
+-	ipxp->ipxp_lastdst = sipx->sipx_addr;
+-	if ((ipxp->ipxp_socket->so_options & SO_DONTROUTE) == 0 && /*XXX*/
+-	    (ro->ro_rt == (struct rtentry *)0 ||
+-	     ro->ro_rt->rt_ifp == (struct ifnet *)0)) {
+-		    /* No route yet, so try to acquire one */
+-		    ro->ro_dst.sa_family = AF_IPX;
+-		    ro->ro_dst.sa_len = sizeof(ro->ro_dst);
+-		    *dst = sipx->sipx_addr;
+-		    dst->ipx_port = 0;
+-		    rtalloc(ro);
+-	}
+-	if (ipx_neteqnn(ipxp->ipxp_laddr.ipx_net, ipx_zeronet)) {
+-		/* 
+-		 * If route is known or can be allocated now,
+-		 * our src addr is taken from the i/f, else punt.
+-		 */
+-
+-		ia = (struct ipx_ifaddr *)0;
+-		/*
+-		 * If we found a route, use the address
+-		 * corresponding to the outgoing interface
+-		 */
+-		if (ro->ro_rt && (ifp = ro->ro_rt->rt_ifp))
+-			TAILQ_FOREACH(ia, &ipx_ifaddr, ia_list)
+-				if (ia->ia_ifp == ifp)
+-					break;
+-		if (ia == NULL) {
+-			u_short fport = sipx->sipx_addr.ipx_port;
+-			sipx->sipx_addr.ipx_port = 0;
+-			ia = (struct ipx_ifaddr *)
+-				ifa_ifwithdstaddr((struct sockaddr *)sipx);
+-			sipx->sipx_addr.ipx_port = fport;
+-			if (ia == NULL)
+-				ia = ipx_iaonnetof(&sipx->sipx_addr);
+-			if (ia == NULL)
+-				ia = TAILQ_FIRST(&ipx_ifaddr);
+-			if (ia == 0)
+-				return (EADDRNOTAVAIL);
+-		}
+-		ipxp->ipxp_laddr.ipx_net = satoipx_addr(ia->ia_addr).ipx_net;
+-	}
+-	if (ipx_pcblookup(&sipx->sipx_addr, ipxp->ipxp_lport, 0))
+-		return (EADDRINUSE);
+-	if (ipxp->ipxp_lport == 0)
+-		(void) ipx_pcbbind(ipxp, (struct mbuf *)0);
+-
+-	ipxp->ipxp_faddr = sipx->sipx_addr;
+-	/* Includes ipxp->ipxp_fport = sipx->sipx_port; */
+-	return (0);
+-}
+-
+-void
+-ipx_pcbdisconnect(ipxp)
+-	struct ipxpcb *ipxp;
+-{
+-
+-	ipxp->ipxp_faddr = zeroipx_addr;
+-	if (ipxp->ipxp_socket->so_state & SS_NOFDREF)
+-		ipx_pcbdetach(ipxp);
+-}
+-
+-void
+-ipx_pcbdetach(ipxp)
+-	struct ipxpcb *ipxp;
+-{
+-	struct socket *so = ipxp->ipxp_socket;
+-	int	s;
+-
+-	so->so_pcb = 0;
+-	sofree(so);
+-	if (ipxp->ipxp_route.ro_rt)
+-		rtfree(ipxp->ipxp_route.ro_rt);
+-	s = splnet();
+-	LIST_REMOVE(ipxp, ipxp_hash);
+-	CIRCLEQ_REMOVE(&ipxp->ipxp_table->ipxpt_queue, ipxp, ipxp_queue);
+-	splx(s);
+-	FREE(ipxp, M_PCB);
+-}
+-
+-void
+-ipx_setsockaddr(ipxp, nam)
+-	struct ipxpcb *ipxp;
+-	struct mbuf *nam;
+-{
+-	struct sockaddr_ipx *sipx = mtod(nam, struct sockaddr_ipx *);
+-	
+-	nam->m_len = sizeof(*sipx);
+-	sipx = mtod(nam, struct sockaddr_ipx *);
+-	bzero((caddr_t)sipx, sizeof(*sipx));
+-	sipx->sipx_len = sizeof(*sipx);
+-	sipx->sipx_family = AF_IPX;
+-	sipx->sipx_addr = ipxp->ipxp_laddr;
+-}
+-
+-void
+-ipx_setpeeraddr(ipxp, nam)
+-	struct ipxpcb *ipxp;
+-	struct mbuf *nam;
+-{
+-	struct sockaddr_ipx *sipx = mtod(nam, struct sockaddr_ipx *);
+-	
+-	nam->m_len = sizeof(*sipx);
+-	sipx = mtod(nam, struct sockaddr_ipx *);
+-	bzero((caddr_t)sipx, sizeof(*sipx));
+-	sipx->sipx_len = sizeof(*sipx);
+-	sipx->sipx_family = AF_IPX;
+-	sipx->sipx_addr = ipxp->ipxp_faddr;
+-}
+-
+-/*
+- * Pass some notification to all connections of a protocol
+- * associated with address dst.  Call the
+- * protocol specific routine to handle each connection.
+- * Also pass an extra parameter via the ipxpcb. (which may in fact
+- * be a parameter list!)
+- */
+-void
+-ipx_pcbnotify(dst, errno, notify, param)
+-	struct ipx_addr *dst;
+-	int errno;
+-	void (*notify)(struct ipxpcb *);
+-	long param;
+-{
+-	struct ipxpcb *ipxp, *oinp;
+-	int s = splnet();
+-
+-	for (ipxp = CIRCLEQ_FIRST(&ipxcbtable.ipxpt_queue);
+-	    ipxp != CIRCLEQ_END(&ipxcbtable.ipxpt_queue);) {
+-		if (!ipx_hosteq(*dst,ipxp->ipxp_faddr)) {
+-	next:
+-			ipxp = CIRCLEQ_NEXT(ipxp, ipxp_queue);
+-			continue;
+-		}
+-		if (ipxp->ipxp_socket == 0)
+-			goto next;
+-		if (errno) 
+-			ipxp->ipxp_socket->so_error = errno;
+-		oinp = ipxp;
+-		ipxp = CIRCLEQ_NEXT(ipxp, ipxp_queue);
+-		oinp->ipxp_notify_param = param;
+-		(*notify)(oinp);
+-	}
+-	splx(s);
+-}
+-
+-#ifdef notdef
+-/*
+- * After a routing change, flush old routing
+- * and allocate a (hopefully) better one.
+- */
+-ipx_rtchange(ipxp)
+-	struct ipxpcb *ipxp;
+-{
+-	if (ipxp->ipxp_route.ro_rt) {
+-		rtfree(ipxp->ipxp_route.ro_rt);
+-		ipxp->ipxp_route.ro_rt = 0;
+-		/*
+-		 * A new route can be allocated the next time
+-		 * output is attempted.
+-		 */
+-	}
+-	/* SHOULD NOTIFY HIGHER-LEVEL PROTOCOLS */
+-}
+-#endif
+-
+-struct ipxpcb *
+-ipx_pcblookup(faddr, lport, wildp)
+-	struct ipx_addr *faddr;
+-	u_short lport;
+-	int wildp;
+-{
+-	struct ipxpcb *ipxp, *match = 0;
+-	int matchwild = 3, wildcard;
+-	u_short fport;
+-
+-	fport = faddr->ipx_port;
+-	CIRCLEQ_FOREACH(ipxp, &ipxcbtable.ipxpt_queue, ipxp_queue) {
+-		if (ipxp->ipxp_lport != lport)
+-			continue;
+-		wildcard = 0;
+-		if (ipx_nullhost(ipxp->ipxp_faddr)) {
+-			if (!ipx_nullhost(*faddr))
+-				wildcard++;
+-		} else {
+-			if (ipx_nullhost(*faddr))
+-				wildcard++;
+-			else {
+-				if (!ipx_hosteq(ipxp->ipxp_faddr, *faddr))
+-					continue;
+-				if (ipxp->ipxp_fport != fport) {
+-					if (ipxp->ipxp_fport != 0)
+-						continue;
+-					else
+-						wildcard++;
+-				}
+-			}
+-		}
+-		if (wildcard && wildp==0)
+-			continue;
+-		if (wildcard < matchwild) {
+-			match = ipxp;
+-			matchwild = wildcard;
+-			if (wildcard == 0)
+-				break;
+-		}
+-	}
+-	return (match);
+-}
+diff --git a/sys/netipx/ipx_pcb.h b/sys/netipx/ipx_pcb.h
+deleted file mode 100644
+index 46c9ce4984f..00000000000
+--- a/sys/netipx/ipx_pcb.h
++++ /dev/null
+@@ -1,103 +0,0 @@
+-/*	$OpenBSD: ipx_pcb.h,v 1.6 2003/06/02 23:28:16 millert Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx_pcb.h
+- *
+- * from FreeBSD Id: ipx_pcb.h,v 1.5 1995/11/24 12:25:10 bde Exp
+- */
+-
+-#ifndef _NETIPX_IPX_PCB_H_
+-#define	_NETIPX_IPX_PCB_H_
+-
+-/*
+- * IPX protocol interface control block.
+- */
+-struct ipxpcb {
+-	LIST_ENTRY(ipxpcb)	ipxp_hash;
+-	CIRCLEQ_ENTRY(ipxpcb)	ipxp_queue;
+-	struct	ipxpcbtable	*ipxp_table;	/* back pointer to the table */
+-	struct	socket		*ipxp_socket;	/* back pointer to socket */
+-	struct	ipx_addr	ipxp_faddr;	/* destination address */
+-	struct	ipx_addr	ipxp_laddr;	/* socket's address */
+-#define ipxp_lport ipxp_laddr.ipx_port
+-#define ipxp_fport ipxp_faddr.ipx_port
+-	caddr_t	ipxp_ppcb;		/* protocol specific stuff */
+-	struct	route ipxp_route;	/* routing information */
+-	struct	ipx_addr ipxp_lastdst;	/* validate cached route for dg socks*/
+-	u_long	ipxp_notify_param;	/* extra info passed via ipx_pcbnotify*/
+-	u_short	ipxp_flags;
+-	u_char	ipxp_dpt;		/* default packet type for ipx_output */
+-	u_char	ipxp_rpt;		/* last received packet type by ipx_input() */
+-};
+-
+-struct ipxpcbtable {
+-	CIRCLEQ_HEAD(, ipxpcb)	ipxpt_queue;
+-	LIST_HEAD(ipxppcbhead, ipxpcb) *ipxpt_hashtbl;
+-	u_long		ipxpt_hash;
+-	u_int16_t	ipxpt_lport;
+-};
+-
+-/* possible flags */
+-
+-#define IPXP_IN_ABORT	0x1	/* calling abort through socket */
+-#define IPXP_RAWIN	0x2	/* show headers on input */
+-#define IPXP_RAWOUT	0x4	/* show header on output */
+-#define IPXP_ALL_PACKETS 0x8	/* Turn off higher proto processing */
+-
+-#define	IPX_WILDCARD	1
+-
+-#define	sotoipxpcb(so)		((struct ipxpcb *)((so)->so_pcb))
+-
+-/*
+- * Nominal space allocated to a IPX socket.
+- */
+-#define	IPXSNDQ		16384
+-#define	IPXRCVQ		40960
+-
+-#ifdef _KERNEL
+-extern struct ipxpcbtable ipxcbtable, ipxrawcbtable;	/* head of list */
+-
+-void	ipx_pcbinit(struct ipxpcbtable *, int);
+-int	ipx_pcballoc(struct socket *so, struct ipxpcbtable *head);
+-int	ipx_pcbbind(struct ipxpcb *ipxp, struct mbuf *nam);
+-int	ipx_pcbconnect(struct ipxpcb *ipxp, struct mbuf *nam);
+-void	ipx_pcbdetach(struct ipxpcb *ipxp);
+-void	ipx_pcbdisconnect(struct ipxpcb *ipxp);
+-struct ipxpcb *ipx_pcblookup(struct ipx_addr *faddr, int lport, int wildp);
+-void	ipx_pcbnotify(struct ipx_addr *dst, int errno,
+-	    void (*notify)(struct ipxpcb *), long param);
+-void	ipx_setpeeraddr(struct ipxpcb *ipxp, struct mbuf *nam);
+-void	ipx_setsockaddr(struct ipxpcb *ipxp, struct mbuf *nam);
+-#endif
+-
+-#endif /* !_NETIPX_IPX_PCB_H_ */
+diff --git a/sys/netipx/ipx_proto.c b/sys/netipx/ipx_proto.c
+deleted file mode 100644
+index 97d2af16ff0..00000000000
+--- a/sys/netipx/ipx_proto.c
++++ /dev/null
+@@ -1,94 +0,0 @@
+-/*	$OpenBSD: ipx_proto.c,v 1.6 2003/06/02 23:28:16 millert Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx_proto.c
+- *
+- * from FreeBSD Id: ipx_proto.c,v 1.4 1996/01/05 20:47:05 wollman Exp
+- */
+-
+-#include <sys/param.h>
+-#include <sys/socket.h>
+-#include <sys/protosw.h>
+-#include <sys/domain.h>
+-#include <sys/kernel.h>
+-#include <sys/mbuf.h>
+-
+-#include <net/radix.h>
+-
+-#include <netipx/ipx.h>
+-#include <netipx/spx.h>
+-
+-/*
+- * IPX protocol family: IPX, ERR, PXP, SPX, ROUTE.
+- */
+-
+-struct protosw ipxsw[] = {
+-{ 0,		&ipxdomain,	0,		0,
+-  0,		ipx_output,	0,		0,
+-  0,
+-  ipx_init,	0,		0,		0,	ipx_sysctl
+-},
+-{ SOCK_DGRAM,	&ipxdomain,	0,		PR_ATOMIC|PR_ADDR,
+-  0,		0,		ipx_ctlinput,	ipx_ctloutput,
+-  ipx_usrreq,
+-  0,		0,		0,		0,	ipx_sysctl
+-},
+-{ SOCK_STREAM,	&ipxdomain,	IPXPROTO_SPX,	PR_CONNREQUIRED|PR_WANTRCVD|PR_ABRTACPTDIS,
+-  spx_input,	0,		spx_ctlinput,	spx_ctloutput,
+-  spx_usrreq,
+-  spx_init,	spx_fasttimo,	spx_slowtimo,	0,	spx_sysctl
+-},
+-{ SOCK_SEQPACKET,&ipxdomain,	IPXPROTO_SPX,	PR_CONNREQUIRED|PR_WANTRCVD|PR_ATOMIC|PR_ABRTACPTDIS,
+-  spx_input,	0,		spx_ctlinput,	spx_ctloutput,
+-  spx_usrreq_sp,
+-  0,		0,		0,		0,	spx_sysctl
+-},
+-{ SOCK_RAW,	&ipxdomain,	IPXPROTO_RAW,	PR_ATOMIC|PR_ADDR,
+-  ipx_input,	ipx_output,	0,		ipx_ctloutput,
+-  ipx_raw_usrreq,
+-  0,		0,		0,		0,	ipx_sysctl
+-},
+-#ifdef IPTUNNEL
+-{ SOCK_RAW,	&ipxdomain,	IPPROTO_IPX,	PR_ATOMIC|PR_ADDR,
+-  iptun_input,	rip_output,	iptun_ctlinput,	0,
+-  rip_usrreq,
+-  0,		0,		0,		0,	ipx_sysctl,
+-},
+-#endif
+-};
+-
+-struct domain ipxdomain =
+-    { AF_IPX, "Internetwork Packet Exchange", 0, 0, 0, 
+-      ipxsw, &ipxsw[sizeof(ipxsw)/sizeof(ipxsw[0])], 0,
+-      rn_inithead, 16, sizeof(struct sockaddr_ipx)};
+-
+diff --git a/sys/netipx/ipx_tun.c b/sys/netipx/ipx_tun.c
+deleted file mode 100644
+index fac32574a4d..00000000000
+--- a/sys/netipx/ipx_tun.c
++++ /dev/null
+@@ -1,70 +0,0 @@
+-/*	$OpenBSD: ipx_tun.c,v 1.3 2003/06/02 23:28:16 millert Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Modifications Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx_tun.c
+- *
+- * from FreeBSD Id: ipx_tun.c,v 1.4 1996/03/11 15:13:55 davidg Exp
+- */
+-
+-/*
+- * Software interface driver for encapsulating IP in IPX.
+- */
+-
+-#ifdef IPTUNNEL
+-#include <sys/param.h>
+-#include <sys/queue.h>
+-#include <sys/systm.h>
+-#include <sys/malloc.h>
+-#include <sys/mbuf.h>
+-#include <sys/socket.h>
+-#include <sys/socketvar.h>
+-#include <sys/errno.h>
+-#include <sys/ioctl.h>
+-#include <sys/protosw.h>
+-
+-#include <net/if.h>
+-#include <net/netisr.h>
+-#include <net/route.h>
+-
+-#include <netinet/in.h>
+-#include <netinet/in_systm.h>
+-#include <netinet/in_var.h>
+-#include <netinet/ip.h>
+-#include <netinet/ip_var.h>
+-
+-#include <machine/mtpr.h>
+-
+-#include <netipx/ipx.h>
+-#include <netipx/ipx_if.h>
+-
+-#endif
+diff --git a/sys/netipx/ipx_usrreq.c b/sys/netipx/ipx_usrreq.c
+deleted file mode 100644
+index 1bfce2dc3d3..00000000000
+--- a/sys/netipx/ipx_usrreq.c
++++ /dev/null
+@@ -1,608 +0,0 @@
+-/*	$OpenBSD: ipx_usrreq.c,v 1.15 2006/03/05 21:48:57 miod Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx_usrreq.c
+- *
+- * from FreeBSD Id: ipx_usrreq.c,v 1.5 1996/03/11 15:13:57 davidg Exp
+- */
+-
+-#include <sys/param.h>
+-#include <sys/queue.h>
+-#include <sys/systm.h>
+-#include <sys/kernel.h>
+-#include <sys/malloc.h>
+-#include <sys/mbuf.h>
+-#include <sys/protosw.h>
+-#include <sys/socket.h>
+-#include <sys/socketvar.h>
+-#include <sys/errno.h>
+-#include <sys/stat.h>
+-#include <sys/proc.h>
+-#include <uvm/uvm_extern.h>
+-#include <sys/sysctl.h>
+-
+-#include <net/if.h>
+-#include <net/route.h>
+-
+-#include <netinet/in.h>
+-
+-#include <netipx/ipx.h>
+-#include <netipx/ipx_pcb.h>
+-#include <netipx/ipx_if.h>
+-#include <netipx/ipx_var.h>
+-#include <netipx/ipx_ip.h>
+-
+-#include <sys/stdarg.h>
+-
+-/*
+- * IPX protocol implementation.
+- */
+-
+-int noipxRoute;
+-
+-int ipx_sendspace = IPXSNDQ;
+-int ipx_recvspace = IPXRCVQ;
+-
+-/*
+- *  This may also be called for raw listeners.
+- */
+-void
+-ipx_input(struct mbuf *m, ...)
+-{
+-	struct ipxpcb *ipxp;
+-	struct ipx *ipx = mtod(m, struct ipx *);
+-	struct ifnet *ifp = m->m_pkthdr.rcvif;
+-	struct sockaddr_ipx ipx_ipx;
+-	va_list	ap;
+-
+-	va_start(ap, m);
+-	ipxp = va_arg(ap, struct ipxpcb *);
+-	va_end(ap);
+-
+-	if (ipxp == NULL)
+-		panic("No ipxpcb");
+-	/*
+-	 * Construct sockaddr format source address.
+-	 * Stuff source address and datagram in user buffer.
+-	 */
+-	bzero(&ipx_ipx, sizeof(ipx_ipx));
+-	ipx_ipx.sipx_len = sizeof(ipx_ipx);
+-	ipx_ipx.sipx_family = AF_IPX;
+-	ipx_ipx.sipx_addr = ipx->ipx_sna;
+-	if (ipx_neteqnn(ipx->ipx_sna.ipx_net, ipx_zeronet) && ifp) {
+-		struct ifaddr *ifa;
+-
+-		TAILQ_FOREACH(ifa, &ifp->if_addrlist, ifa_list) {
+-			if (ifa->ifa_addr->sa_family == AF_IPX) {
+-				ipx_ipx.sipx_addr.ipx_net =
+-					IA_SIPX(ifa)->sipx_addr.ipx_net;
+-				break;
+-			}
+-		}
+-	}
+-	ipxp->ipxp_rpt = ipx->ipx_pt;
+-	if ( ! (ipxp->ipxp_flags & IPXP_RAWIN) ) {
+-		m->m_len -= sizeof(struct ipx);
+-		m->m_pkthdr.len -= sizeof(struct ipx);
+-		m->m_data += sizeof(struct ipx);
+-	}
+-	if (sbappendaddr(&ipxp->ipxp_socket->so_rcv, sipxtosa(&ipx_ipx), m,
+-	    (struct mbuf *)0) == 0)
+-		goto bad;
+-	sorwakeup(ipxp->ipxp_socket);
+-	return;
+-bad:
+-	m_freem(m);
+-}
+-
+-void
+-ipx_abort(ipxp)
+-	struct ipxpcb *ipxp;
+-{
+-	struct socket *so = ipxp->ipxp_socket;
+-
+-	ipx_pcbdisconnect(ipxp);
+-	soisdisconnected(so);
+-}
+-/*
+- * Drop connection, reporting
+- * the specified error.
+- */
+-/* struct ipxpcb * DELETE THIS */
+-void
+-ipx_drop(ipxp, errno)
+-	struct ipxpcb *ipxp;
+-	int errno;
+-{
+-	struct socket *so = ipxp->ipxp_socket;
+-
+-	/*
+-	 * someday, in the xerox world
+-	 * we will generate error protocol packets
+-	 * announcing that the socket has gone away.
+-	 */
+-	/*if (TCPS_HAVERCVDSYN(tp->t_state)) {
+-		tp->t_state = TCPS_CLOSED;
+-		(void) tcp_output(tp);
+-	}*/
+-	so->so_error = errno;
+-	ipx_pcbdisconnect(ipxp);
+-	soisdisconnected(so);
+-}
+-
+-int
+-ipx_output(struct mbuf *m0, ...)
+-{
+-	struct mbuf *m;
+-	struct ipx *ipx;
+-	struct ipxpcb *ipxp;
+-	struct socket *so;
+-	int len = 0;
+-	struct route *ro;
+-	struct mbuf *mprev = NULL;
+-	va_list	ap;
+-
+-	va_start(ap, m0);
+-	ipxp = va_arg(ap, struct ipxpcb *);
+-	va_end(ap);
+-
+-	/*
+-	 * Calculate data length.
+-	 */
+-	for (m = m0; m; m = m->m_next) {
+-		mprev = m;
+-		len += m->m_len;
+-	}
+-	/*
+-	 * Make sure packet is actually of even length.
+-	 */
+-	
+-	if (len & 1) {
+-		m = mprev;
+-		if ((m->m_flags & M_EXT) == 0 &&
+-			(m->m_len + m->m_data < &m->m_dat[MLEN])) {
+-			m->m_len++;
+-		} else {
+-			struct mbuf *m1 = m_get(M_DONTWAIT, MT_DATA);
+-
+-			if (m1 == 0) {
+-				m_freem(m0);
+-				return (ENOBUFS);
+-			}
+-			m1->m_len = 1;
+-			* mtod(m1, char *) = 0;
+-			m->m_next = m1;
+-		}
+-		m0->m_pkthdr.len++;
+-	}
+-
+-	/*
+-	 * Fill in mbuf with extended IPX header
+-	 * and addresses and length put into network format.
+-	 */
+-	m = m0;
+-	if (ipxp->ipxp_flags & IPXP_RAWOUT) {
+-		ipx = mtod(m, struct ipx *);
+-	} else {
+-		M_PREPEND(m, sizeof(struct ipx), M_DONTWAIT);
+-		if (m == 0)
+-			return (ENOBUFS);
+-		ipx = mtod(m, struct ipx *);
+-		ipx->ipx_tc = 0;
+-		ipx->ipx_pt = ipxp->ipxp_dpt;
+-		ipx->ipx_sna = ipxp->ipxp_laddr;
+-		ipx->ipx_dna = ipxp->ipxp_faddr;
+-		len += sizeof(struct ipx);
+-	}
+-
+-	ipx->ipx_len = htons((u_short)len);
+-
+-	if (ipxcksum) {
+-		ipx->ipx_sum = 0;
+-		len = ((len - 1) | 1) + 1;
+-		ipx->ipx_sum = ipx_cksum(m, len);
+-	} else
+-		ipx->ipx_sum = 0xffff;
+-
+-	/*
+-	 * Output datagram.
+-	 */
+-	so = ipxp->ipxp_socket;
+-	if (so->so_options & SO_DONTROUTE)
+-		return (ipx_outputfl(m, (struct route *)0,
+-		    (so->so_options & SO_BROADCAST) | IPX_ROUTETOIF));
+-	/*
+-	 * Use cached route for previous datagram if
+-	 * possible.  If the previous net was the same
+-	 * and the interface was a broadcast medium, or
+-	 * if the previous destination was identical,
+-	 * then we are ok.
+-	 *
+-	 * NB: We don't handle broadcasts because that
+-	 *     would require 3 subroutine calls.
+-	 */
+-	ro = &ipxp->ipxp_route;
+-	if (noipxRoute)
+-		ro = 0;
+-	return (ipx_outputfl(m, ro, so->so_options & SO_BROADCAST));
+-}
+-
+-/* ARGSUSED */
+-int
+-ipx_ctloutput(req, so, level, name, value)
+-	int req, level;
+-	struct socket *so;
+-	int name;
+-	struct mbuf **value;
+-{
+-	struct mbuf *m;
+-	struct ipxpcb *ipxp = sotoipxpcb(so);
+-	int mask, error = 0;
+-	/*extern long ipx_pexseq;*/ /*XXX*//*JRE*/
+-
+-	if (ipxp == NULL)
+-		return (EINVAL);
+-
+-	switch (req) {
+-
+-	case PRCO_GETOPT:
+-		if (value==NULL)
+-			return (EINVAL);
+-		m = m_get(M_DONTWAIT, MT_DATA);
+-		if (m==NULL)
+-			return (ENOBUFS);
+-		switch (name) {
+-
+-		case SO_ALL_PACKETS:
+-			mask = IPXP_ALL_PACKETS;
+-			goto get_flags;
+-
+-		case SO_HEADERS_ON_INPUT:
+-			mask = IPXP_RAWIN;
+-			goto get_flags;
+-			
+-		case SO_HEADERS_ON_OUTPUT:
+-			mask = IPXP_RAWOUT;
+-		get_flags:
+-			m->m_len = sizeof(short);
+-			*mtod(m, short *) = ipxp->ipxp_flags & mask;
+-			break;
+-
+-		case SO_DEFAULT_HEADERS:
+-			m->m_len = sizeof(struct ipx);
+-			{
+-				struct ipx *ipx = mtod(m, struct ipx *);
+-				ipx->ipx_len = 0;
+-				ipx->ipx_sum = 0;
+-				ipx->ipx_tc = 0;
+-				ipx->ipx_pt = ipxp->ipxp_dpt;
+-				ipx->ipx_dna = ipxp->ipxp_faddr;
+-				ipx->ipx_sna = ipxp->ipxp_laddr;
+-			}
+-			break;
+-
+-		case SO_SEQNO:
+-			m->m_len = sizeof(long);
+-			*mtod(m, long *) = ipx_pexseq++;
+-			break;
+-
+-		default:
+-			error = EINVAL;
+-		}
+-		*value = m;
+-		break;
+-
+-	case PRCO_SETOPT:
+-		switch (name) {
+-			int *ok;
+-
+-		case SO_ALL_PACKETS:
+-			mask = IPXP_ALL_PACKETS;
+-			goto set_head;
+-
+-		case SO_HEADERS_ON_INPUT:
+-			mask = IPXP_RAWIN;
+-			goto set_head;
+-
+-		case SO_HEADERS_ON_OUTPUT:
+-			mask = IPXP_RAWOUT;
+-		set_head:
+-			if (value && *value) {
+-				ok = mtod(*value, int *);
+-				if (*ok)
+-					ipxp->ipxp_flags |= mask;
+-				else
+-					ipxp->ipxp_flags &= ~mask;
+-			} else error = EINVAL;
+-			break;
+-
+-		case SO_DEFAULT_HEADERS:
+-			{
+-				struct ipx *ipx
+-				    = mtod(*value, struct ipx *);
+-				ipxp->ipxp_dpt = ipx->ipx_pt;
+-			}
+-			break;
+-#ifdef IPXIP
+-		case SO_IPXIP_ROUTE:
+-			error = ipxip_route(*value);
+-			break;
+-#endif /* IPXIP */
+-#ifdef IPXTUNNEL
+-		case SO_IPXTUNNEL_ROUTE:
+-			error = ipxtun_route(*value);
+-			break;
+-#endif
+-		default:
+-			error = EINVAL;
+-		}
+-		if (value && *value)
+-			m_freem(*value);
+-		break;
+-	}
+-	return (error);
+-}
+-
+-/*ARGSUSED*/
+-int
+-ipx_usrreq(so, req, m, nam, control)
+-	struct socket *so;
+-	int req;
+-	struct mbuf *m, *nam, *control;
+-{
+-	struct ipxpcb *ipxp = sotoipxpcb(so);
+-	int error = 0;
+-
+-	if (req == PRU_CONTROL)
+-                return (ipx_control(so, (long)m, (caddr_t)nam,
+-			(struct ifnet *)control));
+-	if (control && control->m_len) {
+-		error = EINVAL;
+-		goto release;
+-	}
+-	if (ipxp == NULL && req != PRU_ATTACH) {
+-		error = EINVAL;
+-		goto release;
+-	}
+-	switch (req) {
+-
+-	case PRU_ATTACH:
+-		if (ipxp != NULL) {
+-			error = EINVAL;
+-			break;
+-		}
+-		error = ipx_pcballoc(so, &ipxcbtable);
+-		if (error)
+-			break;
+-		error = soreserve(so, ipx_sendspace, ipx_recvspace);
+-		if (error)
+-			break;
+-		break;
+-
+-	case PRU_DETACH:
+-		if (ipxp == NULL) {
+-			error = ENOTCONN;
+-			break;
+-		}
+-		ipx_pcbdetach(ipxp);
+-		break;
+-
+-	case PRU_BIND:
+-		error = ipx_pcbbind(ipxp, nam);
+-		break;
+-
+-	case PRU_LISTEN:
+-		error = EOPNOTSUPP;
+-		break;
+-
+-	case PRU_CONNECT:
+-		if (!ipx_nullhost(ipxp->ipxp_faddr)) {
+-			error = EISCONN;
+-			break;
+-		}
+-		error = ipx_pcbconnect(ipxp, nam);
+-		if (error == 0)
+-			soisconnected(so);
+-		break;
+-
+-	case PRU_CONNECT2:
+-		error = EOPNOTSUPP;
+-		break;
+-
+-	case PRU_ACCEPT:
+-		error = EOPNOTSUPP;
+-		break;
+-
+-	case PRU_DISCONNECT:
+-		if (ipx_nullhost(ipxp->ipxp_faddr)) {
+-			error = ENOTCONN;
+-			break;
+-		}
+-		ipx_pcbdisconnect(ipxp);
+-		soisdisconnected(so);
+-		break;
+-
+-	case PRU_SHUTDOWN:
+-		socantsendmore(so);
+-		break;
+-
+-	case PRU_SEND:
+-	{
+-		struct ipx_addr laddr;
+-		int s = 0;
+-
+-		if (nam) {
+-			laddr = ipxp->ipxp_laddr;
+-			if (!ipx_nullhost(ipxp->ipxp_faddr)) {
+-				error = EISCONN;
+-				break;
+-			}
+-			/*
+-			 * Must block input while temporarily connected.
+-			 */
+-			s = splnet();
+-			error = ipx_pcbconnect(ipxp, nam);
+-			if (error) {
+-				splx(s);
+-				break;
+-			}
+-		} else {
+-			if (ipx_nullhost(ipxp->ipxp_faddr)) {
+-				error = ENOTCONN;
+-				break;
+-			}
+-		}
+-		error = ipx_output(m, ipxp);
+-		m = NULL;
+-		if (nam) {
+-			ipx_pcbdisconnect(ipxp);
+-			splx(s);
+-			ipxp->ipxp_laddr.ipx_host = laddr.ipx_host;
+-			ipxp->ipxp_laddr.ipx_port = laddr.ipx_port;
+-		}
+-	}
+-		break;
+-
+-	case PRU_ABORT:
+-		ipx_pcbdetach(ipxp);
+-		sofree(so);
+-		soisdisconnected(so);
+-		break;
+-
+-	case PRU_SOCKADDR:
+-		ipx_setsockaddr(ipxp, nam);
+-		break;
+-
+-	case PRU_PEERADDR:
+-		ipx_setpeeraddr(ipxp, nam);
+-		break;
+-
+-	case PRU_SENSE:
+-		/*
+-		 * stat: don't bother with a blocksize.
+-		 */
+-		return (0);
+-
+-	case PRU_SENDOOB:
+-	case PRU_FASTTIMO:
+-	case PRU_SLOWTIMO:
+-	case PRU_PROTORCV:
+-	case PRU_PROTOSEND:
+-		error =  EOPNOTSUPP;
+-		break;
+-
+-	case PRU_CONTROL:
+-	case PRU_RCVD:
+-	case PRU_RCVOOB:
+-		return (EOPNOTSUPP);	/* do not free mbuf's */
+-
+-	default:
+-		panic("ipx_usrreq");
+-	}
+-release:
+-	if (control != NULL)
+-		m_freem(control);
+-	if (m != NULL)
+-		m_freem(m);
+-	return (error);
+-}
+-
+-/*ARGSUSED*/
+-int
+-ipx_raw_usrreq(so, req, m, nam, control)
+-	struct socket *so;
+-	int req;
+-	struct mbuf *m, *nam, *control;
+-{
+-	int error = 0;
+-	struct ipxpcb *ipxp = sotoipxpcb(so);
+-	/*extern struct ipxpcb ipxrawpcb;*//*XXX*//*JRE*/
+-
+-	switch (req) {
+-
+-	case PRU_ATTACH:
+-
+-		if (!(so->so_state & SS_PRIV) || (ipxp != NULL)) {
+-			error = EINVAL;
+-			break;
+-		}
+-		error = ipx_pcballoc(so, &ipxrawcbtable);
+-		if (error)
+-			break;
+-		error = soreserve(so, ipx_sendspace, ipx_recvspace);
+-		if (error)
+-			break;
+-		ipxp = sotoipxpcb(so);
+-		ipxp->ipxp_faddr.ipx_host = ipx_broadhost;
+-		ipxp->ipxp_flags = IPXP_RAWIN | IPXP_RAWOUT;
+-		break;
+-	default:
+-		error = ipx_usrreq(so, req, m, nam, control);
+-	}
+-	return (error);
+-}
+-
+-int
+-ipx_sysctl(name, namelen, oldp, oldlenp, newp, newlen)
+-	int *name;
+-	u_int namelen;
+-	void *oldp;
+-	size_t *oldlenp;
+-	void *newp;
+-	size_t newlen;
+-{
+-	/* All sysctl names at this level are terminal. */
+-	if (namelen != 1)
+-		return (ENOTDIR);
+-
+-	switch (name[0]) {
+-	case IPXCTL_CHECKSUM:
+-		return (sysctl_int(oldp, oldlenp, newp, newlen,
+-		    &ipxcksum));
+-	case IPXCTL_FORWARDING:	
+-		return (sysctl_int(oldp, oldlenp, newp, newlen,
+-		    &ipxforwarding));
+-	case IPXCTL_NETBIOS:
+-		return (sysctl_int(oldp, oldlenp, newp, newlen,
+-		    &ipxnetbios));
+-	case IPXCTL_RECVSPACE:
+-		return (sysctl_int(oldp, oldlenp, newp, newlen,
+-		    &ipx_recvspace));
+-	case IPXCTL_SENDSPACE:
+-		return (sysctl_int(oldp, oldlenp, newp, newlen,
+-		    &ipx_sendspace));
+-	default:
+-		return (ENOPROTOOPT);
+-	}
+-	/* NOTREACHED */
+-}
+diff --git a/sys/netipx/ipx_var.h b/sys/netipx/ipx_var.h
+deleted file mode 100644
+index 50dea808076..00000000000
+--- a/sys/netipx/ipx_var.h
++++ /dev/null
+@@ -1,83 +0,0 @@
+-/*	$OpenBSD: ipx_var.h,v 1.6 2003/06/02 23:28:16 millert Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)ipx_var.h
+- *
+- * from FreeBSD Id: ipx_var.h,v 1.3 1995/11/04 09:03:27 julian Exp
+- */
+-
+-#ifndef _NETIPX_IPX_VAR_H_
+-#define _NETIPX_IPX_VAR_H_
+-
+-/*
+- * IPX Kernel Structures and Variables
+- */
+-struct	ipxstat {
+-	u_long  ipxs_total;             /* total packets received */
+-	u_long  ipxs_badsum;            /* checksum bad */
+-	u_long  ipxs_tooshort;          /* packet too short */
+-	u_long  ipxs_toosmall;          /* not enough data */
+-	u_long  ipxs_forward;           /* packets forwarded */
+-	u_long  ipxs_cantforward;       /* packets rcvd for unreachable dest */
+-	u_long  ipxs_delivered;         /* datagrams delivered to upper level*/
+-	u_long  ipxs_localout;          /* total ipx packets generated here */
+-	u_long  ipxs_odropped;          /* lost packets due to nobufs, etc. */
+-	u_long  ipxs_noroute;           /* packets discarded due to no route */
+-	u_long  ipxs_mtutoosmall;       /* the interface mtu is too small */
+-};
+-
+-/*
+- * Names for IPX sysctl objects.
+- */
+-
+-#define	IPXCTL_CHECKSUM		1
+-#define IPXCTL_FORWARDING	2
+-#define IPXCTL_NETBIOS		3
+-#define IPXCTL_RECVSPACE	4
+-#define IPXCTL_SENDSPACE	5
+-#define	IPXCTL_MAXID		6
+-
+-#define IPXCTL_NAMES { \
+-	{ 0, 0}, \
+-	{ "checksum", CTLTYPE_INT }, \
+-	{ "forwarding", CTLTYPE_INT }, \
+-	{ "netbios", CTLTYPE_INT }, \
+-	{ "recvspace", CTLTYPE_INT }, \
+-	{ "sendspace", CTLTYPE_INT }, \
+-}
+-
+-#ifdef _KERNEL
+-extern struct ipxstat ipxstat;
+-#endif
+-
+-#endif
+diff --git a/sys/netipx/spx.h b/sys/netipx/spx.h
+deleted file mode 100644
+index 729920184a4..00000000000
+--- a/sys/netipx/spx.h
++++ /dev/null
+@@ -1,202 +0,0 @@
+-/*	$OpenBSD: spx.h,v 1.8 2003/10/26 17:01:11 avsm Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)spx.h
+- *
+- * from FreeBSD Id: spx.h,v 1.7 1996/01/30 22:58:51 mpp Exp
+- */
+-
+-#ifndef _NETIPX_SPX_H_
+-#define	_NETIPX_SPX_H_
+-
+-#include <sys/queue.h>
+-
+-/*
+- * Definitions for IPX style Sequenced Packet Protocol
+- */
+-
+-struct spxhdr {
+-	u_int8_t  spx_cc  __packed;	/* connection control */
+-	u_int8_t  spx_dt  __packed;	/* datastream type */
+-#define	SPX_SP	  0x80			/* system packet */
+-#define	SPX_SA	  0x40			/* send acknowledgement */
+-#define	SPX_OB	  0x20			/* attention (out of band data) */
+-#define	SPX_EM	  0x10			/* end of message */
+-	u_int16_t spx_sid __packed;	/* source connection identifier */
+-	u_int16_t spx_did __packed;	/* destination connection identifier */
+-	u_int16_t spx_seq __packed;	/* sequence number */
+-	u_int16_t spx_ack __packed;	/* acknowledge number */
+-	u_int16_t spx_alo __packed;	/* allocation number */
+-};
+-
+-/*
+- * Definitions for NS(tm) Internet Datagram Protocol
+- * containing a Sequenced Packet Protocol packet.
+- */
+-struct spx {
+-	struct ipx	si_i __packed;
+-	struct spxhdr 	si_s __packed;
+-};
+-
+-#define SI(x)	((struct spx *)x)
+-#define si_sum	si_i.ipx_sum
+-#define si_len	si_i.ipx_len
+-#define si_tc	si_i.ipx_tc
+-#define si_pt	si_i.ipx_pt
+-#define si_dna	si_i.ipx_dna
+-#define si_sna	si_i.ipx_sna
+-#define si_sport	si_i.ipx_sna.ipx_port
+-#define si_cc	si_s.spx_cc
+-#define si_dt	si_s.spx_dt
+-#define si_sid	si_s.spx_sid
+-#define si_did	si_s.spx_did
+-#define si_seq	si_s.spx_seq
+-#define si_ack	si_s.spx_ack
+-#define si_alo	si_s.spx_alo
+-
+-struct spx_q {
+-	TAILQ_ENTRY(spx_q)	list;
+-	struct mbuf *m;
+-};
+-
+-/*
+- * SPX control block, one per connection
+- */
+-struct spxpcb {
+-	TAILQ_HEAD(, spx_q)	spxp_queue;
+-	struct	ipxpcb	*s_ipxpcb;	/* backpointer to ipx pcb */
+-	u_char	s_state;
+-	u_char	s_flags;
+-#define	SF_ACKNOW	0x01		/* Ack peer immediately */
+-#define	SF_DELACK	0x02		/* Ack, but try to delay it */
+-#define	SF_HI	0x04			/* Show headers on input */
+-#define	SF_HO	0x08			/* Show headers on output */
+-#define	SF_PI	0x10			/* Packet (datagram) interface */
+-#define SF_WIN	0x20			/* Window info changed */
+-#define SF_RXT	0x40			/* Rxt info changed */
+-#define SF_RVD	0x80			/* Calling from read usrreq routine */
+-	u_short s_mtu;			/* Max packet size for this stream */
+-/* use sequence fields in headers to store sequence numbers for this
+-   connection */
+-	struct	ipx	*s_ipx;
+-	struct	spxhdr	s_shdr;		/* prototype header to transmit */
+-#define s_cc s_shdr.spx_cc		/* connection control (for EM bit) */
+-#define s_dt s_shdr.spx_dt		/* datastream type */
+-#define s_sid s_shdr.spx_sid		/* source connection identifier */
+-#define s_did s_shdr.spx_did		/* destination connection identifier */
+-#define s_seq s_shdr.spx_seq		/* sequence number */
+-#define s_ack s_shdr.spx_ack		/* acknowledge number */
+-#define s_alo s_shdr.spx_alo		/* allocation number */
+-#define s_dport s_ipx->ipx_dna.ipx_port	/* where we are sending */
+-	struct spxhdr s_rhdr;		/* last received header (in effect!)*/
+-	u_short s_rack;			/* their acknowledge number */
+-	u_short s_ralo;			/* their allocation number */
+-	u_short s_smax;			/* highest packet # we have sent */
+-	u_short	s_snxt;			/* which packet to send next */
+-
+-/* congestion control */
+-#define	CUNIT	1024			/* scaling for ... */
+-	int	s_cwnd;			/* Congestion-controlled window */
+-					/* in packets * CUNIT */
+-	short	s_swnd;			/* == tcp snd_wnd, in packets */
+-	short	s_smxw;			/* == tcp max_sndwnd */
+-					/* difference of two spx_seq's can be
+-					   no bigger than a short */
+-	u_short	s_swl1;			/* == tcp snd_wl1 */
+-	u_short	s_swl2;			/* == tcp snd_wl2 */
+-	int	s_cwmx;			/* max allowable cwnd */
+-	int	s_ssthresh;		/* s_cwnd size threshold for
+-					 * slow start exponential-to-
+-					 * linear switch */
+-/* transmit timing stuff
+- * srtt and rttvar are stored as fixed point, for convenience in smoothing.
+- * srtt has 3 bits to the right of the binary point, rttvar has 2.
+- */
+-	short	s_idle;			/* time idle */
+-#define	SPXT_NTIMERS	4
+-	short	s_timer[SPXT_NTIMERS];	/* timers */
+-	short	s_rxtshift;		/* log(2) of rexmt exp. backoff */
+-	short	s_rxtcur;		/* current retransmit value */
+-	u_short	s_rtseq;		/* packet being timed */
+-	short	s_rtt;			/* timer for round trips */
+-	short	s_srtt;			/* averaged timer */
+-	short	s_rttvar;		/* variance in round trip time */
+-	char	s_force;		/* which timer expired */
+-	char	s_dupacks;		/* counter to intuit xmt loss */
+-
+-/* out of band data */
+-	char	s_oobflags;
+-#define SF_SOOB	0x08			/* sending out of band data */
+-#define SF_IOOB 0x10			/* receiving out of band data */
+-	char	s_iobc;			/* input characters */
+-/* debug stuff */
+-	u_short	s_want;			/* Last candidate for sending */
+-	char	s_outx;			/* exit taken from spx_output */
+-	char	s_inx;			/* exit taken from spx_input */
+-	u_short	s_flags2;		/* more flags for testing */
+-#define SF_NEWCALL	0x100		/* for new_recvmsg */
+-#define SO_NEWCALL	10		/* for new_recvmsg */
+-};
+-
+-#define	ipxtospxpcb(np)	((struct spxpcb *)(np)->ipxp_ppcb)
+-#define	sotospxpcb(so)	(ipxtospxpcb(sotoipxpcb(so)))
+-
+-#ifdef _KERNEL
+-
+-void	spx_abort(struct ipxpcb *ipxp);
+-struct spxpcb *spx_close(struct spxpcb *cb);
+-void	*spx_ctlinput(int cmd, struct sockaddr *arg_as_sa, void *dummy);
+-int	spx_ctloutput(int req, struct socket *so, int level, int name,
+-			   struct mbuf **value);
+-struct spxpcb *spx_disconnect(struct spxpcb *cb);
+-struct spxpcb *spx_drop(struct spxpcb *cb, int errno);
+-void	spx_fasttimo(void);
+-void	spx_init(void);
+-void	spx_input(struct mbuf *m, ...);
+-int	spx_output(struct spxpcb *cb, struct mbuf *m0);
+-void	spx_quench(struct ipxpcb *ipxp);
+-int	spx_reass(struct spxpcb *cb, struct mbuf *m0);
+-void	spx_setpersist(struct spxpcb *cb);
+-void	spx_slowtimo(void);
+-void	spx_template(struct spxpcb *cb);
+-struct spxpcb *spx_timers(struct spxpcb *cb, int timer);
+-struct spxpcb *spx_usrclosed(struct spxpcb *cb);
+-int	spx_usrreq(struct socket *so, int req, struct mbuf *m,
+-			struct mbuf *nam, struct mbuf *controlp);
+-int	spx_usrreq_sp(struct socket *so, int req, struct mbuf *m,
+-			   struct mbuf *nam, struct mbuf *controlp);
+-int	spx_sysctl(int *, u_int, void *, size_t *, void *, size_t);
+-
+-#endif /* _KERNEL */
+-
+-#endif /* !_NETIPX_SPX_H_ */
+diff --git a/sys/netipx/spx_debug.c b/sys/netipx/spx_debug.c
+deleted file mode 100644
+index e8a7374fb9b..00000000000
+--- a/sys/netipx/spx_debug.c
++++ /dev/null
+@@ -1,171 +0,0 @@
+-/*	$OpenBSD: spx_debug.c,v 1.7 2003/06/02 23:28:16 millert Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)spx_debug.c
+- *
+- * from FreeBSD Id: spx_debug.c,v 1.5 1996/03/11 15:13:58 davidg Exp
+- */
+-
+-#include <sys/param.h>
+-#include <sys/queue.h>
+-#include <sys/systm.h>
+-#include <sys/mbuf.h>
+-#include <sys/socket.h>
+-#include <sys/socketvar.h>
+-#define	PRUREQUESTS
+-#include <sys/protosw.h>
+-#include <sys/errno.h>
+-
+-#include <net/route.h>
+-#include <net/if.h>
+-#include <netinet/in_systm.h>
+-#define	TCPSTATES
+-#include <netinet/tcp_fsm.h>
+-
+-#include <netipx/ipx.h>
+-#include <netipx/ipx_pcb.h>
+-#include <netipx/ipx.h>
+-#include <netipx/ipx_var.h>
+-#include <netipx/spx.h>
+-#define SPXTIMERS
+-#include <netipx/spx_timer.h>
+-#include <netipx/spx_var.h>
+-#define	SANAMES
+-#include <netipx/spx_debug.h>
+-
+-int	spxconsdebug = 0;
+-
+-/*
+- * spx debug routines
+- */
+-void
+-spx_trace(act, ostate, sp, si, req)
+-	short act;
+-	u_char ostate;
+-	struct spxpcb *sp;
+-	struct spx *si;
+-	int req;
+-{
+-#ifdef SPXDEBUG
+-	u_short seq, ack, len, alo;
+-	int flags;
+-	struct spx_debug *sd = &spx_debug[spx_debx++];
+-
+-	if (spx_debx == SPX_NDEBUG)
+-		spx_debx = 0;
+-	sd->sd_time = iptime();
+-	sd->sd_act = act;
+-	sd->sd_ostate = ostate;
+-	sd->sd_cb = (caddr_t)sp;
+-	if (sp)
+-		sd->sd_sp = *sp;
+-	else
+-		bzero((caddr_t)&sd->sd_sp, sizeof(*sp));
+-	if (si)
+-		sd->sd_si = *si;
+-	else
+-		bzero((caddr_t)&sd->sd_si, sizeof(*si));
+-	sd->sd_req = req;
+-	if (spxconsdebug == 0)
+-		return;
+-	if (ostate >= TCP_NSTATES) ostate = 0;
+-	if (act >= SA_DROP) act = SA_DROP;
+-	if (sp)
+-		printf("%x %s:", sp, tcpstates[ostate]);
+-	else
+-		printf("???????? ");
+-	printf("%s ", spxnames[act]);
+-	switch (act) {
+-
+-	case SA_RESPOND:
+-	case SA_INPUT:
+-	case SA_OUTPUT:
+-	case SA_DROP:
+-		if (si == 0)
+-			break;
+-		seq = si->si_seq;
+-		ack = si->si_ack;
+-		alo = si->si_alo;
+-		len = si->si_len;
+-		if (act == SA_OUTPUT) {
+-			seq = ntohs(seq);
+-			ack = ntohs(ack);
+-			alo = ntohs(alo);
+-			len = ntohs(len);
+-		}
+-#ifndef lint
+-#define p1(f)  { printf("%s = %x, ", "f", f); }
+-		p1(seq); p1(ack); p1(alo); p1(len);
+-#endif
+-		flags = si->si_cc;
+-		if (flags) {
+-			char *cp = "<";
+-#ifndef lint
+-#define pf(f) { if (flags & SPX_ ## f) { printf("%s%s", cp, "f"); cp = ","; } }
+-			pf(SP); pf(SA); pf(OB); pf(EM);
+-#else
+-			cp = cp;
+-#endif
+-			printf(">");
+-		}
+-#ifndef lint
+-#define p2(f)  { printf("%s = %x, ", "f", si->si_ ## f); }
+-		p2(sid);p2(did);p2(dt);p2(pt);
+-#endif
+-		ipx_printhost(&si->si_sna);
+-		ipx_printhost(&si->si_dna);
+-
+-		if (act==SA_RESPOND) {
+-			printf("ipx_len = %x, ",
+-				((struct ipx *)si)->ipx_len);
+-		}
+-		break;
+-
+-	case SA_USER:
+-		printf("%s", prurequests[req&0xff]);
+-		if ((req & 0xff) == PRU_SLOWTIMO)
+-			printf("<%s>", spxtimers[req>>8]);
+-		break;
+-	}
+-	if (sp)
+-		printf(" -> %s", tcpstates[sp->s_state]);
+-	/* print out internal state of sp !?! */
+-	printf("\n");
+-	if (sp == 0)
+-		return;
+-#ifndef lint
+-#define p3(f)  { printf("%s = %x, ", "f", sp->s_ ## f); }
+-	printf("\t"); p3(rack);p3(ralo);p3(smax);p3(flags); printf("\n");
+-#endif
+-#endif
+-}
+diff --git a/sys/netipx/spx_debug.h b/sys/netipx/spx_debug.h
+deleted file mode 100644
+index e038cd57c8e..00000000000
+--- a/sys/netipx/spx_debug.h
++++ /dev/null
+@@ -1,75 +0,0 @@
+-/*	$OpenBSD: spx_debug.h,v 1.5 2003/06/02 23:28:16 millert Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)spx_debug.h
+- *
+- * from FreeBSD Id: spx_debug.h,v 1.5 1995/11/24 12:25:13 bde Exp
+- */
+-
+-#ifndef _NETIPX_SPX_DEBUG_H_
+-#define	_NETIPX_SPX_DEBUG_H_
+-
+-struct	spx_debug {
+-	u_long	sd_time;
+-	short	sd_act;
+-	short	sd_ostate;
+-	caddr_t	sd_cb;
+-	short	sd_req;
+-	struct	spx sd_si;
+-	struct	spxpcb sd_sp;
+-};
+-
+-#define	SA_INPUT 	0
+-#define	SA_OUTPUT	1
+-#define	SA_USER		2
+-#define	SA_RESPOND	3
+-#define	SA_DROP		4
+-
+-#ifdef SANAMES
+-char	*spxnames[] =
+-    { "input", "output", "user", "respond", "drop" };
+-#endif
+-
+-#define	SPX_NDEBUG 100
+-struct	spx_debug spx_debug[SPX_NDEBUG];
+-int	spx_debx;
+-
+-#ifdef _KERNEL
+-extern char *prurequests[];
+-extern char *sanames[];
+-
+-void	spx_trace(int act, int ostate, struct spxpcb *sp, struct spx *si,
+-		       int req);
+-#endif
+-
+-#endif /* !_NETIPX_SPX_DEBUG_H_ */
+diff --git a/sys/netipx/spx_timer.h b/sys/netipx/spx_timer.h
+deleted file mode 100644
+index 8ade6513ef3..00000000000
+--- a/sys/netipx/spx_timer.h
++++ /dev/null
+@@ -1,128 +0,0 @@
+-/*	$OpenBSD: spx_timer.h,v 1.3 2003/06/02 23:28:16 millert Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1982, 1986, 1988, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)spx_timer.h
+- *
+- * from FreeBSD Id: spx_timer.h,v 1.5 1996/01/30 22:58:53 mpp Exp
+- */
+-
+-#ifndef _NETIPX_SPX_TIMER_H_
+-#define _NETIPX_SPX_TIMER_H_
+-
+-/*
+- * Definitions of the SPX timers.  These timers are counted
+- * down PR_SLOWHZ times a second.
+- */
+-#define	SPXT_REXMT	0		/* retransmit */
+-#define	SPXT_PERSIST	1		/* retransmit persistence */
+-#define	SPXT_KEEP	2		/* keep alive */
+-#define	SPXT_2MSL	3		/* 2*msl quiet time timer */
+-
+-/*
+- * The SPXT_REXMT timer is used to force retransmissions.
+- * The SPX has the SPXT_REXMT timer set whenever segments
+- * have been sent for which ACKs are expected but not yet
+- * received.  If an ACK is received which advances tp->snd_una,
+- * then the retransmit timer is cleared (if there are no more
+- * outstanding segments) or reset to the base value (if there
+- * are more ACKs expected).  Whenever the retransmit timer goes off,
+- * we retransmit one unacknowledged segment, and do a backoff
+- * on the retransmit timer.
+- *
+- * The SPXT_PERSIST timer is used to keep window size information
+- * flowing even if the window goes shut.  If all previous transmissions
+- * have been acknowledged (so that there are no retransmissions in progress),
+- * and the window is too small to bother sending anything, then we start
+- * the SPXT_PERSIST timer.  When it expires, if the window is nonzero,
+- * we go to transmit state.  Otherwise, at intervals send a single byte
+- * into the peer's window to force him to update our window information.
+- * We do this at most as often as SPXT_PERSMIN time intervals,
+- * but no more frequently than the current estimate of round-trip
+- * packet time.  The SPXT_PERSIST timer is cleared whenever we receive
+- * a window update from the peer.
+- *
+- * The SPXT_KEEP timer is used to keep connections alive.  If an
+- * connection is idle (no segments received) for SPXTV_KEEP amount of time,
+- * but not yet established, then we drop the connection.  If the connection
+- * is established, then we force the peer to send us a segment by sending:
+- *	<SEQ=SND.UNA-1><ACK=RCV.NXT><CTL=ACK>
+- * This segment is (deliberately) outside the window, and should elicit
+- * an ack segment in response from the peer.  If, despite the SPXT_KEEP
+- * initiated segments we cannot elicit a response from a peer in SPXT_MAXIDLE
+- * amount of time, then we drop the connection.
+- */
+-
+-#define	SPX_TTL		30		/* default time to live for SPX segs */
+-/*
+- * Time constants.
+- */
+-#define	SPXTV_MSL	( 15*PR_SLOWHZ)		/* max seg lifetime */
+-#define	SPXTV_SRTTBASE	0			/* base roundtrip time;
+-						   if 0, no idea yet */
+-#define	SPXTV_SRTTDFLT	(  3*PR_SLOWHZ)		/* assumed RTT if no info */
+-
+-#define	SPXTV_PERSMIN	(  5*PR_SLOWHZ)		/* retransmit persistence */
+-#define	SPXTV_PERSMAX	( 60*PR_SLOWHZ)		/* maximum persist interval */
+-
+-#define	SPXTV_KEEP	( 75*PR_SLOWHZ)		/* keep alive - 75 secs */
+-#define	SPXTV_MAXIDLE	(  8*SPXTV_KEEP)	/* maximum allowable idle
+-						   time before drop conn */
+-
+-#define	SPXTV_MIN	(  1*PR_SLOWHZ)		/* minimum allowable value */
+-#define	SPXTV_REXMTMAX	( 64*PR_SLOWHZ)		/* max allowable REXMT value */
+-
+-#define	SPX_LINGERTIME	120			/* linger at most 2 minutes */
+-
+-#define	SPX_MAXRXTSHIFT	12			/* maximum retransmits */
+-
+-#ifdef	SPXTIMERS
+-char *spxtimers[] =
+-    { "REXMT", "PERSIST", "KEEP", "2MSL" };
+-#endif
+-
+-/*
+- * Force a time value to be in a certain range.
+- */
+-#define	SPXT_RANGESET(tv, value, tvmin, tvmax) { \
+-	(tv) = (value); \
+-	if ((tv) < (tvmin)) \
+-		(tv) = (tvmin); \
+-	else if ((tv) > (tvmax)) \
+-		(tv) = (tvmax); \
+-}
+-
+-#ifdef _KERNEL
+-extern int spx_backoff[];
+-#endif
+-
+-#endif
+diff --git a/sys/netipx/spx_usrreq.c b/sys/netipx/spx_usrreq.c
+deleted file mode 100644
+index ecf413a73e6..00000000000
+--- a/sys/netipx/spx_usrreq.c
++++ /dev/null
+@@ -1,1815 +0,0 @@
+-/*	$OpenBSD: spx_usrreq.c,v 1.25 2006/03/05 21:48:57 miod Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)spx_usrreq.h
+- *
+- * from FreeBSD Id: spx_usrreq.c,v 1.7 1995/12/16 02:14:35 bde Exp
+- */
+-
+-#include <sys/param.h>
+-#include <sys/systm.h>
+-#include <sys/malloc.h>
+-#include <sys/mbuf.h>
+-#include <sys/protosw.h>
+-#include <sys/socket.h>
+-#include <sys/socketvar.h>
+-
+-#include <net/route.h>
+-#include <netinet/tcp_fsm.h>
+-
+-#include <netipx/ipx.h>
+-#include <netipx/ipx_pcb.h>
+-#include <netipx/ipx_var.h>
+-#include <netipx/spx.h>
+-#include <netipx/spx_timer.h>
+-#include <netipx/spx_var.h>
+-#include <netipx/spx_debug.h>
+-
+-#include <sys/stdarg.h>
+-
+-/*
+- * SPX protocol implementation.
+- */
+-
+-struct spx spx_savesi;
+-int traceallspxs = 0;
+-extern int spxconsdebug;
+-int spx_hardnosed;
+-int spx_use_delack = 0;
+-u_short spx_newchecks[50];
+-
+-struct spx_istat spx_istat;
+-u_short spx_iss;
+-
+-#ifndef	SPXCBHASHSIZE
+-#define	SPXCBHASHSIZE	32
+-#endif
+-struct	ipxpcbtable	ipxcbtable;
+-int			ipxcbhashsize = SPXCBHASHSIZE;
+-
+-void
+-spx_init()
+-{
+-	ipx_pcbinit(&ipxcbtable, ipxcbhashsize);
+-	spx_iss = 1; /* WRONG !! should fish it out of TODR */
+-}
+-
+-/* ARGSUSED */
+-void
+-spx_input(struct mbuf *m, ...)
+-{
+-	struct ipxpcb		*ipxpcbp;
+-	struct spxpcb	*cb;
+-	struct spx	*si = mtod(m, struct spx *);
+-	struct socket	*so;
+-	int	dropsocket = 0;
+-	short	ostate = 0;
+-	va_list	ap;
+-
+-	va_start(ap, m);
+-	ipxpcbp = va_arg(ap, struct ipxpcb *);
+-	va_end(ap);
+-
+-	spxstat.spxs_rcvtotal++;
+-	if (ipxpcbp == NULL)
+-		panic("spx_input: no ipxpcb");
+-
+-	cb = ipxtospxpcb(ipxpcbp);
+-	if (cb == 0) goto bad;
+-
+-	if (m->m_len < sizeof(*si)) {
+-		if ((m = m_pullup(m, sizeof(*si))) == 0) {
+-			spxstat.spxs_rcvshort++;
+-			return;
+-		}
+-		si = mtod(m, struct spx *);
+-	}
+-	si->si_seq = ntohs(si->si_seq);
+-	si->si_ack = ntohs(si->si_ack);
+-	si->si_alo = ntohs(si->si_alo);
+-
+-	so = ipxpcbp->ipxp_socket;
+-
+-	if (so->so_options & SO_DEBUG || traceallspxs) {
+-		ostate = cb->s_state;
+-		spx_savesi = *si;
+-	}
+-	if (so->so_options & SO_ACCEPTCONN) {
+-		struct spxpcb *ocb = cb;
+-
+-		so = sonewconn(so, 0);
+-		if (so == 0) {
+-			goto drop;
+-		}
+-		/*
+-		 * This is ugly, but ....
+-		 *
+-		 * Mark socket as temporary until we're
+-		 * committed to keeping it.  The code at
+-		 * ``drop'' and ``dropwithreset'' check the
+-		 * flag dropsocket to see if the temporary
+-		 * socket created here should be discarded.
+-		 * We mark the socket as discardable until
+-		 * we're committed to it below in TCPS_LISTEN.
+-		 */
+-		dropsocket++;
+-		ipxpcbp = (struct ipxpcb *)so->so_pcb;
+-		ipxpcbp->ipxp_laddr = si->si_dna;
+-		cb = ipxtospxpcb(ipxpcbp);
+-		cb->s_mtu = ocb->s_mtu;		/* preserve sockopts */
+-		cb->s_flags = ocb->s_flags;	/* preserve sockopts */
+-		cb->s_flags2 = ocb->s_flags2;	/* preserve sockopts */
+-		cb->s_state = TCPS_LISTEN;
+-	}
+-
+-	/*
+-	 * Packet received on connection.
+-	 * reset idle time and keep-alive timer;
+-	 */
+-	cb->s_idle = 0;
+-	cb->s_timer[SPXT_KEEP] = SPXTV_KEEP;
+-
+-	switch (cb->s_state) {
+-
+-	case TCPS_LISTEN:{
+-		struct mbuf *am;
+-		struct sockaddr_ipx *sipx;
+-		struct ipx_addr laddr;
+-
+-		/*
+-		 * If somebody here was carying on a conversation
+-		 * and went away, and his pen pal thinks he can
+-		 * still talk, we get the misdirected packet.
+-		 */
+-		if (spx_hardnosed && (si->si_did != 0 || si->si_seq != 0)) {
+-			spx_istat.gonawy++;
+-			goto dropwithreset;
+-		}
+-		am = m_get(M_DONTWAIT, MT_SONAME);
+-		if (am == NULL)
+-			goto drop;
+-		am->m_len = sizeof(struct sockaddr_ipx);
+-		sipx = mtod(am, struct sockaddr_ipx *);
+-		sipx->sipx_len = sizeof(*sipx);
+-		sipx->sipx_family = AF_IPX;
+-		sipx->sipx_addr = si->si_sna;
+-		laddr = ipxpcbp->ipxp_laddr;
+-		if (ipx_nullhost(laddr))
+-			ipxpcbp->ipxp_laddr = si->si_dna;
+-		if (ipx_pcbconnect(ipxpcbp, am)) {
+-			ipxpcbp->ipxp_laddr = laddr;
+-			(void) m_free(am);
+-			spx_istat.noconn++;
+-			goto drop;
+-		}
+-		(void) m_free(am);
+-		spx_template(cb);
+-		dropsocket = 0;		/* committed to socket */
+-		cb->s_did = si->si_sid;
+-		cb->s_rack = si->si_ack;
+-		cb->s_ralo = si->si_alo;
+-#define THREEWAYSHAKE
+-#ifdef THREEWAYSHAKE
+-		cb->s_state = TCPS_SYN_RECEIVED;
+-		cb->s_force = 1 + SPXT_KEEP;
+-		spxstat.spxs_accepts++;
+-		cb->s_timer[SPXT_KEEP] = SPXTV_KEEP;
+-		}
+-		break;
+-	/*
+-	 * This state means that we have heard a response
+-	 * to our acceptance of their connection
+-	 * It is probably logically unnecessary in this
+-	 * implementation.
+-	 */
+-	 case TCPS_SYN_RECEIVED: {
+-		if (si->si_did!=cb->s_sid) {
+-			spx_istat.wrncon++;
+-			goto drop;
+-		}
+-#endif
+-		ipxpcbp->ipxp_fport =  si->si_sport;
+-		cb->s_timer[SPXT_REXMT] = 0;
+-		cb->s_timer[SPXT_KEEP] = SPXTV_KEEP;
+-		soisconnected(so);
+-		cb->s_state = TCPS_ESTABLISHED;
+-		spxstat.spxs_accepts++;
+-		}
+-		break;
+-
+-	/*
+-	 * This state means that we have gotten a response
+-	 * to our attempt to establish a connection.
+-	 * We fill in the data from the other side,
+-	 * telling us which port to respond to, instead of the well-
+-	 * known one we might have sent to in the first place.
+-	 * We also require that this is a response to our
+-	 * connection id.
+-	 */
+-	case TCPS_SYN_SENT:
+-		if (si->si_did!=cb->s_sid) {
+-			spx_istat.notme++;
+-			goto drop;
+-		}
+-		spxstat.spxs_connects++;
+-		cb->s_did = si->si_sid;
+-		cb->s_rack = si->si_ack;
+-		cb->s_ralo = si->si_alo;
+-		cb->s_dport = ipxpcbp->ipxp_fport =  si->si_sport;
+-		cb->s_timer[SPXT_REXMT] = 0;
+-		cb->s_flags |= SF_ACKNOW;
+-		soisconnected(so);
+-		cb->s_state = TCPS_ESTABLISHED;
+-		/* Use roundtrip time of connection request for initial rtt */
+-		if (cb->s_rtt) {
+-			cb->s_srtt = cb->s_rtt << 3;
+-			cb->s_rttvar = cb->s_rtt << 1;
+-			SPXT_RANGESET(cb->s_rxtcur,
+-			    ((cb->s_srtt >> 2) + cb->s_rttvar) >> 1,
+-			    SPXTV_MIN, SPXTV_REXMTMAX);
+-			    cb->s_rtt = 0;
+-		}
+-	}
+-	if (so->so_options & SO_DEBUG || traceallspxs)
+-		spx_trace(SA_INPUT, (u_char)ostate, cb, &spx_savesi, 0);
+-
+-	m->m_len -= sizeof(struct ipx);
+-	m->m_pkthdr.len -= sizeof(struct ipx);
+-	m->m_data += sizeof(struct ipx);
+-
+-	if (spx_reass(cb, m))
+-		m_freem(m);
+-
+-	if (cb->s_force || (cb->s_flags & (SF_ACKNOW|SF_WIN|SF_RXT)))
+-		(void) spx_output(cb, (struct mbuf *)0);
+-	cb->s_flags &= ~(SF_WIN|SF_RXT);
+-	return;
+-
+-dropwithreset:
+-	if (dropsocket)
+-		(void) soabort(so);
+-	si->si_seq = ntohs(si->si_seq);
+-	si->si_ack = ntohs(si->si_ack);
+-	si->si_alo = ntohs(si->si_alo);
+-	m_freem(m);
+-	if (cb->s_ipxpcb->ipxp_socket->so_options & SO_DEBUG || traceallspxs)
+-		spx_trace(SA_DROP, (u_char)ostate, cb, &spx_savesi, 0);
+-	return;
+-
+-drop:
+-bad:
+-	if (cb == 0 || cb->s_ipxpcb->ipxp_socket->so_options & SO_DEBUG ||
+-            traceallspxs)
+-		spx_trace(SA_DROP, (u_char)ostate, cb, &spx_savesi, 0);
+-	m_freem(m);
+-}
+-
+-int spxrexmtthresh = 3;
+-
+-/*
+- * This is structurally similar to the tcp reassembly routine
+- * but its function is somewhat different:  It merely queues
+- * packets up, and suppresses duplicates.
+- */
+-int
+-spx_reass(cb, m0)
+-	struct spxpcb *cb;
+-	struct mbuf	*m0;
+-{
+-	struct spx_q	*q;
+-	struct mbuf	*m;
+-	struct spx	*si = mtod(m0, struct spx *);
+-	struct socket	*so = cb->s_ipxpcb->ipxp_socket;
+-	char	packetp = cb->s_flags & SF_HI;
+-	int	incr;
+-	char	wakeup = 0;
+-
+-	if (si == NULL)
+-		goto present;
+-	/*
+-	 * Update our news from them.
+-	 */
+-	if (si->si_cc & SPX_SA)
+-		cb->s_flags |= (spx_use_delack ? SF_DELACK : SF_ACKNOW);
+-	if (SSEQ_GT(si->si_alo, cb->s_ralo))
+-		cb->s_flags |= SF_WIN;
+-	if (SSEQ_LEQ(si->si_ack, cb->s_rack)) {
+-		if ((si->si_cc & SPX_SP) && cb->s_rack != (cb->s_smax + 1)) {
+-			spxstat.spxs_rcvdupack++;
+-			/*
+-			 * If this is a completely duplicate ack
+-			 * and other conditions hold, we assume
+-			 * a packet has been dropped and retransmit
+-			 * it exactly as in tcp_input().
+-			 */
+-			if (si->si_ack != cb->s_rack ||
+-			    si->si_alo != cb->s_ralo)
+-				cb->s_dupacks = 0;
+-			else if (++cb->s_dupacks == spxrexmtthresh) {
+-				u_short onxt = cb->s_snxt;
+-				int cwnd = cb->s_cwnd;
+-
+-				cb->s_snxt = si->si_ack;
+-				cb->s_cwnd = CUNIT;
+-				cb->s_force = 1 + SPXT_REXMT;
+-				(void) spx_output(cb, (struct mbuf *)0);
+-				cb->s_timer[SPXT_REXMT] = cb->s_rxtcur;
+-				cb->s_rtt = 0;
+-				if (cwnd >= 4 * CUNIT)
+-					cb->s_cwnd = cwnd / 2;
+-				if (SSEQ_GT(onxt, cb->s_snxt))
+-					cb->s_snxt = onxt;
+-				return (1);
+-			}
+-		} else
+-			cb->s_dupacks = 0;
+-		goto update_window;
+-	}
+-	cb->s_dupacks = 0;
+-	/*
+-	 * If our correspondent acknowledges data we haven't sent
+-	 * TCP would drop the packet after acking.  We'll be a little
+-	 * more permissive
+-	 */
+-	if (SSEQ_GT(si->si_ack, (cb->s_smax + 1))) {
+-		spxstat.spxs_rcvacktoomuch++;
+-		si->si_ack = cb->s_smax + 1;
+-	}
+-	spxstat.spxs_rcvackpack++;
+-	/*
+-	 * If transmit timer is running and timed sequence
+-	 * number was acked, update smoothed round trip time.
+-	 * See discussion of algorithm in tcp_input.c
+-	 */
+-	if (cb->s_rtt && SSEQ_GT(si->si_ack, cb->s_rtseq)) {
+-		spxstat.spxs_rttupdated++;
+-		if (cb->s_srtt != 0) {
+-			short delta;
+-			delta = cb->s_rtt - (cb->s_srtt >> 3);
+-			if ((cb->s_srtt += delta) <= 0)
+-				cb->s_srtt = 1;
+-			if (delta < 0)
+-				delta = -delta;
+-			delta -= (cb->s_rttvar >> 2);
+-			if ((cb->s_rttvar += delta) <= 0)
+-				cb->s_rttvar = 1;
+-		} else {
+-			/*
+-			 * No rtt measurement yet
+-			 */
+-			cb->s_srtt = cb->s_rtt << 3;
+-			cb->s_rttvar = cb->s_rtt << 1;
+-		}
+-		cb->s_rtt = 0;
+-		cb->s_rxtshift = 0;
+-		SPXT_RANGESET(cb->s_rxtcur,
+-			((cb->s_srtt >> 2) + cb->s_rttvar) >> 1,
+-			SPXTV_MIN, SPXTV_REXMTMAX);
+-	}
+-	/*
+-	 * If all outstanding data is acked, stop retransmit
+-	 * timer and remember to restart (more output or persist).
+-	 * If there is more data to be acked, restart retransmit
+-	 * timer, using current (possibly backed-off) value;
+-	 */
+-	if (si->si_ack == cb->s_smax + 1) {
+-		cb->s_timer[SPXT_REXMT] = 0;
+-		cb->s_flags |= SF_RXT;
+-	} else if (cb->s_timer[SPXT_PERSIST] == 0)
+-		cb->s_timer[SPXT_REXMT] = cb->s_rxtcur;
+-	/*
+-	 * When new data is acked, open the congestion window.
+-	 * If the window gives us less than ssthresh packets
+-	 * in flight, open exponentially (maxseg at a time).
+-	 * Otherwise open linearly (maxseg^2 / cwnd at a time).
+-	 */
+-	incr = CUNIT;
+-	if (cb->s_cwnd > cb->s_ssthresh)
+-		incr = max(incr * incr / cb->s_cwnd, 1);
+-	cb->s_cwnd = min(cb->s_cwnd + incr, cb->s_cwmx);
+-	/*
+-	 * Trim Acked data from output queue.
+-	 */
+-	while ((m = so->so_snd.sb_mb) != NULL) {
+-		if (SSEQ_LT((mtod(m, struct spx *))->si_seq, si->si_ack))
+-			sbdroprecord(&so->so_snd);
+-		else
+-			break;
+-	}
+-	sowwakeup(so);
+-	cb->s_rack = si->si_ack;
+-update_window:
+-	if (SSEQ_LT(cb->s_snxt, cb->s_rack))
+-		cb->s_snxt = cb->s_rack;
+-	if ((SSEQ_LT(cb->s_swl1, si->si_seq) || cb->s_swl1 == si->si_seq) &&
+-	     (SSEQ_LT(cb->s_swl2, si->si_ack) || cb->s_swl2 == si->si_ack) &&
+-	     SSEQ_LT(cb->s_ralo, si->si_alo)) {
+-		/* keep track of pure window updates */
+-		if ((si->si_cc & SPX_SP) && cb->s_swl2 == si->si_ack
+-		    && SSEQ_LT(cb->s_ralo, si->si_alo)) {
+-			spxstat.spxs_rcvwinupd++;
+-			spxstat.spxs_rcvdupack--;
+-		}
+-		cb->s_ralo = si->si_alo;
+-		cb->s_swl1 = si->si_seq;
+-		cb->s_swl2 = si->si_ack;
+-		cb->s_swnd = (1 + si->si_alo - si->si_ack);
+-		if (cb->s_swnd > cb->s_smxw)
+-			cb->s_smxw = cb->s_swnd;
+-		cb->s_flags |= SF_WIN;
+-	}
+-	/*
+-	 * If this packet number is higher than that which
+-	 * we have allocated refuse it, unless urgent
+-	 */
+-	if (SSEQ_GT(si->si_seq, cb->s_alo)) {
+-		if (si->si_cc & SPX_SP) {
+-			spxstat.spxs_rcvwinprobe++;
+-			return (1);
+-		} else
+-			spxstat.spxs_rcvpackafterwin++;
+-		if (si->si_cc & SPX_OB) {
+-			if (SSEQ_GT(si->si_seq, cb->s_alo + 60)) {
+-				m_freem(m0);
+-				return (0);
+-			} /* else queue this packet; */
+-		} else {
+-			/*register struct socket *so = cb->s_ipxpcb->ipxp_socket;
+-			if (so->so_state & SS_NOFDREF) {
+-				m_freem(m0);
+-				(void)spx_close(cb);
+-			} else
+-				       would crash system*/
+-			spx_istat.notyet++;
+-			m_freem(m0);
+-			return (0);
+-		}
+-	}
+-	/*
+-	 * If this is a system packet, we don't need to
+-	 * queue it up, and won't update acknowledge #
+-	 */
+-	if (si->si_cc & SPX_SP) {
+-		return (1);
+-	}
+-	/*
+-	 * We have already seen this packet, so drop.
+-	 */
+-	if (SSEQ_LT(si->si_seq, cb->s_ack)) {
+-		spx_istat.bdreas++;
+-		spxstat.spxs_rcvduppack++;
+-		if (si->si_seq == cb->s_ack - 1)
+-			spx_istat.lstdup++;
+-		return (1);
+-	}
+-	/*
+-	 * Loop through all packets queued up to insert in
+-	 * appropriate sequence.
+-	 */
+-	TAILQ_FOREACH(q, &cb->spxp_queue, list) {
+-		if (si->si_seq == SI(q)->si_seq) {
+-			spxstat.spxs_rcvduppack++;
+-			return (1);
+-		}
+-		if (SSEQ_LT(si->si_seq, SI(q)->si_seq)) {
+-			spxstat.spxs_rcvoopack++;
+-			break;
+-		}
+-	}
+-
+-	/* XXX what if q == NULL ??? */
+-	{
+-		struct spx_q	*p;
+-		if ((p = malloc(sizeof(*p),M_DEVBUF,M_NOWAIT)) != NULL)
+-		{
+-			p->m = m0;
+-			TAILQ_INSERT_AFTER(&cb->spxp_queue, q, p, list);
+-		} else
+-			return 1;
+-	}
+-
+-	/*
+-	 * If this packet is urgent, inform process
+-	 */
+-	if (si->si_cc & SPX_OB) {
+-		cb->s_iobc = ((char *)si)[1 + sizeof(*si)];
+-		sohasoutofband(so);
+-		cb->s_oobflags |= SF_IOOB;
+-	}
+-present:
+-#define SPINC sizeof(struct spxhdr)
+-	/*
+-	 * Loop through all packets queued up to update acknowledge
+-	 * number, and present all acknowledged data to user;
+-	 * If in packet interface mode, show packet headers.
+-	 */
+-	TAILQ_FOREACH(q, &cb->spxp_queue, list) {
+-		  if (SI(q)->si_seq == cb->s_ack) {
+-			cb->s_ack++;
+-			m = q->m;
+-			if (SI(q)->si_cc & SPX_OB) {
+-				cb->s_oobflags &= ~SF_IOOB;
+-				if (so->so_rcv.sb_cc)
+-					so->so_oobmark = so->so_rcv.sb_cc;
+-				else
+-					so->so_state |= SS_RCVATMARK;
+-			}
+-			TAILQ_REMOVE(&cb->spxp_queue, q, list);
+-			free(q, M_DEVBUF);
+-			wakeup = 1;
+-			spxstat.spxs_rcvpack++;
+-#ifdef SF_NEWCALL
+-			if (cb->s_flags2 & SF_NEWCALL) {
+-				struct spxhdr *sp = mtod(m, struct spxhdr *);
+-				u_char dt = sp->spx_dt;
+-				spx_newchecks[4]++;
+-				if (dt != cb->s_rhdr.spx_dt) {
+-					struct mbuf *mm =
+-					   m_getclr(M_DONTWAIT, MT_CONTROL);
+-					spx_newchecks[0]++;
+-					if (mm != NULL) {
+-						u_short *s =
+-							mtod(mm, u_short *);
+-						cb->s_rhdr.spx_dt = dt;
+-						mm->m_len = 5; /*XXX*/
+-						s[0] = 5;
+-						s[1] = 1;
+-						*(u_char *)(&s[2]) = dt;
+-						sbappend(&so->so_rcv, mm);
+-					}
+-				}
+-				if (sp->spx_cc & SPX_OB) {
+-					MCHTYPE(m, MT_OOBDATA);
+-					spx_newchecks[1]++;
+-					so->so_oobmark = 0;
+-					so->so_state &= ~SS_RCVATMARK;
+-				}
+-				if (packetp == 0) {
+-					m->m_data += SPINC;
+-					m->m_len -= SPINC;
+-					m->m_pkthdr.len -= SPINC;
+-				}
+-				if ((sp->spx_cc & SPX_EM) || packetp) {
+-					sbappendrecord(&so->so_rcv, m);
+-					spx_newchecks[9]++;
+-				} else
+-					sbappend(&so->so_rcv, m);
+-			} else
+-#endif
+-			if (packetp) {
+-				sbappendrecord(&so->so_rcv, m);
+-			} else {
+-				cb->s_rhdr = *mtod(m, struct spxhdr *);
+-				m->m_data += SPINC;
+-				m->m_len -= SPINC;
+-				m->m_pkthdr.len -= SPINC;
+-				sbappend(&so->so_rcv, m);
+-			}
+-		  } else
+-			break;
+-	}
+-	if (wakeup) sorwakeup(so);
+-	return (0);
+-}
+-
+-void *
+-spx_ctlinput(cmd, arg_as_sa, dummy)
+-	int cmd;
+-	struct sockaddr *arg_as_sa;	/* XXX should be swapped with dummy */
+-	void *dummy;
+-{
+-	caddr_t arg = (/* XXX */ caddr_t)arg_as_sa;
+-	struct ipx_addr *na;
+-	struct sockaddr_ipx *sipx;
+-
+-	if (cmd < 0 || cmd >= PRC_NCMDS)
+-		return NULL;
+-
+-	switch (cmd) {
+-
+-	case PRC_ROUTEDEAD:
+-		return NULL;
+-
+-	case PRC_IFDOWN:
+-	case PRC_HOSTDEAD:
+-	case PRC_HOSTUNREACH:
+-		sipx = (struct sockaddr_ipx *)arg;
+-		if (sipx == NULL || sipx->sipx_family != AF_IPX)
+-			return NULL;
+-		na = &sipx->sipx_addr;
+-		break;
+-
+-	default:
+-		break;
+-	}
+-	return NULL;
+-}
+-
+-/*
+- * When a source quench is received, close congestion window
+- * to one packet.  We will gradually open it again as we proceed.
+- */
+-void
+-spx_quench(ipxp)
+-	struct ipxpcb *ipxp;
+-{
+-	struct spxpcb *cb = ipxtospxpcb(ipxp);
+-
+-	if (cb)
+-		cb->s_cwnd = CUNIT;
+-}
+-
+-#ifdef notdef
+-int
+-spx_fixmtu(ipxp)
+-	struct ipxpcb *ipxp;
+-{
+-	struct spxpcb *cb = (struct spxpcb *)(ipxp->ipxp_ppcb);
+-	struct mbuf *m;
+-	struct spx *si;
+-	struct ipx_errp *ep;
+-	struct sockbuf *sb;
+-	int badseq, len;
+-	struct mbuf *firstbad, *m0;
+-
+-	if (cb) {
+-		/* 
+-		 * The notification that we have sent
+-		 * too much is bad news -- we will
+-		 * have to go through queued up so far
+-		 * splitting ones which are too big and
+-		 * reassigning sequence numbers and checksums.
+-		 * we should then retransmit all packets from
+-		 * one above the offending packet to the last one
+-		 * we had sent (or our allocation)
+-		 * then the offending one so that the any queued
+-		 * data at our destination will be discarded.
+-		 */
+-		 ep = (struct ipx_errp *)ipxp->ipxp_notify_param;
+-		 sb = &ipxp->ipxp_socket->so_snd;
+-		 cb->s_mtu = ep->ipx_err_param;
+-		 badseq = SI(&ep->ipx_err_ipx)->si_seq;
+-		 for (m = sb->sb_mb; m; m = m->m_act) {
+-			si = mtod(m, struct spx *);
+-			if (si->si_seq == badseq)
+-				break;
+-		 }
+-		 if (m == 0) return;
+-		 firstbad = m;
+-		 /*for (;;) {*/
+-			/* calculate length */
+-			for (m0 = m, len = 0; m ; m = m->m_next)
+-				len += m->m_len;
+-			if (len > cb->s_mtu) {
+-			}
+-		/* FINISH THIS
+-		} */
+-	}
+-}
+-#endif
+-
+-int
+-spx_output(cb, m0)
+-	struct spxpcb *cb;
+-	struct mbuf *m0;
+-{
+-	struct socket *so = cb->s_ipxpcb->ipxp_socket;
+-	struct mbuf *m;
+-	struct spx *si = NULL;
+-	struct sockbuf *sb = &so->so_snd;
+-	int len = 0, win, rcv_win;
+-	short span, off, recordp = 0;
+-	u_short alo;
+-	int error = 0, sendalot;
+-#ifdef notdef
+-	int idle;
+-#endif
+-	struct mbuf *mprev;
+-
+-	if (m0) {
+-		int mtu = cb->s_mtu;
+-		int datalen;
+-		/*
+-		 * Make sure that packet isn't too big.
+-		 */
+-		for (m = m0; m ; m = m->m_next) {
+-			mprev = m;
+-			len += m->m_len;
+-			if (m->m_flags & M_EOR)
+-				recordp = 1;
+-		}
+-		datalen = (cb->s_flags & SF_HO) ?
+-				len - sizeof(struct spxhdr) : len;
+-		if (datalen > mtu) {
+-			if (cb->s_flags & SF_PI) {
+-				m_freem(m0);
+-				return (EMSGSIZE);
+-			} else {
+-				int oldEM = cb->s_cc & SPX_EM;
+-
+-				cb->s_cc &= ~SPX_EM;
+-				while (len > mtu) {
+-					/*
+-					 * Here we are only being called
+-					 * from usrreq(), so it is OK to
+-					 * block.
+-					 */
+-					m = m_copym(m0, 0, mtu, M_WAIT);
+-					if (cb->s_flags & SF_NEWCALL) {
+-					    struct mbuf *mm = m;
+-					    spx_newchecks[7]++;
+-					    while (mm) {
+-						mm->m_flags &= ~M_EOR;
+-						mm = mm->m_next;
+-					    }
+-					}
+-					error = spx_output(cb, m);
+-					if (error) {
+-						cb->s_cc |= oldEM;
+-						m_freem(m0);
+-						return(error);
+-					}
+-					m_adj(m0, mtu);
+-					len -= mtu;
+-				}
+-				cb->s_cc |= oldEM;
+-			}
+-		}
+-		/*
+-		 * Force length even, by adding a "garbage byte" if
+-		 * necessary.
+-		 */
+-		if (len & 1) {
+-			m = mprev;
+-			if (M_TRAILINGSPACE(m) >= 1)
+-				m->m_len++;
+-			else {
+-				struct mbuf *m1 = m_get(M_DONTWAIT, MT_DATA);
+-
+-				if (m1 == 0) {
+-					m_freem(m0);
+-					return (ENOBUFS);
+-				}
+-				m1->m_len = 1;
+-				*(mtod(m1, u_char *)) = 0;
+-				m->m_next = m1;
+-			}
+-		}
+-		m = m_gethdr(M_DONTWAIT, MT_HEADER);
+-		if (m == 0) {
+-			m_freem(m0);
+-			return (ENOBUFS);
+-		}
+-		/*
+-		 * Fill in mbuf with extended SP header
+-		 * and addresses and length put into network format.
+-		 */
+-		M_MOVE_HDR(m, m0);
+-		MH_ALIGN(m, sizeof(struct spx));
+-		m->m_len = sizeof(struct spx);
+-		m->m_next = m0;
+-		si = mtod(m, struct spx *);
+-		si->si_i = *cb->s_ipx;
+-		si->si_s = cb->s_shdr;
+-		if ((cb->s_flags & SF_PI) && (cb->s_flags & SF_HO)) {
+-			struct spxhdr *sh;
+-			if (m0->m_len < sizeof(*sh)) {
+-				if((m0 = m_pullup(m0, sizeof(*sh))) == NULL) {
+-					(void) m_free(m);
+-					return (EINVAL);
+-				}
+-				m->m_next = m0;
+-			}
+-			sh = mtod(m0, struct spxhdr *);
+-			si->si_dt = sh->spx_dt;
+-			si->si_cc |= sh->spx_cc & SPX_EM;
+-			m0->m_len -= sizeof(*sh);
+-			m0->m_data += sizeof(*sh);
+-			len -= sizeof(*sh);
+-		}
+-		len += sizeof(*si);
+-		if ((cb->s_flags2 & SF_NEWCALL) && recordp) {
+-			si->si_cc  |= SPX_EM;
+-			spx_newchecks[8]++;
+-		}
+-		if (cb->s_oobflags & SF_SOOB) {
+-			/*
+-			 * Per jqj@cornell:
+-			 * make sure OB packets convey exactly 1 byte.
+-			 * If the packet is 1 byte or larger, we
+-			 * have already guaranted there to be at least
+-			 * one garbage byte for the checksum, and
+-			 * extra bytes shouldn't hurt!
+-			 */
+-			if (len > sizeof(*si)) {
+-				si->si_cc |= SPX_OB;
+-				len = (1 + sizeof(*si));
+-			}
+-		}
+-		si->si_len = htons((u_short)len);
+-		m->m_pkthdr.len = ((len - 1) | 1) + 1;
+-		/*
+-		 * queue stuff up for output
+-		 */
+-		sbappendrecord(sb, m);
+-		cb->s_seq++;
+-	}
+-#ifdef notdef
+-	idle = (cb->s_smax == (cb->s_rack - 1));
+-#endif
+-again:
+-	sendalot = 0;
+-	off = cb->s_snxt - cb->s_rack;
+-	win = min(cb->s_swnd, (cb->s_cwnd/CUNIT));
+-
+-	/*
+-	 * If in persist timeout with window of 0, send a probe.
+-	 * Otherwise, if window is small but nonzero
+-	 * and timer expired, send what we can and go into
+-	 * transmit state.
+-	 */
+-	if (cb->s_force == 1 + SPXT_PERSIST) {
+-		if (win != 0) {
+-			cb->s_timer[SPXT_PERSIST] = 0;
+-			cb->s_rxtshift = 0;
+-		}
+-	}
+-	span = cb->s_seq - cb->s_rack;
+-	len = min(span, win) - off;
+-
+-	if (len < 0) {
+-		/*
+-		 * Window shrank after we went into it.
+-		 * If window shrank to 0, cancel pending
+-		 * restransmission and pull s_snxt back
+-		 * to (closed) window.  We will enter persist
+-		 * state below.  If the widndow didn't close completely,
+-		 * just wait for an ACK.
+-		 */
+-		len = 0;
+-		if (win == 0) {
+-			cb->s_timer[SPXT_REXMT] = 0;
+-			cb->s_snxt = cb->s_rack;
+-		}
+-	}
+-	if (len > 1)
+-		sendalot = 1;
+-	rcv_win = sbspace(&so->so_rcv);
+-
+-	/*
+-	 * Send if we owe peer an ACK.
+-	 */
+-	if (cb->s_oobflags & SF_SOOB) {
+-		/*
+-		 * must transmit this out of band packet
+-		 */
+-		cb->s_oobflags &= ~ SF_SOOB;
+-		sendalot = 1;
+-		spxstat.spxs_sndurg++;
+-		goto found;
+-	}
+-	if (cb->s_flags & SF_ACKNOW)
+-		goto send;
+-	if (cb->s_state < TCPS_ESTABLISHED)
+-		goto send;
+-	/*
+-	 * Silly window can't happen in spx.
+-	 * Code from tcp deleted.
+-	 */
+-	if (len)
+-		goto send;
+-	/*
+-	 * Compare available window to amount of window
+-	 * known to peer (as advertised window less
+-	 * next expected input.)  If the difference is at least two
+-	 * packets or at least 35% of the mximum possible window,
+-	 * then want to send a window update to peer.
+-	 */
+-	if (rcv_win > 0) {
+-		u_short delta =  1 + cb->s_alo - cb->s_ack;
+-		int adv = rcv_win - (delta * cb->s_mtu);
+-		
+-		if ((so->so_rcv.sb_cc == 0 && adv >= (2 * cb->s_mtu)) ||
+-		    (100 * adv / so->so_rcv.sb_hiwat >= 35)) {
+-			spxstat.spxs_sndwinup++;
+-			cb->s_flags |= SF_ACKNOW;
+-			goto send;
+-		}
+-
+-	}
+-	/*
+-	 * Many comments from tcp_output.c are appropriate here
+-	 * including . . .
+-	 * If send window is too small, there is data to transmit, and no
+-	 * retransmit or persist is pending, then go to persist state.
+-	 * If nothing happens soon, send when timer expires:
+-	 * if window is nonzero, transmit what we can,
+-	 * otherwise send a probe.
+-	 */
+-	if (so->so_snd.sb_cc && cb->s_timer[SPXT_REXMT] == 0 &&
+-		cb->s_timer[SPXT_PERSIST] == 0) {
+-			cb->s_rxtshift = 0;
+-			spx_setpersist(cb);
+-	}
+-	/*
+-	 * No reason to send a packet, just return.
+-	 */
+-	cb->s_outx = 1;
+-	return (0);
+-
+-send:
+-	/*
+-	 * Find requested packet.
+-	 */
+-	si = NULL;
+-	if (len > 0) {
+-		cb->s_want = cb->s_snxt;
+-		for (m = sb->sb_mb; m; m = m->m_act) {
+-			si = mtod(m, struct spx *);
+-			if (SSEQ_LEQ(cb->s_snxt, si->si_seq))
+-				break;
+-		}
+-	found:
+-		if (si) {
+-			if (si->si_seq == cb->s_snxt)
+-					cb->s_snxt++;
+-				else
+-					spxstat.spxs_sndvoid++, si = NULL;
+-		}
+-	}
+-	/*
+-	 * update window
+-	 */
+-	if (rcv_win < 0)
+-		rcv_win = 0;
+-	alo = cb->s_ack - 1 + (rcv_win / ((short)cb->s_mtu));
+-	if (SSEQ_LT(alo, cb->s_alo)) 
+-		alo = cb->s_alo;
+-
+-	if (si) {
+-		/*
+-		 * must make a copy of this packet for
+-		 * ipx_output to monkey with
+-		 */
+-		m = m_copy(m, 0, M_COPYALL);
+-		if (m == NULL)
+-			return (ENOBUFS);
+-		si = mtod(m, struct spx *);
+-		if (SSEQ_LT(si->si_seq, cb->s_smax))
+-			spxstat.spxs_sndrexmitpack++;
+-		else
+-			spxstat.spxs_sndpack++;
+-	} else if (cb->s_force || cb->s_flags & SF_ACKNOW) {
+-		/*
+-		 * Must send an acknowledgement or a probe
+-		 */
+-		if (cb->s_force)
+-			spxstat.spxs_sndprobe++;
+-		if (cb->s_flags & SF_ACKNOW)
+-			spxstat.spxs_sndacks++;
+-		m = m_gethdr(M_DONTWAIT, MT_HEADER);
+-		if (m == 0)
+-			return (ENOBUFS);
+-		/*
+-		 * Fill in mbuf with extended SP header
+-		 * and addresses and length put into network format.
+-		 */
+-		MH_ALIGN(m, sizeof(struct spx));
+-		m->m_len = sizeof(*si);
+-		m->m_pkthdr.len = sizeof(*si);
+-		si = mtod(m, struct spx *);
+-		si->si_i = *cb->s_ipx;
+-		si->si_s = cb->s_shdr;
+-		si->si_seq = cb->s_smax + 1;
+-		si->si_len = htons(sizeof(*si));
+-		si->si_cc |= SPX_SP;
+-	} else {
+-		cb->s_outx = 3;
+-		if (so->so_options & SO_DEBUG || traceallspxs)
+-			spx_trace(SA_OUTPUT, cb->s_state, cb, si, 0);
+-		return (0);
+-	}
+-	/*
+-	 * Stuff checksum and output datagram.
+-	 */
+-	if ((si->si_cc & SPX_SP) == 0) {
+-		if (cb->s_force != (1 + SPXT_PERSIST) ||
+-		    cb->s_timer[SPXT_PERSIST] == 0) {
+-			/*
+-			 * If this is a new packet and we are not currently 
+-			 * timing anything, time this one.
+-			 */
+-			if (SSEQ_LT(cb->s_smax, si->si_seq)) {
+-				cb->s_smax = si->si_seq;
+-				if (cb->s_rtt == 0) {
+-					spxstat.spxs_segstimed++;
+-					cb->s_rtseq = si->si_seq;
+-					cb->s_rtt = 1;
+-				}
+-			}
+-			/*
+-			 * Set rexmt timer if not currently set,
+-			 * Initial value for retransmit timer is smoothed
+-			 * round-trip time + 2 * round-trip time variance.
+-			 * Initialize shift counter which is used for backoff
+-			 * of retransmit time.
+-			 */
+-			if (cb->s_timer[SPXT_REXMT] == 0 &&
+-			    cb->s_snxt != cb->s_rack) {
+-				cb->s_timer[SPXT_REXMT] = cb->s_rxtcur;
+-				if (cb->s_timer[SPXT_PERSIST]) {
+-					cb->s_timer[SPXT_PERSIST] = 0;
+-					cb->s_rxtshift = 0;
+-				}
+-			}
+-		} else if (SSEQ_LT(cb->s_smax, si->si_seq)) {
+-			cb->s_smax = si->si_seq;
+-		}
+-	} else if (cb->s_state < TCPS_ESTABLISHED) {
+-		if (cb->s_rtt == 0)
+-			cb->s_rtt = 1; /* Time initial handshake */
+-		if (cb->s_timer[SPXT_REXMT] == 0)
+-			cb->s_timer[SPXT_REXMT] = cb->s_rxtcur;
+-	}
+-	{
+-		/*
+-		 * Do not request acks when we ack their data packets or
+-		 * when we do a gratuitous window update.
+-		 */
+-		if (((si->si_cc & SPX_SP) == 0) || cb->s_force)
+-				si->si_cc |= SPX_SA;
+-		si->si_seq = htons(si->si_seq);
+-		si->si_alo = htons(alo);
+-		si->si_ack = htons(cb->s_ack);
+-
+-		if (ipxcksum) {
+-			si->si_sum = 0;
+-			len = ntohs(si->si_len);
+-			if (len & 1)
+-				len++;
+-			si->si_sum = ipx_cksum(m, len);
+-		} else
+-			si->si_sum = 0xffff;
+-
+-		cb->s_outx = 4;
+-		if (so->so_options & SO_DEBUG || traceallspxs)
+-			spx_trace(SA_OUTPUT, cb->s_state, cb, si, 0);
+-
+-		if (so->so_options & SO_DONTROUTE)
+-			error = ipx_outputfl(m, (struct route *)0,
+-			    IPX_ROUTETOIF);
+-		else
+-			error = ipx_outputfl(m, &cb->s_ipxpcb->ipxp_route, 0);
+-	}
+-	if (error) {
+-		return (error);
+-	}
+-	spxstat.spxs_sndtotal++;
+-	/*
+-	 * Data sent (as far as we can tell).
+-	 * If this advertises a larger window than any other segment,
+-	 * then remember the size of the advertized window.
+-	 * Any pending ACK has now been sent.
+-	 */
+-	cb->s_force = 0;
+-	cb->s_flags &= ~(SF_ACKNOW|SF_DELACK);
+-	if (SSEQ_GT(alo, cb->s_alo))
+-		cb->s_alo = alo;
+-	if (sendalot)
+-		goto again;
+-	cb->s_outx = 5;
+-	return (0);
+-}
+-
+-int spx_do_persist_panics = 0;
+-
+-void
+-spx_setpersist(cb)
+-	struct spxpcb *cb;
+-{
+-	int t = ((cb->s_srtt >> 2) + cb->s_rttvar) >> 1;
+-
+-	if (cb->s_timer[SPXT_REXMT] && spx_do_persist_panics)
+-		panic("spx_output REXMT");
+-	/*
+-	 * Start/restart persistance timer.
+-	 */
+-	SPXT_RANGESET(cb->s_timer[SPXT_PERSIST],
+-	    t*spx_backoff[cb->s_rxtshift],
+-	    SPXTV_PERSMIN, SPXTV_PERSMAX);
+-	if (cb->s_rxtshift < SPX_MAXRXTSHIFT)
+-		cb->s_rxtshift++;
+-}
+-
+-/* ARGSUSED */
+-int
+-spx_ctloutput(req, so, level, name, value)
+-	int req;
+-	struct socket *so;
+-	int level, name;
+-	struct mbuf **value;
+-{
+-	struct mbuf *m;
+-	struct ipxpcb *ipxp = sotoipxpcb(so);
+-	struct spxpcb *cb;
+-	int mask, error = 0;
+-
+-	if (level != IPXPROTO_SPX) {
+-		/* This will have to be changed when we do more general
+-		   stacking of protocols */
+-		return (ipx_ctloutput(req, so, level, name, value));
+-	}
+-	if (ipxp == NULL) {
+-		error = EINVAL;
+-		goto release;
+-	} else
+-		cb = ipxtospxpcb(ipxp);
+-
+-	switch (req) {
+-
+-	case PRCO_GETOPT:
+-		if (value == NULL)
+-			return (EINVAL);
+-		m = m_get(M_DONTWAIT, MT_DATA);
+-		if (m == NULL)
+-			return (ENOBUFS);
+-		switch (name) {
+-
+-		case SO_HEADERS_ON_INPUT:
+-			mask = SF_HI;
+-			goto get_flags;
+-
+-		case SO_HEADERS_ON_OUTPUT:
+-			mask = SF_HO;
+-		get_flags:
+-			m->m_len = sizeof(short);
+-			*mtod(m, short *) = cb->s_flags & mask;
+-			break;
+-
+-		case SO_MTU:
+-			m->m_len = sizeof(u_short);
+-			*mtod(m, short *) = cb->s_mtu;
+-			break;
+-
+-		case SO_LAST_HEADER:
+-			m->m_len = sizeof(struct spxhdr);
+-			*mtod(m, struct spxhdr *) = cb->s_rhdr;
+-			break;
+-
+-		case SO_DEFAULT_HEADERS:
+-			m->m_len = sizeof(struct spx);
+-			*mtod(m, struct spxhdr *) = cb->s_shdr;
+-			break;
+-
+-		default:
+-			error = EINVAL;
+-		}
+-		*value = m;
+-		break;
+-
+-	case PRCO_SETOPT:
+-		if (value == 0 || *value == 0) {
+-			error = EINVAL;
+-			break;
+-		}
+-		switch (name) {
+-			int *ok;
+-
+-		case SO_HEADERS_ON_INPUT:
+-			mask = SF_HI;
+-			goto set_head;
+-
+-		case SO_HEADERS_ON_OUTPUT:
+-			mask = SF_HO;
+-		set_head:
+-			if (cb->s_flags & SF_PI) {
+-				ok = mtod(*value, int *);
+-				if (*ok)
+-					cb->s_flags |= mask;
+-				else
+-					cb->s_flags &= ~mask;
+-			} else error = EINVAL;
+-			break;
+-
+-		case SO_MTU:
+-			cb->s_mtu = *(mtod(*value, u_short *));
+-			break;
+-
+-#ifdef SF_NEWCALL
+-		case SO_NEWCALL:
+-			ok = mtod(*value, int *);
+-			if (*ok) {
+-				cb->s_flags2 |= SF_NEWCALL;
+-				spx_newchecks[5]++;
+-			} else {
+-				cb->s_flags2 &= ~SF_NEWCALL;
+-				spx_newchecks[6]++;
+-			}
+-			break;
+-#endif
+-
+-		case SO_DEFAULT_HEADERS:
+-			{
+-				struct spxhdr *sp =
+-				    mtod(*value, struct spxhdr *);
+-				cb->s_dt = sp->spx_dt;
+-				cb->s_cc = sp->spx_cc & SPX_EM;
+-			}
+-			break;
+-
+-		default:
+-			error = EINVAL;
+-		}
+-		m_freem(*value);
+-		break;
+-	}
+-	release:
+-		return (error);
+-}
+-
+-/* ARGSUSED */
+-int
+-spx_usrreq(so, req, m, nam, controlp)
+-	struct socket *so;
+-	int req;
+-	struct mbuf *m, *nam, *controlp;
+-{
+-	struct ipxpcb *ipxp = sotoipxpcb(so);
+-	struct spxpcb *cb = NULL;
+-	int s = splnet();
+-	int error = 0, ostate;
+-	struct sockbuf *sb;
+-
+-	if (req == PRU_CONTROL)
+-                return (ipx_control(so, (long)m, (caddr_t)nam,
+-			(struct ifnet *)controlp));
+-	if (ipxp == NULL) {
+-		if (req != PRU_ATTACH) {
+-			error = EINVAL;
+-			goto release;
+-		}
+-	} else
+-		cb = ipxtospxpcb(ipxp);
+-
+-	ostate = cb ? cb->s_state : 0;
+-
+-	switch (req) {
+-
+-	case PRU_ATTACH:
+-		if (ipxp != NULL) {
+-			error = EISCONN;
+-			break;
+-		}
+-		error = ipx_pcballoc(so, &ipxcbtable);
+-		if (error)
+-			break;
+-		if (so->so_snd.sb_hiwat == 0 || so->so_rcv.sb_hiwat == 0) {
+-			error = soreserve(so, (u_long) 3072, (u_long) 3072);
+-			if (error)
+-				break;
+-		}
+-		ipxp = sotoipxpcb(so);
+-		sb = &so->so_snd;
+-
+-		cb = malloc(sizeof(*cb), M_PCB, M_NOWAIT);
+-		if (cb == NULL) {
+-			error = ENOBUFS;
+-			break;
+-		}
+-		bzero((caddr_t)cb, sizeof(*cb));
+-		cb->s_ipx = malloc(sizeof(*cb->s_ipx), M_PCB, M_NOWAIT);
+-		if (cb->s_ipx == NULL) {
+-			(void) free(cb, M_PCB);
+-			error = ENOBUFS;
+-			break;
+-		}
+-		bzero((caddr_t)cb->s_ipx, sizeof(*cb->s_ipx));
+-		cb->s_state = TCPS_LISTEN;
+-		cb->s_smax = -1;
+-		cb->s_swl1 = -1;
+-		TAILQ_INIT(&cb->spxp_queue);
+-		cb->s_ipxpcb = ipxp;
+-		cb->s_mtu = 576 - sizeof(struct spx);
+-		cb->s_cwnd = sbspace(sb) * CUNIT / cb->s_mtu;
+-		cb->s_ssthresh = cb->s_cwnd;
+-		cb->s_cwmx = sbspace(sb) * CUNIT /
+-				(2 * sizeof(struct spx));
+-		/* Above is recomputed when connecting to account
+-		   for changed buffering or mtu's */
+-		cb->s_rtt = SPXTV_SRTTBASE;
+-		cb->s_rttvar = SPXTV_SRTTDFLT << 2;
+-		SPXT_RANGESET(cb->s_rxtcur,
+-		    ((SPXTV_SRTTBASE >> 2) + (SPXTV_SRTTDFLT << 2)) >> 1,
+-		    SPXTV_MIN, SPXTV_REXMTMAX);
+-		ipxp->ipxp_ppcb = (caddr_t) cb; 
+-		break;
+-
+-	case PRU_DETACH:
+-		if (cb->s_state > TCPS_LISTEN)
+-			cb = spx_disconnect(cb);
+-		else
+-			cb = spx_close(cb);
+-		break;
+-
+-	case PRU_BIND:
+-		error = ipx_pcbbind(ipxp, nam);
+-		break;
+-
+-	case PRU_LISTEN:
+-		if (ipxp->ipxp_lport == 0)
+-			error = ipx_pcbbind(ipxp, (struct mbuf *)0);
+-		if (error == 0)
+-			cb->s_state = TCPS_LISTEN;
+-		break;
+-
+-	/*
+-	 * Initiate connection to peer.
+-	 * Enter SYN_SENT state, and mark socket as connecting.
+-	 * Start keep-alive timer, setup prototype header,
+-	 * Send initial system packet requesting connection.
+-	 */
+-	case PRU_CONNECT:
+-		if (ipxp->ipxp_lport == 0) {
+-			error = ipx_pcbbind(ipxp, (struct mbuf *)0);
+-			if (error)
+-				break;
+-		}
+-		error = ipx_pcbconnect(ipxp, nam);
+-		if (error)
+-			break;
+-		soisconnecting(so);
+-		spxstat.spxs_connattempt++;
+-		cb->s_state = TCPS_SYN_SENT;
+-		cb->s_did = 0;
+-		spx_template(cb);
+-		cb->s_timer[SPXT_KEEP] = SPXTV_KEEP;
+-		cb->s_force = 1 + SPXTV_KEEP;
+-		/*
+-		 * Other party is required to respond to
+-		 * the port I send from, but he is not
+-		 * required to answer from where I am sending to,
+-		 * so allow wildcarding.
+-		 * original port I am sending to is still saved in
+-		 * cb->s_dport.
+-		 */
+-		ipxp->ipxp_fport = 0;
+-		error = spx_output(cb, (struct mbuf *) 0);
+-		break;
+-
+-	case PRU_CONNECT2:
+-		error = EOPNOTSUPP;
+-		break;
+-
+-	/*
+-	 * We may decide later to implement connection closing
+-	 * handshaking at the spx level optionally.
+-	 * here is the hook to do it:
+-	 */
+-	case PRU_DISCONNECT:
+-		cb = spx_disconnect(cb);
+-		break;
+-
+-	case PRU_SHUTDOWN:
+-		socantsendmore(so);
+-		cb = spx_usrclosed(cb);
+-		if (cb)
+-			error = spx_output(cb, (struct mbuf *) 0);
+-		break;
+-
+-	/*
+-	 * After a receive, possibly send acknowledgment
+-	 * updating allocation.
+-	 */
+-	case PRU_RCVD:
+-		cb->s_flags |= SF_RVD;
+-		(void) spx_output(cb, (struct mbuf *) 0);
+-		cb->s_flags &= ~SF_RVD;
+-		break;
+-
+-	case PRU_ABORT:
+-		(void) spx_drop(cb, ECONNABORTED);
+-		break;
+-
+-	case PRU_SENSE:
+-	case PRU_CONTROL:
+-		m = NULL;
+-		error = EOPNOTSUPP;
+-		break;
+-
+-	case PRU_RCVOOB:
+-		if ((cb->s_oobflags & SF_IOOB) || so->so_oobmark ||
+-		    (so->so_state & SS_RCVATMARK)) {
+-			m->m_len = 1;
+-			*mtod(m, caddr_t) = cb->s_iobc;
+-			break;
+-		}
+-		error = EINVAL;
+-		break;
+-
+-	case PRU_SENDOOB:
+-		if (sbspace(&so->so_snd) < -512) {
+-			error = ENOBUFS;
+-			break;
+-		}
+-		cb->s_oobflags |= SF_SOOB;
+-		/* FALLTHROUGH */
+-
+-	case PRU_SEND:
+-		if (controlp) {
+-			u_short *p = mtod(controlp, u_short *);
+-			spx_newchecks[2]++;
+-			if ((p[0] == 5) && p[1] == 1) { /* XXXX, for testing */
+-				cb->s_shdr.spx_dt = *(u_char *)(&p[2]);
+-				spx_newchecks[3]++;
+-			}
+-			m_freem(controlp);
+-		}
+-		controlp = NULL;
+-		error = spx_output(cb, m);
+-		m = NULL;
+-		break;
+-
+-	case PRU_SOCKADDR:
+-		ipx_setsockaddr(ipxp, nam);
+-		break;
+-
+-	/*
+-	 * Accept a connection.  Essentially all the work is
+-	 * done at higher levels; just return the address
+-	 * of the peer, storing through addr.
+-	 */
+-	case PRU_ACCEPT:
+-		/* FALLTHROUGH */
+-
+-	case PRU_PEERADDR:
+-		ipx_setpeeraddr(ipxp, nam);
+-		break;
+-
+-	case PRU_SLOWTIMO:
+-		cb = spx_timers(cb, (long)nam);
+-		req |= ((long)nam) << 8;
+-		break;
+-
+-	case PRU_FASTTIMO:
+-	case PRU_PROTORCV:
+-	case PRU_PROTOSEND:
+-		error =  EOPNOTSUPP;
+-		break;
+-
+-	default:
+-		panic("spx_usrreq");
+-	}
+-	if (cb && (so->so_options & SO_DEBUG || traceallspxs))
+-		spx_trace(SA_USER, (u_char)ostate, cb, (struct spx *)0, req);
+-release:
+-	if (controlp != NULL)
+-		m_freem(controlp);
+-	if (m != NULL)
+-		m_freem(m);
+-	splx(s);
+-	return (error);
+-}
+-
+-int
+-spx_usrreq_sp(so, req, m, nam, controlp)
+-	struct socket *so;
+-	int req;
+-	struct mbuf *m, *nam, *controlp;
+-{
+-	int error = spx_usrreq(so, req, m, nam, controlp);
+-
+-	if (req == PRU_ATTACH && error == 0) {
+-		struct ipxpcb *ipxp = sotoipxpcb(so);
+-		((struct spxpcb *)ipxp->ipxp_ppcb)->s_flags |=
+-					(SF_HI | SF_HO | SF_PI);
+-	}
+-	return (error);
+-}
+-
+-/*
+- * Create template to be used to send spx packets on a connection.
+- * Called after host entry created, fills
+- * in a skeletal spx header (choosing connection id),
+- * minimizing the amount of work necessary when the connection is used.
+- */
+-void
+-spx_template(cb)
+-	struct spxpcb *cb;
+-{
+-	struct ipxpcb *ipxp = cb->s_ipxpcb;
+-	struct ipx *ipx = cb->s_ipx;
+-	struct sockbuf *sb = &(ipxp->ipxp_socket->so_snd);
+-
+-	ipx->ipx_pt = IPXPROTO_SPX;
+-	ipx->ipx_sna = ipxp->ipxp_laddr;
+-	ipx->ipx_dna = ipxp->ipxp_faddr;
+-	cb->s_sid = htons(spx_iss);
+-	spx_iss += SPX_ISSINCR/2;
+-	cb->s_alo = 1;
+-	cb->s_cwnd = (sbspace(sb) * CUNIT) / cb->s_mtu;
+-	cb->s_ssthresh = cb->s_cwnd; /* Try to expand fast to full complement
+-					of large packets */
+-	cb->s_cwmx = (sbspace(sb) * CUNIT) / (2 * sizeof(struct spx));
+-	cb->s_cwmx = max(cb->s_cwmx, cb->s_cwnd);
+-		/* But allow for lots of little packets as well */
+-}
+-
+-/*
+- * Close a SPIP control block:
+- *	discard spx control block itself
+- *	discard ipx protocol control block
+- *	wake up any sleepers
+- */
+-struct spxpcb *
+-spx_close(cb)
+-	struct spxpcb *cb;
+-{
+-	struct spx_q *s;
+-	struct ipxpcb *ipxp = cb->s_ipxpcb;
+-	struct socket *so = ipxp->ipxp_socket;
+-
+-	for (s = TAILQ_FIRST(&cb->spxp_queue); s != NULL;
+-	     s = TAILQ_FIRST(&cb->spxp_queue)) {
+-		TAILQ_REMOVE(&cb->spxp_queue, s, list);
+-		m_freem(s->m);
+-		free(s, M_DEVBUF);
+-	}
+-	free(cb->s_ipx, M_PCB);
+-	free(cb, M_PCB);
+-	ipxp->ipxp_ppcb = 0;
+-	soisdisconnected(so);
+-	ipx_pcbdetach(ipxp);
+-	spxstat.spxs_closed++;
+-	return (NULL);
+-}
+-/*
+- *	Someday we may do level 3 handshaking
+- *	to close a connection or send a xerox style error.
+- *	For now, just close.
+- */
+-struct spxpcb *
+-spx_usrclosed(cb)
+-	struct spxpcb *cb;
+-{
+-	return (spx_close(cb));
+-}
+-struct spxpcb *
+-spx_disconnect(cb)
+-	struct spxpcb *cb;
+-{
+-	return (spx_close(cb));
+-}
+-/*
+- * Drop connection, reporting
+- * the specified error.
+- */
+-struct spxpcb *
+-spx_drop(cb, errno)
+-	struct spxpcb *cb;
+-	int errno;
+-{
+-	struct socket *so = cb->s_ipxpcb->ipxp_socket;
+-
+-	/*
+-	 * someday, in the xerox world
+-	 * we will generate error protocol packets
+-	 * announcing that the socket has gone away.
+-	 */
+-	if (TCPS_HAVERCVDSYN(cb->s_state)) {
+-		spxstat.spxs_drops++;
+-		cb->s_state = TCPS_CLOSED;
+-		/*(void) tcp_output(cb);*/
+-	} else
+-		spxstat.spxs_conndrops++;
+-	so->so_error = errno;
+-	return (spx_close(cb));
+-}
+-
+-void
+-spx_abort(ipxp)
+-	struct ipxpcb *ipxp;
+-{
+-
+-	(void) spx_close((struct spxpcb *)ipxp->ipxp_ppcb);
+-}
+-
+-int	spx_backoff[SPX_MAXRXTSHIFT+1] =
+-    { 1, 2, 4, 8, 16, 32, 64, 64, 64, 64, 64, 64, 64 };
+-/*
+- * Fast timeout routine for processing delayed acks
+- */
+-void
+-spx_fasttimo()
+-{
+-	struct ipxpcb *ipxp;
+-	struct spxpcb *cb;
+-	int s = splnet();
+-
+-	if (!CIRCLEQ_EMPTY(&ipxpcbtable.ipxpt_queue))
+-		CIRCLEQ_FOREACH(ipxp, &ipxpcbtable.ipxpt_queue, ipxp_queue)
+-			if ((cb = (struct spxpcb *)ipxp->ipxp_ppcb) &&
+-			    (cb->s_flags & SF_DELACK)) {
+-				cb->s_flags &= ~SF_DELACK;
+-				cb->s_flags |= SF_ACKNOW;
+-				spxstat.spxs_delack++;
+-				(void) spx_output(cb, (struct mbuf *) 0);
+-			}
+-	splx(s);
+-}
+-
+-/*
+- * spx protocol timeout routine called every 500 ms.
+- * Updates the timers in all active pcb's and
+- * causes finite state machine actions if timers expire.
+- */
+-void
+-spx_slowtimo()
+-{
+-	struct ipxpcb *ipx, *ipxnxt;
+-	struct spxpcb *cb;
+-	int s = splnet();
+-	int i;
+-
+-	/*
+-	 * Search through tcb's and update active timers.
+-	 */
+-	if (CIRCLEQ_EMPTY(&ipxpcbtable.ipxpt_queue)) {
+-		splx(s);
+-		return;
+-	}
+-	for (ipx = CIRCLEQ_FIRST(&ipxcbtable.ipxpt_queue);
+-	    ipx != CIRCLEQ_END(&ipxcbtable.ipxpt_queue);) {
+-		cb = ipxtospxpcb(ipx);
+-		ipxnxt = CIRCLEQ_NEXT(ipx, ipxp_queue);
+-		if (cb == 0)
+-			goto tpgone;
+-		for (i = 0; i < SPXT_NTIMERS; i++) {
+-			if (cb->s_timer[i] && --cb->s_timer[i] == 0) {
+-				(void) spx_usrreq(cb->s_ipxpcb->ipxp_socket,
+-				    PRU_SLOWTIMO, NULL,
+-				    (struct mbuf *)(long)i, NULL);
+-				if (ipxnxt->ipxp_queue.cqe_prev != ipx)
+-					goto tpgone;
+-			}
+-		}
+-		cb->s_idle++;
+-		if (cb->s_rtt)
+-			cb->s_rtt++;
+-tpgone:
+-		ipx = ipxnxt;
+-	}
+-	spx_iss += SPX_ISSINCR/PR_SLOWHZ;		/* increment iss */
+-	splx(s);
+-}
+-/*
+- * SPX timer processing.
+- */
+-struct spxpcb *
+-spx_timers(cb, timer)
+-	struct spxpcb *cb;
+-	int timer;
+-{
+-	long rexmt;
+-	int win;
+-
+-	cb->s_force = 1 + timer;
+-	switch (timer) {
+-
+-	/*
+-	 * 2 MSL timeout in shutdown went off.  TCP deletes connection
+-	 * control block.
+-	 */
+-	case SPXT_2MSL:
+-		printf("spx: SPXT_2MSL went off for no reason\n");
+-		cb->s_timer[timer] = 0;
+-		break;
+-
+-	/*
+-	 * Retransmission timer went off.  Message has not
+-	 * been acked within retransmit interval.  Back off
+-	 * to a longer retransmit interval and retransmit one packet.
+-	 */
+-	case SPXT_REXMT:
+-		if (++cb->s_rxtshift > SPX_MAXRXTSHIFT) {
+-			cb->s_rxtshift = SPX_MAXRXTSHIFT;
+-			spxstat.spxs_timeoutdrop++;
+-			cb = spx_drop(cb, ETIMEDOUT);
+-			break;
+-		}
+-		spxstat.spxs_rexmttimeo++;
+-		rexmt = ((cb->s_srtt >> 2) + cb->s_rttvar) >> 1;
+-		rexmt *= spx_backoff[cb->s_rxtshift];
+-		SPXT_RANGESET(cb->s_rxtcur, rexmt, SPXTV_MIN, SPXTV_REXMTMAX);
+-		cb->s_timer[SPXT_REXMT] = cb->s_rxtcur;
+-		/*
+-		 * If we have backed off fairly far, our srtt
+-		 * estimate is probably bogus.  Clobber it
+-		 * so we'll take the next rtt measurement as our srtt;
+-		 * move the current srtt into rttvar to keep the current
+-		 * retransmit times until then.
+-		 */
+-		if (cb->s_rxtshift > SPX_MAXRXTSHIFT / 4 ) {
+-			cb->s_rttvar += (cb->s_srtt >> 2);
+-			cb->s_srtt = 0;
+-		}
+-		cb->s_snxt = cb->s_rack;
+-		/*
+-		 * If timing a packet, stop the timer.
+-		 */
+-		cb->s_rtt = 0;
+-		/*
+-		 * See very long discussion in tcp_timer.c about congestion
+-		 * window and sstrhesh
+-		 */
+-		win = min(cb->s_swnd, (cb->s_cwnd/CUNIT)) / 2;
+-		if (win < 2)
+-			win = 2;
+-		cb->s_cwnd = CUNIT;
+-		cb->s_ssthresh = win * CUNIT;
+-		(void) spx_output(cb, (struct mbuf *) 0);
+-		break;
+-
+-	/*
+-	 * Persistance timer into zero window.
+-	 * Force a probe to be sent.
+-	 */
+-	case SPXT_PERSIST:
+-		spxstat.spxs_persisttimeo++;
+-		spx_setpersist(cb);
+-		(void) spx_output(cb, (struct mbuf *) 0);
+-		break;
+-
+-	/*
+-	 * Keep-alive timer went off; send something
+-	 * or drop connection if idle for too long.
+-	 */
+-	case SPXT_KEEP:
+-		spxstat.spxs_keeptimeo++;
+-		if (cb->s_state < TCPS_ESTABLISHED)
+-			goto dropit;
+-		if (cb->s_ipxpcb->ipxp_socket->so_options & SO_KEEPALIVE) {
+-		    	if (cb->s_idle >= SPXTV_MAXIDLE)
+-				goto dropit;
+-			spxstat.spxs_keepprobe++;
+-			(void) spx_output(cb, (struct mbuf *) 0);
+-		} else
+-			cb->s_idle = 0;
+-		cb->s_timer[SPXT_KEEP] = SPXTV_KEEP;
+-		break;
+-	dropit:
+-		spxstat.spxs_keepdrops++;
+-		cb = spx_drop(cb, ETIMEDOUT);
+-		break;
+-	}
+-	return (cb);
+-}
+-
+-int
+-spx_sysctl(name, namelen, oldp, oldlenp, newp, newlen)
+-	int *name;
+-	u_int namelen;
+-	void *oldp;
+-	size_t *oldlenp;
+-	void *newp;
+-	size_t newlen;
+-{
+-	/* All sysctl names at this level are terminal. */
+-	if (namelen != 1)
+-		return (ENOTDIR);
+-
+-	switch (name[0]) {
+-	default:
+-		return (ENOPROTOOPT);
+-	}
+-	/* NOT REACHED */
+-}
+diff --git a/sys/netipx/spx_var.h b/sys/netipx/spx_var.h
+deleted file mode 100644
+index a89671f39ed..00000000000
+--- a/sys/netipx/spx_var.h
++++ /dev/null
+@@ -1,144 +0,0 @@
+-/*	$OpenBSD: spx_var.h,v 1.4 2003/06/02 23:28:16 millert Exp $	*/
+-
+-/*-
+- *
+- * Copyright (c) 1996 Michael Shalayeff
+- * Copyright (c) 1995, Mike Mitchell
+- * Copyright (c) 1984, 1985, 1986, 1987, 1993
+- *	The Regents of the University of California.  All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- * 3. Neither the name of the University nor the names of its contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- *
+- *	@(#)spx_var.h
+- *
+- * from FreeBSD Id: spx_var.h,v 1.4 1995/11/04 09:03:47 julian Exp
+- */
+-
+-#ifndef _NETIPX_SPX_VAR_H_
+-#define _NETIPX_SPX_VAR_H_
+-
+-struct	spxstat {
+-	long	spxs_connattempt;	/* connections initiated */
+-	long	spxs_accepts;		/* connections accepted */
+-	long	spxs_connects;		/* connections established */
+-	long	spxs_drops;		/* connections dropped */
+-	long	spxs_conndrops;		/* embryonic connections dropped */
+-	long	spxs_closed;		/* conn. closed (includes drops) */
+-	long	spxs_segstimed;		/* segs where we tried to get rtt */
+-	long	spxs_rttupdated;	/* times we succeeded */
+-	long	spxs_delack;		/* delayed acks sent */
+-	long	spxs_timeoutdrop;	/* conn. dropped in rxmt timeout */
+-	long	spxs_rexmttimeo;	/* retransmit timeouts */
+-	long	spxs_persisttimeo;	/* persist timeouts */
+-	long	spxs_keeptimeo;		/* keepalive timeouts */
+-	long	spxs_keepprobe;		/* keepalive probes sent */
+-	long	spxs_keepdrops;		/* connections dropped in keepalive */
+-
+-	long	spxs_sndtotal;		/* total packets sent */
+-	long	spxs_sndpack;		/* data packets sent */
+-	long	spxs_sndbyte;		/* data bytes sent */
+-	long	spxs_sndrexmitpack;	/* data packets retransmitted */
+-	long	spxs_sndrexmitbyte;	/* data bytes retransmitted */
+-	long	spxs_sndacks;		/* ack-only packets sent */
+-	long	spxs_sndprobe;		/* window probes sent */
+-	long	spxs_sndurg;		/* packets sent with URG only */
+-	long	spxs_sndwinup;		/* window update-only packets sent */
+-	long	spxs_sndctrl;		/* control (SYN|FIN|RST) packets sent */
+-	long	spxs_sndvoid;		/* couldn't find requested packet*/
+-
+-	long	spxs_rcvtotal;		/* total packets received */
+-	long	spxs_rcvpack;		/* packets received in sequence */
+-	long	spxs_rcvbyte;		/* bytes received in sequence */
+-	long	spxs_rcvbadsum;		/* packets received with ccksum errs */
+-	long	spxs_rcvbadoff;		/* packets received with bad offset */
+-	long	spxs_rcvshort;		/* packets received too short */
+-	long	spxs_rcvduppack;	/* duplicate-only packets received */
+-	long	spxs_rcvdupbyte;	/* duplicate-only bytes received */
+-	long	spxs_rcvpartduppack;	/* packets with some duplicate data */
+-	long	spxs_rcvpartdupbyte;	/* dup. bytes in part-dup. packets */
+-	long	spxs_rcvoopack;		/* out-of-order packets received */
+-	long	spxs_rcvoobyte;		/* out-of-order bytes received */
+-	long	spxs_rcvpackafterwin;	/* packets with data after window */
+-	long	spxs_rcvbyteafterwin;	/* bytes rcvd after window */
+-	long	spxs_rcvafterclose;	/* packets rcvd after "close" */
+-	long	spxs_rcvwinprobe;	/* rcvd window probe packets */
+-	long	spxs_rcvdupack;		/* rcvd duplicate acks */
+-	long	spxs_rcvacktoomuch;	/* rcvd acks for unsent data */
+-	long	spxs_rcvackpack;	/* rcvd ack packets */
+-	long	spxs_rcvackbyte;	/* bytes acked by rcvd acks */
+-	long	spxs_rcvwinupd;		/* rcvd window update packets */
+-};
+-
+-struct	spx_istat {
+-	short	hdrops;
+-	short	badsum;
+-	short	badlen;
+-	short	slotim;
+-	short	fastim;
+-	short	nonucn;
+-	short	noconn;
+-	short	notme;
+-	short	wrncon;
+-	short	bdreas;
+-	short	gonawy;
+-	short	notyet;
+-	short	lstdup;
+-	struct spxstat newstats;
+-};
+-
+-#ifdef _KERNEL
+-extern struct spx_istat spx_istat;
+-extern u_short spx_iss;
+-
+-/* Following was struct spxstat spxstat; */
+-#ifndef spxstat
+-#define spxstat spx_istat.newstats
+-#endif
+-
+-#endif
+-
+-#define	SPX_ISSINCR	128
+-/*
+- * spx sequence numbers are 16 bit integers operated
+- * on with modular arithmetic.  These macros can be
+- * used to compare such integers.
+- */
+-#define	SSEQ_LT(a,b)	(((short)((a)-(b))) < 0)
+-#define	SSEQ_LEQ(a,b)	(((short)((a)-(b))) <= 0)
+-#define	SSEQ_GT(a,b)	(((short)((a)-(b))) > 0)
+-#define	SSEQ_GEQ(a,b)	(((short)((a)-(b))) >= 0)
+-
+-/*
+- * Names for SPX sysctl objects.
+- */
+-
+-#define SPXCTL_MAXID            1
+-
+-#define SPXCTL_NAMES { \
+-	{ 0, 0}, \
+-}
+-
+-
+-#endif
+

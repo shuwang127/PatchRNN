@@ -1,0 +1,175 @@
+commit bb0030797f55c9996ea1cebd16b65750ceb7e4fd
+Author: Ingo Molnar <mingo@elte.hu>
+Date:   Wed Mar 22 00:09:14 2006 -0800
+
+    [PATCH] sem2mutex: security/
+    
+    Semaphore to mutex conversion.
+    
+    The conversion was generated via scripts, and the result was validated
+    automatically via a script as well.
+    
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+    Cc: Stephen Smalley <sds@epoch.ncsc.mil>
+    Cc: James Morris <jmorris@namei.org>
+    Cc: David Howells <dhowells@redhat.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/security/keys/process_keys.c b/security/keys/process_keys.c
+index 74cb79eb917e..f6940618e345 100644
+--- a/security/keys/process_keys.c
++++ b/security/keys/process_keys.c
+@@ -16,11 +16,12 @@
+ #include <linux/keyctl.h>
+ #include <linux/fs.h>
+ #include <linux/err.h>
++#include <linux/mutex.h>
+ #include <asm/uaccess.h>
+ #include "internal.h"
+ 
+ /* session keyring create vs join semaphore */
+-static DECLARE_MUTEX(key_session_sem);
++static DEFINE_MUTEX(key_session_mutex);
+ 
+ /* the root user's tracking struct */
+ struct key_user root_key_user = {
+@@ -711,7 +712,7 @@ long join_session_keyring(const char *name)
+ 	}
+ 
+ 	/* allow the user to join or create a named keyring */
+-	down(&key_session_sem);
++	mutex_lock(&key_session_mutex);
+ 
+ 	/* look for an existing keyring of this name */
+ 	keyring = find_keyring_by_name(name, 0);
+@@ -737,7 +738,7 @@ long join_session_keyring(const char *name)
+ 	key_put(keyring);
+ 
+ error2:
+-	up(&key_session_sem);
++	mutex_unlock(&key_session_mutex);
+ error:
+ 	return ret;
+ 
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+index b5fa02d17b1e..65efa8f76331 100644
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -15,6 +15,7 @@
+ #include <linux/slab.h>
+ #include <linux/vmalloc.h>
+ #include <linux/fs.h>
++#include <linux/mutex.h>
+ #include <linux/init.h>
+ #include <linux/string.h>
+ #include <linux/security.h>
+@@ -44,7 +45,7 @@ static int __init checkreqprot_setup(char *str)
+ __setup("checkreqprot=", checkreqprot_setup);
+ 
+ 
+-static DECLARE_MUTEX(sel_sem);
++static DEFINE_MUTEX(sel_mutex);
+ 
+ /* global data for booleans */
+ static struct dentry *bool_dir = NULL;
+@@ -230,7 +231,7 @@ static ssize_t sel_write_load(struct file * file, const char __user * buf,
+ 	ssize_t length;
+ 	void *data = NULL;
+ 
+-	down(&sel_sem);
++	mutex_lock(&sel_mutex);
+ 
+ 	length = task_has_security(current, SECURITY__LOAD_POLICY);
+ 	if (length)
+@@ -262,7 +263,7 @@ static ssize_t sel_write_load(struct file * file, const char __user * buf,
+ 	else
+ 		length = count;
+ out:
+-	up(&sel_sem);
++	mutex_unlock(&sel_mutex);
+ 	vfree(data);
+ 	return length;
+ }
+@@ -714,7 +715,7 @@ static ssize_t sel_read_bool(struct file *filep, char __user *buf,
+ 	int cur_enforcing;
+ 	struct inode *inode;
+ 
+-	down(&sel_sem);
++	mutex_lock(&sel_mutex);
+ 
+ 	ret = -EFAULT;
+ 
+@@ -759,7 +760,7 @@ static ssize_t sel_read_bool(struct file *filep, char __user *buf,
+ 	*ppos = end;
+ 	ret = count;
+ out:
+-	up(&sel_sem);
++	mutex_unlock(&sel_mutex);
+ 	if (page)
+ 		free_page((unsigned long)page);
+ 	return ret;
+@@ -773,7 +774,7 @@ static ssize_t sel_write_bool(struct file *filep, const char __user *buf,
+ 	int new_value;
+ 	struct inode *inode;
+ 
+-	down(&sel_sem);
++	mutex_lock(&sel_mutex);
+ 
+ 	length = task_has_security(current, SECURITY__SETBOOL);
+ 	if (length)
+@@ -812,7 +813,7 @@ static ssize_t sel_write_bool(struct file *filep, const char __user *buf,
+ 	length = count;
+ 
+ out:
+-	up(&sel_sem);
++	mutex_unlock(&sel_mutex);
+ 	if (page)
+ 		free_page((unsigned long) page);
+ 	return length;
+@@ -831,7 +832,7 @@ static ssize_t sel_commit_bools_write(struct file *filep,
+ 	ssize_t length = -EFAULT;
+ 	int new_value;
+ 
+-	down(&sel_sem);
++	mutex_lock(&sel_mutex);
+ 
+ 	length = task_has_security(current, SECURITY__SETBOOL);
+ 	if (length)
+@@ -869,7 +870,7 @@ static ssize_t sel_commit_bools_write(struct file *filep,
+ 	length = count;
+ 
+ out:
+-	up(&sel_sem);
++	mutex_unlock(&sel_mutex);
+ 	if (page)
+ 		free_page((unsigned long) page);
+ 	return length;
+diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
+index 8a764928ff4b..63e0b7f29cb5 100644
+--- a/security/selinux/ss/services.c
++++ b/security/selinux/ss/services.c
+@@ -27,7 +27,8 @@
+ #include <linux/in.h>
+ #include <linux/sched.h>
+ #include <linux/audit.h>
+-#include <asm/semaphore.h>
++#include <linux/mutex.h>
++
+ #include "flask.h"
+ #include "avc.h"
+ #include "avc_ss.h"
+@@ -48,9 +49,9 @@ static DEFINE_RWLOCK(policy_rwlock);
+ #define POLICY_RDUNLOCK read_unlock(&policy_rwlock)
+ #define POLICY_WRUNLOCK write_unlock_irq(&policy_rwlock)
+ 
+-static DECLARE_MUTEX(load_sem);
+-#define LOAD_LOCK down(&load_sem)
+-#define LOAD_UNLOCK up(&load_sem)
++static DEFINE_MUTEX(load_mutex);
++#define LOAD_LOCK mutex_lock(&load_mutex)
++#define LOAD_UNLOCK mutex_unlock(&load_mutex)
+ 
+ static struct sidtab sidtab;
+ struct policydb policydb;
+

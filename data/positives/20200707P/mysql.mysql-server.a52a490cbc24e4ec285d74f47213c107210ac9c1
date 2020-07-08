@@ -1,0 +1,61 @@
+commit a52a490cbc24e4ec285d74f47213c107210ac9c1
+Author: prabakaran thirumalai <prabakaran.thirumalai@oracle.com>
+Date:   Tue Oct 16 14:02:19 2012 +0530
+
+    Bug#14689561 - SERVER CRASH ON CONNECTING CLIENT USING BIND
+    ADDRESS, WHEN HOST CACHE = '0'
+    
+    Analysis:
+    host_cache_size global variable specifies size of
+    underlying hash_filo class. hash_filo::add() dereferences
+    last_link (which is NULL in case of cache size= 0),
+    irrespective of cache size.
+    
+    Fix:
+    Do not add entry by doing early return from hash_filo::add
+    when hash_filo::size is zero.
+
+diff --git a/sql/hash_filo.h b/sql/hash_filo.h
+index 81ff6f7ba8b..2ecb2e82895 100644
+--- a/sql/hash_filo.h
++++ b/sql/hash_filo.h
+@@ -124,6 +124,7 @@ public:
+ 
+   my_bool add(hash_filo_element *entry)
+   {
++    if (!m_size) return 1;
+     if (cache.records == m_size)
+     {
+       hash_filo_element *tmp=last_link;
+diff --git a/unittest/gunit/segfault-t.cc b/unittest/gunit/segfault-t.cc
+index 805a86ab947..ea51f14e953 100644
+--- a/unittest/gunit/segfault-t.cc
++++ b/unittest/gunit/segfault-t.cc
+@@ -20,6 +20,7 @@
+ #include "test_utils.h"
+ #include "my_stacktrace.h"
+ #include "m_string.h"
++#include "hash_filo.h"
+ 
+ namespace {
+ 
+@@ -179,4 +180,18 @@ TEST(PrintUtilities, Printf)
+   EXPECT_STREQ(sprintfbuff, buff);
+ }
+ 
++TEST_F(FatalSignalDeathTest, TestHashFiloZeroSize)
++{
++  hash_filo *t_cache;
++  t_cache= new hash_filo(5, 0, 0,
++                         (my_hash_get_key) NULL,
++                         (my_hash_free_key) NULL,
++                         NULL);
++  t_cache->resize(0);
++  hash_filo_element entry;
++  //after resize (to zero) it tries to dereference last_link which is NULL
++  t_cache->add(&entry);
++  delete t_cache;
++}
++
+ }
+

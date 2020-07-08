@@ -1,0 +1,113 @@
+commit be038b376465953c358d675cb38a611898a49dc2
+Author: Assaf Krauss <assaf.krauss@intel.com>
+Date:   Thu Jun 5 19:55:21 2008 +0300
+
+    mac80211: Checking IBSS support while changing channel in ad-hoc mode
+    
+    This patch adds a check to the set_channel flow. When attempting to change
+    the channel while in IBSS mode, and the new channel does not support IBSS
+    mode, the flow return with an error value with no consequences on the
+    mac80211 and driver state.
+    
+    Signed-off-by: Assaf Krauss <assaf.krauss@intel.com>
+    Signed-off-by: Emmanuel Grumbach <emmanuel.grumbach@intel.com>
+    Signed-off-by: Tomas Winkler <tomas.winkler@intel.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
+index c7314bf4bec2..006486b26726 100644
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -899,7 +899,7 @@ extern const struct iw_handler_def ieee80211_iw_handler_def;
+ 
+ 
+ /* ieee80211_ioctl.c */
+-int ieee80211_set_freq(struct ieee80211_local *local, int freq);
++int ieee80211_set_freq(struct net_device *dev, int freq);
+ /* ieee80211_sta.c */
+ void ieee80211_sta_timer(unsigned long data);
+ void ieee80211_sta_work(struct work_struct *work);
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index affe42f8484c..4d2b582dd055 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -2359,13 +2359,10 @@ static int ieee80211_sta_join_ibss(struct net_device *dev,
+ 	sdata->drop_unencrypted = bss->capability &
+ 		WLAN_CAPABILITY_PRIVACY ? 1 : 0;
+ 
+-	res = ieee80211_set_freq(local, bss->freq);
++	res = ieee80211_set_freq(dev, bss->freq);
+ 
+-	if (local->oper_channel->flags & IEEE80211_CHAN_NO_IBSS) {
+-		printk(KERN_DEBUG "%s: IBSS not allowed on frequency "
+-		       "%d MHz\n", dev->name, local->oper_channel->center_freq);
+-		return -1;
+-	}
++	if (res)
++		return res;
+ 
+ 	/* Set beacon template */
+ 	skb = dev_alloc_skb(local->hw.extra_tx_headroom + 400);
+@@ -3491,7 +3488,7 @@ static int ieee80211_sta_config_auth(struct net_device *dev,
+ 	spin_unlock_bh(&local->sta_bss_lock);
+ 
+ 	if (selected) {
+-		ieee80211_set_freq(local, selected->freq);
++		ieee80211_set_freq(dev, selected->freq);
+ 		if (!(ifsta->flags & IEEE80211_STA_SSID_SET))
+ 			ieee80211_sta_set_ssid(dev, selected->ssid,
+ 					       selected->ssid_len);
+diff --git a/net/mac80211/wext.c b/net/mac80211/wext.c
+index 8311bb24f9f3..a8bb8e31b1ec 100644
+--- a/net/mac80211/wext.c
++++ b/net/mac80211/wext.c
+@@ -290,14 +290,22 @@ static int ieee80211_ioctl_giwmode(struct net_device *dev,
+ 	return 0;
+ }
+ 
+-int ieee80211_set_freq(struct ieee80211_local *local, int freqMHz)
++int ieee80211_set_freq(struct net_device *dev, int freqMHz)
+ {
+ 	int ret = -EINVAL;
+ 	struct ieee80211_channel *chan;
++	struct ieee80211_local *local = wdev_priv(dev->ieee80211_ptr);
++	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
+ 
+ 	chan = ieee80211_get_channel(local->hw.wiphy, freqMHz);
+ 
+ 	if (chan && !(chan->flags & IEEE80211_CHAN_DISABLED)) {
++		if (sdata->vif.type == IEEE80211_IF_TYPE_IBSS &&
++		    chan->flags & IEEE80211_CHAN_NO_IBSS) {
++			printk(KERN_DEBUG "%s: IBSS not allowed on frequency "
++				"%d MHz\n", dev->name, chan->center_freq);
++			return ret;
++		}
+ 		local->oper_channel = chan;
+ 
+ 		if (local->sta_sw_scanning || local->sta_hw_scanning)
+@@ -315,7 +323,6 @@ static int ieee80211_ioctl_siwfreq(struct net_device *dev,
+ 				   struct iw_request_info *info,
+ 				   struct iw_freq *freq, char *extra)
+ {
+-	struct ieee80211_local *local = wdev_priv(dev->ieee80211_ptr);
+ 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
+ 
+ 	if (sdata->vif.type == IEEE80211_IF_TYPE_STA)
+@@ -329,14 +336,14 @@ static int ieee80211_ioctl_siwfreq(struct net_device *dev,
+ 					IEEE80211_STA_AUTO_CHANNEL_SEL;
+ 			return 0;
+ 		} else
+-			return ieee80211_set_freq(local,
++			return ieee80211_set_freq(dev,
+ 				ieee80211_channel_to_frequency(freq->m));
+ 	} else {
+ 		int i, div = 1000000;
+ 		for (i = 0; i < freq->e; i++)
+ 			div /= 10;
+ 		if (div > 0)
+-			return ieee80211_set_freq(local, freq->m / div);
++			return ieee80211_set_freq(dev, freq->m / div);
+ 		else
+ 			return -EINVAL;
+ 	}
+

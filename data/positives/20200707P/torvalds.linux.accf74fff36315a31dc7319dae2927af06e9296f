@@ -1,0 +1,73 @@
+commit accf74fff36315a31dc7319dae2927af06e9296f
+Author: Mauro Carvalho Chehab <mchehab@redhat.com>
+Date:   Mon Aug 16 18:34:37 2010 -0300
+
+    i7core_edac: don't use a freed mci struct
+    
+    This is a nasty bug. Since kobject count will be reduced by zero by
+    edac_mc_del_mc(), and this triggers the kobj release method, the
+    mci memory will be freed automatically. So, all we have left is ctl_name,
+    as shown by enabling debug:
+    
+    [   80.822186] EDAC DEBUG: in drivers/edac/edac_mc_sysfs.c, line at 1020: edac_remove_sysfs_mci_device()  remove_link
+    [   80.832590] EDAC DEBUG: in drivers/edac/edac_mc_sysfs.c, line at 1024: edac_remove_sysfs_mci_device()  remove_mci_instance
+    [   80.843776] EDAC DEBUG: in drivers/edac/edac_mc_sysfs.c, line at 640: edac_mci_control_release() mci instance idx=0 releasing
+    [   80.855163] EDAC MC: Removed device 0 for i7core_edac.c i7 core #0: DEV 0000:3f:03.0
+    [   80.862936] EDAC DEBUG: in drivers/edac/i7core_edac.c, line at 2089: (null): free structs
+    [   80.871134] EDAC DEBUG: in drivers/edac/edac_mc.c, line at 238: edac_mc_free()
+    [   80.878379] EDAC DEBUG: in drivers/edac/edac_mc_sysfs.c, line at 726: edac_mc_unregister_sysfs_main_kobj()
+    [   80.888043] EDAC DEBUG: in drivers/edac/i7core_edac.c, line at 1232: drivers/edac/i7core_edac.c: i7core_put_devices()
+    
+    Also, kfree(mci) shouldn't happen at the kobj.release, as it happens
+    when edac_remove_sysfs_mci_device() is called, but the logic is:
+            edac_remove_sysfs_mci_device(mci);
+            edac_printk(KERN_INFO, EDAC_MC,
+                    "Removed device %d for %s %s: DEV %s\n", mci->mc_idx,
+                    mci->mod_name, mci->ctl_name, edac_dev_name(mci));
+    So, as the edac_printk() needs the mci struct, this generates an OOPS.
+    
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+
+diff --git a/drivers/edac/edac_mc.c b/drivers/edac/edac_mc.c
+index 889ce7566b56..ba6586a69ccc 100644
+--- a/drivers/edac/edac_mc.c
++++ b/drivers/edac/edac_mc.c
+@@ -238,6 +238,9 @@ void edac_mc_free(struct mem_ctl_info *mci)
+ 	debugf1("%s()\n", __func__);
+ 
+ 	edac_mc_unregister_sysfs_main_kobj(mci);
++
++	/* free the mci instance memory here */
++	kfree(mci);
+ }
+ EXPORT_SYMBOL_GPL(edac_mc_free);
+ 
+diff --git a/drivers/edac/edac_mc_sysfs.c b/drivers/edac/edac_mc_sysfs.c
+index ddd765253630..2905dc103393 100644
+--- a/drivers/edac/edac_mc_sysfs.c
++++ b/drivers/edac/edac_mc_sysfs.c
+@@ -630,9 +630,6 @@ static void edac_mci_control_release(struct kobject *kobj)
+ 
+ 	/* decrement the module ref count */
+ 	module_put(mci->owner);
+-
+-	/* free the mci instance memory here */
+-	kfree(mci);
+ }
+ 
+ static struct kobj_type ktype_mci = {
+diff --git a/drivers/edac/i7core_edac.c b/drivers/edac/i7core_edac.c
+index b0559973c66f..8e789a2e35d6 100644
+--- a/drivers/edac/i7core_edac.c
++++ b/drivers/edac/i7core_edac.c
+@@ -2085,8 +2085,7 @@ static void __devexit i7core_remove(struct pci_dev *pdev)
+ 			/* Remove MC sysfs nodes */
+ 			edac_mc_del_mc(&i7core_dev->pdev[0]->dev);
+ 
+-			/* Free data */
+-			debugf1("%s: free structs\n");
++			debugf1("%s: free mci struct\n", mci->ctl_name);
+ 			kfree(mci->ctl_name);
+ 			edac_mc_free(mci);
+ 
+

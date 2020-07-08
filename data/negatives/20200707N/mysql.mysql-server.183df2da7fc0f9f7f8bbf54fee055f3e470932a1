@@ -1,0 +1,102 @@
+commit 183df2da7fc0f9f7f8bbf54fee055f3e470932a1
+Author: monty@mashka.mysql.fi <>
+Date:   Sun Jan 19 02:00:26 2003 +0200
+
+    Fixes cases where thd->query was not protected.
+    This fixes a problem with SHOW PROCESSLIST
+
+diff --git a/sql/log_event.cc b/sql/log_event.cc
+index 45f54e420de..e243a953c63 100644
+--- a/sql/log_event.cc
++++ b/sql/log_event.cc
+@@ -1702,10 +1702,11 @@ int Query_log_event::exec_event(struct st_relay_log_info* rli)
+ 
+   if (db_ok(thd->db, replicate_do_db, replicate_ignore_db))
+   {
+-    thd->query = (char*)query;
+     thd->set_time((time_t)when);
+     thd->current_tablenr = 0;
++    thd->query_length= q_len;
+     VOID(pthread_mutex_lock(&LOCK_thread_count));
++    thd->query = (char*)query;
+     thd->query_id = query_id++;
+     VOID(pthread_mutex_unlock(&LOCK_thread_count));
+     thd->query_error = 0;			// clear error
+@@ -1760,7 +1761,9 @@ int Query_log_event::exec_event(struct st_relay_log_info* rli)
+     else
+     {
+       // master could be inconsistent, abort and tell DBA to check/fix it
++      VOID(pthread_mutex_lock(&LOCK_thread_count));
+       thd->db = thd->query = 0;
++      VOID(pthread_mutex_unlock(&LOCK_thread_count));
+       thd->variables.convert_set = 0;
+       close_thread_tables(thd);
+       free_root(&thd->mem_root,0);
+@@ -1768,7 +1771,9 @@ int Query_log_event::exec_event(struct st_relay_log_info* rli)
+     }
+   }
+   thd->db= 0;				// prevent db from being freed
++  VOID(pthread_mutex_lock(&LOCK_thread_count));
+   thd->query= 0;			// just to be sure
++  VOID(pthread_mutex_unlock(&LOCK_thread_count));
+   // assume no convert for next query unless set explictly
+   thd->variables.convert_set = 0;
+   close_thread_tables(thd);
+@@ -1816,7 +1821,8 @@ int Load_log_event::exec_event(NET* net, struct st_relay_log_info* rli,
+ {
+   init_sql_alloc(&thd->mem_root, 8192,0);
+   thd->db = rewrite_db((char*)db);
+-  thd->query = 0;
++  DBUG_ASSERT(thd->query == 0);
++  thd->query = 0;				// Should not be needed
+   thd->query_error = 0;
+ 	    
+   if (db_ok(thd->db, replicate_do_db, replicate_ignore_db))
+diff --git a/sql/sql_acl.cc b/sql/sql_acl.cc
+index 1f8f25e5fb8..da563f0547c 100644
+--- a/sql/sql_acl.cc
++++ b/sql/sql_acl.cc
+@@ -2322,6 +2322,7 @@ my_bool grant_init(THD *org_thd)
+   if (t_table->file->index_first(t_table->record[0]))
+   {
+     t_table->file->index_end();
++    return_val= 0;
+     goto end_unlock;
+   }
+   grant_option= TRUE;
+diff --git a/sql/sql_db.cc b/sql/sql_db.cc
+index ffb02cd36c1..4cb46c00bed 100644
+--- a/sql/sql_db.cc
++++ b/sql/sql_db.cc
+@@ -78,9 +78,9 @@ int mysql_create_db(THD *thd, char *db, uint create_options, bool silent)
+     if (!thd->query)
+     {
+       /* The client used the old obsolete mysql_create_db() call */
+-      thd->query_length = (uint) (strxmov(path,"create database `", db, "`",
+-					  NullS) - path);
+-      thd->query = path;
++      thd->query_length= (uint) (strxmov(path,"create database `", db, "`",
++					 NullS) - path);
++      thd->query= path;
+     }
+     {
+       mysql_update_log.write(thd,thd->query, thd->query_length);
+@@ -93,7 +93,7 @@ int mysql_create_db(THD *thd, char *db, uint create_options, bool silent)
+     if (thd->query == path)
+     {
+       VOID(pthread_mutex_lock(&LOCK_thread_count));
+-      thd->query = 0; // just in case
++      thd->query= 0;
+       VOID(pthread_mutex_unlock(&LOCK_thread_count));
+     }
+     send_ok(&thd->net, result);
+@@ -182,7 +182,7 @@ int mysql_rm_db(THD *thd,char *db,bool if_exists, bool silent)
+       if (thd->query == path)
+       {
+ 	VOID(pthread_mutex_lock(&LOCK_thread_count));
+-	thd->query = 0; // just in case
++	thd->query= 0;
+ 	VOID(pthread_mutex_unlock(&LOCK_thread_count));
+       }
+       send_ok(&thd->net,(ulong) deleted);
+

@@ -1,0 +1,290 @@
+commit f8fee0e2c399af59ee30c62234b47505fbd93725
+Author: Matthijs Kooijman <matthijs@stdin.nl>
+Date:   Tue Aug 30 23:50:23 2011 +0200
+
+    .gateway configuration
+    
+    This directive adds a default route to the guest at startup.
+    
+    syntax:
+            lxc.network.ipv4.gateway = 10.0.0.1
+            lxc.network.ipv6.gateway = 2001:db8:85a3::8a2e:370:7334
+    
+    Signed-off-by: Daniel Lezcano <dlezcano@fr.ibm.com>
+
+diff --git a/src/lxc/conf.c b/src/lxc/conf.c
+index 2eb598bc..751dce04 100644
+--- a/src/lxc/conf.c
++++ b/src/lxc/conf.c
+@@ -1321,6 +1321,51 @@ static int setup_netdev(struct lxc_netdev *netdev)
+ 		}
+ 	}
+ 
++	/* We can only set up the default routes after bringing
++	 * up the interface, sine bringing up the interface adds
++	 * the link-local routes and we can't add a default
++	 * route if the gateway is not reachable. */
++
++	/* setup ipv4 gateway on the interface */
++	if (netdev->ipv4_gateway) {
++		if (!(netdev->flags & IFF_UP)) {
++			ERROR("Cannot add ipv4 gateway for %s when not bringing up the interface", ifname);
++			return -1;
++		}
++
++		if (lxc_list_empty(&netdev->ipv4)) {
++			ERROR("Cannot add ipv4 gateway for %s when not assigning an address", ifname);
++			return -1;
++		}
++
++		err = lxc_ipv4_gateway_add(netdev->ifindex, netdev->ipv4_gateway);
++		if (err) {
++			ERROR("failed to setup ipv4 gateway for '%s': %s",
++				      ifname, strerror(-err));
++			return -1;
++		}
++	}
++
++	/* setup ipv6 gateway on the interface */
++	if (netdev->ipv6_gateway) {
++		if (!(netdev->flags & IFF_UP)) {
++			ERROR("Cannot add ipv6 gateway for %s when not bringing up the interface", ifname);
++			return -1;
++		}
++
++		if (lxc_list_empty(&netdev->ipv6) && !IN6_IS_ADDR_LINKLOCAL(netdev->ipv6_gateway)) {
++			ERROR("Cannot add ipv6 gateway for %s when not assigning an address", ifname);
++			return -1;
++		}
++
++		err = lxc_ipv6_gateway_add(netdev->ifindex, netdev->ipv6_gateway);
++		if (err) {
++			ERROR("failed to setup ipv6 gateway for '%s': %s",
++				      ifname, strerror(-err));
++			return -1;
++		}
++	}
++
+ 	DEBUG("'%s' has been setup", current_ifname);
+ 
+ 	return 0;
+diff --git a/src/lxc/conf.h b/src/lxc/conf.h
+index 8fd3dd8c..328d236d 100644
+--- a/src/lxc/conf.h
++++ b/src/lxc/conf.h
+@@ -114,6 +114,8 @@ struct lxc_netdev {
+ 	union netdev_p priv;
+ 	struct lxc_list ipv4;
+ 	struct lxc_list ipv6;
++	struct in_addr *ipv4_gateway;
++	struct in6_addr *ipv6_gateway;
+ 	char *upscript;
+ };
+ 
+diff --git a/src/lxc/confile.c b/src/lxc/confile.c
+index 8d8d8e57..8e215f80 100644
+--- a/src/lxc/confile.c
++++ b/src/lxc/confile.c
+@@ -63,8 +63,10 @@ static int config_network_hwaddr(const char *, char *, struct lxc_conf *);
+ static int config_network_vlan_id(const char *, char *, struct lxc_conf *);
+ static int config_network_mtu(const char *, char *, struct lxc_conf *);
+ static int config_network_ipv4(const char *, char *, struct lxc_conf *);
++static int config_network_ipv4_gateway(const char *, char *, struct lxc_conf *);
+ static int config_network_script(const char *, char *, struct lxc_conf *);
+ static int config_network_ipv6(const char *, char *, struct lxc_conf *);
++static int config_network_ipv6_gateway(const char *, char *, struct lxc_conf *);
+ static int config_cap_drop(const char *, char *, struct lxc_conf *);
+ static int config_console(const char *, char *, struct lxc_conf *);
+ 
+@@ -96,7 +98,9 @@ static struct config config[] = {
+ 	{ "lxc.network.hwaddr",       config_network_hwaddr       },
+ 	{ "lxc.network.mtu",          config_network_mtu          },
+ 	{ "lxc.network.vlan.id",      config_network_vlan_id      },
++	{ "lxc.network.ipv4.gateway", config_network_ipv4_gateway },
+ 	{ "lxc.network.ipv4",         config_network_ipv4         },
++	{ "lxc.network.ipv6.gateway", config_network_ipv6_gateway },
+ 	{ "lxc.network.ipv6",         config_network_ipv6         },
+ 	{ "lxc.cap.drop",             config_cap_drop             },
+ 	{ "lxc.console",              config_console              },
+@@ -433,6 +437,37 @@ static int config_network_ipv4(const char *key, char *value,
+ 	return 0;
+ }
+ 
++static int config_network_ipv4_gateway(const char *key, char *value,
++			               struct lxc_conf *lxc_conf)
++{
++	struct lxc_netdev *netdev;
++	struct in_addr *gw;
++
++	netdev = network_netdev(key, value, &lxc_conf->network);
++	if (!netdev)
++		return -1;
++
++	gw = malloc(sizeof(*gw));
++	if (!gw) {
++		SYSERROR("failed to allocate ipv4 gateway address");
++		return -1;
++	}
++
++	if (!value) {
++		ERROR("no ipv4 gateway address specified");
++		return -1;
++	}
++
++	if (!inet_pton(AF_INET, value, gw)) {
++		SYSERROR("invalid ipv4 gateway address: %s", value);
++		return -1;
++	}
++
++	netdev->ipv4_gateway = gw;
++
++	return 0;
++}
++
+ static int config_network_ipv6(const char *key, char *value,
+ 			       struct lxc_conf *lxc_conf)
+ {
+@@ -480,6 +515,37 @@ static int config_network_ipv6(const char *key, char *value,
+ 	return 0;
+ }
+ 
++static int config_network_ipv6_gateway(const char *key, char *value,
++			               struct lxc_conf *lxc_conf)
++{
++	struct lxc_netdev *netdev;
++	struct in6_addr *gw;
++
++	netdev = network_netdev(key, value, &lxc_conf->network);
++	if (!netdev)
++		return -1;
++
++	gw = malloc(sizeof(*gw));
++	if (!gw) {
++		SYSERROR("failed to allocate ipv6 gateway address");
++		return -1;
++	}
++
++	if (!value) {
++		ERROR("no ipv6 gateway address specified");
++		return -1;
++	}
++
++	if (!inet_pton(AF_INET6, value, gw)) {
++		SYSERROR("invalid ipv6 gateway address: %s", value);
++		return -1;
++	}
++
++	netdev->ipv6_gateway = gw;
++
++	return 0;
++}
++
+ static int config_network_script(const char *key, char *value,
+ 				 struct lxc_conf *lxc_conf)
+ {
+diff --git a/src/lxc/network.c b/src/lxc/network.c
+index 420117a0..b1d60f2b 100644
+--- a/src/lxc/network.c
++++ b/src/lxc/network.c
+@@ -89,6 +89,11 @@ struct ip_req {
+ 	struct ifaddrmsg ifa;
+ };
+ 
++struct rt_req {
++	struct nlmsg nlmsg;
++	struct rtmsg rt;
++};
++
+ int lxc_netdev_move_by_index(int ifindex, pid_t pid)
+ {
+ 	struct nl_handler nlh;
+@@ -741,6 +746,71 @@ int lxc_ipv4_addr_add(int ifindex, struct in_addr *addr,
+ 	return ip_addr_add(AF_INET, ifindex, addr, bcast, NULL, prefix);
+ }
+ 
++static int ip_gateway_add(int family, int ifindex, void *gw)
++{
++	struct nl_handler nlh;
++	struct nlmsg *nlmsg = NULL, *answer = NULL;
++	struct rt_req *rt_req;
++	int addrlen;
++	int err;
++
++	addrlen = family == AF_INET ? sizeof(struct in_addr) :
++		sizeof(struct in6_addr);
++
++	err = netlink_open(&nlh, NETLINK_ROUTE);
++	if (err)
++		return err;
++
++	err = -ENOMEM;
++	nlmsg = nlmsg_alloc(NLMSG_GOOD_SIZE);
++	if (!nlmsg)
++		goto out;
++
++	answer = nlmsg_alloc(NLMSG_GOOD_SIZE);
++	if (!answer)
++		goto out;
++
++	rt_req = (struct rt_req *)nlmsg;
++	rt_req->nlmsg.nlmsghdr.nlmsg_len =
++		NLMSG_LENGTH(sizeof(struct rtmsg));
++	rt_req->nlmsg.nlmsghdr.nlmsg_flags =
++		NLM_F_ACK|NLM_F_REQUEST|NLM_F_CREATE|NLM_F_EXCL;
++	rt_req->nlmsg.nlmsghdr.nlmsg_type = RTM_NEWROUTE;
++	rt_req->rt.rtm_family = family;
++	rt_req->rt.rtm_table = RT_TABLE_MAIN;
++	rt_req->rt.rtm_scope = RT_SCOPE_UNIVERSE;
++	rt_req->rt.rtm_protocol = RTPROT_BOOT;
++	rt_req->rt.rtm_type = RTN_UNICAST;
++	/* "default" destination */
++	rt_req->rt.rtm_dst_len = 0;
++
++	err = -EINVAL;
++	if (nla_put_buffer(nlmsg, RTA_GATEWAY, gw, addrlen))
++		goto out;
++
++	/* Adding the interface index enables the use of link-local
++	 * addresses for the gateway */
++	if (nla_put_u32(nlmsg, RTA_OIF, ifindex))
++		goto out;
++
++	err = netlink_transaction(&nlh, nlmsg, answer);
++out:
++	netlink_close(&nlh);
++	nlmsg_free(answer);
++	nlmsg_free(nlmsg);
++	return err;
++}
++
++int lxc_ipv4_gateway_add(int ifindex, struct in_addr *gw)
++{
++	return ip_gateway_add(AF_INET, ifindex, gw);
++}
++
++int lxc_ipv6_gateway_add(int ifindex, struct in6_addr *gw)
++{
++	return ip_gateway_add(AF_INET6, ifindex, gw);
++}
++
+ /*
+  * There is a lxc_bridge_attach, but no need of a bridge detach
+  * as automatically done by kernel when a netdev is deleted.
+diff --git a/src/lxc/network.h b/src/lxc/network.h
+index 0d6eb4c9..5a1fd50c 100644
+--- a/src/lxc/network.h
++++ b/src/lxc/network.h
+@@ -83,6 +83,12 @@ extern int lxc_ipv6_addr_add(int ifindex, struct in6_addr *addr,
+ extern int lxc_ipv4_addr_add(int ifindex, struct in_addr *addr,
+ 			     struct in_addr *bcast, int prefix);
+ 
++/*
++ * Set default route.
++ */
++extern int lxc_ipv4_gateway_add(int ifindex, struct in_addr *gw);
++extern int lxc_ipv6_gateway_add(int ifindex, struct in6_addr *gw);
++
+ /*
+  * Attach an interface to the bridge
+  */
+

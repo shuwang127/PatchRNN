@@ -1,0 +1,75 @@
+commit a9097a9666fd7b08fd2a152b2a0b6c8d48639bb2
+Author: Giuseppe CAVALLARO <peppe.cavallaro@st.com>
+Date:   Tue Oct 18 00:01:19 2011 +0000
+
+    stmmac: protect tx process with lock (V4)
+    
+    This patch fixes a problem raised on Orly ARM SMP platform
+    where, in case of fragmented frames, the descriptors
+    in the TX ring resulted broken. This was due to a missing lock
+    protection in the tx process.
+    
+    Signed-off-by: Giuseppe Cavallaro <peppe.cavallaro@st.com>
+    Tested-by: Srinivas Kandagatla <srinivas.kandagatla@st.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 1434bdb390d4..50e95d87857a 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -70,6 +70,7 @@ struct stmmac_priv {
+ 
+ 	u32 msg_enable;
+ 	spinlock_t lock;
++	spinlock_t tx_lock;
+ 	int wolopts;
+ 	int wolenabled;
+ 	int wol_irq;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index ae5debb1f5cd..f80190d78f90 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -588,6 +588,8 @@ static void stmmac_tx(struct stmmac_priv *priv)
+ {
+ 	unsigned int txsize = priv->dma_tx_size;
+ 
++	spin_lock(&priv->tx_lock);
++
+ 	while (priv->dirty_tx != priv->cur_tx) {
+ 		int last;
+ 		unsigned int entry = priv->dirty_tx % txsize;
+@@ -651,6 +653,7 @@ static void stmmac_tx(struct stmmac_priv *priv)
+ 		}
+ 		netif_tx_unlock(priv->dev);
+ 	}
++	spin_unlock(&priv->tx_lock);
+ }
+ 
+ static inline void stmmac_enable_irq(struct stmmac_priv *priv)
+@@ -1078,6 +1081,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+ 		return NETDEV_TX_BUSY;
+ 	}
+ 
++	spin_lock(&priv->tx_lock);
++
+ 	entry = priv->cur_tx % txsize;
+ 
+ #ifdef STMMAC_XMIT_DEBUG
+@@ -1166,6 +1171,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+ 
+ 	priv->hw->dma->enable_dma_transmission(priv->ioaddr);
+ 
++	spin_unlock(&priv->tx_lock);
++
+ 	return NETDEV_TX_OK;
+ }
+ 
+@@ -1731,6 +1738,7 @@ static int stmmac_probe(struct net_device *dev)
+ 			"please, use ifconfig or nwhwconfig!\n");
+ 
+ 	spin_lock_init(&priv->lock);
++	spin_lock_init(&priv->tx_lock);
+ 
+ 	ret = register_netdev(dev);
+ 	if (ret) {
+

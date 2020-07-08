@@ -1,0 +1,55 @@
+commit 9ecdb039b7517dc10b8c3e6dbeb40859178ac28e
+Author: Gerd Hoffmann <kraxel@redhat.com>
+Date:   Wed Nov 19 12:28:10 2014 +0100
+
+    bochs: add endian switching support
+    
+    Recently (qemu 2.2+) the qemu stdvga got a register to switch the vga
+    framebuffer endianness.  This patch adds code to explicitly set the
+    endianness of the framebuffer.  In most cases this has no effect as
+    the default is guest architecture endianness.  It is needed though in
+    case a architecture supports both big and little endian, i.e. for
+    ppc64le.
+    
+    Signed-off-by: Gerd Hoffmann <kraxel@redhat.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/bochs/bochs_hw.c b/drivers/gpu/drm/bochs/bochs_hw.c
+index e8b1dacc4911..460389702d31 100644
+--- a/drivers/gpu/drm/bochs/bochs_hw.c
++++ b/drivers/gpu/drm/bochs/bochs_hw.c
+@@ -51,7 +51,7 @@ int bochs_hw_init(struct drm_device *dev, uint32_t flags)
+ {
+ 	struct bochs_device *bochs = dev->dev_private;
+ 	struct pci_dev *pdev = dev->pdev;
+-	unsigned long addr, size, mem, ioaddr, iosize;
++	unsigned long addr, size, mem, ioaddr, iosize, qext_size;
+ 	u16 id;
+ 
+ 	if (pdev->resource[2].flags & IORESOURCE_MEM) {
+@@ -115,6 +115,24 @@ int bochs_hw_init(struct drm_device *dev, uint32_t flags)
+ 		 size / 1024, addr,
+ 		 bochs->ioports ? "ioports" : "mmio",
+ 		 ioaddr);
++
++	if (bochs->mmio && pdev->revision >= 2) {
++		qext_size = readl(bochs->mmio + 0x600);
++		if (qext_size < 4 || qext_size > iosize)
++			goto noext;
++		DRM_DEBUG("Found qemu ext regs, size %ld\n", qext_size);
++		if (qext_size >= 8) {
++#ifdef __BIG_ENDIAN
++			writel(0xbebebebe, bochs->mmio + 0x604);
++#else
++			writel(0x1e1e1e1e, bochs->mmio + 0x604);
++#endif
++			DRM_DEBUG("  qext endian: 0x%x\n",
++				  readl(bochs->mmio + 0x604));
++		}
++	}
++
++noext:
+ 	return 0;
+ }
+ 
+

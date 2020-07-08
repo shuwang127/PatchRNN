@@ -1,0 +1,376 @@
+commit 056f3760cd311faf088d6f5fe06498960788c8c7
+Author: Lou Berger <lberger@labn.net>
+Date:   Wed Apr 10 12:30:04 2013 -0700
+
+    bgpd, lib: memory cleanups for valgrind, plus debug changes
+    
+    Description:
+        We use valgrind memcheck quite a bit to spot leaks in
+        our work with bgpd. In order to eliminate false positives,
+        we added code in the exit path to release the remaining
+        allocated memory.
+    
+        Bgpd startup log message now includes pid.
+    
+    Some little tweaks by Paul Jakma <paul.jakma@hpe.com>:
+    
+    * bgp_mplsvpn.c: (str2prefix_rd) do the cleanup in common code at the end
+      and goto it.
+
+diff --git a/bgpd/bgp_aspath.c b/bgpd/bgp_aspath.c
+index 0aec3ef1..9d49f343 100644
+--- a/bgpd/bgp_aspath.c
++++ b/bgpd/bgp_aspath.c
+@@ -98,6 +98,12 @@ assegment_data_new (int num)
+   return (XMALLOC (MTYPE_AS_SEG_DATA, ASSEGMENT_DATA_SIZE (num, 1)));
+ }
+ 
++static void
++assegment_data_free (as_t *asdata)
++{
++  XFREE (MTYPE_AS_SEG_DATA, asdata);
++}
++
+ /* Get a new segment. Note that 0 is an allowed length,
+  * and will result in a segment with no allocated data segment.
+  * the caller should immediately assign data to the segment, as the segment
+@@ -126,7 +132,7 @@ assegment_free (struct assegment *seg)
+     return;
+   
+   if (seg->as)
+-    XFREE (MTYPE_AS_SEG_DATA, seg->as);
++    assegment_data_free (seg->as);
+   memset (seg, 0xfe, sizeof(struct assegment));
+   XFREE (MTYPE_AS_SEG, seg);
+   
+@@ -194,13 +200,14 @@ assegment_prepend_asns (struct assegment *seg, as_t asnum, int num)
+   if (num >= AS_SEGMENT_MAX)
+     return seg; /* we don't do huge prepends */
+   
+-  newas = assegment_data_new (seg->length + num);
+-
++  if ((newas = assegment_data_new (seg->length + num)) == NULL)
++    return seg;
++  
+   for (i = 0; i < num; i++)
+     newas[i] = asnum;
+ 
+   memcpy (newas + num, seg->as, ASSEGMENT_DATA_SIZE (seg->length, 1));
+-  XFREE (MTYPE_AS_SEG_DATA, seg->as);
++  assegment_data_free (seg->as);
+   seg->as = newas;
+   seg->length += num;
+ 
+@@ -1879,6 +1886,7 @@ aspath_init (void)
+ void
+ aspath_finish (void)
+ {
++  hash_clean (ashash, (void (*)(void *))aspath_free);
+   hash_free (ashash);
+   ashash = NULL;
+   
+diff --git a/bgpd/bgp_attr.c b/bgpd/bgp_attr.c
+index 5c832edc..d413e5b2 100644
+--- a/bgpd/bgp_attr.c
++++ b/bgpd/bgp_attr.c
+@@ -203,6 +203,7 @@ cluster_init (void)
+ static void
+ cluster_finish (void)
+ {
++  hash_clean (cluster_hash, (void (*)(void *))cluster_free);
+   hash_free (cluster_hash);
+   cluster_hash = NULL;
+ }
+@@ -279,6 +280,7 @@ transit_init (void)
+ static void
+ transit_finish (void)
+ {
++  hash_clean (transit_hash, (void (*)(void *))transit_free);
+   hash_free (transit_hash);
+   transit_hash = NULL;
+ }
+@@ -452,9 +454,20 @@ attrhash_init (void)
+   attrhash = hash_create (attrhash_key_make, attrhash_cmp);
+ }
+ 
++/*
++ * special for hash_clean below
++ */
++static void
++attr_vfree (void *attr)
++{
++  bgp_attr_extra_free ((struct attr *)attr);
++  XFREE (MTYPE_ATTR, attr);
++}
++
+ static void
+ attrhash_finish (void)
+ {
++  hash_clean(attrhash, attr_vfree);
+   hash_free (attrhash);
+   attrhash = NULL;
+ }
+diff --git a/bgpd/bgp_main.c b/bgpd/bgp_main.c
+index cacff234..591a6f93 100644
+--- a/bgpd/bgp_main.c
++++ b/bgpd/bgp_main.c
+@@ -37,6 +37,7 @@ Software Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
+ #include "plist.h"
+ #include "stream.h"
+ #include "vrf.h"
++#include "workqueue.h"
+ 
+ #include "bgpd/bgpd.h"
+ #include "bgpd/bgp_attr.h"
+@@ -196,10 +197,12 @@ sigint (void)
+ {
+   zlog_notice ("Terminating on signal");
+ 
+-  if (! retain_mode)
+-    bgp_terminate ();
++  if (! retain_mode) 
++    {
++      bgp_terminate ();
++      zprivs_terminate (&bgpd_privs);
++    }
+ 
+-  zprivs_terminate (&bgpd_privs);
+   bgp_exit (0);
+ }
+ 
+@@ -234,7 +237,27 @@ bgp_exit (int status)
+   for (ALL_LIST_ELEMENTS (bm->bgp, node, nnode, bgp))
+     bgp_delete (bgp);
+   list_free (bm->bgp);
+-
++  bm->bgp = NULL;
++  
++  /*
++   * bgp_delete can re-allocate the process queues after they were
++   * deleted in bgp_terminate. delete them again.
++   *
++   * It might be better to ensure the RIBs (including static routes)
++   * are cleared by bgp_terminate() during its call to bgp_cleanup_routes(),
++   * which currently only deletes the kernel routes.
++   */
++  if (bm->process_main_queue)
++    {
++     work_queue_free (bm->process_main_queue);
++     bm->process_main_queue = NULL;
++    }
++  if (bm->process_rsclient_queue)
++    {
++      work_queue_free (bm->process_rsclient_queue);
++      bm->process_rsclient_queue = NULL;
++    }
++  
+   /* reverse bgp_master_init */
+   for (ALL_LIST_ELEMENTS_RO(bm->listen_sockets, node, socket))
+     {
+@@ -447,10 +470,11 @@ main (int argc, char **argv)
+   vty_serv_sock (vty_addr, vty_port, BGP_VTYSH_PATH);
+ 
+   /* Print banner. */
+-  zlog_notice ("BGPd %s starting: vty@%d, bgp@%s:%d", QUAGGA_VERSION,
++  zlog_notice ("BGPd %s starting: vty@%d, bgp@%s:%d pid %d", QUAGGA_VERSION,
+ 	       vty_port, 
+ 	       (bm->address ? bm->address : "<all>"),
+-	       bm->port);
++	       bm->port,
++	       getpid ());
+ 
+   /* Start finite state machine, here we go! */
+   while (thread_fetch (bm->master, &thread))
+diff --git a/bgpd/bgp_mplsvpn.c b/bgpd/bgp_mplsvpn.c
+index 8a1ed70e..a72d5ede 100644
+--- a/bgpd/bgp_mplsvpn.c
++++ b/bgpd/bgp_mplsvpn.c
+@@ -170,11 +170,12 @@ bgp_nlri_parse_vpnv4 (struct peer *peer, struct attr *attr,
+ int
+ str2prefix_rd (const char *str, struct prefix_rd *prd)
+ {
+-  int ret;
++  int ret; /* ret of called functions */
++  int lret; /* local ret, of this func */
+   char *p;
+   char *p2;
+-  struct stream *s;
+-  char *half;
++  struct stream *s = NULL;
++  char *half = NULL;
+   struct in_addr addr;
+ 
+   s = stream_new (8);
+@@ -182,12 +183,13 @@ str2prefix_rd (const char *str, struct prefix_rd *prd)
+   prd->family = AF_UNSPEC;
+   prd->prefixlen = 64;
+ 
++  lret = 0;
+   p = strchr (str, ':');
+   if (! p)
+-    return 0;
++    goto out;
+ 
+   if (! all_digit (p + 1))
+-    return 0;
++    goto out;
+ 
+   half = XMALLOC (MTYPE_TMP, (p - str) + 1);
+   memcpy (half, str, (p - str));
+@@ -198,10 +200,8 @@ str2prefix_rd (const char *str, struct prefix_rd *prd)
+   if (! p2)
+     {
+       if (! all_digit (half))
+-	{
+-	  XFREE (MTYPE_TMP, half);
+-	  return 0;
+-	}
++        goto out;
++      
+       stream_putw (s, RD_TYPE_AS);
+       stream_putw (s, atoi (half));
+       stream_putl (s, atol (p + 1));
+@@ -210,18 +210,21 @@ str2prefix_rd (const char *str, struct prefix_rd *prd)
+     {
+       ret = inet_aton (half, &addr);
+       if (! ret)
+-	{
+-	  XFREE (MTYPE_TMP, half);
+-	  return 0;
+-	}
++        goto out;
++      
+       stream_putw (s, RD_TYPE_IP);
+       stream_put_in_addr (s, &addr);
+       stream_putw (s, atol (p + 1));
+     }
+   memcpy (prd->val, s->data, 8);
+-
+-  XFREE(MTYPE_TMP, half);
+-  return 1;
++  lret = 1;
++
++out:
++  if (s)
++    stream_free (s);
++  if (half)
++    XFREE(MTYPE_TMP, half);
++  return lret;
+ }
+ 
+ int
+diff --git a/bgpd/bgp_network.c b/bgpd/bgp_network.c
+index 8621854b..3c5e6c5d 100644
+--- a/bgpd/bgp_network.c
++++ b/bgpd/bgp_network.c
+@@ -276,6 +276,7 @@ bgp_bind (struct peer *peer)
+ #ifdef SO_BINDTODEVICE
+   int ret;
+   struct ifreq ifreq;
++  int myerrno;
+ 
+   if (! peer->ifname)
+     return 0;
+@@ -287,13 +288,15 @@ bgp_bind (struct peer *peer)
+   
+   ret = setsockopt (peer->fd, SOL_SOCKET, SO_BINDTODEVICE, 
+ 		    &ifreq, sizeof (ifreq));
+-
++  myerrno = errno;
++  
+   if (bgpd_privs.change (ZPRIVS_LOWER) )
+     zlog_err ("bgp_bind: could not lower privs");
+ 
+   if (ret < 0)
+     {
+-      zlog (peer->log, LOG_INFO, "bind to interface %s failed", peer->ifname);
++      zlog (peer->log, LOG_INFO, "bind to interface %s failed, errno=%d",
++            peer->ifname, myerrno);
+       return ret;
+     }
+ #endif /* SO_BINDTODEVICE */
+diff --git a/bgpd/bgp_nexthop.c b/bgpd/bgp_nexthop.c
+index bb658afb..145a1d88 100644
+--- a/bgpd/bgp_nexthop.c
++++ b/bgpd/bgp_nexthop.c
+@@ -1439,29 +1439,29 @@ bgp_scan_init (void)
+ void
+ bgp_scan_finish (void)
+ {
+-  /* Only the current one needs to be reset. */
+-  bgp_nexthop_cache_reset (bgp_nexthop_cache_table[AFI_IP]);
+-
+-  bgp_table_unlock (cache1_table[AFI_IP]);
++  if (cache1_table[AFI_IP])
++    bgp_table_unlock (cache1_table[AFI_IP]);
+   cache1_table[AFI_IP] = NULL;
+ 
+-  bgp_table_unlock (cache2_table[AFI_IP]);
++  if (cache2_table[AFI_IP])
++    bgp_table_unlock (cache2_table[AFI_IP]);
+   cache2_table[AFI_IP] = NULL;
+-
+-  bgp_table_unlock (bgp_connected_table[AFI_IP]);
++  
++  if (bgp_connected_table[AFI_IP])
++    bgp_table_unlock (bgp_connected_table[AFI_IP]);
+   bgp_connected_table[AFI_IP] = NULL;
+ 
+ #ifdef HAVE_IPV6
+-  /* Only the current one needs to be reset. */
+-  bgp_nexthop_cache_reset (bgp_nexthop_cache_table[AFI_IP6]);
+-
+-  bgp_table_unlock (cache1_table[AFI_IP6]);
++  if (cache1_table[AFI_IP6])
++    bgp_table_unlock (cache1_table[AFI_IP6]);
+   cache1_table[AFI_IP6] = NULL;
+ 
+-  bgp_table_unlock (cache2_table[AFI_IP6]);
++  if (cache2_table[AFI_IP6])
++    bgp_table_unlock (cache2_table[AFI_IP6]);
+   cache2_table[AFI_IP6] = NULL;
+ 
+-  bgp_table_unlock (bgp_connected_table[AFI_IP6]);
++  if (bgp_connected_table[AFI_IP6])
++    bgp_table_unlock (bgp_connected_table[AFI_IP6]);
+   bgp_connected_table[AFI_IP6] = NULL;
+ #endif /* HAVE_IPV6 */
+ }
+diff --git a/bgpd/bgpd.c b/bgpd/bgpd.c
+index 3fdd9ff6..90e77f21 100644
+--- a/bgpd/bgpd.c
++++ b/bgpd/bgpd.c
+@@ -737,6 +737,9 @@ peer_free (struct peer *peer)
+   if (peer->clear_node_queue)
+     work_queue_free (peer->clear_node_queue);
+   
++  if (peer->notify.data)
++    XFREE(MTYPE_TMP, peer->notify.data);
++  
+   bgp_sync_delete (peer);
+   memset (peer, 0, sizeof (struct peer));
+   
+@@ -1988,7 +1991,7 @@ bgp_create (as_t *as, const char *name)
+ struct bgp *
+ bgp_get_default (void)
+ {
+-  if (bm->bgp->head)
++  if (bm && bm->bgp && bm->bgp->head)
+     return (listgetdata (listhead (bm->bgp)));
+   return NULL;
+ }
+diff --git a/lib/routemap.c b/lib/routemap.c
+index 1e1510eb..7302e231 100644
+--- a/lib/routemap.c
++++ b/lib/routemap.c
+@@ -897,6 +897,9 @@ route_map_finish (void)
+   route_match_vec = NULL;
+   vector_free (route_set_vec);
+   route_set_vec = NULL;
++  /* cleanup route_map */                                                    
++  while (route_map_master.head)                                              
++    route_map_delete (route_map_master.head); 
+ }
+ 
+ /* VTY related functions. */
+

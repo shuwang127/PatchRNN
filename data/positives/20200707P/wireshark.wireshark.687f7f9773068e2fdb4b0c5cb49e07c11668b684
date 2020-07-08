@@ -1,0 +1,85 @@
+commit 687f7f9773068e2fdb4b0c5cb49e07c11668b684
+Author: Michael Mann <mmann78@netscape.net>
+Date:   Sun Mar 26 13:50:23 2017 -0400
+
+    netscaler.c: use dynamic memory for temporary buffer in nstrace_read_v30.
+    
+    Makes Windows vscodeanalysis a little happier.
+    
+    Change-Id: Ie744e91ab3f2a9744ae21c932ab6ea25467ad2fa
+    Reviewed-on: https://code.wireshark.org/review/20724
+    Petri-Dish: Michael Mann <mmann78@netscape.net>
+    Tested-by: Petri Dish Buildbot <buildbot-no-reply@wireshark.org>
+    Reviewed-by: Michael Mann <mmann78@netscape.net>
+
+diff --git a/wiretap/netscaler.c b/wiretap/netscaler.c
+index 50be72eaab..0840a2c8b2 100644
+--- a/wiretap/netscaler.c
++++ b/wiretap/netscaler.c
+@@ -1374,6 +1374,7 @@ static gboolean nstrace_read_v20(wtap *wth, int *err, gchar **err_info, gint64 *
+         if ((nstrace->nstrace_buflen - nstrace_buf_offset) < sizeof *fp) {\
+             *err = WTAP_ERR_BAD_FILE;\
+             *err_info = g_strdup("nstrace: record header crosses page boundary");\
++            g_free(nstrace_tmpbuff);\
+             return FALSE;\
+         }\
+         (phdr)->rec_type = REC_TYPE_PACKET;\
+@@ -1386,6 +1387,7 @@ static gboolean nstrace_read_v20(wtap *wth, int *err, gchar **err_info, gint64 *
+         if ((phdr)->caplen < sizeof *fp) {\
+             *err = WTAP_ERR_BAD_FILE;\
+             *err_info = g_strdup("nstrace: record size is less than record header size");\
++            g_free(nstrace_tmpbuff);\
+             return FALSE;\
+         }\
+         ws_buffer_assure_space(wth->frame_buffer, (phdr)->caplen);\
+@@ -1409,6 +1411,7 @@ static gboolean nstrace_read_v20(wtap *wth, int *err, gchar **err_info, gint64 *
+             /* Read the next page */\
+             bytes_read = file_read(nstrace_buf, NSPR_PAGESIZE_TRACE, wth->fh);\
+             if ( !file_eof(wth->fh) && bytes_read != NSPR_PAGESIZE_TRACE) {\
++                g_free(nstrace_tmpbuff);\
+                 return FALSE;\
+             } else {\
+                 nstrace_buf_offset = 0;\
+@@ -1426,6 +1429,7 @@ static gboolean nstrace_read_v20(wtap *wth, int *err, gchar **err_info, gint64 *
+         nstrace->nstrace_buf_offset = nstrace_buf_offset;\
+         nstrace->nstrace_buflen = nstrace_buflen;\
+         nstrace->nsg_creltime = nsg_creltime;\
++        g_free(nstrace_tmpbuff);\
+         return TRUE;\
+     } while(0)
+ 
+@@ -1436,7 +1440,7 @@ static gboolean nstrace_read_v30(wtap *wth, int *err, gchar **err_info, gint64 *
+     gchar *nstrace_buf = nstrace->pnstrace_buf;
+     guint32 nstrace_buf_offset = nstrace->nstrace_buf_offset;
+     guint32 nstrace_buflen = nstrace->nstrace_buflen;
+-    guint8 nstrace_tmpbuff[65536];
++    guint8* nstrace_tmpbuff;
+     guint32 nstrace_tmpbuff_off=0,nst_dataSize=0,rec_size=0,nsg_nextPageOffset=0;
+     nspr_hd_v20_t *hdp;
+     int bytes_read = 0;
+@@ -1446,6 +1450,8 @@ static gboolean nstrace_read_v30(wtap *wth, int *err, gchar **err_info, gint64 *
+       return FALSE; /* Reached End Of File */
+     }
+ 
++    nstrace_tmpbuff = (guint8*)g_malloc(65536);
++
+     do
+     {
+         if (!nstrace_buf[nstrace_buf_offset] && nstrace_buf_offset <= NSPR_PAGESIZE_TRACE){
+@@ -1461,6 +1467,7 @@ static gboolean nstrace_read_v30(wtap *wth, int *err, gchar **err_info, gint64 *
+             if (nspr_getv20recordsize(hdp) == 0) {
+                 *err = WTAP_ERR_BAD_FILE;
+                 *err_info = g_strdup("nstrace: zero size record found");
++                g_free(nstrace_tmpbuff);
+                 return FALSE;
+             }
+             switch (hdp->phd_RecordType)
+@@ -1513,6 +1520,7 @@ static gboolean nstrace_read_v30(wtap *wth, int *err, gchar **err_info, gint64 *
+         nstrace_buflen = NSPR_PAGESIZE_TRACE;
+     } while((nstrace_buflen > 0) && (nstrace_read_buf(wth->fh, nstrace_buf, nstrace_buflen, err, err_info)));
+ 
++    g_free(nstrace_tmpbuff);
+     return FALSE;
+ }
+ 
+

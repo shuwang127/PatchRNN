@@ -1,0 +1,419 @@
+commit 1660d773300099055b212c9fcdd3df96c5e24cbc
+Author: cristy <urban-warrior@git.imagemagick.org>
+Date:   Sun Jun 6 23:39:36 2010 +0000
+
+diff --git a/ltdl/libltdl/lt_dlloader.h b/ltdl/libltdl/lt_dlloader.h
+index ae131fae9..589fd0dc3 100644
+--- a/ltdl/libltdl/lt_dlloader.h
++++ b/ltdl/libltdl/lt_dlloader.h
+@@ -73,8 +73,8 @@ typedef struct {
+ LT_SCOPE int		lt_dlloader_add	   (const lt_dlvtable *vtable);
+ LT_SCOPE lt_dlloader	lt_dlloader_next   (const lt_dlloader loader);
+ 
+-LT_SCOPE lt_dlvtable *	lt_dlloader_remove	(char *name);
+-LT_SCOPE const lt_dlvtable *lt_dlloader_find	(char *name);
++LT_SCOPE lt_dlvtable *	lt_dlloader_remove	(const char *name);
++LT_SCOPE const lt_dlvtable *lt_dlloader_find	(const char *name);
+ LT_SCOPE const lt_dlvtable *lt_dlloader_get	(lt_dlloader loader);
+ 
+ 
+diff --git a/ltdl/libltdl/slist.h b/ltdl/libltdl/slist.h
+index e4b7ead8d..4d5650997 100644
+--- a/ltdl/libltdl/slist.h
++++ b/ltdl/libltdl/slist.h
+@@ -1,6 +1,6 @@
+ /* slist.h -- generalised singly linked lists
+ 
+-   Copyright (C) 2000, 2004 Free Software Foundation, Inc.
++   Copyright (C) 2000, 2004, 2009 Free Software Foundation, Inc.
+    Written by Gary V. Vaughan, 2000
+ 
+    NOTE: The canonical source of this file is maintained with the
+@@ -48,6 +48,8 @@ or obtained by writing to the Free Software Foundation, Inc.,
+ #  define LT_SCOPE
+ #endif
+ 
++#include <stddef.h>
++
+ #if defined(__cplusplus)
+ extern "C" {
+ #endif
+@@ -65,7 +67,7 @@ LT_SCOPE SList *slist_concat	(SList *head, SList *tail);
+ LT_SCOPE SList *slist_cons	(SList *item, SList *slist);
+ 
+ LT_SCOPE SList *slist_delete	(SList *slist, void (*delete_fct) (void *item));
+-LT_SCOPE void *	slist_remove	(SList **phead, SListCallback *find,
++LT_SCOPE SList *slist_remove	(SList **phead, SListCallback *find,
+ 				 void *matchdata);
+ LT_SCOPE SList *slist_reverse	(SList *slist);
+ LT_SCOPE SList *slist_sort	(SList *slist, SListCompare *compare,
+diff --git a/ltdl/loaders/loadlibrary.c b/ltdl/loaders/loadlibrary.c
+index 564467651..179c00980 100644
+--- a/ltdl/loaders/loadlibrary.c
++++ b/ltdl/loaders/loadlibrary.c
+@@ -1,7 +1,7 @@
+ /* loader-loadlibrary.c --  dynamic linking for Win32
+ 
+    Copyright (C) 1998, 1999, 2000, 2004, 2005, 2006,
+-                 2007, 2008 Free Software Foundation, Inc.
++                 2007, 2008, 2010 Free Software Foundation, Inc.
+    Written by Thomas Tanner, 1998
+ 
+    NOTE: The canonical source of this file is maintained with the
+@@ -98,12 +98,32 @@ get_vtable (lt_user_data loader_data)
+ 
+ #include <windows.h>
+ 
++#define LOCALFREE(mem)					     LT_STMT_START { \
++	if (mem) { LocalFree ((void *)mem); mem = NULL; }    } LT_STMT_END
++#define LOADLIB__SETERROR(errmsg) LT__SETERRORSTR (loadlibraryerror (errmsg))
++#define LOADLIB_SETERROR(errcode) LOADLIB__SETERROR (LT__STRERROR (errcode))
++
++static const char *loadlibraryerror (const char *default_errmsg);
++static DWORD WINAPI wrap_getthreaderrormode (void);
++static DWORD WINAPI fallback_getthreaderrormode (void);
++static BOOL WINAPI wrap_setthreaderrormode (DWORD mode, DWORD *oldmode);
++static BOOL WINAPI fallback_setthreaderrormode (DWORD mode, DWORD *oldmode);
++
++typedef DWORD (WINAPI getthreaderrormode_type) (void);
++typedef BOOL (WINAPI setthreaderrormode_type) (DWORD, DWORD *);
++
++static getthreaderrormode_type *getthreaderrormode = wrap_getthreaderrormode;
++static setthreaderrormode_type *setthreaderrormode = wrap_setthreaderrormode;
++static char *error_message = 0;
++
++
+ /* A function called through the vtable when this loader is no
+    longer needed by the application.  */
+ static int
+ vl_exit (lt_user_data LT__UNUSED loader_data)
+ {
+   vtable = NULL;
++  LOCALFREE (error_message);
+   return 0;
+ }
+ 
+@@ -156,7 +176,7 @@ vm_open (lt_user_data LT__UNUSED loader_data, const char *filename,
+ 	  /* Append a `.' to stop Windows from adding an
+ 	     implicit `.dll' extension. */
+ 	  if (!len)
+-	    len = LT_STRLEN (wpath);
++	    len = strlen (wpath);
+ 
+ 	  if (len + 1 >= MAX_PATH)
+ 	    {
+@@ -170,16 +190,18 @@ vm_open (lt_user_data LT__UNUSED loader_data, const char *filename,
+     }
+ 
+   {
+-    /* Silence dialog from LoadLibrary on some failures.
+-       No way to get the error mode, but to set it,
+-       so set it twice to preserve any previous flags. */
+-    UINT errormode = SetErrorMode(SEM_FAILCRITICALERRORS);
+-    SetErrorMode(errormode | SEM_FAILCRITICALERRORS);
++    /* Silence dialog from LoadLibrary on some failures. */
++    DWORD errormode = getthreaderrormode ();
++    DWORD last_error;
++
++    setthreaderrormode (errormode | SEM_FAILCRITICALERRORS, NULL);
+ 
+     module = LoadLibrary (wpath);
+ 
+     /* Restore the error mode. */
+-    SetErrorMode(errormode);
++    last_error = GetLastError ();
++    setthreaderrormode (errormode, NULL);
++    SetLastError (last_error);
+   }
+ 
+   /* libltdl expects this function to fail if it is unable
+@@ -207,7 +229,9 @@ vm_open (lt_user_data LT__UNUSED loader_data, const char *filename,
+           }
+       }
+ 
+-    if (cur || !module)
++    if (!module)
++      LOADLIB_SETERROR (CANNOT_OPEN);
++    else if (cur)
+       {
+         LT__SETERROR (CANNOT_OPEN);
+         module = 0;
+@@ -225,9 +249,9 @@ vm_close (lt_user_data LT__UNUSED loader_data, lt_module module)
+ {
+   int errors = 0;
+ 
+-  if (FreeLibrary((HMODULE) module) == 0)
++  if (FreeLibrary ((HMODULE) module) == 0)
+     {
+-      LT__SETERROR (CANNOT_CLOSE);
++      LOADLIB_SETERROR (CANNOT_CLOSE);
+       ++errors;
+     }
+ 
+@@ -244,8 +268,102 @@ vm_sym (lt_user_data LT__UNUSED loader_data, lt_module module, const char *name)
+ 
+   if (!address)
+     {
+-      LT__SETERROR (SYMBOL_NOT_FOUND);
++      LOADLIB_SETERROR (SYMBOL_NOT_FOUND);
+     }
+ 
+   return address;
+ }
++
++
++
++/* --- HELPER FUNCTIONS --- */
++
++
++/* Return the windows error message, or the passed in error message on
++   failure. */
++static const char *
++loadlibraryerror (const char *default_errmsg)
++{
++  size_t len;
++  LOCALFREE (error_message);
++
++  FormatMessageA (FORMAT_MESSAGE_ALLOCATE_BUFFER |
++                  FORMAT_MESSAGE_FROM_SYSTEM |
++                  FORMAT_MESSAGE_IGNORE_INSERTS,
++                  NULL,
++                  GetLastError (),
++                  0,
++                  (char *) &error_message,
++                  0, NULL);
++
++  /* Remove trailing CRNL */
++  len = LT_STRLEN (error_message);
++  if (len && error_message[len - 1] == '\n')
++    error_message[--len] = LT_EOS_CHAR;
++  if (len && error_message[len - 1] == '\r')
++    error_message[--len] = LT_EOS_CHAR;
++
++  return len ? error_message : default_errmsg;
++}
++
++/* A function called through the getthreaderrormode variable which checks
++   if the system supports GetThreadErrorMode (or GetErrorMode) and arranges
++   for it or a fallback implementation to be called directly in the future.
++   The selected version is then called. */
++static DWORD WINAPI
++wrap_getthreaderrormode (void)
++{
++  HMODULE kernel32 = GetModuleHandleA ("kernel32.dll");
++  getthreaderrormode
++    = (getthreaderrormode_type *) GetProcAddress (kernel32,
++						  "GetThreadErrorMode");
++  if (!getthreaderrormode)
++    getthreaderrormode
++      = (getthreaderrormode_type *) GetProcAddress (kernel32,
++						    "GetErrorMode");
++  if (!getthreaderrormode)
++    getthreaderrormode = fallback_getthreaderrormode;
++  return getthreaderrormode ();
++}
++
++/* A function called through the getthreaderrormode variable for cases
++   where the system does not support GetThreadErrorMode or GetErrorMode */
++static DWORD WINAPI
++fallback_getthreaderrormode (void)
++{
++  /* Prior to Windows Vista, the only way to get the current error
++     mode was to set a new one. In our case, we are setting a new
++     error mode right after "getting" it while ignoring the error
++     mode in effect when setting the new error mode, so that's
++     fairly ok. */
++  return (DWORD) SetErrorMode (SEM_FAILCRITICALERRORS);
++}
++
++/* A function called through the setthreaderrormode variable which checks
++   if the system supports SetThreadErrorMode and arranges for it or a
++   fallback implementation to be called directly in the future.
++   The selected version is then called. */
++static BOOL WINAPI
++wrap_setthreaderrormode (DWORD mode, DWORD *oldmode)
++{
++  HMODULE kernel32 = GetModuleHandleA ("kernel32.dll");
++  setthreaderrormode
++    = (setthreaderrormode_type *) GetProcAddress (kernel32,
++						  "SetThreadErrorMode");
++  if (!setthreaderrormode)
++    setthreaderrormode = fallback_setthreaderrormode;
++  return setthreaderrormode (mode, oldmode);
++}
++
++/* A function called through the setthreaderrormode variable for cases
++   where the system does not support SetThreadErrorMode. */
++static BOOL WINAPI
++fallback_setthreaderrormode (DWORD mode, DWORD *oldmode)
++{
++  /* Prior to Windows 7, there was no way to set the thread local error
++     mode, so set the process global error mode instead. */
++  DWORD old = (DWORD) SetErrorMode (mode);
++  if (oldmode)
++    *oldmode = old;
++  return TRUE;
++}
+diff --git a/ltdl/lt_dlloader.c b/ltdl/lt_dlloader.c
+index 4e66a6ca1..2c99a22d4 100644
+--- a/ltdl/lt_dlloader.c
++++ b/ltdl/lt_dlloader.c
+@@ -150,7 +150,7 @@ lt_dlloader_get	(lt_dlloader loader)
+    modules need this loader; in either case, the loader list is not
+    changed if NULL is returned.  */
+ lt_dlvtable *
+-lt_dlloader_remove (char *name)
++lt_dlloader_remove (const char *name)
+ {
+   const lt_dlvtable *	vtable	= lt_dlloader_find (name);
+   static const char	id_string[] = "lt_dlloader_remove";
+@@ -199,12 +199,12 @@ lt_dlloader_remove (char *name)
+ 
+   /* If we got this far, remove the loader from our global list.  */
+   return (lt_dlvtable *)
+-      slist_unbox ((SList *) slist_remove (&loaders, loader_callback, name));
++      slist_unbox ((SList *) slist_remove (&loaders, loader_callback, (void *) name));
+ }
+ 
+ 
+ const lt_dlvtable *
+-lt_dlloader_find (char *name)
++lt_dlloader_find (const char *name)
+ {
+-  return lt_dlloader_get (slist_find (loaders, loader_callback, name));
++  return lt_dlloader_get (slist_find (loaders, loader_callback, (void *) name));
+ }
+diff --git a/ltdl/ltdl.c b/ltdl/ltdl.c
+index 7c426351c..4e1a4025f 100644
+--- a/ltdl/ltdl.c
++++ b/ltdl/ltdl.c
+@@ -208,7 +208,7 @@ LT_BEGIN_C_DECLS
+ LT_SCOPE const lt_dlvtable *	get_vtable (lt_user_data data);
+ LT_END_C_DECLS
+ #ifdef HAVE_LIBDLLOADER
+-extern lt_dlsymlist		preloaded_symbols;
++extern lt_dlsymlist		preloaded_symbols[];
+ #endif
+ 
+ /* Initialize libltdl. */
+@@ -234,7 +234,7 @@ lt_dlinit (void)
+ #ifdef HAVE_LIBDLLOADER
+       if (!errors)
+ 	{
+-	  errors += lt_dlpreload (&preloaded_symbols);
++	  errors += lt_dlpreload (preloaded_symbols);
+ 	}
+ 
+       if (!errors)
+@@ -994,7 +994,7 @@ trim (char **dest, const char *str)
+ 
+   FREE (*dest);
+ 
+-  if (!end)
++  if (!end || end == str)
+     return 1;
+ 
+   if (len > 3 && str[0] == '\'')
+@@ -1265,7 +1265,7 @@ try_dlopen (lt_dlhandle *phandle, const char *filename, const char *ext,
+       if (vtable)
+ 	{
+ 	  /* name + "." + libext + NULL */
+-	  archive_name = MALLOC (char, LT_STRLEN (name) + LT_STRLEN (libext) + 2);
++	  archive_name = MALLOC (char, LT_STRLEN (name) + strlen (libext) + 2);
+ 	  *phandle = (lt_dlhandle) lt__zalloc (sizeof (struct lt__handle));
+ 
+ 	  if ((*phandle == NULL) || (archive_name == NULL))
+@@ -1487,7 +1487,7 @@ try_dlopen (lt_dlhandle *phandle, const char *filename, const char *ext,
+ }
+ 
+ 
+-/* If the last error messge store was `FILE_NOT_FOUND', then return
++/* If the last error message stored was `FILE_NOT_FOUND', then return
+    non-zero.  */
+ static int
+ file_not_found (void)
+@@ -1507,7 +1507,7 @@ file_not_found (void)
+ static int
+ has_library_ext (const char *filename)
+ {
+-  char *	ext     = 0;
++  const char *	ext     = 0;
+ 
+   assert (filename);
+ 
+@@ -1615,6 +1615,9 @@ lt_dlopenadvise (const char *filename, lt_dladvise advise)
+ {
+   lt_dlhandle	handle	= 0;
+   int		errors	= 0;
++  const char *	saved_error	= 0;
++
++  LT__GETERROR (saved_error);
+ 
+   /* Can't have symbols hidden and visible at the same time!  */
+   if (advise && advise->is_symlocal && advise->is_symglobal)
+@@ -1651,6 +1654,7 @@ lt_dlopenadvise (const char *filename, lt_dladvise advise)
+ 
+ #if defined(LT_MODULE_EXT)
+       /* Try appending SHLIB_EXT.   */
++      LT__SETERRORSTR (saved_error);
+       errors = try_dlopen (&handle, filename, shlib_ext, advise);
+ 
+       /* As before, if the file was found but loading failed, return now
+@@ -2062,7 +2066,7 @@ lt_dlerror (void)
+   LT__GETERROR (error);
+   LT__SETERRORSTR (0);
+ 
+-  return error ? error : NULL;
++  return error;
+ }
+ 
+ static int
+diff --git a/ltdl/slist.c b/ltdl/slist.c
+index c99f39914..25906a43a 100644
+--- a/ltdl/slist.c
++++ b/ltdl/slist.c
+@@ -1,6 +1,6 @@
+ /* slist.c -- generalised singly linked lists
+ 
+-   Copyright (C) 2000, 2004, 2007, 2008 Free Software Foundation, Inc.
++   Copyright (C) 2000, 2004, 2007, 2008, 2009 Free Software Foundation, Inc.
+    Written by Gary V. Vaughan, 2000
+ 
+    NOTE: The canonical source of this file is maintained with the
+@@ -32,6 +32,7 @@ or obtained by writing to the Free Software Foundation, Inc.,
+ 
+ #include "slist.h"
+ #include <stddef.h>
++#include <stdlib.h>
+ 
+ static SList *	slist_sort_merge    (SList *left, SList *right,
+ 				     SListCompare *compare, void *userdata);
+@@ -73,7 +74,7 @@ slist_delete (SList *head, void (*delete_fct) (void *item))
+            the stale item, you should probably return that from FIND if
+ 	   it makes a successful match.  Don't forget to slist_unbox()
+ 	   every item in a boxed list before operating on its contents.   */
+-void *
++SList *
+ slist_remove (SList **phead, SListCallback *find, void *matchdata)
+ {
+   SList *stale = 0;
+@@ -107,7 +108,7 @@ slist_remove (SList **phead, SListCallback *find, void *matchdata)
+ 	}
+     }
+ 
+-  return result;
++  return (SList *) result;
+ }
+ 
+ /* Call FIND repeatedly with each element of SLIST and MATCHDATA, until
+@@ -314,6 +315,9 @@ slist_sort (SList *slist, SListCompare *compare, void *userdata)
+   left = slist;
+   right = slist->next;
+ 
++  if (!right)
++    return left;
++
+   /* Skip two items with RIGHT and one with SLIST, until RIGHT falls off
+      the end.  SLIST must be about half way along.  */
+   while (right && (right = right->next))
+

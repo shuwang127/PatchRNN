@@ -1,0 +1,140 @@
+commit 1b02109305f4b5a285a24745d7da2fb70752a079
+Author: Rainer Gerhards <rgerhards@adiscon.com>
+Date:   Tue Oct 5 16:49:58 2010 +0200
+
+    omhdfs: fixed some issues with new config interface functions
+    
+    also did some cleanup in omfile.c
+
+diff --git a/plugins/omhdfs/omhdfs.c b/plugins/omhdfs/omhdfs.c
+index 25c330f99..1fe9b46bb 100644
+--- a/plugins/omhdfs/omhdfs.c
++++ b/plugins/omhdfs/omhdfs.c
+@@ -59,12 +59,18 @@ DEFobjCurrIf(errmsg)
+ /* global data */
+ static struct hashtable *files;		/* holds all file objects that we know */
+ 
+-/* globals for default values */
+-static uchar *fileName = NULL;	
+-static uchar *hdfsHost = NULL;	
+-static uchar *dfltTplName = NULL;	/* default template name to use */
+-int hdfsPort = 0;
+-/* end globals for default values */
++typedef struct configSettings_s {
++	uchar *fileName;	
++	uchar *hdfsHost;	
++	uchar *dfltTplName;	/* default template name to use */
++	int hdfsPort;
++} configSettings_t;
++
++SCOPING_SUPPORT; /* must be set AFTER configSettings_t is defined */
++
++BEGINinitConfVars		/* (re)set config variables to default values */
++CODESTARTinitConfVars 
++ENDinitConfVars
+ 
+ typedef struct {
+ 	uchar	*name;
+@@ -380,22 +386,22 @@ CODESTARTparseSelectorAct
+ 	CHKiRet(createInstance(&pData));
+ 	CODE_STD_STRING_REQUESTparseSelectorAct(1)
+ 	CHKiRet(cflineParseTemplateName(&p, *ppOMSR, 0, 0,
+-				       (dfltTplName == NULL) ? (uchar*)"RSYSLOG_FileFormat" : dfltTplName));
++				       (cs.dfltTplName == NULL) ? (uchar*)"RSYSLOG_FileFormat" : cs.dfltTplName));
+ 
+-	if(fileName == NULL) {
++	if(cs.fileName == NULL) {
+ 		errmsg.LogError(0, RS_RET_ERR_HDFS_OPEN, "omhdfs: no file name specified, can not continue");
+ 		ABORT_FINALIZE(RS_RET_FILE_NOT_SPECIFIED);
+ 	}
+ 
+-	pFile = hashtable_search(files, fileName);
++	pFile = hashtable_search(files, cs.fileName);
+ 	if(pFile == NULL) {
+ 		/* we need a new file object, this one not seen before */
+ 		CHKiRet(fileObjConstruct(&pFile));
+-		CHKmalloc(pFile->name = fileName);
+-		CHKmalloc(keybuf = ustrdup(fileName));
+-		fileName = NULL; /* re-set, data passed to file object */
+-		CHKmalloc(pFile->hdfsHost = strdup((hdfsHost == NULL) ? "default" : (char*) hdfsHost));
+-		pFile->hdfsPort = hdfsPort;
++		CHKmalloc(pFile->name = cs.fileName);
++		CHKmalloc(keybuf = ustrdup(cs.fileName));
++		cs.fileName = NULL; /* re-set, data passed to file object */
++		CHKmalloc(pFile->hdfsHost = strdup((cs.hdfsHost == NULL) ? "default" : (char*) cs.hdfsHost));
++		pFile->hdfsPort = cs.hdfsPort;
+ 		fileOpen(pFile);
+ 		if(pFile->fh == NULL){
+ 			errmsg.LogError(0, RS_RET_ERR_HDFS_OPEN, "omhdfs: failed to open %s - "
+@@ -437,8 +443,12 @@ ENDdoHUP
+  */
+ static rsRetVal resetConfigVariables(uchar __attribute__((unused)) *pp, void __attribute__((unused)) *pVal)
+ {
+-	hdfsHost = NULL;
+-	hdfsPort = 0;
++	cs.hdfsHost = NULL;
++	cs.hdfsPort = 0;
++	free(cs.fileName);
++	cs.fileName = NULL;
++	free(cs.dfltTplName);
++	cs.dfltTplName = NULL;
+ 	return RS_RET_OK;
+ }
+ 
+@@ -458,6 +468,7 @@ CODEqueryEtryPt_doHUP
+ ENDqueryEtryPt
+ 
+ 
++
+ BEGINmodInit()
+ CODESTARTmodInit
+ 	*ipIFVersProvided = CURR_MOD_IF_VERSION;
+@@ -466,10 +477,10 @@ CODEmodInit_QueryRegCFSLineHdlr
+ 	CHKmalloc(files = create_hashtable(20, hash_from_string, key_equals_string,
+ 			                   fileObjDestruct4Hashtable));
+ 
+-	CHKiRet(regCfSysLineHdlr((uchar *)"omhdfsfilename", 0, eCmdHdlrGetWord, NULL, &fileName, NULL, eConfObjAction));
+-	CHKiRet(regCfSysLineHdlr((uchar *)"omhdfshost", 0, eCmdHdlrGetWord, NULL, &hdfsHost, NULL, eConfObjAction));
+-	CHKiRet(regCfSysLineHdlr((uchar *)"omhdfsport", 0, eCmdHdlrInt, NULL, &hdfsPort, NULL, eConfObjAction));
+-	CHKiRet(regCfSysLineHdlr((uchar *)"omhdfsdefaulttemplate", 0, eCmdHdlrGetWord, NULL, &dfltTplName, NULL, eConfObjAction));
++	CHKiRet(regCfSysLineHdlr((uchar *)"omhdfscs.fileName", 0, eCmdHdlrGetWord, NULL, &cs.fileName, NULL, eConfObjAction));
++	CHKiRet(regCfSysLineHdlr((uchar *)"omhdfshost", 0, eCmdHdlrGetWord, NULL, &cs.hdfsHost, NULL, eConfObjAction));
++	CHKiRet(regCfSysLineHdlr((uchar *)"omhdfsport", 0, eCmdHdlrInt, NULL, &cs.hdfsPort, NULL, eConfObjAction));
++	CHKiRet(regCfSysLineHdlr((uchar *)"omhdfsdefaulttemplate", 0, eCmdHdlrGetWord, NULL, &cs.dfltTplName, NULL, eConfObjAction));
+ 	CHKiRet(omsdRegCFSLineHdlr((uchar *)"resetconfigvariables", 1, eCmdHdlrCustomHandler, resetConfigVariables, NULL, STD_LOADABLE_MODULE_ID, eConfObjAction));
+ CODEmodInit_QueryRegCFSLineHdlr
+ ENDmodInit
+diff --git a/tools/omfile.c b/tools/omfile.c
+index 522cab46f..4f89f2ac4 100644
+--- a/tools/omfile.c
++++ b/tools/omfile.c
+@@ -121,28 +121,6 @@ typedef struct s_dynaFileCacheEntry dynaFileCacheEntry;
+ #define FLUSHONTX_DFLT 1 	/* default for flush on TX end */
+ 
+ #define DFLT_bForceChown 0
+-#if 0
+-/* globals for default values */
+-static int iDynaFileCacheSize = 10; /* max cache for dynamic files */
+-static int fCreateMode = 0644; /* mode to use when creating files */
+-static int fDirCreateMode = 0700; /* mode to use when creating files */
+-static int	bFailOnChown;	/* fail if chown fails? */
+-static int	bForceChown = DFLT_bForceChown;	/* Force chown() on existing files? */
+-static uid_t	fileUID;	/* UID to be used for newly created files */
+-static uid_t	fileGID;	/* GID to be used for newly created files */
+-static uid_t	dirUID;		/* UID to be used for newly created directories */
+-static uid_t	dirGID;		/* GID to be used for newly created directories */
+-static int	bCreateDirs = 1;/* auto-create directories for dynaFiles: 0 - no, 1 - yes */
+-static int	bEnableSync = 0;/* enable syncing of files (no dash in front of pathname in conf): 0 - no, 1 - yes */
+-static int	iZipLevel = 0;	/* zip compression mode (0..9 as usual) */
+-static sbool	bFlushOnTXEnd = FLUSHONTX_DFLT;/* flush write buffers when transaction has ended? */
+-static int64	iIOBufSize = IOBUF_DFLT_SIZE;	/* size of an io buffer */
+-static int	iFlushInterval = FLUSH_INTRVL_DFLT; 	/* how often flush the output buffer on inactivity? */
+-static int	bUseAsyncWriter = USE_ASYNCWRITER_DFLT;	/* should we enable asynchronous writing? */
+-uchar	*pszFileDfltTplName = NULL; /* name of the default template to use */
+-/* end globals for default values */
+-#endif
+-
+ 
+ typedef struct _instanceData {
+ 	uchar	f_fname[MAXFNAME];/* file or template name (display only) */
+

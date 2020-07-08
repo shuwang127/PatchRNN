@@ -1,0 +1,72 @@
+commit ca60a42c9be41c07ebcc2ec8c43dd1be53f147bf
+Author: Rusty Russell <rusty@rustcorp.com.au>
+Date:   Wed Sep 23 22:26:47 2009 -0600
+
+    lguest: don't force VIRTIO_F_NOTIFY_ON_EMPTY
+    
+    VIRTIO_F_NOTIFY_ON_EMPTY indicates to the Guest that we will hit them with
+    an interrupt every time the xmit queue is emptied.
+    
+    Because it results in lots of tx interrupts, modern Guests probably don't
+    want it, so let's only force it when they accept the option.
+    
+    Signed-off-by: Rusty Russell <rusty@rustcorp.com.au>
+
+diff --git a/Documentation/lguest/lguest.c b/Documentation/lguest/lguest.c
+index 84bbb190bf7b..ba9373f82ab5 100644
+--- a/Documentation/lguest/lguest.c
++++ b/Documentation/lguest/lguest.c
+@@ -134,6 +134,9 @@ struct device {
+ 	/* Is it operational */
+ 	bool running;
+ 
++	/* Does Guest want an intrrupt on empty? */
++	bool irq_on_empty;
++
+ 	/* Device-specific data. */
+ 	void *priv;
+ };
+@@ -624,10 +627,13 @@ static void trigger_irq(struct virtqueue *vq)
+ 		return;
+ 	vq->pending_used = 0;
+ 
+-	/* If they don't want an interrupt, don't send one, unless empty. */
+-	if ((vq->vring.avail->flags & VRING_AVAIL_F_NO_INTERRUPT)
+-	    && lg_last_avail(vq) != vq->vring.avail->idx)
+-		return;
++	/* If they don't want an interrupt, don't send one... */
++	if (vq->vring.avail->flags & VRING_AVAIL_F_NO_INTERRUPT) {
++		/* ... unless they've asked us to force one on empty. */
++		if (!vq->dev->irq_on_empty
++		    || lg_last_avail(vq) != vq->vring.avail->idx)
++			return;
++	}
+ 
+ 	/* Send the Guest an interrupt tell them we used something up. */
+ 	if (write(lguest_fd, buf, sizeof(buf)) != 0)
+@@ -1043,6 +1049,15 @@ static void create_thread(struct virtqueue *vq)
+ 	close(vq->eventfd);
+ }
+ 
++static bool accepted_feature(struct device *dev, unsigned int bit)
++{
++	const u8 *features = get_feature_bits(dev) + dev->feature_len;
++
++	if (dev->feature_len < bit / CHAR_BIT)
++		return false;
++	return features[bit / CHAR_BIT] & (1 << (bit % CHAR_BIT));
++}
++
+ static void start_device(struct device *dev)
+ {
+ 	unsigned int i;
+@@ -1056,6 +1071,8 @@ static void start_device(struct device *dev)
+ 		verbose(" %02x", get_feature_bits(dev)
+ 			[dev->feature_len+i]);
+ 
++	dev->irq_on_empty = accepted_feature(dev, VIRTIO_F_NOTIFY_ON_EMPTY);
++
+ 	for (vq = dev->vq; vq; vq = vq->next) {
+ 		if (vq->service)
+ 			create_thread(vq);
+

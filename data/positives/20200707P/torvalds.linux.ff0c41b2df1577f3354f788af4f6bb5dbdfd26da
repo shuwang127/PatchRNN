@@ -1,0 +1,57 @@
+commit ff0c41b2df1577f3354f788af4f6bb5dbdfd26da
+Author: Mike Qiu <qiudayu@linux.vnet.ibm.com>
+Date:   Mon Apr 14 16:12:35 2014 -0600
+
+    powerpc/PCI: Fix NULL dereference in sys_pciconfig_iobase() list traversal
+    
+    3bc955987fb3 ("powerpc/PCI: Use list_for_each_entry() for bus traversal")
+    caused a NULL pointer dereference because the loop body set the iterator to
+    NULL:
+    
+      Unable to handle kernel paging request for data at address 0x00000000
+      Faulting instruction address: 0xc000000000041d78
+      Oops: Kernel access of bad area, sig: 11 [#1]
+      ...
+      NIP [c000000000041d78] .sys_pciconfig_iobase+0x68/0x1f0
+      LR [c000000000041e0c] .sys_pciconfig_iobase+0xfc/0x1f0
+      Call Trace:
+      [c0000003b4787db0] [c000000000041e0c] .sys_pciconfig_iobase+0xfc/0x1f0 (unreliable)
+      [c0000003b4787e30] [c000000000009ed8] syscall_exit+0x0/0x98
+    
+    Fix it by using a temporary variable for the iterator.
+    
+    [bhelgaas: changelog, drop tmp_bus initialization]
+    Fixes: 3bc955987fb3 powerpc/PCI: Use list_for_each_entry() for bus traversal
+    Signed-off-by: Mike Qiu <qiudayu@linux.vnet.ibm.com>
+    Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+
+diff --git a/arch/powerpc/kernel/pci_64.c b/arch/powerpc/kernel/pci_64.c
+index 2a4779091a58..155013da27e0 100644
+--- a/arch/powerpc/kernel/pci_64.c
++++ b/arch/powerpc/kernel/pci_64.c
+@@ -208,7 +208,7 @@ long sys_pciconfig_iobase(long which, unsigned long in_bus,
+ 			  unsigned long in_devfn)
+ {
+ 	struct pci_controller* hose;
+-	struct pci_bus *bus = NULL;
++	struct pci_bus *tmp_bus, *bus = NULL;
+ 	struct device_node *hose_node;
+ 
+ 	/* Argh ! Please forgive me for that hack, but that's the
+@@ -229,10 +229,12 @@ long sys_pciconfig_iobase(long which, unsigned long in_bus,
+ 	 * used on pre-domains setup. We return the first match
+ 	 */
+ 
+-	list_for_each_entry(bus, &pci_root_buses, node) {
+-		if (in_bus >= bus->number && in_bus <= bus->busn_res.end)
++	list_for_each_entry(tmp_bus, &pci_root_buses, node) {
++		if (in_bus >= tmp_bus->number &&
++		    in_bus <= tmp_bus->busn_res.end) {
++			bus = tmp_bus;
+ 			break;
+-		bus = NULL;
++		}
+ 	}
+ 	if (bus == NULL || bus->dev.of_node == NULL)
+ 		return -ENODEV;
+

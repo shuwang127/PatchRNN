@@ -1,0 +1,74 @@
+commit 9e81eccf199d910e5ea8db377a43478e4eccd033
+Author: Christian Lamparter <chunkeey@web.de>
+Date:   Sun Jul 19 05:05:37 2009 +0200
+
+    cfg80211: double free in __cfg80211_scan_done
+    
+    This patch fixes a double free corruption in __cfg80211_scan_done:
+    
+     ================================================
+     BUG kmalloc-512: Object already free
+     ------------------------------------------------
+    
+     INFO: Allocated in load_elf_binary+0x18b/0x19af age=6
+     INFO: Freed in load_elf_binary+0x104e/0x19af age=5
+     INFO: Slab 0xffffea0001bae4c0 objects=14 used=7
+     INFO: Object 0xffff88007e8a9918 @offset=6424 fp=0xffff88007e8a9488
+    
+     Bytes b4 0xffff88007e8a9908:  00 00 00 00 00 00 00 00 5a 5a
+     [...]
+     Pid: 28705, comm: rmmod Tainted: P         C 2.6.31-rc2-wl #1
+     Call Trace:
+      [<ffffffff810da9f4>] print_trailer+0x14e/0x16e
+      [<ffffffff810daa56>] object_err+0x42/0x61
+      [<ffffffff810dbcd9>] __slab_free+0x2af/0x396
+      [<ffffffffa0ec9694>] ? wiphy_unregister+0x92/0x142 [cfg80211]
+      [<ffffffff810dd5e3>] kfree+0x13c/0x17a
+      [<ffffffffa0ec9694>] ? wiphy_unregister+0x92/0x142 [cfg80211]
+      [<ffffffffa0ec9694>] wiphy_unregister+0x92/0x142 [cfg80211]
+      [<ffffffffa0eed163>] ieee80211_unregister_hw+0xc8/0xff [mac80211]
+      [<ffffffffa0f3fbc8>] p54_unregister_common+0x31/0x66 [p54common]
+      [...]
+     FIX kmalloc-512: Object at 0xffff88007e8a9918 not freed
+    
+    The code path which leads to the *funny* double free:
+    
+           request = rdev->scan_req;
+           dev = dev_get_by_index(&init_net, request->ifidx);
+            /*
+             * the driver was unloaded recently and
+             * therefore dev_get_by_index will return NULL!
+             */
+            if (!dev)
+                    goto out;
+            [...]
+            rdev->scan_req = NULL; /* not executed... */
+            [...]
+     out:
+            kfree(request);
+    
+    Signed-off-by: Christian Lamparter <chunkeey@web.de>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/net/wireless/scan.c b/net/wireless/scan.c
+index f8e71b300001..9271118e1fc4 100644
+--- a/net/wireless/scan.c
++++ b/net/wireless/scan.c
+@@ -35,8 +35,6 @@ void cfg80211_scan_done(struct cfg80211_scan_request *request, bool aborted)
+ 	else
+ 		nl80211_send_scan_done(wiphy_to_dev(request->wiphy), dev);
+ 
+-	wiphy_to_dev(request->wiphy)->scan_req = NULL;
+-
+ #ifdef CONFIG_WIRELESS_EXT
+ 	if (!aborted) {
+ 		memset(&wrqu, 0, sizeof(wrqu));
+@@ -48,6 +46,7 @@ void cfg80211_scan_done(struct cfg80211_scan_request *request, bool aborted)
+ 	dev_put(dev);
+ 
+  out:
++	wiphy_to_dev(request->wiphy)->scan_req = NULL;
+ 	kfree(request);
+ }
+ EXPORT_SYMBOL(cfg80211_scan_done);
+

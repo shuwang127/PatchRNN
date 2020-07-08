@@ -1,0 +1,87 @@
+commit 291be10fd7511101d44cf98166d049bd31bc7600
+Author: Julien Grall <julien.grall@citrix.com>
+Date:   Wed Sep 9 15:17:33 2015 +0100
+
+    xen/swiotlb: Pass addresses rather than frame numbers to xen_arch_need_swiotlb
+    
+    With 64KB page granularity support, the frame number will be different.
+    
+    It will be easier to modify the behavior in a single place rather than
+    in each caller.
+    
+    Signed-off-by: Julien Grall <julien.grall@citrix.com>
+    Reviewed-by: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+    Signed-off-by: David Vrabel <david.vrabel@citrix.com>
+
+diff --git a/arch/arm/include/asm/xen/page.h b/arch/arm/include/asm/xen/page.h
+index e3d94cfa4d46..415dbc6e43fd 100644
+--- a/arch/arm/include/asm/xen/page.h
++++ b/arch/arm/include/asm/xen/page.h
+@@ -115,8 +115,8 @@ static inline bool set_phys_to_machine(unsigned long pfn, unsigned long mfn)
+ #define xen_unmap(cookie) iounmap((cookie))
+ 
+ bool xen_arch_need_swiotlb(struct device *dev,
+-			   unsigned long pfn,
+-			   unsigned long bfn);
++			   phys_addr_t phys,
++			   dma_addr_t dev_addr);
+ unsigned long xen_get_swiotlb_free_pages(unsigned int order);
+ 
+ #endif /* _ASM_ARM_XEN_PAGE_H */
+diff --git a/arch/arm/xen/mm.c b/arch/arm/xen/mm.c
+index 6dd911d1f0ac..7b517e913762 100644
+--- a/arch/arm/xen/mm.c
++++ b/arch/arm/xen/mm.c
+@@ -138,9 +138,12 @@ void __xen_dma_sync_single_for_device(struct device *hwdev,
+ }
+ 
+ bool xen_arch_need_swiotlb(struct device *dev,
+-			   unsigned long pfn,
+-			   unsigned long bfn)
++			   phys_addr_t phys,
++			   dma_addr_t dev_addr)
+ {
++	unsigned long pfn = PFN_DOWN(phys);
++	unsigned long bfn = PFN_DOWN(dev_addr);
++
+ 	return (!hypercall_cflush && (pfn != bfn) && !is_device_dma_coherent(dev));
+ }
+ 
+diff --git a/arch/x86/include/asm/xen/page.h b/arch/x86/include/asm/xen/page.h
+index fe58e3a935de..f5fb840b43e8 100644
+--- a/arch/x86/include/asm/xen/page.h
++++ b/arch/x86/include/asm/xen/page.h
+@@ -298,8 +298,8 @@ void make_lowmem_page_readwrite(void *vaddr);
+ #define xen_unmap(cookie) iounmap((cookie))
+ 
+ static inline bool xen_arch_need_swiotlb(struct device *dev,
+-					 unsigned long pfn,
+-					 unsigned long bfn)
++					 phys_addr_t phys,
++					 dma_addr_t dev_addr)
+ {
+ 	return false;
+ }
+diff --git a/drivers/xen/swiotlb-xen.c b/drivers/xen/swiotlb-xen.c
+index 79bc4933b13e..0a5a0e949862 100644
+--- a/drivers/xen/swiotlb-xen.c
++++ b/drivers/xen/swiotlb-xen.c
+@@ -392,7 +392,7 @@ dma_addr_t xen_swiotlb_map_page(struct device *dev, struct page *page,
+ 	 */
+ 	if (dma_capable(dev, dev_addr, size) &&
+ 	    !range_straddles_page_boundary(phys, size) &&
+-		!xen_arch_need_swiotlb(dev, PFN_DOWN(phys), PFN_DOWN(dev_addr)) &&
++		!xen_arch_need_swiotlb(dev, phys, dev_addr) &&
+ 		!swiotlb_force) {
+ 		/* we are not interested in the dma_addr returned by
+ 		 * xen_dma_map_page, only in the potential cache flushes executed
+@@ -551,7 +551,7 @@ xen_swiotlb_map_sg_attrs(struct device *hwdev, struct scatterlist *sgl,
+ 		dma_addr_t dev_addr = xen_phys_to_bus(paddr);
+ 
+ 		if (swiotlb_force ||
+-		    xen_arch_need_swiotlb(hwdev, PFN_DOWN(paddr), PFN_DOWN(dev_addr)) ||
++		    xen_arch_need_swiotlb(hwdev, paddr, dev_addr) ||
+ 		    !dma_capable(hwdev, dev_addr, sg->length) ||
+ 		    range_straddles_page_boundary(paddr, sg->length)) {
+ 			phys_addr_t map = swiotlb_tbl_map_single(hwdev,
+

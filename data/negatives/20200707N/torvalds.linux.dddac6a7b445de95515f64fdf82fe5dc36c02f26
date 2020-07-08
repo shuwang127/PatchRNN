@@ -1,0 +1,76 @@
+commit dddac6a7b445de95515f64fdf82fe5dc36c02f26
+Author: Alan Jenkins <alan-jenkins@tuffmail.co.uk>
+Date:   Wed Jul 29 21:07:55 2009 +0200
+
+    PM / Hibernate: Replace bdget call with simple atomic_inc of i_count
+    
+    Create bdgrab().  This function copies an existing reference to a
+    block_device.  It is safe to call from any context.
+    
+    Hibernation code wishes to copy a reference to the active swap device.
+    Right now it calls bdget() under a spinlock, but this is wrong because
+    bdget() can sleep.  It doesn't need a full bdget() because we already
+    hold a reference to active swap devices (and the spinlock protects
+    against swapoff).
+    
+    Fixes http://bugzilla.kernel.org/show_bug.cgi?id=13827
+    
+    Signed-off-by: Alan Jenkins <alan-jenkins@tuffmail.co.uk>
+    Signed-off-by: Rafael J. Wysocki <rjw@sisk.pl>
+
+diff --git a/fs/block_dev.c b/fs/block_dev.c
+index 3a6d4fb2a329..94dfda24c06e 100644
+--- a/fs/block_dev.c
++++ b/fs/block_dev.c
+@@ -564,6 +564,16 @@ struct block_device *bdget(dev_t dev)
+ 
+ EXPORT_SYMBOL(bdget);
+ 
++/**
++ * bdgrab -- Grab a reference to an already referenced block device
++ * @bdev:	Block device to grab a reference to.
++ */
++struct block_device *bdgrab(struct block_device *bdev)
++{
++	atomic_inc(&bdev->bd_inode->i_count);
++	return bdev;
++}
++
+ long nr_blockdev_pages(void)
+ {
+ 	struct block_device *bdev;
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 0872372184fe..a36ffa5a77a4 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1946,6 +1946,7 @@ extern void putname(const char *name);
+ extern int register_blkdev(unsigned int, const char *);
+ extern void unregister_blkdev(unsigned int, const char *);
+ extern struct block_device *bdget(dev_t);
++extern struct block_device *bdgrab(struct block_device *bdev);
+ extern void bd_set_size(struct block_device *, loff_t size);
+ extern void bd_forget(struct inode *inode);
+ extern void bdput(struct block_device *);
+diff --git a/mm/swapfile.c b/mm/swapfile.c
+index d1ade1a48ee7..8ffdc0d23c53 100644
+--- a/mm/swapfile.c
++++ b/mm/swapfile.c
+@@ -753,7 +753,7 @@ int swap_type_of(dev_t device, sector_t offset, struct block_device **bdev_p)
+ 
+ 		if (!bdev) {
+ 			if (bdev_p)
+-				*bdev_p = bdget(sis->bdev->bd_dev);
++				*bdev_p = bdgrab(sis->bdev);
+ 
+ 			spin_unlock(&swap_lock);
+ 			return i;
+@@ -765,7 +765,7 @@ int swap_type_of(dev_t device, sector_t offset, struct block_device **bdev_p)
+ 					struct swap_extent, list);
+ 			if (se->start_block == offset) {
+ 				if (bdev_p)
+-					*bdev_p = bdget(sis->bdev->bd_dev);
++					*bdev_p = bdgrab(sis->bdev);
+ 
+ 				spin_unlock(&swap_lock);
+ 				bdput(bdev);
+

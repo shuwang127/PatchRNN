@@ -1,0 +1,174 @@
+commit 0975c0f07e7fd6edfe9e85647db8c2f05d469c66
+Author: Marc-André Moreau <marcandre.moreau@gmail.com>
+Date:   Tue Feb 7 22:16:57 2012 -0500
+
+    libfreerdp-core: improve error checking in certificate validation
+
+diff --git a/libfreerdp-core/crypto.c b/libfreerdp-core/crypto.c
+index 3fbe34ff..2d24da55 100644
+--- a/libfreerdp-core/crypto.c
++++ b/libfreerdp-core/crypto.c
+@@ -373,29 +373,46 @@ char* crypto_cert_subject(X509* xcert)
+ 	return crypto_print_name(X509_get_subject_name(xcert));
+ }
+ 
+-char* crypto_cert_subject_common_name(X509* xcert)
++char* crypto_cert_subject_common_name(X509* xcert, int* length)
+ {
+ 	int index;
+-	int length;
+ 	uint8* common_name;
+ 	X509_NAME* subject_name;
+ 	X509_NAME_ENTRY* entry;
+ 	ASN1_STRING* entry_data;
+ 
+ 	subject_name = X509_get_subject_name(xcert);
++
++	if (subject_name == NULL)
++		return NULL;
++
+ 	index = X509_NAME_get_index_by_NID(subject_name, NID_commonName, -1);
+ 
++	if (index < 0)
++		return NULL;
++
+ 	entry = X509_NAME_get_entry(subject_name, index);
++
++	if (entry == NULL)
++		return NULL;
++
+ 	entry_data = X509_NAME_ENTRY_get_data(entry);
+ 
+-	length = ASN1_STRING_to_UTF8(&common_name, entry_data);
++	if (entry_data == NULL)
++		return NULL;
++
++	*length = ASN1_STRING_to_UTF8(&common_name, entry_data);
++
++	if (*length < 0)
++		return NULL;
+ 
+ 	return (char*) common_name;
+ }
+ 
+-char** crypto_cert_subject_alt_name(X509* xcert, int* count)
++char** crypto_cert_subject_alt_name(X509* xcert, int* count, int** lengths)
+ {
+ 	int index;
++	int length;
+ 	char** strings;
+ 	uint8* string;
+ 	int num_subject_alt_names;
+@@ -409,7 +426,8 @@ char** crypto_cert_subject_alt_name(X509* xcert, int* count)
+ 		return NULL;
+ 
+ 	num_subject_alt_names = sk_GENERAL_NAME_num(subject_alt_names);
+-	strings = malloc(sizeof(char*) * num_subject_alt_names);
++	strings = (char**) malloc(sizeof(char*) * num_subject_alt_names);
++	*lengths = (int*) malloc(sizeof(int*) * num_subject_alt_names);
+ 
+ 	for (index = 0; index < num_subject_alt_names; ++index)
+ 	{
+@@ -417,11 +435,16 @@ char** crypto_cert_subject_alt_name(X509* xcert, int* count)
+ 
+ 		if (subject_alt_name->type == GEN_DNS)
+ 		{
+-			ASN1_STRING_to_UTF8(&string, subject_alt_name->d.dNSName);
+-			strings[(*count)++] = (char*) string;
++			length = ASN1_STRING_to_UTF8(&string, subject_alt_name->d.dNSName);
++			strings[*count] = (char*) string;
++			*lengths[*count] = length;
++			(*count)++;
+ 		}
+ 	}
+ 
++	if (*count < 1)
++		return NULL;
++
+ 	return strings;
+ }
+ 
+diff --git a/libfreerdp-core/crypto.h b/libfreerdp-core/crypto.h
+index 515399f0..15afca8a 100644
+--- a/libfreerdp-core/crypto.h
++++ b/libfreerdp-core/crypto.h
+@@ -115,8 +115,8 @@ typedef struct crypto_cert_struct* CryptoCert;
+ CryptoCert crypto_cert_read(uint8* data, uint32 length);
+ char* crypto_cert_fingerprint(X509* xcert);
+ char* crypto_cert_subject(X509* xcert);
+-char* crypto_cert_subject_common_name(X509* xcert);
+-char** crypto_cert_subject_alt_name(X509* xcert, int* count);
++char* crypto_cert_subject_common_name(X509* xcert, int* length);
++char** crypto_cert_subject_alt_name(X509* xcert, int* count, int** lengths);
+ char* crypto_cert_issuer(X509* xcert);
+ void crypto_cert_print_info(X509* xcert);
+ void crypto_cert_free(CryptoCert cert);
+diff --git a/libfreerdp-core/tls.c b/libfreerdp-core/tls.c
+index 4f7e1476..3d490686 100644
+--- a/libfreerdp-core/tls.c
++++ b/libfreerdp-core/tls.c
+@@ -232,8 +232,10 @@ boolean tls_verify_certificate(rdpTls* tls, CryptoCert cert, char* hostname)
+ 	int match;
+ 	int index;
+ 	char* common_name;
++	int common_name_length;
+ 	char** alt_names;
+ 	int alt_names_count;
++	int* alt_names_lengths;
+ 	boolean certificate_status;
+ 	boolean hostname_match = false;
+ 	rdpCertificateData* certificate_data;
+@@ -253,18 +255,32 @@ boolean tls_verify_certificate(rdpTls* tls, CryptoCert cert, char* hostname)
+ 	certificate_data = crypto_get_certificate_data(cert->px509, hostname);
+ 
+ 	/* extra common name and alternative names */
+-	common_name = crypto_cert_subject_common_name(cert->px509);
+-	alt_names = crypto_cert_subject_alt_name(cert->px509, &alt_names_count);
++	common_name = crypto_cert_subject_common_name(cert->px509, &common_name_length);
++	alt_names = crypto_cert_subject_alt_name(cert->px509, &alt_names_count, &alt_names_lengths);
+ 
+ 	/* compare against common name */
+-	if (strcmp(hostname, common_name) == 0)
+-		hostname_match = true;
++
++	if (common_name != NULL)
++	{
++		if (strlen(hostname) == common_name_length)
++		{
++			if (memcmp((void*) hostname, (void*) common_name, common_name_length) == 0)
++				hostname_match = true;
++		}
++	}
+ 
+ 	/* compare against alternative names */
+-	for (index = 0; index < alt_names_count; index++)
++
++	if (alt_names != NULL)
+ 	{
+-		if (strcmp(hostname, alt_names[index]) == 0)
+-			hostname_match = true;
++		for (index = 0; index < alt_names_count; index++)
++		{
++			if (strlen(hostname) == alt_names_lengths[index])
++			{
++				if (memcmp((void*) hostname, (void*) alt_names[index], alt_names_lengths[index]) == 0)
++					hostname_match = true;
++			}
++		}
+ 	}
+ 
+ 	/* if the certificate is valid and the certificate name matches, verification succeeds */
+diff --git a/server/X11/xf_input.h b/server/X11/xf_input.h
+index f19d7005..34cda06d 100644
+--- a/server/X11/xf_input.h
++++ b/server/X11/xf_input.h
+@@ -26,7 +26,7 @@
+ 
+ void xf_input_synchronize_event(rdpInput* input, uint32 flags);
+ void xf_input_keyboard_event(rdpInput* input, uint16 flags, uint16 code);
+-void xf_input_unicode_keyboard_event(rdpInput* input, uint16 code);
++void xf_input_unicode_keyboard_event(rdpInput* input, uint16 flags, uint16 code);
+ void xf_input_mouse_event(rdpInput* input, uint16 flags, uint16 x, uint16 y);
+ void xf_input_extended_mouse_event(rdpInput* input, uint16 flags, uint16 x, uint16 y);
+ void xf_input_register_callbacks(rdpInput* input);
+

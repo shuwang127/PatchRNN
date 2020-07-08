@@ -1,0 +1,136 @@
+commit 58fd4210c380b4f05c83ef0dfe51a14f986782d1
+Author: Daniel Morissette <dmorissette@mapgears.com>
+Date:   Wed Mar 9 20:38:48 2011 +0000
+
+    Support for MS_ERRORFILE relative to mapfile path (#2853)
+    
+    git-svn-id: http://svn.osgeo.org/mapserver/trunk@11128 7532c77e-422f-0410-93f4-f0b67bdd69e2
+
+diff --git a/mapdebug.c b/mapdebug.c
+index 6a1f7152..a363f83e 100644
+--- a/mapdebug.c
++++ b/mapdebug.c
+@@ -129,12 +129,27 @@ debugInfoObj *msGetDebugInfoObj()
+ **
+ ** Set output target, ready to write to it, open file if necessary
+ **
++** If pszRelToPath != NULL then we will try to make the value relative to 
++** this path if it is not absolute already and it's not one of the special
++** values (stderr, stdout, windowsdebug)
++**
+ ** Returns MS_SUCCESS/MS_FAILURE
+ */
+-int msSetErrorFile(const char *pszErrorFile)
++int msSetErrorFile(const char *pszErrorFile, const char *pszRelToPath)
+ {
++    char extended_path[MS_MAXPATHLEN];
+     debugInfoObj *debuginfo = msGetDebugInfoObj();
+ 
++    if (strcmp(pszErrorFile, "stderr") != 0 &&
++        strcmp(pszErrorFile, "stdout") != 0 &&
++        strcmp(pszErrorFile, "windowsdebug") != 0)
++    {
++        /* Try to make the path relative */
++        if(msBuildPath(extended_path, pszRelToPath, pszErrorFile) == NULL)
++            return MS_FAILURE;
++        pszErrorFile = extended_path;
++    }
++
+     if (debuginfo && debuginfo->errorfile && pszErrorFile &&
+         strcmp(debuginfo->errorfile, pszErrorFile) == 0)
+     {
+@@ -271,7 +286,7 @@ int msDebugInitFromEnv()
+ 
+     if( (val=getenv( "MS_ERRORFILE" )) != NULL )
+     {
+-        if ( msSetErrorFile(val) != MS_SUCCESS )
++        if ( msSetErrorFile(val, NULL) != MS_SUCCESS )
+             return MS_FAILURE;
+     }
+     
+diff --git a/maperror.h b/maperror.h
+index 929f19c1..f71c5299 100644
+--- a/maperror.h
++++ b/maperror.h
+@@ -159,7 +159,7 @@ typedef struct debug_info_obj
+ 
+ 
+ MS_DLL_EXPORT void msDebug( const char * pszFormat, ... );
+-MS_DLL_EXPORT int msSetErrorFile(const char *pszErrorFile);
++MS_DLL_EXPORT int msSetErrorFile(const char *pszErrorFile, const char *pszRelToPath);
+ MS_DLL_EXPORT void msCloseErrorFile( void );
+ MS_DLL_EXPORT const char *msGetErrorFile( void );
+ MS_DLL_EXPORT void msSetGlobalDebugLevel(int level);
+diff --git a/mapobject.c b/mapobject.c
+index 5a3cca33..5c263dc8 100644
+--- a/mapobject.c
++++ b/mapobject.c
+@@ -191,10 +191,12 @@ int msSetConfigOption( mapObj *map, const char *key, const char *value)
+     }
+ 
+     /* Same for MS_ERRORFILE, we want it to kick in as early as possible
+-     * to catch parsing errors */
++     * to catch parsing errors.
++     * Value can be relative to mapfile, unless it's already absolute 
++     */
+     if( strcasecmp(key,"MS_ERRORFILE") == 0 )
+     {
+-        if (msSetErrorFile( value ) != MS_SUCCESS)
++        if (msSetErrorFile( value, map->mappath ) != MS_SUCCESS)
+             return MS_FAILURE;
+     }
+ 
+@@ -245,7 +247,7 @@ void msApplyMapConfigOptions( mapObj *map )
+         }
+         else if( strcasecmp(key,"MS_ERRORFILE") == 0 )
+         {
+-            msSetErrorFile( value );
++            msSetErrorFile( value, map->mappath );
+         }
+         else 
+         {
+diff --git a/shp2img.c b/shp2img.c
+index 13de6c8f..b60f84ba 100644
+--- a/shp2img.c
++++ b/shp2img.c
+@@ -64,7 +64,7 @@ int main(int argc, char *argv[])
+ 
+         /* Send output to stderr by default */ 
+         if (msGetErrorFile() == NULL)
+-            msSetErrorFile("stderr");
++            msSetErrorFile("stderr", NULL);
+ 
+         continue;
+     }
+@@ -213,7 +213,7 @@ int main(int argc, char *argv[])
+ 
+         /* Send output to stderr by default */ 
+         if (msGetErrorFile() == NULL)
+-            msSetErrorFile("stderr");
++            msSetErrorFile("stderr", NULL);
+     }
+     
+     if(strcmp(argv[i], "-layer_debug") == 0) /* debug */
+@@ -235,7 +235,7 @@ int main(int argc, char *argv[])
+ 
+         /* Send output to stderr by default */ 
+         if (msGetErrorFile() == NULL)
+-            msSetErrorFile("stderr");
++            msSetErrorFile("stderr", NULL);
+     }
+     
+     if(strcmp(argv[i],"-e") == 0) { /* change extent */
+diff --git a/sortshp.c b/sortshp.c
+index 4d5d305f..f4bbe9f3 100644
+--- a/sortshp.c
++++ b/sortshp.c
+@@ -104,7 +104,7 @@ int main(int argc, char *argv[])
+       exit(0);
+   }
+ 
+-  msSetErrorFile("stderr");
++  msSetErrorFile("stderr", NULL);
+ 
+   /* ------------------------------------------------------------------------------- */
+   /*       Open the shapefile                                                        */
+

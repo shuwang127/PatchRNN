@@ -1,0 +1,578 @@
+commit 48a066e72d970a3e225a9c18690d570c736fc455
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Sun Sep 29 22:06:07 2013 -0400
+
+    RCU'd vfsmounts
+    
+    * RCU-delayed freeing of vfsmounts
+    * vfsmount_lock replaced with a seqlock (mount_lock)
+    * sequence number from mount_lock is stored in nameidata->m_seq and
+    used when we exit RCU mode
+    * new vfsmount flag - MNT_SYNC_UMOUNT.  Set by umount_tree() when its
+    caller knows that vfsmount will have no surviving references.
+    * synchronize_rcu() done between unlocking namespace_sem in namespace_unlock()
+    and doing pending mntput().
+    * new helper: legitimize_mnt(mnt, seq).  Checks the mount_lock sequence
+    number against seq, then grabs reference to mnt.  Then it rechecks mount_lock
+    again to close the race and either returns success or drops the reference it
+    has acquired.  The subtle point is that in case of MNT_SYNC_UMOUNT we can
+    simply decrement the refcount and sod off - aforementioned synchronize_rcu()
+    makes sure that final mntput() won't come until we leave RCU mode.  We need
+    that, since we don't want to end up with some lazy pathwalk racing with
+    umount() and stealing the final mntput() from it - caller of umount() may
+    expect it to return only once the fs is shut down and we don't want to break
+    that.  In other cases (i.e. with MNT_SYNC_UMOUNT absent) we have to do
+    full-blown mntput() in case of mount_lock sequence number mismatch happening
+    just as we'd grabbed the reference, but in those cases we won't be stealing
+    the final mntput() from anything that would care.
+    * mntput_no_expire() doesn't lock anything on the fast path now.  Incidentally,
+    SMP and UP cases are handled the same way - no ifdefs there.
+    * normal pathname resolution does *not* do any writes to mount_lock.  It does,
+    of course, bump the refcounts of vfsmount and dentry in the very end, but that's
+    it.
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+diff --git a/fs/dcache.c b/fs/dcache.c
+index eb0978da1bd4..aafa2a146434 100644
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -2887,24 +2887,28 @@ static int prepend_path(const struct path *path,
+ 	struct vfsmount *vfsmnt = path->mnt;
+ 	struct mount *mnt = real_mount(vfsmnt);
+ 	int error = 0;
+-	unsigned seq = 0;
++	unsigned seq, m_seq = 0;
+ 	char *bptr;
+ 	int blen;
+ 
+-	br_read_lock(&vfsmount_lock);
+ 	rcu_read_lock();
++restart_mnt:
++	read_seqbegin_or_lock(&mount_lock, &m_seq);
++	seq = 0;
+ restart:
+ 	bptr = *buffer;
+ 	blen = *buflen;
++	error = 0;
+ 	read_seqbegin_or_lock(&rename_lock, &seq);
+ 	while (dentry != root->dentry || vfsmnt != root->mnt) {
+ 		struct dentry * parent;
+ 
+ 		if (dentry == vfsmnt->mnt_root || IS_ROOT(dentry)) {
++			struct mount *parent = ACCESS_ONCE(mnt->mnt_parent);
+ 			/* Global root? */
+-			if (mnt_has_parent(mnt)) {
+-				dentry = mnt->mnt_mountpoint;
+-				mnt = mnt->mnt_parent;
++			if (mnt != parent) {
++				dentry = ACCESS_ONCE(mnt->mnt_mountpoint);
++				mnt = parent;
+ 				vfsmnt = &mnt->mnt;
+ 				continue;
+ 			}
+@@ -2938,7 +2942,11 @@ restart:
+ 		goto restart;
+ 	}
+ 	done_seqretry(&rename_lock, seq);
+-	br_read_unlock(&vfsmount_lock);
++	if (need_seqretry(&mount_lock, m_seq)) {
++		m_seq = 1;
++		goto restart_mnt;
++	}
++	done_seqretry(&mount_lock, m_seq);
+ 
+ 	if (error >= 0 && bptr == *buffer) {
+ 		if (--blen < 0)
+diff --git a/fs/mount.h b/fs/mount.h
+index f0866076de6e..d64c594be6c4 100644
+--- a/fs/mount.h
++++ b/fs/mount.h
+@@ -1,7 +1,6 @@
+ #include <linux/mount.h>
+ #include <linux/seq_file.h>
+ #include <linux/poll.h>
+-#include <linux/lglock.h>
+ 
+ struct mnt_namespace {
+ 	atomic_t		count;
+@@ -30,6 +29,7 @@ struct mount {
+ 	struct mount *mnt_parent;
+ 	struct dentry *mnt_mountpoint;
+ 	struct vfsmount mnt;
++	struct rcu_head mnt_rcu;
+ #ifdef CONFIG_SMP
+ 	struct mnt_pcp __percpu *mnt_pcp;
+ #else
+@@ -80,21 +80,23 @@ static inline int is_mounted(struct vfsmount *mnt)
+ extern struct mount *__lookup_mnt(struct vfsmount *, struct dentry *);
+ extern struct mount *__lookup_mnt_last(struct vfsmount *, struct dentry *);
+ 
++extern bool legitimize_mnt(struct vfsmount *, unsigned);
++
+ static inline void get_mnt_ns(struct mnt_namespace *ns)
+ {
+ 	atomic_inc(&ns->count);
+ }
+ 
+-extern struct lglock vfsmount_lock;
++extern seqlock_t mount_lock;
+ 
+ static inline void lock_mount_hash(void)
+ {
+-	br_write_lock(&vfsmount_lock);
++	write_seqlock(&mount_lock);
+ }
+ 
+ static inline void unlock_mount_hash(void)
+ {
+-	br_write_unlock(&vfsmount_lock);
++	write_sequnlock(&mount_lock);
+ }
+ 
+ struct proc_mounts {
+diff --git a/fs/namei.c b/fs/namei.c
+index 1f844fbfce72..cb0ebae07e52 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -484,14 +484,12 @@ EXPORT_SYMBOL(path_put);
+ 
+ static inline void lock_rcu_walk(void)
+ {
+-	br_read_lock(&vfsmount_lock);
+ 	rcu_read_lock();
+ }
+ 
+ static inline void unlock_rcu_walk(void)
+ {
+ 	rcu_read_unlock();
+-	br_read_unlock(&vfsmount_lock);
+ }
+ 
+ /**
+@@ -512,26 +510,23 @@ static int unlazy_walk(struct nameidata *nd, struct dentry *dentry)
+ 	BUG_ON(!(nd->flags & LOOKUP_RCU));
+ 
+ 	/*
+-	 * Get a reference to the parent first: we're
+-	 * going to make "path_put(nd->path)" valid in
+-	 * non-RCU context for "terminate_walk()".
+-	 *
+-	 * If this doesn't work, return immediately with
+-	 * RCU walking still active (and then we will do
+-	 * the RCU walk cleanup in terminate_walk()).
++	 * After legitimizing the bastards, terminate_walk()
++	 * will do the right thing for non-RCU mode, and all our
++	 * subsequent exit cases should rcu_read_unlock()
++	 * before returning.  Do vfsmount first; if dentry
++	 * can't be legitimized, just set nd->path.dentry to NULL
++	 * and rely on dput(NULL) being a no-op.
+ 	 */
+-	if (!lockref_get_not_dead(&parent->d_lockref))
++	if (!legitimize_mnt(nd->path.mnt, nd->m_seq))
+ 		return -ECHILD;
+-
+-	/*
+-	 * After the mntget(), we terminate_walk() will do
+-	 * the right thing for non-RCU mode, and all our
+-	 * subsequent exit cases should unlock_rcu_walk()
+-	 * before returning.
+-	 */
+-	mntget(nd->path.mnt);
+ 	nd->flags &= ~LOOKUP_RCU;
+ 
++	if (!lockref_get_not_dead(&parent->d_lockref)) {
++		nd->path.dentry = NULL;	
++		unlock_rcu_walk();
++		return -ECHILD;
++	}
++
+ 	/*
+ 	 * For a negative lookup, the lookup sequence point is the parents
+ 	 * sequence point, and it only needs to revalidate the parent dentry.
+@@ -608,16 +603,21 @@ static int complete_walk(struct nameidata *nd)
+ 		if (!(nd->flags & LOOKUP_ROOT))
+ 			nd->root.mnt = NULL;
+ 
++		if (!legitimize_mnt(nd->path.mnt, nd->m_seq)) {
++			unlock_rcu_walk();
++			return -ECHILD;
++		}
+ 		if (unlikely(!lockref_get_not_dead(&dentry->d_lockref))) {
+ 			unlock_rcu_walk();
++			mntput(nd->path.mnt);
+ 			return -ECHILD;
+ 		}
+ 		if (read_seqcount_retry(&dentry->d_seq, nd->seq)) {
+ 			unlock_rcu_walk();
+ 			dput(dentry);
++			mntput(nd->path.mnt);
+ 			return -ECHILD;
+ 		}
+-		mntget(nd->path.mnt);
+ 		unlock_rcu_walk();
+ 	}
+ 
+@@ -909,15 +909,15 @@ int follow_up(struct path *path)
+ 	struct mount *parent;
+ 	struct dentry *mountpoint;
+ 
+-	br_read_lock(&vfsmount_lock);
++	read_seqlock_excl(&mount_lock);
+ 	parent = mnt->mnt_parent;
+ 	if (parent == mnt) {
+-		br_read_unlock(&vfsmount_lock);
++		read_sequnlock_excl(&mount_lock);
+ 		return 0;
+ 	}
+ 	mntget(&parent->mnt);
+ 	mountpoint = dget(mnt->mnt_mountpoint);
+-	br_read_unlock(&vfsmount_lock);
++	read_sequnlock_excl(&mount_lock);
+ 	dput(path->dentry);
+ 	path->dentry = mountpoint;
+ 	mntput(path->mnt);
+@@ -1048,8 +1048,8 @@ static int follow_managed(struct path *path, unsigned flags)
+ 
+ 			/* Something is mounted on this dentry in another
+ 			 * namespace and/or whatever was mounted there in this
+-			 * namespace got unmounted before we managed to get the
+-			 * vfsmount_lock */
++			 * namespace got unmounted before lookup_mnt() could
++			 * get it */
+ 		}
+ 
+ 		/* Handle an automount point */
+@@ -1864,6 +1864,7 @@ static int path_init(int dfd, const char *name, unsigned int flags,
+ 		if (flags & LOOKUP_RCU) {
+ 			lock_rcu_walk();
+ 			nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
++			nd->m_seq = read_seqbegin(&mount_lock);
+ 		} else {
+ 			path_get(&nd->path);
+ 		}
+@@ -1872,6 +1873,7 @@ static int path_init(int dfd, const char *name, unsigned int flags,
+ 
+ 	nd->root.mnt = NULL;
+ 
++	nd->m_seq = read_seqbegin(&mount_lock);
+ 	if (*name=='/') {
+ 		if (flags & LOOKUP_RCU) {
+ 			lock_rcu_walk();
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 500202ce10db..ac2ce8a766e1 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -53,7 +53,7 @@ EXPORT_SYMBOL_GPL(fs_kobj);
+  * It should be taken for write in all cases where the vfsmount
+  * tree or hash is modified or when a vfsmount structure is modified.
+  */
+-DEFINE_BRLOCK(vfsmount_lock);
++__cacheline_aligned_in_smp DEFINE_SEQLOCK(mount_lock);
+ 
+ static inline unsigned long hash(struct vfsmount *mnt, struct dentry *dentry)
+ {
+@@ -547,16 +547,38 @@ static void free_vfsmnt(struct mount *mnt)
+ 	kmem_cache_free(mnt_cache, mnt);
+ }
+ 
++/* call under rcu_read_lock */
++bool legitimize_mnt(struct vfsmount *bastard, unsigned seq)
++{
++	struct mount *mnt;
++	if (read_seqretry(&mount_lock, seq))
++		return false;
++	if (bastard == NULL)
++		return true;
++	mnt = real_mount(bastard);
++	mnt_add_count(mnt, 1);
++	if (likely(!read_seqretry(&mount_lock, seq)))
++		return true;
++	if (bastard->mnt_flags & MNT_SYNC_UMOUNT) {
++		mnt_add_count(mnt, -1);
++		return false;
++	}
++	rcu_read_unlock();
++	mntput(bastard);
++	rcu_read_lock();
++	return false;
++}
++
+ /*
+  * find the first mount at @dentry on vfsmount @mnt.
+- * vfsmount_lock must be held for read or write.
++ * call under rcu_read_lock()
+  */
+ struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
+ {
+ 	struct list_head *head = mount_hashtable + hash(mnt, dentry);
+ 	struct mount *p;
+ 
+-	list_for_each_entry(p, head, mnt_hash)
++	list_for_each_entry_rcu(p, head, mnt_hash)
+ 		if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
+ 			return p;
+ 	return NULL;
+@@ -564,7 +586,7 @@ struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
+ 
+ /*
+  * find the last mount at @dentry on vfsmount @mnt.
+- * vfsmount_lock must be held for read or write.
++ * mount_lock must be held.
+  */
+ struct mount *__lookup_mnt_last(struct vfsmount *mnt, struct dentry *dentry)
+ {
+@@ -596,17 +618,17 @@ struct mount *__lookup_mnt_last(struct vfsmount *mnt, struct dentry *dentry)
+ struct vfsmount *lookup_mnt(struct path *path)
+ {
+ 	struct mount *child_mnt;
++	struct vfsmount *m;
++	unsigned seq;
+ 
+-	br_read_lock(&vfsmount_lock);
+-	child_mnt = __lookup_mnt(path->mnt, path->dentry);
+-	if (child_mnt) {
+-		mnt_add_count(child_mnt, 1);
+-		br_read_unlock(&vfsmount_lock);
+-		return &child_mnt->mnt;
+-	} else {
+-		br_read_unlock(&vfsmount_lock);
+-		return NULL;
+-	}
++	rcu_read_lock();
++	do {
++		seq = read_seqbegin(&mount_lock);
++		child_mnt = __lookup_mnt(path->mnt, path->dentry);
++		m = child_mnt ? &child_mnt->mnt : NULL;
++	} while (!legitimize_mnt(m, seq));
++	rcu_read_unlock();
++	return m;
+ }
+ 
+ static struct mountpoint *new_mountpoint(struct dentry *dentry)
+@@ -874,38 +896,46 @@ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
+ 	return ERR_PTR(err);
+ }
+ 
++static void delayed_free(struct rcu_head *head)
++{
++	struct mount *mnt = container_of(head, struct mount, mnt_rcu);
++	kfree(mnt->mnt_devname);
++#ifdef CONFIG_SMP
++	free_percpu(mnt->mnt_pcp);
++#endif
++	kmem_cache_free(mnt_cache, mnt);
++}
++
+ static void mntput_no_expire(struct mount *mnt)
+ {
+ put_again:
+-#ifdef CONFIG_SMP
+-	br_read_lock(&vfsmount_lock);
+-	if (likely(mnt->mnt_ns)) {
+-		/* shouldn't be the last one */
+-		mnt_add_count(mnt, -1);
+-		br_read_unlock(&vfsmount_lock);
++	rcu_read_lock();
++	mnt_add_count(mnt, -1);
++	if (likely(mnt->mnt_ns)) { /* shouldn't be the last one */
++		rcu_read_unlock();
+ 		return;
+ 	}
+-	br_read_unlock(&vfsmount_lock);
+-
+ 	lock_mount_hash();
+-	mnt_add_count(mnt, -1);
+ 	if (mnt_get_count(mnt)) {
++		rcu_read_unlock();
+ 		unlock_mount_hash();
+ 		return;
+ 	}
+-#else
+-	mnt_add_count(mnt, -1);
+-	if (likely(mnt_get_count(mnt)))
+-		return;
+-	lock_mount_hash();
+-#endif
+ 	if (unlikely(mnt->mnt_pinned)) {
+ 		mnt_add_count(mnt, mnt->mnt_pinned + 1);
+ 		mnt->mnt_pinned = 0;
++		rcu_read_unlock();
+ 		unlock_mount_hash();
+ 		acct_auto_close_mnt(&mnt->mnt);
+ 		goto put_again;
+ 	}
++	if (unlikely(mnt->mnt.mnt_flags & MNT_DOOMED)) {
++		rcu_read_unlock();
++		unlock_mount_hash();
++		return;
++	}
++	mnt->mnt.mnt_flags |= MNT_DOOMED;
++	rcu_read_unlock();
+ 
+ 	list_del(&mnt->mnt_instance);
+ 	unlock_mount_hash();
+@@ -924,7 +954,8 @@ put_again:
+ 	fsnotify_vfsmount_delete(&mnt->mnt);
+ 	dput(mnt->mnt.mnt_root);
+ 	deactivate_super(mnt->mnt.mnt_sb);
+-	free_vfsmnt(mnt);
++	mnt_free_id(mnt);
++	call_rcu(&mnt->mnt_rcu, delayed_free);
+ }
+ 
+ void mntput(struct vfsmount *mnt)
+@@ -1137,6 +1168,8 @@ static void namespace_unlock(void)
+ 	list_splice_init(&unmounted, &head);
+ 	up_write(&namespace_sem);
+ 
++	synchronize_rcu();
++
+ 	while (!list_empty(&head)) {
+ 		mnt = list_first_entry(&head, struct mount, mnt_hash);
+ 		list_del_init(&mnt->mnt_hash);
+@@ -1152,10 +1185,13 @@ static inline void namespace_lock(void)
+ }
+ 
+ /*
+- * vfsmount lock must be held for write
++ * mount_lock must be held
+  * namespace_sem must be held for write
++ * how = 0 => just this tree, don't propagate
++ * how = 1 => propagate; we know that nobody else has reference to any victims
++ * how = 2 => lazy umount
+  */
+-void umount_tree(struct mount *mnt, int propagate)
++void umount_tree(struct mount *mnt, int how)
+ {
+ 	LIST_HEAD(tmp_list);
+ 	struct mount *p;
+@@ -1163,7 +1199,7 @@ void umount_tree(struct mount *mnt, int propagate)
+ 	for (p = mnt; p; p = next_mnt(p, mnt))
+ 		list_move(&p->mnt_hash, &tmp_list);
+ 
+-	if (propagate)
++	if (how)
+ 		propagate_umount(&tmp_list);
+ 
+ 	list_for_each_entry(p, &tmp_list, mnt_hash) {
+@@ -1171,6 +1207,8 @@ void umount_tree(struct mount *mnt, int propagate)
+ 		list_del_init(&p->mnt_list);
+ 		__touch_mnt_namespace(p->mnt_ns);
+ 		p->mnt_ns = NULL;
++		if (how < 2)
++			p->mnt.mnt_flags |= MNT_SYNC_UMOUNT;
+ 		list_del_init(&p->mnt_child);
+ 		if (mnt_has_parent(p)) {
+ 			put_mountpoint(p->mnt_mp);
+@@ -1262,14 +1300,18 @@ static int do_umount(struct mount *mnt, int flags)
+ 	lock_mount_hash();
+ 	event++;
+ 
+-	if (!(flags & MNT_DETACH))
+-		shrink_submounts(mnt);
+-
+-	retval = -EBUSY;
+-	if (flags & MNT_DETACH || !propagate_mount_busy(mnt, 2)) {
++	if (flags & MNT_DETACH) {
+ 		if (!list_empty(&mnt->mnt_list))
+-			umount_tree(mnt, 1);
++			umount_tree(mnt, 2);
+ 		retval = 0;
++	} else {
++		shrink_submounts(mnt);
++		retval = -EBUSY;
++		if (!propagate_mount_busy(mnt, 2)) {
++			if (!list_empty(&mnt->mnt_list))
++				umount_tree(mnt, 1);
++			retval = 0;
++		}
+ 	}
+ 	unlock_mount_hash();
+ 	namespace_unlock();
+@@ -1955,7 +1997,7 @@ static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
+ 	struct mount *parent;
+ 	int err;
+ 
+-	mnt_flags &= ~(MNT_SHARED | MNT_WRITE_HOLD | MNT_INTERNAL);
++	mnt_flags &= ~(MNT_SHARED | MNT_WRITE_HOLD | MNT_INTERNAL | MNT_DOOMED | MNT_SYNC_UMOUNT);
+ 
+ 	mp = lock_mount(path);
+ 	if (IS_ERR(mp))
+@@ -2172,7 +2214,7 @@ resume:
+  * process a list of expirable mountpoints with the intent of discarding any
+  * submounts of a specific parent mountpoint
+  *
+- * vfsmount_lock must be held for write
++ * mount_lock must be held for write
+  */
+ static void shrink_submounts(struct mount *mnt)
+ {
+@@ -2558,7 +2600,7 @@ out_type:
+ /*
+  * Return true if path is reachable from root
+  *
+- * namespace_sem or vfsmount_lock is held
++ * namespace_sem or mount_lock is held
+  */
+ bool is_path_reachable(struct mount *mnt, struct dentry *dentry,
+ 			 const struct path *root)
+@@ -2573,9 +2615,9 @@ bool is_path_reachable(struct mount *mnt, struct dentry *dentry,
+ int path_is_under(struct path *path1, struct path *path2)
+ {
+ 	int res;
+-	br_read_lock(&vfsmount_lock);
++	read_seqlock_excl(&mount_lock);
+ 	res = is_path_reachable(real_mount(path1->mnt), path1->dentry, path2);
+-	br_read_unlock(&vfsmount_lock);
++	read_sequnlock_excl(&mount_lock);
+ 	return res;
+ }
+ EXPORT_SYMBOL(path_is_under);
+@@ -2748,8 +2790,6 @@ void __init mnt_init(void)
+ 	for (u = 0; u < HASH_SIZE; u++)
+ 		INIT_LIST_HEAD(&mountpoint_hashtable[u]);
+ 
+-	br_lock_init(&vfsmount_lock);
+-
+ 	err = sysfs_init();
+ 	if (err)
+ 		printk(KERN_WARNING "%s: sysfs_init error: %d\n",
+@@ -2788,9 +2828,8 @@ void kern_unmount(struct vfsmount *mnt)
+ {
+ 	/* release long term mount so mount point can be released */
+ 	if (!IS_ERR_OR_NULL(mnt)) {
+-		lock_mount_hash();
+ 		real_mount(mnt)->mnt_ns = NULL;
+-		unlock_mount_hash();
++		synchronize_rcu();	/* yecchhh... */
+ 		mntput(mnt);
+ 	}
+ }
+diff --git a/include/linux/mount.h b/include/linux/mount.h
+index 38cd98f112a0..371d346fa270 100644
+--- a/include/linux/mount.h
++++ b/include/linux/mount.h
+@@ -49,6 +49,8 @@ struct mnt_namespace;
+ 
+ #define MNT_LOCK_READONLY	0x400000
+ #define MNT_LOCKED		0x800000
++#define MNT_DOOMED		0x1000000
++#define MNT_SYNC_UMOUNT		0x2000000
+ 
+ struct vfsmount {
+ 	struct dentry *mnt_root;	/* root of the mounted tree */
+diff --git a/include/linux/namei.h b/include/linux/namei.h
+index 8e47bc7a1665..492de72560fa 100644
+--- a/include/linux/namei.h
++++ b/include/linux/namei.h
+@@ -16,7 +16,7 @@ struct nameidata {
+ 	struct path	root;
+ 	struct inode	*inode; /* path.dentry.d_inode */
+ 	unsigned int	flags;
+-	unsigned	seq;
++	unsigned	seq, m_seq;
+ 	int		last_type;
+ 	unsigned	depth;
+ 	char *saved_names[MAX_NESTED_LINKS + 1];
+

@@ -1,0 +1,154 @@
+commit 35fa2f2ad161024e735fb0cd571cb92e50171afd
+Author: Ben Skeggs <bskeggs@redhat.com>
+Date:   Thu Oct 21 14:07:03 2010 +1000
+
+    drm/nouveau: add support for MSI
+    
+    Only supported on NV50+ so far, and disabled by default currently.  The
+    module parameter "msi=1" will enable it.
+    
+    There's a kernel bug which will cause this to fail if the module (or the
+    NVIDIA binary driver) has ever been loaded before loading nouveau with
+    MSI enabled.  As such, this is only safe to enable if you have nouveau
+    load on boot, and don't wish to ever reload it.
+    
+    The workaround is to "echo 0 > /sys/bus/pci/devices/<device>/enable"
+    until the enable count reads 0.  Then you should be able to load nouveau
+    with MSI enabled.
+    
+    Signed-off-by: Ben Skeggs <bskeggs@redhat.com>
+
+diff --git a/drivers/gpu/drm/nouveau/nouveau_drv.c b/drivers/gpu/drm/nouveau/nouveau_drv.c
+index 6dbb8818c530..db926ecf5b6f 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_drv.c
++++ b/drivers/gpu/drm/nouveau/nouveau_drv.c
+@@ -115,6 +115,10 @@ MODULE_PARM_DESC(perflvl_wr, "Allow perflvl changes (warning: dangerous!)\n");
+ int nouveau_perflvl_wr;
+ module_param_named(perflvl_wr, nouveau_perflvl_wr, int, 0400);
+ 
++MODULE_PARM_DESC(msi, "Enable MSI (default: off)\n");
++int nouveau_msi;
++module_param_named(msi, nouveau_msi, int, 0400);
++
+ int nouveau_fbpercrtc;
+ #if 0
+ module_param_named(fbpercrtc, nouveau_fbpercrtc, int, 0400);
+diff --git a/drivers/gpu/drm/nouveau/nouveau_drv.h b/drivers/gpu/drm/nouveau/nouveau_drv.h
+index bf34f25c7a54..9ab7dc8ede4e 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_drv.h
++++ b/drivers/gpu/drm/nouveau/nouveau_drv.h
+@@ -593,6 +593,8 @@ struct drm_nouveau_private {
+ 
+ 	struct nouveau_bo *vga_ram;
+ 
++	/* interrupt handling */
++	bool msi_enabled;
+ 	struct workqueue_struct *wq;
+ 	struct work_struct irq_work;
+ 	struct work_struct hpd_work;
+@@ -754,6 +756,7 @@ extern int nouveau_force_post;
+ extern int nouveau_override_conntype;
+ extern char *nouveau_perflvl;
+ extern int nouveau_perflvl_wr;
++extern int nouveau_msi;
+ 
+ extern int nouveau_pci_suspend(struct pci_dev *pdev, pm_message_t pm_state);
+ extern int nouveau_pci_resume(struct pci_dev *pdev);
+@@ -872,6 +875,8 @@ extern int nouveau_ioctl_gpuobj_free(struct drm_device *, void *data,
+ 				     struct drm_file *);
+ 
+ /* nouveau_irq.c */
++extern int         nouveau_irq_init(struct drm_device *);
++extern void        nouveau_irq_fini(struct drm_device *);
+ extern irqreturn_t nouveau_irq_handler(DRM_IRQ_ARGS);
+ extern void        nouveau_irq_preinstall(struct drm_device *);
+ extern int         nouveau_irq_postinstall(struct drm_device *);
+diff --git a/drivers/gpu/drm/nouveau/nouveau_irq.c b/drivers/gpu/drm/nouveau/nouveau_irq.c
+index ca9b969f4f9c..17e2fa86cde7 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_irq.c
++++ b/drivers/gpu/drm/nouveau/nouveau_irq.c
+@@ -68,8 +68,13 @@ nouveau_irq_preinstall(struct drm_device *dev)
+ int
+ nouveau_irq_postinstall(struct drm_device *dev)
+ {
++	struct drm_nouveau_private *dev_priv = dev->dev_private;
++
+ 	/* Master enable */
+ 	nv_wr32(dev, NV03_PMC_INTR_EN_0, NV_PMC_INTR_EN_0_MASTER_ENABLE);
++	if (dev_priv->msi_enabled)
++		nv_wr08(dev, 0x00088068, 0xff);
++
+ 	return 0;
+ }
+ 
+@@ -1263,5 +1268,35 @@ nouveau_irq_handler(DRM_IRQ_ARGS)
+ 
+ 	spin_unlock_irqrestore(&dev_priv->context_switch_lock, flags);
+ 
++	if (dev_priv->msi_enabled)
++		nv_wr08(dev, 0x00088068, 0xff);
++
+ 	return IRQ_HANDLED;
+ }
++
++int
++nouveau_irq_init(struct drm_device *dev)
++{
++	struct drm_nouveau_private *dev_priv = dev->dev_private;
++	int ret;
++
++	if (nouveau_msi != 0 && dev_priv->card_type >= NV_50) {
++		ret = pci_enable_msi(dev->pdev);
++		if (ret == 0) {
++			NV_INFO(dev, "enabled MSI\n");
++			dev_priv->msi_enabled = true;
++		}
++	}
++
++	return drm_irq_install(dev);
++}
++
++void
++nouveau_irq_fini(struct drm_device *dev)
++{
++	struct drm_nouveau_private *dev_priv = dev->dev_private;
++
++	drm_irq_uninstall(dev);
++	if (dev_priv->msi_enabled)
++		pci_disable_msi(dev->pdev);
++}
+diff --git a/drivers/gpu/drm/nouveau/nouveau_state.c b/drivers/gpu/drm/nouveau/nouveau_state.c
+index f13134aa8c4f..410a79f5e0cd 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_state.c
++++ b/drivers/gpu/drm/nouveau/nouveau_state.c
+@@ -667,10 +667,7 @@ nouveau_card_init(struct drm_device *dev)
+ 	if (ret)
+ 		goto out_fifo;
+ 
+-	/* this call irq_preinstall, register irq handler and
+-	 * call irq_postinstall
+-	 */
+-	ret = drm_irq_install(dev);
++	ret = nouveau_irq_init(dev);
+ 	if (ret)
+ 		goto out_display;
+ 
+@@ -701,7 +698,7 @@ nouveau_card_init(struct drm_device *dev)
+ out_fence:
+ 	nouveau_fence_fini(dev);
+ out_irq:
+-	drm_irq_uninstall(dev);
++	nouveau_irq_fini(dev);
+ out_display:
+ 	engine->display.destroy(dev);
+ out_fifo:
+@@ -772,7 +769,7 @@ static void nouveau_card_takedown(struct drm_device *dev)
+ 	nouveau_gpuobj_takedown(dev);
+ 	nouveau_mem_vram_fini(dev);
+ 
+-	drm_irq_uninstall(dev);
++	nouveau_irq_fini(dev);
+ 
+ 	nouveau_pm_fini(dev);
+ 	nouveau_bios_takedown(dev);
+

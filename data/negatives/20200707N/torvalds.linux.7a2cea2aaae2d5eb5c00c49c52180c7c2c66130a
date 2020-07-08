@@ -1,0 +1,87 @@
+commit 7a2cea2aaae2d5eb5c00c49c52180c7c2c66130a
+Author: Steve Wise <swise@opengridcomputing.com>
+Date:   Fri Mar 14 21:52:07 2014 +0530
+
+    cxgb4/iw_cxgb4: Treat CPL_ERR_KEEPALV_NEG_ADVICE as negative advice
+    
+    Based on original work by Anand Priyadarshee <anandp@chelsio.com>.
+    
+    Signed-off-by: Steve Wise <swise@opengridcomputing.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/infiniband/hw/cxgb4/cm.c b/drivers/infiniband/hw/cxgb4/cm.c
+index d286bdebe2ab..7e98a58aacfd 100644
+--- a/drivers/infiniband/hw/cxgb4/cm.c
++++ b/drivers/infiniband/hw/cxgb4/cm.c
+@@ -1647,6 +1647,15 @@ static inline int act_open_has_tid(int status)
+ 	       status != CPL_ERR_ARP_MISS;
+ }
+ 
++/* Returns whether a CPL status conveys negative advice.
++ */
++static int is_neg_adv(unsigned int status)
++{
++	return status == CPL_ERR_RTX_NEG_ADVICE ||
++	       status == CPL_ERR_PERSIST_NEG_ADVICE ||
++	       status == CPL_ERR_KEEPALV_NEG_ADVICE;
++}
++
+ #define ACT_OPEN_RETRY_COUNT 2
+ 
+ static int import_ep(struct c4iw_ep *ep, int iptype, __u8 *peer_ip,
+@@ -1835,7 +1844,7 @@ static int act_open_rpl(struct c4iw_dev *dev, struct sk_buff *skb)
+ 	PDBG("%s ep %p atid %u status %u errno %d\n", __func__, ep, atid,
+ 	     status, status2errno(status));
+ 
+-	if (status == CPL_ERR_RTX_NEG_ADVICE) {
++	if (is_neg_adv(status)) {
+ 		printk(KERN_WARNING MOD "Connection problems for atid %u\n",
+ 			atid);
+ 		return 0;
+@@ -2265,15 +2274,6 @@ static int peer_close(struct c4iw_dev *dev, struct sk_buff *skb)
+ 	return 0;
+ }
+ 
+-/*
+- * Returns whether an ABORT_REQ_RSS message is a negative advice.
+- */
+-static int is_neg_adv_abort(unsigned int status)
+-{
+-	return status == CPL_ERR_RTX_NEG_ADVICE ||
+-	       status == CPL_ERR_PERSIST_NEG_ADVICE;
+-}
+-
+ static int peer_abort(struct c4iw_dev *dev, struct sk_buff *skb)
+ {
+ 	struct cpl_abort_req_rss *req = cplhdr(skb);
+@@ -2287,7 +2287,7 @@ static int peer_abort(struct c4iw_dev *dev, struct sk_buff *skb)
+ 	unsigned int tid = GET_TID(req);
+ 
+ 	ep = lookup_tid(t, tid);
+-	if (is_neg_adv_abort(req->status)) {
++	if (is_neg_adv(req->status)) {
+ 		PDBG("%s neg_adv_abort ep %p tid %u\n", __func__, ep,
+ 		     ep->hwtid);
+ 		return 0;
+@@ -3570,7 +3570,7 @@ static int peer_abort_intr(struct c4iw_dev *dev, struct sk_buff *skb)
+ 		kfree_skb(skb);
+ 		return 0;
+ 	}
+-	if (is_neg_adv_abort(req->status)) {
++	if (is_neg_adv(req->status)) {
+ 		PDBG("%s neg_adv_abort ep %p tid %u\n", __func__, ep,
+ 		     ep->hwtid);
+ 		kfree_skb(skb);
+diff --git a/drivers/net/ethernet/chelsio/cxgb4/t4_msg.h b/drivers/net/ethernet/chelsio/cxgb4/t4_msg.h
+index cd6874b571ee..f2738c710789 100644
+--- a/drivers/net/ethernet/chelsio/cxgb4/t4_msg.h
++++ b/drivers/net/ethernet/chelsio/cxgb4/t4_msg.h
+@@ -116,6 +116,7 @@ enum CPL_error {
+ 	CPL_ERR_KEEPALIVE_TIMEDOUT = 34,
+ 	CPL_ERR_RTX_NEG_ADVICE     = 35,
+ 	CPL_ERR_PERSIST_NEG_ADVICE = 36,
++	CPL_ERR_KEEPALV_NEG_ADVICE = 37,
+ 	CPL_ERR_ABORT_FAILED       = 42,
+ 	CPL_ERR_IWARP_FLM          = 50,
+ };
+

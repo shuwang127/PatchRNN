@@ -1,0 +1,43 @@
+commit 2622d73e51acfe1dbeb21bf2299066bdead85163
+Author: Peter Hurley <peter@hurleysoftware.com>
+Date:   Thu Oct 16 15:33:27 2014 -0400
+
+    pty: Fix packet mode setting race
+    
+    Because pty_set_pktmode() does not claim the slave's ctrl_lock
+    to clear ->ctrl_status (to avoid unnecessary lock nesting),
+    pty_set_pktmode() may accidentally erase new ->ctrl_status updates.
+    For example,
+    
+    CPU 0                             | CPU 1
+    pty_set_pktmode()                 | pty_start()
+      spin_lock(master's ctrl_lock)   |
+      tty->packet = 1                 |
+                                      |   if (tty->link->packet)
+                                      |     spin_lock(slave's ctrl_lock)
+                                      |     tty->ctrl_status = TIOCPKT_START
+      tty->link->ctrl_status = 0      |
+    
+    Ensure the clear of ->ctrl_status occurs before packet mode is set
+    (and observable on another cpu).
+    
+    Signed-off-by: Peter Hurley <peter@hurleysoftware.com>
+    Reviewed-by: Alan Cox <alan@linux.intel.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+diff --git a/drivers/tty/pty.c b/drivers/tty/pty.c
+index e554393d5551..bcec4c71a408 100644
+--- a/drivers/tty/pty.c
++++ b/drivers/tty/pty.c
+@@ -186,8 +186,9 @@ static int pty_set_pktmode(struct tty_struct *tty, int __user *arg)
+ 	spin_lock_irq(&tty->ctrl_lock);
+ 	if (pktmode) {
+ 		if (!tty->packet) {
+-			tty->packet = 1;
+ 			tty->link->ctrl_status = 0;
++			smp_mb();
++			tty->packet = 1;
+ 		}
+ 	} else
+ 		tty->packet = 0;
+

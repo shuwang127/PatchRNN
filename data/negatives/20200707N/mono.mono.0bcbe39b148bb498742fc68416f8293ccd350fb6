@@ -1,0 +1,1268 @@
+commit 0bcbe39b148bb498742fc68416f8293ccd350fb6
+Author: Zoltan Varga <vargaz@gmail.com>
+Date:   Wed Sep 14 02:56:20 2016 +0200
+
+    [runtime] Rename IMT thunks to 'trampolines'. NFC. (#3555)
+
+diff --git a/mono/metadata/class-internals.h b/mono/metadata/class-internals.h
+index de54bd07a4d..b62d6155f91 100644
+--- a/mono/metadata/class-internals.h
++++ b/mono/metadata/class-internals.h
+@@ -771,7 +771,7 @@ typedef struct {
+ 	size_t imt_slots_with_collisions;
+ 	size_t imt_max_collisions_in_slot;
+ 	size_t imt_method_count_when_max_collisions;
+-	size_t imt_thunks_size;
++	size_t imt_trampolines_size;
+ 	size_t jit_info_table_insert_count;
+ 	size_t jit_info_table_remove_count;
+ 	size_t jit_info_table_lookup_count;
+diff --git a/mono/metadata/domain-internals.h b/mono/metadata/domain-internals.h
+index 8f518aa3bc0..575e6d07ed3 100644
+--- a/mono/metadata/domain-internals.h
++++ b/mono/metadata/domain-internals.h
+@@ -385,7 +385,7 @@ struct _MonoDomain {
+ 	GHashTable	   *generic_virtual_cases;
+ 	MonoThunkFreeList **thunk_free_lists;
+ 
+-	GHashTable     *generic_virtual_thunks;
++	GHashTable     *generic_virtual_trampolines;
+ 
+ 	/* Information maintained by the JIT engine */
+ 	gpointer runtime_info;
+diff --git a/mono/metadata/domain.c b/mono/metadata/domain.c
+index 422ce454283..b5d5a26d417 100644
+--- a/mono/metadata/domain.c
++++ b/mono/metadata/domain.c
+@@ -1258,9 +1258,9 @@ mono_domain_free (MonoDomain *domain, gboolean force)
+ 		g_hash_table_destroy (domain->generic_virtual_cases);
+ 		domain->generic_virtual_cases = NULL;
+ 	}
+-	if (domain->generic_virtual_thunks) {
+-		g_hash_table_destroy (domain->generic_virtual_thunks);
+-		domain->generic_virtual_thunks = NULL;
++	if (domain->generic_virtual_trampolines) {
++		g_hash_table_destroy (domain->generic_virtual_trampolines);
++		domain->generic_virtual_trampolines = NULL;
+ 	}
+ 	if (domain->ftnptrs_hash) {
+ 		g_hash_table_destroy (domain->ftnptrs_hash);
+diff --git a/mono/metadata/object-internals.h b/mono/metadata/object-internals.h
+index 6329bfbb3bc..d28bd6c9f79 100644
+--- a/mono/metadata/object-internals.h
++++ b/mono/metadata/object-internals.h
+@@ -1523,14 +1523,14 @@ struct _MonoIMTCheckItem {
+ 	guint8            has_target_code;
+ };
+ 
+-typedef gpointer (*MonoImtThunkBuilder) (MonoVTable *vtable, MonoDomain *domain,
++typedef gpointer (*MonoImtTrampolineBuilder) (MonoVTable *vtable, MonoDomain *domain,
+ 		MonoIMTCheckItem **imt_entries, int count, gpointer fail_trunk);
+ 
+ void
+-mono_install_imt_thunk_builder (MonoImtThunkBuilder func);
++mono_install_imt_trampoline_builder (MonoImtTrampolineBuilder func);
+ 
+ void
+-mono_set_always_build_imt_thunks (gboolean value);
++mono_set_always_build_imt_trampolines (gboolean value);
+ 
+ void
+ mono_vtable_build_imt_slot (MonoVTable* vtable, int imt_slot);
+@@ -1544,7 +1544,7 @@ mono_method_add_generic_virtual_invocation (MonoDomain *domain, MonoVTable *vtab
+ 											MonoMethod *method, gpointer code);
+ 
+ gpointer
+-mono_method_alloc_generic_virtual_thunk (MonoDomain *domain, int size);
++mono_method_alloc_generic_virtual_trampoline (MonoDomain *domain, int size);
+ 
+ typedef enum {
+ 	MONO_UNHANDLED_POLICY_LEGACY,
+diff --git a/mono/metadata/object.c b/mono/metadata/object.c
+index 632cc4b6624..16571fd270f 100644
+--- a/mono/metadata/object.c
++++ b/mono/metadata/object.c
+@@ -572,8 +572,8 @@ default_delegate_trampoline (MonoDomain *domain, MonoClass *klass)
+ }
+ 
+ static MonoDelegateTrampoline arch_create_delegate_trampoline = default_delegate_trampoline;
+-static MonoImtThunkBuilder imt_thunk_builder;
+-static gboolean always_build_imt_thunks;
++static MonoImtTrampolineBuilder imt_trampoline_builder;
++static gboolean always_build_imt_trampolines;
+ 
+ #if (MONO_IMT_SIZE > 32)
+ #error "MONO_IMT_SIZE cannot be larger than 32"
+@@ -606,14 +606,15 @@ mono_install_delegate_trampoline (MonoDelegateTrampoline func)
+ }
+ 
+ void
+-mono_install_imt_thunk_builder (MonoImtThunkBuilder func) {
+-	imt_thunk_builder = func;
++mono_install_imt_trampoline_builder (MonoImtTrampolineBuilder func)
++{
++	imt_trampoline_builder = func;
+ }
+ 
+ void
+-mono_set_always_build_imt_thunks (gboolean value)
++mono_set_always_build_imt_trampolines (gboolean value)
+ {
+-	always_build_imt_thunks = value;
++	always_build_imt_trampolines = value;
+ }
+ 
+ /**
+@@ -1345,15 +1346,15 @@ initialize_imt_slot (MonoVTable *vtable, MonoDomain *domain, MonoImtBuilderEntry
+ 	MONO_REQ_GC_NEUTRAL_MODE;
+ 
+ 	if (imt_builder_entry != NULL) {
+-		if (imt_builder_entry->children == 0 && !fail_tramp && !always_build_imt_thunks) {
++		if (imt_builder_entry->children == 0 && !fail_tramp && !always_build_imt_trampolines) {
+ 			/* No collision, return the vtable slot contents */
+ 			return vtable->vtable [imt_builder_entry->value.vtable_slot];
+ 		} else {
+-			/* Collision, build the thunk */
++			/* Collision, build the trampoline */
+ 			GPtrArray *imt_ir = imt_sort_slot_entries (imt_builder_entry);
+ 			gpointer result;
+ 			int i;
+-			result = imt_thunk_builder (vtable, domain,
++			result = imt_trampoline_builder (vtable, domain,
+ 				(MonoIMTCheckItem**)imt_ir->pdata, imt_ir->len, fail_tramp);
+ 			for (i = 0; i < imt_ir->len; ++i)
+ 				g_free (g_ptr_array_index (imt_ir, i));
+@@ -1475,12 +1476,12 @@ build_imt_slots (MonoClass *klass, MonoVTable *vt, MonoDomain *domain, gpointer*
+ 
+ 			if (has_generic_virtual || has_variant_iface) {
+ 				/*
+-				 * There might be collisions later when the the thunk is expanded.
++				 * There might be collisions later when the the trampoline is expanded.
+ 				 */
+ 				imt_collisions_bitmap |= (1 << i);
+ 
+ 				/* 
+-				 * The IMT thunk might be called with an instance of one of the 
++				 * The IMT trampoline might be called with an instance of one of the 
+ 				 * generic virtual methods, so has to fallback to the IMT trampoline.
+ 				 */
+ 				imt [i] = initialize_imt_slot (vt, domain, imt_builder [i], callbacks.get_imt_trampoline (vt, i));
+@@ -1533,7 +1534,7 @@ build_imt (MonoClass *klass, MonoVTable *vt, MonoDomain *domain, gpointer* imt,
+  * @imt_slot: slot in the IMT table
+  *
+  * Fill the given @imt_slot in the IMT table of @vtable with
+- * a trampoline or a thunk for the case of collisions.
++ * a trampoline or a trampoline for the case of collisions.
+  * This is part of the internal mono API.
+  *
+  * LOCKING: Take the domain lock.
+@@ -1605,23 +1606,23 @@ list_index_for_size (int item_size)
+ }
+ 
+ /**
+- * mono_method_alloc_generic_virtual_thunk:
++ * mono_method_alloc_generic_virtual_trampoline:
+  * @domain: a domain
+  * @size: size in bytes
+  *
+  * Allocs size bytes to be used for the code of a generic virtual
+- * thunk.  It's either allocated from the domain's code manager or
++ * trampoline.  It's either allocated from the domain's code manager or
+  * reused from a previously invalidated piece.
+  *
+  * LOCKING: The domain lock must be held.
+  */
+ gpointer
+-mono_method_alloc_generic_virtual_thunk (MonoDomain *domain, int size)
++mono_method_alloc_generic_virtual_trampoline (MonoDomain *domain, int size)
+ {
+ 	MONO_REQ_GC_NEUTRAL_MODE;
+ 
+ 	static gboolean inited = FALSE;
+-	static int generic_virtual_thunks_size = 0;
++	static int generic_virtual_trampolines_size = 0;
+ 
+ 	guint32 *p;
+ 	int i;
+@@ -1654,19 +1655,19 @@ mono_method_alloc_generic_virtual_thunk (MonoDomain *domain, int size)
+ 
+ 	/* still nothing found - allocate it */
+ 	if (!inited) {
+-		mono_counters_register ("Generic virtual thunk bytes",
+-				MONO_COUNTER_GENERICS | MONO_COUNTER_INT, &generic_virtual_thunks_size);
++		mono_counters_register ("Generic virtual trampoline bytes",
++				MONO_COUNTER_GENERICS | MONO_COUNTER_INT, &generic_virtual_trampolines_size);
+ 		inited = TRUE;
+ 	}
+-	generic_virtual_thunks_size += size;
++	generic_virtual_trampolines_size += size;
+ 
+ 	p = (guint32 *)mono_domain_code_reserve (domain, size);
+ 	*p = size;
+ 
+ 	mono_domain_lock (domain);
+-	if (!domain->generic_virtual_thunks)
+-		domain->generic_virtual_thunks = g_hash_table_new (NULL, NULL);
+-	g_hash_table_insert (domain->generic_virtual_thunks, p, p);
++	if (!domain->generic_virtual_trampolines)
++		domain->generic_virtual_trampolines = g_hash_table_new (NULL, NULL);
++	g_hash_table_insert (domain->generic_virtual_trampolines, p, p);
+ 	mono_domain_unlock (domain);
+ 
+ 	return p + 1;
+@@ -1676,7 +1677,7 @@ mono_method_alloc_generic_virtual_thunk (MonoDomain *domain, int size)
+  * LOCKING: The domain lock must be held.
+  */
+ static void
+-invalidate_generic_virtual_thunk (MonoDomain *domain, gpointer code)
++invalidate_generic_virtual_trampoline (MonoDomain *domain, gpointer code)
+ {
+ 	MONO_REQ_GC_NEUTRAL_MODE;
+ 
+@@ -1685,14 +1686,14 @@ invalidate_generic_virtual_thunk (MonoDomain *domain, gpointer code)
+ 	gboolean found = FALSE;
+ 
+ 	mono_domain_lock (domain);
+-	if (!domain->generic_virtual_thunks)
+-		domain->generic_virtual_thunks = g_hash_table_new (NULL, NULL);
+-	if (g_hash_table_lookup (domain->generic_virtual_thunks, l))
++	if (!domain->generic_virtual_trampolines)
++		domain->generic_virtual_trampolines = g_hash_table_new (NULL, NULL);
++	if (g_hash_table_lookup (domain->generic_virtual_trampolines, l))
+ 		found = TRUE;
+ 	mono_domain_unlock (domain);
+ 
+ 	if (!found)
+-		/* Not allocated by mono_method_alloc_generic_virtual_thunk (), i.e. AOT */
++		/* Not allocated by mono_method_alloc_generic_virtual_trampoline (), i.e. AOT */
+ 		return;
+ 	init_thunk_free_lists (domain);
+ 
+@@ -1785,7 +1786,7 @@ get_generic_virtual_entries (MonoDomain *domain, gpointer *vtable_slot)
+  * Registers a call via unmanaged code to a generic virtual method
+  * instantiation or variant interface method.  If the number of calls reaches a threshold
+  * (THUNK_THRESHOLD), the method is added to the vtable slot's generic
+- * virtual method thunk.
++ * virtual method trampoline.
+  */
+ void
+ mono_method_add_generic_virtual_invocation (MonoDomain *domain, MonoVTable *vtable,
+@@ -1841,7 +1842,7 @@ mono_method_add_generic_virtual_invocation (MonoDomain *domain, MonoVTable *vtab
+ 			int displacement = (gpointer*)vtable_slot - (gpointer*)vtable;
+ 			int imt_slot = MONO_IMT_SIZE + displacement;
+ 
+-			/* Force the rebuild of the thunk at the next call */
++			/* Force the rebuild of the trampoline at the next call */
+ 			imt_trampoline = callbacks.get_imt_trampoline (vtable, imt_slot);
+ 			*vtable_slot = imt_trampoline;
+ 		} else {
+@@ -1851,8 +1852,8 @@ mono_method_add_generic_virtual_invocation (MonoDomain *domain, MonoVTable *vtab
+ 
+ 			sorted = imt_sort_slot_entries (entries);
+ 
+-			*vtable_slot = imt_thunk_builder (NULL, domain, (MonoIMTCheckItem**)sorted->pdata, sorted->len,
+-											  vtable_trampoline);
++			*vtable_slot = imt_trampoline_builder (NULL, domain, (MonoIMTCheckItem**)sorted->pdata, sorted->len,
++												   vtable_trampoline);
+ 
+ 			while (entries) {
+ 				MonoImtBuilderEntry *next = entries->next;
+@@ -1866,10 +1867,10 @@ mono_method_add_generic_virtual_invocation (MonoDomain *domain, MonoVTable *vtab
+ 		}
+ 
+ #ifndef __native_client__
+-		/* We don't re-use any thunks as there is a lot of overhead */
++		/* We don't re-use any trampolines as there is a lot of overhead */
+ 		/* to deleting and re-using code in Native Client.          */
+ 		if (old_thunk != vtable_trampoline && old_thunk != imt_trampoline)
+-			invalidate_generic_virtual_thunk (domain, old_thunk);
++			invalidate_generic_virtual_trampoline (domain, old_thunk);
+ #endif
+ 	}
+ 
+diff --git a/mono/mini/aot-compiler.c b/mono/mini/aot-compiler.c
+index 8af33cd7976..3ad4c53b921 100644
+--- a/mono/mini/aot-compiler.c
++++ b/mono/mini/aot-compiler.c
+@@ -1145,7 +1145,7 @@ arm64_emit_specific_trampoline_pages (MonoAotCompile *acfg)
+ 	/* Trampoline argument */
+ 	arm_ldrx (code, ARMREG_IP1, ARMREG_IP0, 0);
+ 
+-	/* Same as arch_emit_imt_thunk () */
++	/* Same as arch_emit_imt_trampoline () */
+ 	labels [0] = code;
+ 	arm_ldrx (code, ARMREG_IP0, ARMREG_IP1, 0);
+ 	arm_cmpx (code, ARMREG_IP0, MONO_ARCH_RGCTX_REG);
+@@ -1177,7 +1177,7 @@ arm64_emit_specific_trampoline_pages (MonoAotCompile *acfg)
+ 	emit_code_bytes (acfg, buf, code - buf);
+ 
+ 	common_tramp_size = code - buf;
+-	acfg->tramp_page_code_offsets [MONO_AOT_TRAMP_IMT_THUNK] = common_tramp_size;
++	acfg->tramp_page_code_offsets [MONO_AOT_TRAMP_IMT] = common_tramp_size;
+ 
+ 	arm64_emit_tramp_page_specific_code (acfg, pagesize, common_tramp_size, specific_tramp_size);
+ }
+@@ -1215,7 +1215,7 @@ arm64_emit_static_rgctx_trampoline (MonoAotCompile *acfg, int offset, int *tramp
+ }
+ 
+ static void
+-arm64_emit_imt_thunk (MonoAotCompile *acfg, int offset, int *tramp_size)
++arm64_emit_imt_trampoline (MonoAotCompile *acfg, int offset, int *tramp_size)
+ {
+ 	guint8 buf [128];
+ 	guint8 *code, *labels [16];
+@@ -1758,7 +1758,7 @@ arch_emit_specific_trampoline_pages (MonoAotCompile *acfg)
+ 
+ 	acfg->tramp_page_code_offsets [MONO_AOT_TRAMP_SPECIFIC] = 16;
+ 	acfg->tramp_page_code_offsets [MONO_AOT_TRAMP_STATIC_RGCTX] = 16;
+-	acfg->tramp_page_code_offsets [MONO_AOT_TRAMP_IMT_THUNK] = 72;
++	acfg->tramp_page_code_offsets [MONO_AOT_TRAMP_IMT] = 72;
+ 	acfg->tramp_page_code_offsets [MONO_AOT_TRAMP_GSHAREDVT_ARG] = 16;
+ 
+ 	/* Unwind info for specifc trampolines */
+@@ -2133,9 +2133,9 @@ arch_emit_static_rgctx_trampoline (MonoAotCompile *acfg, int offset, int *tramp_
+ }	
+ 
+ /*
+- * arch_emit_imt_thunk:
++ * arch_emit_imt_trampoline:
+  *
+- *   Emit an IMT thunk usable in full-aot mode. The thunk uses 1 got slot which
++ *   Emit an IMT trampoline usable in full-aot mode. The trampoline uses 1 got slot which
+  * points to an array of pointer pairs. The pairs of the form [key, ptr], where
+  * key is the IMT key, and ptr holds the address of a memory location holding
+  * the address to branch to if the IMT arg matches the key. The array is 
+@@ -2144,7 +2144,7 @@ arch_emit_static_rgctx_trampoline (MonoAotCompile *acfg, int offset, int *tramp_
+  * TRAMP_SIZE is set to the size of the emitted trampoline.
+  */
+ static void
+-arch_emit_imt_thunk (MonoAotCompile *acfg, int offset, int *tramp_size)
++arch_emit_imt_trampoline (MonoAotCompile *acfg, int offset, int *tramp_size)
+ {
+ #if defined(TARGET_AMD64)
+ 	guint8 *buf, *code;
+@@ -2333,7 +2333,7 @@ arch_emit_imt_thunk (MonoAotCompile *acfg, int offset, int *tramp_size)
+ 
+ 	*tramp_size = code - buf + 4;
+ #elif defined(TARGET_ARM64)
+-	arm64_emit_imt_thunk (acfg, offset, tramp_size);
++	arm64_emit_imt_trampoline (acfg, offset, tramp_size);
+ #elif defined(TARGET_POWERPC)
+ 	guint8 buf [128];
+ 	guint8 *code, *labels [16];
+@@ -6710,7 +6710,7 @@ emit_trampolines (MonoAotCompile *acfg)
+ 		 * These include the following:
+ 		 * - specific trampolines
+ 		 * - static rgctx invoke trampolines
+-		 * - imt thunks
++		 * - imt trampolines
+ 		 * These trampolines have the same code, they are parameterized by GOT 
+ 		 * slots. 
+ 		 * They are defined in this file, in the arch_... routines instead of
+@@ -6746,8 +6746,8 @@ emit_trampolines (MonoAotCompile *acfg)
+ 			case MONO_AOT_TRAMP_STATIC_RGCTX:
+ 				sprintf (symbol, "static_rgctx_trampolines");
+ 				break;
+-			case MONO_AOT_TRAMP_IMT_THUNK:
+-				sprintf (symbol, "imt_thunks");
++			case MONO_AOT_TRAMP_IMT:
++				sprintf (symbol, "imt_trampolines");
+ 				break;
+ 			case MONO_AOT_TRAMP_GSHAREDVT_ARG:
+ 				sprintf (symbol, "gsharedvt_arg_trampolines");
+@@ -6778,8 +6778,8 @@ emit_trampolines (MonoAotCompile *acfg)
+ 					arch_emit_static_rgctx_trampoline (acfg, tramp_got_offset, &tramp_size);				
+ 					tramp_got_offset += 2;
+ 					break;
+-				case MONO_AOT_TRAMP_IMT_THUNK:
+-					arch_emit_imt_thunk (acfg, tramp_got_offset, &tramp_size);
++				case MONO_AOT_TRAMP_IMT:
++					arch_emit_imt_trampoline (acfg, tramp_got_offset, &tramp_size);
+ 					tramp_got_offset += 1;
+ 					break;
+ 				case MONO_AOT_TRAMP_GSHAREDVT_ARG:
+@@ -9470,7 +9470,7 @@ emit_aot_file_info (MonoAotCompile *acfg, MonoAotFileInfo *info)
+ 	if (acfg->num_trampoline_got_entries) {
+ 		symbols [sindex ++] = "specific_trampolines";
+ 		symbols [sindex ++] = "static_rgctx_trampolines";
+-		symbols [sindex ++] = "imt_thunks";
++		symbols [sindex ++] = "imt_trampolines";
+ 		symbols [sindex ++] = "gsharedvt_arg_trampolines";
+ 	} else {
+ 		symbols [sindex ++] = NULL;
+@@ -10535,7 +10535,7 @@ mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
+ #ifdef MONO_ARCH_GSHARED_SUPPORTED
+ 	acfg->num_trampolines [MONO_AOT_TRAMP_STATIC_RGCTX] = mono_aot_mode_is_full (&acfg->aot_opts) ? acfg->aot_opts.nrgctx_trampolines : 0;
+ #endif
+-	acfg->num_trampolines [MONO_AOT_TRAMP_IMT_THUNK] = mono_aot_mode_is_full (&acfg->aot_opts) ? acfg->aot_opts.nimt_trampolines : 0;
++	acfg->num_trampolines [MONO_AOT_TRAMP_IMT] = mono_aot_mode_is_full (&acfg->aot_opts) ? acfg->aot_opts.nimt_trampolines : 0;
+ #ifdef MONO_ARCH_GSHAREDVT_SUPPORTED
+ 	if (acfg->opts & MONO_OPT_GSHAREDVT)
+ 		acfg->num_trampolines [MONO_AOT_TRAMP_GSHAREDVT_ARG] = mono_aot_mode_is_full (&acfg->aot_opts) ? acfg->aot_opts.ngsharedvt_arg_trampolines : 0;
+diff --git a/mono/mini/aot-runtime.c b/mono/mini/aot-runtime.c
+index e1849862a84..9a4d566c754 100644
+--- a/mono/mini/aot-runtime.c
++++ b/mono/mini/aot-runtime.c
+@@ -2151,7 +2151,7 @@ load_aot_module (MonoAssembly *assembly, gpointer user_data)
+ 	amodule->mono_eh_frame = (guint8 *)info->mono_eh_frame;
+ 	amodule->trampolines [MONO_AOT_TRAMP_SPECIFIC] = (guint8 *)info->specific_trampolines;
+ 	amodule->trampolines [MONO_AOT_TRAMP_STATIC_RGCTX] = (guint8 *)info->static_rgctx_trampolines;
+-	amodule->trampolines [MONO_AOT_TRAMP_IMT_THUNK] = (guint8 *)info->imt_thunks;
++	amodule->trampolines [MONO_AOT_TRAMP_IMT] = (guint8 *)info->imt_trampolines;
+ 	amodule->trampolines [MONO_AOT_TRAMP_GSHAREDVT_ARG] = (guint8 *)info->gsharedvt_arg_trampolines;
+ 
+ 	if (!strcmp (assembly->aname.name, "mscorlib"))
+@@ -5186,7 +5186,7 @@ read_page_trampoline_uwinfo (MonoTrampInfo *info, int tramp_type, gboolean is_ge
+ 		sprintf (symbol_name, "specific_trampolines_page_%s_p", is_generic ? "gen" : "sp");
+ 	else if (tramp_type == MONO_AOT_TRAMP_STATIC_RGCTX)
+ 		sprintf (symbol_name, "rgctx_trampolines_page_%s_p", is_generic ? "gen" : "sp");
+-	else if (tramp_type == MONO_AOT_TRAMP_IMT_THUNK)
++	else if (tramp_type == MONO_AOT_TRAMP_IMT)
+ 		sprintf (symbol_name, "imt_trampolines_page_%s_p", is_generic ? "gen" : "sp");
+ 	else if (tramp_type == MONO_AOT_TRAMP_GSHAREDVT_ARG)
+ 		sprintf (symbol_name, "gsharedvt_trampolines_page_%s_p", is_generic ? "gen" : "sp");
+@@ -5234,7 +5234,7 @@ get_new_trampoline_from_page (int tramp_type)
+ 		tpage = load_function (amodule, "specific_trampolines_page");
+ 	else if (tramp_type == MONO_AOT_TRAMP_STATIC_RGCTX)
+ 		tpage = load_function (amodule, "rgctx_trampolines_page");
+-	else if (tramp_type == MONO_AOT_TRAMP_IMT_THUNK)
++	else if (tramp_type == MONO_AOT_TRAMP_IMT)
+ 		tpage = load_function (amodule, "imt_trampolines_page");
+ 	else if (tramp_type == MONO_AOT_TRAMP_GSHAREDVT_ARG)
+ 		tpage = load_function (amodule, "gsharedvt_arg_trampolines_page");
+@@ -5362,7 +5362,7 @@ get_new_imt_trampoline_from_page (gpointer arg)
+ 	void *code;
+ 	gpointer *data;
+ 
+-	code = get_new_trampoline_from_page (MONO_AOT_TRAMP_IMT_THUNK);
++	code = get_new_trampoline_from_page (MONO_AOT_TRAMP_IMT);
+ 
+ 	data = (gpointer*)((char*)code - MONO_AOT_TRAMP_PAGE_SIZE);
+ 	data [0] = arg;
+@@ -5615,13 +5615,13 @@ mono_aot_get_lazy_fetch_trampoline (guint32 slot)
+ }
+ 
+ static void
+-no_imt_thunk (void)
++no_imt_trampoline (void)
+ {
+-       g_assert_not_reached ();
++	g_assert_not_reached ();
+ }
+ 
+ gpointer
+-mono_aot_get_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count, gpointer fail_tramp)
++mono_aot_get_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count, gpointer fail_tramp)
+ {
+ 	guint32 got_offset;
+ 	gpointer code;
+@@ -5630,7 +5630,7 @@ mono_aot_get_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem
+ 	MonoAotModule *amodule;
+ 
+ 	if (mono_llvm_only)
+-		return no_imt_thunk;
++		return no_imt_trampoline;
+ 
+ 	real_count = 0;
+ 	for (i = 0; i < count; ++i) {
+@@ -5667,7 +5667,7 @@ mono_aot_get_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem
+ 	if (USE_PAGE_TRAMPOLINES) {
+ 		code = get_new_imt_trampoline_from_page (buf);
+ 	} else {
+-		code = get_numerous_trampoline (MONO_AOT_TRAMP_IMT_THUNK, 1, &amodule, &got_offset, NULL);
++		code = get_numerous_trampoline (MONO_AOT_TRAMP_IMT, 1, &amodule, &got_offset, NULL);
+ 
+ 		amodule->got [got_offset] = buf;
+ 	}
+@@ -5948,7 +5948,7 @@ mono_aot_get_lazy_fetch_trampoline (guint32 slot)
+ }
+ 
+ gpointer
+-mono_aot_get_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count, gpointer fail_tramp)
++mono_aot_get_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count, gpointer fail_tramp)
+ {
+ 	g_assert_not_reached ();
+ 	return NULL;
+diff --git a/mono/mini/jit-icalls.c b/mono/mini/jit-icalls.c
+index f8a328375b9..bb9c73c0400 100644
+--- a/mono/mini/jit-icalls.c
++++ b/mono/mini/jit-icalls.c
+@@ -1715,7 +1715,7 @@ mono_resolve_generic_virtual_call (MonoVTable *vt, int slot, MonoMethod *generic
+ 
+ 	/*
+ 	 * This wastes memory but the memory usage is bounded since
+-	 * mono_method_add_generic_virtual_invocation () eventually builds an imt thunk for
++	 * mono_method_add_generic_virtual_invocation () eventually builds an imt trampoline for
+ 	 * this vtable slot so we are not called any more for this instantiation.
+ 	 */
+ 	MonoFtnDesc *ftndesc = mini_create_llvmonly_ftndesc (mono_domain_get (), addr, arg);
+@@ -1765,7 +1765,7 @@ mono_resolve_generic_virtual_iface_call (MonoVTable *vt, int imt_slot, MonoMetho
+ 
+ 	/*
+ 	 * This wastes memory but the memory usage is bounded since
+-	 * mono_method_add_generic_virtual_invocation () eventually builds an imt thunk for
++	 * mono_method_add_generic_virtual_invocation () eventually builds an imt trampoline for
+ 	 * this vtable slot so we are not called any more for this instantiation.
+ 	 */
+ 	MonoFtnDesc *ftndesc = mini_create_llvmonly_ftndesc (mono_domain_get (), addr, arg);
+diff --git a/mono/mini/method-to-ir.c b/mono/mini/method-to-ir.c
+index 6769d9c5f85..72d0d5e9655 100644
+--- a/mono/mini/method-to-ir.c
++++ b/mono/mini/method-to-ir.c
+@@ -154,8 +154,7 @@ emit_llvmonly_virtual_call (MonoCompile *cfg, MonoMethod *cmethod, MonoMethodSig
+ /* helper methods signatures */
+ static MonoMethodSignature *helper_sig_domain_get;
+ static MonoMethodSignature *helper_sig_rgctx_lazy_fetch_trampoline;
+-static MonoMethodSignature *helper_sig_llvmonly_imt_thunk;
+-
++static MonoMethodSignature *helper_sig_llvmonly_imt_trampoline;
+ 
+ /* type loading helpers */
+ static GENERATE_GET_CLASS_WITH_CACHE (runtime_helpers, System.Runtime.CompilerServices, RuntimeHelpers)
+@@ -364,7 +363,7 @@ mono_create_helper_signatures (void)
+ {
+ 	helper_sig_domain_get = mono_create_icall_signature ("ptr");
+ 	helper_sig_rgctx_lazy_fetch_trampoline = mono_create_icall_signature ("ptr ptr");
+-	helper_sig_llvmonly_imt_thunk = mono_create_icall_signature ("ptr ptr ptr");
++	helper_sig_llvmonly_imt_trampoline = mono_create_icall_signature ("ptr ptr ptr");
+ }
+ 
+ static MONO_NEVER_INLINE void
+@@ -7809,7 +7808,7 @@ emit_llvmonly_virtual_call (MonoCompile *cfg, MonoMethod *cmethod, MonoMethodSig
+ 		icall_args [0] = thunk_arg_ins;
+ 		icall_args [1] = emit_get_rgctx_method (cfg, context_used,
+ 												cmethod, MONO_RGCTX_INFO_METHOD);
+-		ftndesc_ins = mono_emit_calli (cfg, helper_sig_llvmonly_imt_thunk, icall_args, thunk_addr_ins, NULL, NULL);
++		ftndesc_ins = mono_emit_calli (cfg, helper_sig_llvmonly_imt_trampoline, icall_args, thunk_addr_ins, NULL, NULL);
+ 
+ 		return emit_llvmonly_calli (cfg, fsig, sp, ftndesc_ins);
+ 	}
+@@ -7852,7 +7851,7 @@ emit_llvmonly_virtual_call (MonoCompile *cfg, MonoMethod *cmethod, MonoMethodSig
+ 		icall_args [0] = thunk_arg_ins;
+ 		icall_args [1] = emit_get_rgctx_method (cfg, context_used,
+ 												cmethod, MONO_RGCTX_INFO_METHOD);
+-		ftndesc_ins = mono_emit_calli (cfg, helper_sig_llvmonly_imt_thunk, icall_args, thunk_addr_ins, NULL, NULL);
++		ftndesc_ins = mono_emit_calli (cfg, helper_sig_llvmonly_imt_trampoline, icall_args, thunk_addr_ins, NULL, NULL);
+ 		ftndesc_ins->dreg = ftndesc_reg;
+ 		/*
+ 		 * Unlike normal iface calls, these imt thunks can return NULL, i.e. when they are passed an instantiation
+@@ -9629,7 +9628,7 @@ mono_method_to_ir (MonoCompile *cfg, MonoMethod *method, MonoBasicBlock *start_b
+ 				if (cfg->gsharedvt && mini_is_gsharedvt_signature (fsig))
+ 					GSHAREDVT_FAILURE (*ip);
+ 
+-				if (cfg->backend->have_generalized_imt_thunk && cfg->backend->gshared_supported && cmethod->wrapper_type == MONO_WRAPPER_NONE) {
++				if (cfg->backend->have_generalized_imt_trampoline && cfg->backend->gshared_supported && cmethod->wrapper_type == MONO_WRAPPER_NONE) {
+ 					g_assert (!imt_arg);
+ 					if (!context_used)
+ 						g_assert (cmethod->is_inflated);
+diff --git a/mono/mini/mini-amd64.c b/mono/mini/mini-amd64.c
+index f9a0d5adc8b..4723e49b117 100644
+--- a/mono/mini/mini-amd64.c
++++ b/mono/mini/mini-amd64.c
+@@ -7989,7 +7989,7 @@ imt_branch_distance (MonoIMTCheckItem **imt_entries, int start, int target)
+  * LOCKING: called with the domain lock held
+  */
+ gpointer
+-mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
++mono_arch_build_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
+ 	gpointer fail_tramp)
+ {
+ 	int i;
+@@ -8043,7 +8043,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 		size += item->chunk_size;
+ 	}
+ 	if (fail_tramp)
+-		code = (guint8 *)mono_method_alloc_generic_virtual_thunk (domain, size);
++		code = (guint8 *)mono_method_alloc_generic_virtual_trampoline (domain, size);
+ 	else
+ 		code = (guint8 *)mono_domain_code_reserve (domain, size);
+ 	start = code;
+@@ -8134,7 +8134,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 	}
+ 
+ 	if (!fail_tramp)
+-		mono_stats.imt_thunks_size += code - start;
++		mono_stats.imt_trampolines_size += code - start;
+ 	g_assert (code - start <= size);
+ 
+ 	mono_profiler_code_buffer_new (start, code - start, MONO_PROFILER_CODE_BUFFER_IMT_TRAMPOLINE, NULL);
+diff --git a/mono/mini/mini-amd64.h b/mono/mini/mini-amd64.h
+index 22e7413a6f5..8ac16a17176 100644
+--- a/mono/mini/mini-amd64.h
++++ b/mono/mini/mini-amd64.h
+@@ -386,7 +386,7 @@ typedef struct {
+ #define MONO_ARCH_EXC_REG AMD64_RAX
+ #define MONO_ARCH_HAVE_CMOV_OPS 1
+ #define MONO_ARCH_HAVE_EXCEPTIONS_INIT 1
+-#define MONO_ARCH_HAVE_GENERALIZED_IMT_THUNK 1
++#define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
+ #define MONO_ARCH_HAVE_LIVERANGE_OPS 1
+ #define MONO_ARCH_HAVE_SIGCTX_TO_MONOCTX 1
+ #define MONO_ARCH_HAVE_GET_TRAMPOLINES 1
+diff --git a/mono/mini/mini-arm.c b/mono/mini/mini-arm.c
+index 2b32ed7ad36..82795e5b8e8 100644
+--- a/mono/mini/mini-arm.c
++++ b/mono/mini/mini-arm.c
+@@ -6922,7 +6922,7 @@ mini_dump_bad_imt (int input_imt, int compared_imt, int pc)
+ #endif
+ 
+ gpointer
+-mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
++mono_arch_build_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
+ 	gpointer fail_tramp)
+ {
+ 	int size, i;
+@@ -6974,7 +6974,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 		size += 4 * count; /* The ARM_ADD_REG_IMM to pop the stack */
+ 
+ 	if (fail_tramp)
+-		code = mono_method_alloc_generic_virtual_thunk (domain, size);
++		code = mono_method_alloc_generic_virtual_trampoline (domain, size);
+ 	else
+ 		code = mono_domain_code_reserve (domain, size);
+ 	start = code;
+@@ -6982,7 +6982,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 	unwind_ops = mono_arch_get_cie_program ();
+ 
+ #ifdef DEBUG_IMT
+-	g_print ("Building IMT thunk for class %s %s entries %d code size %d code at %p end %p vtable %p fail_tramp %p\n", vtable->klass->name_space, vtable->klass->name, count, size, start, ((guint8*)start) + size, vtable, fail_tramp);
++	g_print ("Building IMT trampoline for class %s %s entries %d code size %d code at %p end %p vtable %p fail_tramp %p\n", vtable->klass->name_space, vtable->klass->name, count, size, start, ((guint8*)start) + size, vtable, fail_tramp);
+ 	for (i = 0; i < count; ++i) {
+ 		MonoIMTCheckItem *item = imt_entries [i];
+ 		g_print ("method %d (%p) %s vtable slot %p is_equals %d chunk size %d\n", i, item->key, ((MonoMethod*)item->key)->name, &vtable->vtable [item->value.vtable_slot], item->is_equals, item->chunk_size);
+@@ -7148,7 +7148,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 
+ 	mono_arch_flush_icache ((guint8*)start, size);
+ 	mono_profiler_code_buffer_new (start, code - start, MONO_PROFILER_CODE_BUFFER_IMT_TRAMPOLINE, NULL);
+-	mono_stats.imt_thunks_size += code - start;
++	mono_stats.imt_trampolines_size += code - start;
+ 
+ 	g_assert (DISTANCE (start, code) <= size);
+ 
+diff --git a/mono/mini/mini-arm.h b/mono/mini/mini-arm.h
+index bc23a423d29..cb31a6e8b24 100644
+--- a/mono/mini/mini-arm.h
++++ b/mono/mini/mini-arm.h
+@@ -316,7 +316,7 @@ typedef struct MonoCompileArch {
+ 
+ #define MONO_ARCH_NEED_DIV_CHECK 1
+ 
+-#define MONO_ARCH_HAVE_GENERALIZED_IMT_THUNK 1
++#define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
+ 
+ #define MONO_ARCH_HAVE_FULL_AOT_TRAMPOLINES 1
+ #define MONO_ARCH_HAVE_DECOMPOSE_LONG_OPTS 1
+diff --git a/mono/mini/mini-arm64.c b/mono/mini/mini-arm64.c
+index 995aea83d98..bc1b5021a01 100644
+--- a/mono/mini/mini-arm64.c
++++ b/mono/mini/mini-arm64.c
+@@ -4978,14 +4978,14 @@ mono_arch_get_patch_offset (guint8 *code)
+ }
+ 
+ gpointer
+-mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
+-						   gpointer fail_tramp)
++mono_arch_build_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
++								gpointer fail_tramp)
+ {
+ 	int i, buf_len, imt_reg;
+ 	guint8 *buf, *code;
+ 
+ #if DEBUG_IMT
+-	printf ("building IMT thunk for class %s %s entries %d code size %d code at %p end %p vtable %p\n", vtable->klass->name_space, vtable->klass->name, count, size, start, ((guint8*)start) + size, vtable);
++	printf ("building IMT trampoline for class %s %s entries %d code size %d code at %p end %p vtable %p\n", vtable->klass->name_space, vtable->klass->name, count, size, start, ((guint8*)start) + size, vtable);
+ 	for (i = 0; i < count; ++i) {
+ 		MonoIMTCheckItem *item = imt_entries [i];
+ 		printf ("method %d (%p) %s vtable slot %p is_equals %d chunk size %d\n", i, item->key, item->key->name, &vtable->vtable [item->value.vtable_slot], item->is_equals, item->chunk_size);
+@@ -5020,7 +5020,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 	}
+ 
+ 	if (fail_tramp)
+-		buf = mono_method_alloc_generic_virtual_thunk (domain, buf_len);
++		buf = mono_method_alloc_generic_virtual_trampoline (domain, buf_len);
+ 	else
+ 		buf = mono_domain_code_reserve (domain, buf_len);
+ 	code = buf;
+@@ -5108,8 +5108,8 @@ mono_arch_get_trampolines (gboolean aot)
+ #else /* DISABLE_JIT */
+ 
+ gpointer
+-mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
+-						   gpointer fail_tramp)
++mono_arch_build_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
++								gpointer fail_tramp)
+ {
+ 	g_assert_not_reached ();
+ 	return NULL;
+diff --git a/mono/mini/mini-arm64.h b/mono/mini/mini-arm64.h
+index e3e90eb6ea5..8af5ca7f7d7 100644
+--- a/mono/mini/mini-arm64.h
++++ b/mono/mini/mini-arm64.h
+@@ -130,7 +130,7 @@ typedef struct {
+ #define MONO_ARCH_EXC_REG ARMREG_R0
+ #define MONO_ARCH_HAVE_XP_UNWIND 1
+ #define MONO_ARCH_HAVE_CREATE_DELEGATE_TRAMPOLINE 1
+-#define MONO_ARCH_HAVE_GENERALIZED_IMT_THUNK 1
++#define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
+ #define MONO_ARCH_USE_SIGACTION 1
+ #define MONO_ARCH_HAVE_SIGCTX_TO_MONOCTX 1
+ #define MONO_ARCH_HAVE_CONTEXT_SET_INT_REG 1
+diff --git a/mono/mini/mini-ia64.c b/mono/mini/mini-ia64.c
+index 357e2607998..4cd9b377e3e 100644
+--- a/mono/mini/mini-ia64.c
++++ b/mono/mini/mini-ia64.c
+@@ -4532,8 +4532,8 @@ mono_arch_free_jit_tls_data (MonoJitTlsData *tls)
+  * LOCKING: called with the domain lock held
+  */
+ gpointer
+-mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
+-	gpointer fail_tramp)
++mono_arch_build_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
++								gpointer fail_tramp)
+ {
+ 	int i;
+ 	int size = 0;
+@@ -4613,7 +4613,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 
+ 	size = code.buf - buf;
+ 	if (fail_tramp) {
+-		start = mono_method_alloc_generic_virtual_thunk (domain, size + 16);
++		start = mono_method_alloc_generic_virtual_trampoline (domain, size + 16);
+ 		start = (gpointer)ALIGN_TO (start, 16);
+ 	} else {
+ 		start = mono_domain_code_reserve (domain, size);
+diff --git a/mono/mini/mini-ia64.h b/mono/mini/mini-ia64.h
+index bcb30ead561..bfee9d5c548 100644
+--- a/mono/mini/mini-ia64.h
++++ b/mono/mini/mini-ia64.h
+@@ -109,6 +109,6 @@ unw_dyn_region_info_t* mono_ia64_create_unwind_region (Ia64CodegenState *code);
+ 
+ #define MONO_ARCH_HAVE_INVALIDATE_METHOD 1
+ #define MONO_ARCH_HAVE_SAVE_UNWIND_INFO 1
+-#define MONO_ARCH_HAVE_GENERALIZED_IMT_THUNK 1
++#define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
+ 
+ #endif /* __MONO_MINI_IA64_H__ */  
+diff --git a/mono/mini/mini-llvm.c b/mono/mini/mini-llvm.c
+index ca0d573b041..2ae3051b520 100644
+--- a/mono/mini/mini-llvm.c
++++ b/mono/mini/mini-llvm.c
+@@ -8611,7 +8611,7 @@ emit_aot_file_info (MonoLLVMModule *module)
+ 	if (info->trampoline_size [0]) {
+ 		fields [tindex ++] = AddJitGlobal (module, eltype, "specific_trampolines");
+ 		fields [tindex ++] = AddJitGlobal (module, eltype, "static_rgctx_trampolines");
+-		fields [tindex ++] = AddJitGlobal (module, eltype, "imt_thunks");
++		fields [tindex ++] = AddJitGlobal (module, eltype, "imt_trampolines");
+ 		fields [tindex ++] = AddJitGlobal (module, eltype, "gsharedvt_arg_trampolines");
+ 	} else {
+ 		fields [tindex ++] = LLVMConstNull (eltype);
+diff --git a/mono/mini/mini-mips.c b/mono/mini/mini-mips.c
+index 3bce59c9cb7..8af84338759 100644
+--- a/mono/mini/mini-mips.c
++++ b/mono/mini/mini-mips.c
+@@ -5889,8 +5889,8 @@ mono_arch_context_get_int_reg (MonoContext *ctx, int reg)
+  * LOCKING: called with the domain lock held
+  */
+ gpointer
+-mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
+-	gpointer fail_tramp)
++mono_arch_build_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
++								gpointer fail_tramp)
+ {
+ 	int i;
+ 	int size = 0;
+@@ -5928,7 +5928,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 	/* the initial load of the vtable address */
+ 	size += MIPS_LOAD_SEQUENCE_LENGTH;
+ 	if (fail_tramp) {
+-		code = mono_method_alloc_generic_virtual_thunk (domain, size);
++		code = mono_method_alloc_generic_virtual_trampoline (domain, size);
+ 	} else {
+ 		code = mono_domain_code_reserve (domain, size);
+ 	}
+@@ -6016,7 +6016,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 	}
+ 
+ 	if (!fail_tramp)
+-		mono_stats.imt_thunks_size += code - start;
++		mono_stats.imt_trampolines_size += code - start;
+ 	g_assert (code - start <= size);
+ 	mono_arch_flush_icache (start, size);
+ 
+diff --git a/mono/mini/mini-mips.h b/mono/mini/mini-mips.h
+index 73d0ad32720..06c533aee46 100644
+--- a/mono/mini/mini-mips.h
++++ b/mono/mini/mini-mips.h
+@@ -264,7 +264,7 @@ typedef struct MonoCompileArch {
+ #define MONO_ARCH_HAVE_DECOMPOSE_OPTS 1
+ #define MONO_ARCH_HAVE_DECOMPOSE_LONG_OPTS 1
+ 
+-#define MONO_ARCH_HAVE_GENERALIZED_IMT_THUNK 1
++#define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
+ #define MONO_ARCH_SOFT_DEBUG_SUPPORTED 1
+ #define MONO_ARCH_HAVE_SIGCTX_TO_MONOCTX 1
+ #define MONO_ARCH_HAVE_SETUP_RESUME_FROM_SIGNAL_HANDLER_CTX 1
+diff --git a/mono/mini/mini-ppc.c b/mono/mini/mini-ppc.c
+index 1da461c0284..656ba1ed916 100644
+--- a/mono/mini/mini-ppc.c
++++ b/mono/mini/mini-ppc.c
+@@ -5824,8 +5824,8 @@ mono_arch_free_jit_tls_data (MonoJitTlsData *tls)
+  * LOCKING: called with the domain lock held
+  */
+ gpointer
+-mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
+-	gpointer fail_tramp)
++mono_arch_build_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
++								gpointer fail_tramp)
+ {
+ 	int i;
+ 	int size = 0;
+@@ -5862,7 +5862,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 	/* the initial load of the vtable address */
+ 	size += PPC_LOAD_SEQUENCE_LENGTH + LOADSTORE_SIZE;
+ 	if (fail_tramp) {
+-		code = mono_method_alloc_generic_virtual_thunk (domain, size);
++		code = mono_method_alloc_generic_virtual_trampoline (domain, size);
+ 	} else {
+ 		code = mono_domain_code_reserve (domain, size);
+ 	}
+@@ -5955,7 +5955,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 	}
+ 
+ 	if (!fail_tramp)
+-		mono_stats.imt_thunks_size += code - start;
++		mono_stats.imt_trampolines_size += code - start;
+ 	g_assert (code - start <= size);
+ 	mono_arch_flush_icache (start, size);
+ 
+diff --git a/mono/mini/mini-ppc.h b/mono/mini/mini-ppc.h
+index b0d4654de83..2ea49cc4568 100644
+--- a/mono/mini/mini-ppc.h
++++ b/mono/mini/mini-ppc.h
+@@ -221,7 +221,7 @@ typedef struct MonoCompileArch {
+ #define MONO_ARCH_HAVE_DECOMPOSE_OPTS 1
+ #define MONO_ARCH_HAVE_DECOMPOSE_LONG_OPTS 1
+ 
+-#define MONO_ARCH_HAVE_GENERALIZED_IMT_THUNK 1
++#define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
+ 
+ #define MONO_ARCH_HAVE_FULL_AOT_TRAMPOLINES 1
+ 
+diff --git a/mono/mini/mini-runtime.c b/mono/mini/mini-runtime.c
+index 60a6a980302..a9c87011153 100644
+--- a/mono/mini/mini-runtime.c
++++ b/mono/mini/mini-runtime.c
+@@ -2562,34 +2562,34 @@ mono_jit_runtime_invoke (MonoMethod *method, void *obj, void **params, MonoObjec
+ typedef struct {
+ 	MonoVTable *vtable;
+ 	int slot;
+-} IMTThunkInfo;
++} IMTTrampInfo;
+ 
+-typedef gpointer (*IMTThunkFunc) (gpointer *arg, MonoMethod *imt_method);
++typedef gpointer (*IMTTrampFunc) (gpointer *arg, MonoMethod *imt_method);
+ 
+ /*
+- * mini_llvmonly_initial_imt_thunk:
++ * mini_llvmonly_initial_imt_tramp:
+  *
+- *  This function is called the first time a call is made through an IMT thunk.
+- * It should have the same signature as the mono_llvmonly_imt_thunk_... functions.
++ *  This function is called the first time a call is made through an IMT trampoline.
++ * It should have the same signature as the mono_llvmonly_imt_tramp_... functions.
+  */
+ static gpointer
+-mini_llvmonly_initial_imt_thunk (gpointer *arg, MonoMethod *imt_method)
++mini_llvmonly_initial_imt_tramp (gpointer *arg, MonoMethod *imt_method)
+ {
+-	IMTThunkInfo *info = (IMTThunkInfo*)arg;
++	IMTTrampInfo *info = (IMTTrampInfo*)arg;
+ 	gpointer *imt;
+ 	gpointer *ftndesc;
+-	IMTThunkFunc func;
++	IMTTrampFunc func;
+ 
+ 	mono_vtable_build_imt_slot (info->vtable, info->slot);
+ 
+ 	imt = (gpointer*)info->vtable;
+ 	imt -= MONO_IMT_SIZE;
+ 
+-	/* Return what the real IMT thunk returns */
++	/* Return what the real IMT trampoline returns */
+ 	ftndesc = imt [info->slot];
+ 	func = ftndesc [0];
+ 
+-	if (func == (IMTThunkFunc)mini_llvmonly_initial_imt_thunk)
++	if (func == (IMTTrampFunc)mini_llvmonly_initial_imt_tramp)
+ 		/* Happens when the imt slot contains only a generic virtual method */
+ 		return NULL;
+ 	return func ((gpointer *)ftndesc [1], imt_method);
+@@ -2597,11 +2597,11 @@ mini_llvmonly_initial_imt_thunk (gpointer *arg, MonoMethod *imt_method)
+ 
+ /* This is called indirectly through an imt slot. */
+ static gpointer
+-mono_llvmonly_imt_thunk (gpointer *arg, MonoMethod *imt_method)
++mono_llvmonly_imt_tramp (gpointer *arg, MonoMethod *imt_method)
+ {
+ 	int i = 0;
+ 
+-	/* arg points to an array created in mono_llvmonly_get_imt_thunk () */
++	/* arg points to an array created in mono_llvmonly_get_imt_trampoline () */
+ 	while (arg [i] && arg [i] != imt_method)
+ 		i += 2;
+ 	g_assert (arg [i]);
+@@ -2609,16 +2609,16 @@ mono_llvmonly_imt_thunk (gpointer *arg, MonoMethod *imt_method)
+ 	return arg [i + 1];
+ }
+ 
+-/* Optimized versions of mono_llvmonly_imt_thunk () for different table sizes */
++/* Optimized versions of mono_llvmonly_imt_trampoline () for different table sizes */
+ static gpointer
+-mono_llvmonly_imt_thunk_1 (gpointer *arg, MonoMethod *imt_method)
++mono_llvmonly_imt_tramp_1 (gpointer *arg, MonoMethod *imt_method)
+ {
+ 	//g_assert (arg [0] == imt_method);
+ 	return arg [1];
+ }
+ 
+ static gpointer
+-mono_llvmonly_imt_thunk_2 (gpointer *arg, MonoMethod *imt_method)
++mono_llvmonly_imt_tramp_2 (gpointer *arg, MonoMethod *imt_method)
+ {
+ 	//g_assert (arg [0] == imt_method || arg [2] == imt_method);
+ 	if (arg [0] == imt_method)
+@@ -2628,7 +2628,7 @@ mono_llvmonly_imt_thunk_2 (gpointer *arg, MonoMethod *imt_method)
+ }
+ 
+ static gpointer
+-mono_llvmonly_imt_thunk_3 (gpointer *arg, MonoMethod *imt_method)
++mono_llvmonly_imt_tramp_3 (gpointer *arg, MonoMethod *imt_method)
+ {
+ 	//g_assert (arg [0] == imt_method || arg [2] == imt_method || arg [4] == imt_method);
+ 	if (arg [0] == imt_method)
+@@ -2640,14 +2640,14 @@ mono_llvmonly_imt_thunk_3 (gpointer *arg, MonoMethod *imt_method)
+ }
+ 
+ /*
+- * A version of the imt thunk used for generic virtual/variant iface methods.
+- * Unlikely a normal imt thunk, its possible that IMT_METHOD is not found
++ * A version of the imt trampoline used for generic virtual/variant iface methods.
++ * Unlikely a normal imt trampoline, its possible that IMT_METHOD is not found
+  * in the search table. The original JIT code had a 'fallback' trampoline it could
+  * call, but we can't do that, so we just return NULL, and the compiled code
+  * will handle it.
+  */
+ static gpointer
+-mono_llvmonly_fallback_imt_thunk (gpointer *arg, MonoMethod *imt_method)
++mono_llvmonly_fallback_imt_tramp (gpointer *arg, MonoMethod *imt_method)
+ {
+ 	int i = 0;
+ 
+@@ -2660,7 +2660,7 @@ mono_llvmonly_fallback_imt_thunk (gpointer *arg, MonoMethod *imt_method)
+ }
+ 
+ static gpointer
+-mono_llvmonly_get_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count, gpointer fail_tramp)
++mono_llvmonly_get_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count, gpointer fail_tramp)
+ {
+ 	gpointer *buf;
+ 	gpointer *res;
+@@ -2668,7 +2668,7 @@ mono_llvmonly_get_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTChec
+ 	gboolean virtual_generic = FALSE;
+ 
+ 	/*
+-	 * Create an array which is passed to the imt thunk functions.
++	 * Create an array which is passed to the imt trampoline functions.
+ 	 * The array contains MonoMethod-function descriptor pairs, terminated by a NULL entry.
+ 	 */
+ 
+@@ -2723,20 +2723,20 @@ mono_llvmonly_get_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTChec
+ 	res = (void **)mono_domain_alloc (domain, 2 * sizeof (gpointer));
+ 	switch (real_count) {
+ 	case 1:
+-		res [0] = mono_llvmonly_imt_thunk_1;
++		res [0] = mono_llvmonly_imt_tramp_1;
+ 		break;
+ 	case 2:
+-		res [0] = mono_llvmonly_imt_thunk_2;
++		res [0] = mono_llvmonly_imt_tramp_2;
+ 		break;
+ 	case 3:
+-		res [0] = mono_llvmonly_imt_thunk_3;
++		res [0] = mono_llvmonly_imt_tramp_3;
+ 		break;
+ 	default:
+-		res [0] = mono_llvmonly_imt_thunk;
++		res [0] = mono_llvmonly_imt_tramp;
+ 		break;
+ 	}
+ 	if (virtual_generic || fail_tramp)
+-		res [0] = mono_llvmonly_fallback_imt_thunk;
++		res [0] = mono_llvmonly_fallback_imt_tramp;
+ 	res [1] = buf;
+ 
+ 	return res;
+@@ -2958,13 +2958,13 @@ mini_get_vtable_trampoline (MonoVTable *vt, int slot_index)
+ 
+ 	if (mono_llvm_only) {
+ 		if (slot_index < 0) {
+-			/* Initialize the IMT thunks to a 'trampoline' so the generated code doesn't have to initialize it */
++			/* Initialize the IMT trampoline to a 'trampoline' so the generated code doesn't have to initialize it */
+ 			// FIXME: Memory management
+ 			gpointer *ftndesc = g_malloc (2 * sizeof (gpointer));
+-			IMTThunkInfo *info = g_new0 (IMTThunkInfo, 1);
++			IMTTrampInfo *info = g_new0 (IMTTrampInfo, 1);
+ 			info->vtable = vt;
+ 			info->slot = index;
+-			ftndesc [0] = mini_llvmonly_initial_imt_thunk;
++			ftndesc [0] = mini_llvmonly_initial_imt_tramp;
+ 			ftndesc [1] = info;
+ 			mono_memory_barrier ();
+ 			return ftndesc;
+@@ -3663,12 +3663,12 @@ mini_init (const char *filename, const char *runtime_version)
+ 	}
+ 
+ 	if (mono_llvm_only) {
+-		mono_install_imt_thunk_builder (mono_llvmonly_get_imt_thunk);
+-		mono_set_always_build_imt_thunks (TRUE);
++		mono_install_imt_trampoline_builder (mono_llvmonly_get_imt_trampoline);
++		mono_set_always_build_imt_trampolines (TRUE);
+ 	} else if (mono_aot_only) {
+-		mono_install_imt_thunk_builder (mono_aot_get_imt_thunk);
++		mono_install_imt_trampoline_builder (mono_aot_get_imt_trampoline);
+ 	} else {
+-		mono_install_imt_thunk_builder (mono_arch_build_imt_thunk);
++		mono_install_imt_trampoline_builder (mono_arch_build_imt_trampoline);
+ 	}
+ 
+ 	/*Init arch tls information only after the metadata side is inited to make sure we see dynamic appdomain tls keys*/
+@@ -4034,7 +4034,7 @@ print_jit_stats (void)
+ 		g_print ("IMT colliding slots:    %ld\n", mono_stats.imt_slots_with_collisions);
+ 		g_print ("IMT max collisions:     %ld\n", mono_stats.imt_max_collisions_in_slot);
+ 		g_print ("IMT methods at max col: %ld\n", mono_stats.imt_method_count_when_max_collisions);
+-		g_print ("IMT thunks size:        %ld\n", mono_stats.imt_thunks_size);
++		g_print ("IMT trampolines size:   %ld\n", mono_stats.imt_trampolines_size);
+ 
+ 		g_print ("JIT info table inserts: %ld\n", mono_stats.jit_info_table_insert_count);
+ 		g_print ("JIT info table removes: %ld\n", mono_stats.jit_info_table_remove_count);
+diff --git a/mono/mini/mini-s390x.c b/mono/mini/mini-s390x.c
+index d3360a0d36b..420a7b1a3bf 100644
+--- a/mono/mini/mini-s390x.c
++++ b/mono/mini/mini-s390x.c
+@@ -237,7 +237,7 @@ if (ins->inst_target_bb->native_offset) { 					\
+ #define MAX(a, b) ((a) > (b) ? (a) : (b))
+ 
+ /*
+- * imt thunking size values
++ * imt trampoline size values
+  */
+ #define CMP_SIZE 	24
+ #define LOADCON_SIZE	20
+@@ -6662,16 +6662,16 @@ mono_arch_get_delegate_virtual_invoke_impl (MonoMethodSignature *sig, MonoMethod
+ 
+ /*------------------------------------------------------------------*/
+ /*                                                                  */
+-/* Name		- mono_arch_build_imt_thunk.                        */
++/* Name		- mono_arch_build_imt_trampoline.                       */
+ /*                                                                  */
+ /* Function	- 						    */
+ /*		                               			    */
+ /*------------------------------------------------------------------*/
+ 
+ gpointer
+-mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, 
+-			   MonoIMTCheckItem **imt_entries, int count,
+-			   gpointer fail_tramp)
++mono_arch_build_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, 
++								MonoIMTCheckItem **imt_entries, int count,
++								gpointer fail_tramp)
+ {
+ 	int i;
+ 	int size = 0;
+@@ -6710,7 +6710,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain,
+ 	}
+ 
+ 	if (fail_tramp)
+-		code = mono_method_alloc_generic_virtual_thunk (domain, size);
++		code = mono_method_alloc_generic_virtual_trampoline (domain, size);
+ 	else
+ 		code = mono_domain_code_reserve (domain, size);
+ 
+@@ -6793,11 +6793,11 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain,
+ 	mono_profiler_code_buffer_new (start, code - start, MONO_PROFILER_CODE_BUFFER_IMT_TRAMPOLINE, NULL);
+ 
+ 	if (!fail_tramp) 
+-		mono_stats.imt_thunks_size += (code - start);
++		mono_stats.imt_trampolines_size += (code - start);
+ 
+ 	g_assert (code - start <= size);
+ 
+-	snprintf(trampName, sizeof(trampName), "%d_imt_thunk_trampoline", domain->domain_id);
++	snprintf(trampName, sizeof(trampName), "%d_imt_trampoline", domain->domain_id);
+ 	mono_tramp_info_register (mono_tramp_info_create (trampName, start, code - start, NULL, NULL), domain);
+ 
+ 	return (start);
+diff --git a/mono/mini/mini-sparc.c b/mono/mini/mini-sparc.c
+index 5003bfe0254..e43410353d1 100644
+--- a/mono/mini/mini-sparc.c
++++ b/mono/mini/mini-sparc.c
+@@ -2256,8 +2256,8 @@ mono_sparc_is_virtual_call (guint32 *code)
+  * LOCKING: called with the domain lock held
+  */
+ gpointer
+-mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
+-	gpointer fail_tramp)
++mono_arch_build_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
++								gpointer fail_tramp)
+ {
+ 	int i;
+ 	int size = 0;
+@@ -2285,7 +2285,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 		size += item->chunk_size;
+ 	}
+ 	if (fail_tramp)
+-		code = mono_method_alloc_generic_virtual_thunk (domain, size * 4);
++		code = mono_method_alloc_generic_virtual_trampoline (domain, size * 4);
+ 	else
+ 		code = mono_domain_code_reserve (domain, size * 4);
+ 	start = code;
+@@ -2352,7 +2352,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 
+ 	mono_arch_flush_icache ((guint8*)start, (code - start) * 4);
+ 
+-	mono_stats.imt_thunks_size += (code - start) * 4;
++	mono_stats.imt_trampolines_size += (code - start) * 4;
+ 	g_assert (code - start <= size);
+ 
+ 	mono_tramp_info_register (mono_tramp_info_create (NULL, start, code - start, NULL, NULL), domain);
+diff --git a/mono/mini/mini-trampolines.c b/mono/mini/mini-trampolines.c
+index 8c1fe23297b..77775169fd7 100644
+--- a/mono/mini/mini-trampolines.c
++++ b/mono/mini/mini-trampolines.c
+@@ -564,7 +564,7 @@ common_call_trampoline (mgreg_t *regs, guint8 *code, MonoMethod *m, MonoVTable *
+ 			vtable_slot = mini_resolve_imt_method (vt, vtable_slot, imt_method, &impl_method, &addr, &need_rgctx_tramp, &variant_iface, error);
+ 			return_val_if_nok (error, NULL);
+ 
+-			/* This is the vcall slot which gets called through the IMT thunk */
++			/* This is the vcall slot which gets called through the IMT trampoline */
+ 			vtable_slot_to_patch = vtable_slot;
+ 
+ 			if (addr) {
+diff --git a/mono/mini/mini-x86.c b/mono/mini/mini-x86.c
+index 288af652434..bcd050b24f6 100644
+--- a/mono/mini/mini-x86.c
++++ b/mono/mini/mini-x86.c
+@@ -5613,7 +5613,7 @@ imt_branch_distance (MonoIMTCheckItem **imt_entries, int start, int target)
+  * LOCKING: called with the domain lock held
+  */
+ gpointer
+-mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
++mono_arch_build_imt_trampoline (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count,
+ 	gpointer fail_tramp)
+ {
+ 	int i;
+@@ -5645,7 +5645,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 		size += item->chunk_size;
+ 	}
+ 	if (fail_tramp)
+-		code = mono_method_alloc_generic_virtual_thunk (domain, size);
++		code = mono_method_alloc_generic_virtual_trampoline (domain, size);
+ 	else
+ 		code = mono_domain_code_reserve (domain, size);
+ 	start = code;
+@@ -5715,7 +5715,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 	}
+ 
+ 	if (!fail_tramp)
+-		mono_stats.imt_thunks_size += code - start;
++		mono_stats.imt_trampolines_size += code - start;
+ 	g_assert (code - start <= size);
+ 
+ #if DEBUG_IMT
+@@ -5730,7 +5730,7 @@ mono_arch_build_imt_thunk (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckI
+ 		if (vtable)
+ 			buff = g_strdup_printf ("imt_%s_%s_entries_%d", vtable->klass->name_space, vtable->klass->name, count);
+ 		else
+-			buff = g_strdup_printf ("imt_thunk_entries_%d", count);
++			buff = g_strdup_printf ("imt_trampoline_entries_%d", count);
+ 		mono_emit_jit_tramp (start, code - start, buff);
+ 		g_free (buff);
+ 	}
+diff --git a/mono/mini/mini-x86.h b/mono/mini/mini-x86.h
+index b70d836c2aa..be98276e63f 100644
+--- a/mono/mini/mini-x86.h
++++ b/mono/mini/mini-x86.h
+@@ -207,7 +207,7 @@ typedef struct {
+ #define MONO_ARCH_VTABLE_REG X86_EDX
+ #define MONO_ARCH_RGCTX_REG MONO_ARCH_IMT_REG
+ #define MONO_ARCH_EXC_REG X86_EAX
+-#define MONO_ARCH_HAVE_GENERALIZED_IMT_THUNK 1
++#define MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE 1
+ #define MONO_ARCH_HAVE_LIVERANGE_OPS 1
+ #define MONO_ARCH_HAVE_SIGCTX_TO_MONOCTX 1
+ #define MONO_ARCH_HAVE_FULL_AOT_TRAMPOLINES 1
+diff --git a/mono/mini/mini.c b/mono/mini/mini.c
+index 750410441af..0dd4af7a71e 100644
+--- a/mono/mini/mini.c
++++ b/mono/mini/mini.c
+@@ -3136,8 +3136,8 @@ init_backend (MonoBackend *backend)
+ #ifdef MONO_ARCH_HAVE_OBJC_GET_SELECTOR
+ 	backend->have_objc_get_selector = 1;
+ #endif
+-#ifdef MONO_ARCH_HAVE_GENERALIZED_IMT_THUNK
+-	backend->have_generalized_imt_thunk = 1;
++#ifdef MONO_ARCH_HAVE_GENERALIZED_IMT_TRAMPOLINE
++	backend->have_generalized_imt_trampoline = 1;
+ #endif
+ #ifdef MONO_ARCH_GSHARED_SUPPORTED
+ 	backend->gshared_supported = 1;
+diff --git a/mono/mini/mini.h b/mono/mini/mini.h
+index 845162f76f7..d3a55094601 100644
+--- a/mono/mini/mini.h
++++ b/mono/mini/mini.h
+@@ -179,7 +179,7 @@ enum {
+ typedef enum {
+ 	MONO_AOT_TRAMP_SPECIFIC = 0,
+ 	MONO_AOT_TRAMP_STATIC_RGCTX = 1,
+-	MONO_AOT_TRAMP_IMT_THUNK = 2,
++	MONO_AOT_TRAMP_IMT = 2,
+ 	MONO_AOT_TRAMP_GSHAREDVT_ARG = 3,
+ 	MONO_AOT_TRAMP_NUM = 4
+ } MonoAotTrampoline;
+@@ -254,7 +254,7 @@ typedef struct MonoAotFileInfo
+ 	/* Blocks of various kinds of trampolines */
+ 	gpointer specific_trampolines;
+ 	gpointer static_rgctx_trampolines;
+-	gpointer imt_thunks;
++	gpointer imt_trampolines;
+ 	gpointer gsharedvt_arg_trampolines;
+ 	/* In static mode, points to a table of global symbols for trampolines etc */
+ 	gpointer globals;
+@@ -1484,7 +1484,7 @@ typedef struct {
+ 	guint            emulate_div : 1;
+ 	guint            emulate_long_shift_opts : 1;
+ 	guint            have_objc_get_selector : 1;
+-	guint            have_generalized_imt_thunk : 1;
++	guint            have_generalized_imt_trampoline : 1;
+ 	guint            have_tls_get : 1;
+ 	guint            have_tls_get_reg : 1;
+ 	guint            have_liverange_ops: 1;
+@@ -2501,7 +2501,7 @@ gpointer mono_aot_get_trampoline_full       (const char *name, MonoTrampInfo **o
+ gpointer mono_aot_get_unbox_trampoline      (MonoMethod *method);
+ gpointer mono_aot_get_lazy_fetch_trampoline (guint32 slot);
+ gpointer mono_aot_get_static_rgctx_trampoline (gpointer ctx, gpointer addr);
+-gpointer mono_aot_get_imt_thunk             (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count, gpointer fail_tramp);
++gpointer mono_aot_get_imt_trampoline        (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count, gpointer fail_tramp);
+ gpointer mono_aot_get_gsharedvt_arg_trampoline(gpointer arg, gpointer addr);
+ guint8*  mono_aot_get_unwind_info           (MonoJitInfo *ji, guint32 *unwind_info_len);
+ guint32  mono_aot_method_hash               (MonoMethod *method);
+@@ -2790,7 +2790,7 @@ gpointer mono_arch_get_delegate_virtual_invoke_impl (MonoMethodSignature *sig, M
+ gpointer mono_arch_create_specific_trampoline   (gpointer arg1, MonoTrampolineType tramp_type, MonoDomain *domain, guint32 *code_len);
+ MonoMethod* mono_arch_find_imt_method           (mgreg_t *regs, guint8 *code);
+ MonoVTable* mono_arch_find_static_call_vtable   (mgreg_t *regs, guint8 *code);
+-gpointer    mono_arch_build_imt_thunk           (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count, gpointer fail_tramp);
++gpointer    mono_arch_build_imt_trampoline      (MonoVTable *vtable, MonoDomain *domain, MonoIMTCheckItem **imt_entries, int count, gpointer fail_tramp);
+ void    mono_arch_notify_pending_exc            (MonoThreadInfo *info);
+ guint8* mono_arch_get_call_target               (guint8 *code);
+ guint32 mono_arch_get_plt_info_offset           (guint8 *plt_entry, mgreg_t *regs, guint8 *code);
+

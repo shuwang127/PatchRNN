@@ -1,0 +1,157 @@
+commit 8b2a3354f9674c4e05a669e9b741340f1c37c167
+Author: Ben Noordhuis <info@bnoordhuis.nl>
+Date:   Wed Sep 14 16:07:33 2011 +0200
+
+    http_parser: cherry-pick 3258e4a and b89f944 from upstream
+    
+    Fixes #1569, parse error on multi-line HTTP headers.
+
+diff --git a/deps/http_parser/http_parser.c b/deps/http_parser/http_parser.c
+index 1453d411b0..e8f5364209 100644
+--- a/deps/http_parser/http_parser.c
++++ b/deps/http_parser/http_parser.c
+@@ -241,6 +241,7 @@ enum state
+   , s_header_field
+   , s_header_value_start
+   , s_header_value
++  , s_header_value_lws
+ 
+   , s_header_almost_done
+ 
+@@ -332,6 +333,7 @@ size_t http_parser_execute (http_parser *parser,
+                             size_t len)
+ {
+   char c, ch;
++  int8_t unhex_val;
+   const char *p = data, *pe;
+   int64_t to_read;
+ 
+@@ -1039,6 +1041,7 @@ size_t http_parser_execute (http_parser *parser,
+       }
+ 
+       case s_header_field_start:
++      header_field_start:
+       {
+         if (ch == CR) {
+           state = s_headers_almost_done;
+@@ -1216,7 +1219,7 @@ size_t http_parser_execute (http_parser *parser,
+ 
+       case s_header_value_start:
+       {
+-        if (ch == ' ') break;
++        if (ch == ' ' || ch == '\t') break;
+ 
+         MARK(header_value);
+ 
+@@ -1359,7 +1362,7 @@ size_t http_parser_execute (http_parser *parser,
+       {
+         STRICT_CHECK(ch != LF);
+ 
+-        state = s_header_field_start;
++        state = s_header_value_lws;
+ 
+         switch (header_state) {
+           case h_connection_keep_alive:
+@@ -1377,6 +1380,18 @@ size_t http_parser_execute (http_parser *parser,
+         break;
+       }
+ 
++      case s_header_value_lws:
++      {
++        if (ch == ' ' || ch == '\t')
++          state = s_header_value_start;
++        else
++        {
++          state = s_header_field_start;
++          goto header_field_start;
++        }
++        break;
++      }
++
+       case s_headers_almost_done:
+       headers_almost_done:
+       {
+@@ -1478,9 +1493,9 @@ size_t http_parser_execute (http_parser *parser,
+         assert(nread == 1);
+         assert(parser->flags & F_CHUNKED);
+ 
+-        c = unhex[(unsigned char)ch];
+-        if (c == -1) goto error;
+-        parser->content_length = c;
++        unhex_val = unhex[(unsigned char)ch];
++        if (unhex_val == -1) goto error;
++        parser->content_length = unhex_val;
+         state = s_chunk_size;
+         break;
+       }
+@@ -1494,9 +1509,9 @@ size_t http_parser_execute (http_parser *parser,
+           break;
+         }
+ 
+-        c = unhex[(unsigned char)ch];
++        unhex_val = unhex[(unsigned char)ch];
+ 
+-        if (c == -1) {
++        if (unhex_val == -1) {
+           if (ch == ';' || ch == ' ') {
+             state = s_chunk_parameters;
+             break;
+@@ -1505,7 +1520,7 @@ size_t http_parser_execute (http_parser *parser,
+         }
+ 
+         parser->content_length *= 16;
+-        parser->content_length += c;
++        parser->content_length += unhex_val;
+         break;
+       }
+ 
+diff --git a/deps/http_parser/test.c b/deps/http_parser/test.c
+index a4b80a2e60..876cacff4d 100644
+--- a/deps/http_parser/test.c
++++ b/deps/http_parser/test.c
+@@ -582,6 +582,35 @@ const struct message requests[] =
+   ,.body= ""
+   }
+ 
++#define LINE_FOLDING_IN_HEADER 20
++, {.name= "line folding in header value"
++  ,.type= HTTP_REQUEST
++  ,.raw= "GET / HTTP/1.1\r\n"
++         "Line1:   abc\r\n"
++         "\tdef\r\n"
++         " ghi\r\n"
++         "\t\tjkl\r\n"
++         "  mno \r\n"
++         "\t \tqrs\r\n"
++         "Line2: \t line2\t\r\n"
++         "\r\n"
++  ,.should_keep_alive= TRUE
++  ,.message_complete_on_eof= FALSE
++  ,.http_major= 1
++  ,.http_minor= 1
++  ,.method= HTTP_GET
++  ,.query_string= ""
++  ,.fragment= ""
++  ,.request_path= "/"
++  ,.request_url= "/"
++  ,.num_headers= 2
++  ,.headers= { { "Line1", "abcdefghijklmno qrs" }
++             , { "Line2", "line2\t" }
++             }
++  ,.body= ""
++  }
++
++
+ #define QUERY_TERMINATED_HOST 21
+ , {.name= "host terminated by a query string"
+   ,.type= HTTP_REQUEST
+@@ -1943,7 +1972,7 @@ main (void)
+     "\tRA==\r\n"
+     "\t-----END CERTIFICATE-----\r\n"
+     "\r\n";
+-  test_simple(dumbfuck2, 0);
++  test_simple(dumbfuck2, 1);
+ 
+ #if 0
+   // NOTE(Wed Nov 18 11:57:27 CET 2009) this seems okay. we just read body
+

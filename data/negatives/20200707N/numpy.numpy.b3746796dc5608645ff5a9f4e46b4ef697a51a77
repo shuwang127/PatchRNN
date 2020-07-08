@@ -1,0 +1,258 @@
+commit b3746796dc5608645ff5a9f4e46b4ef697a51a77
+Author: Travis Oliphant <oliphant@enthought.com>
+Date:   Tue Feb 14 00:39:30 2006 +0000
+
+    Fixed allocation problem.
+
+diff --git a/numpy/core/src/arrayobject.c b/numpy/core/src/arrayobject.c
+index 3e996d338..38f9f9434 100644
+--- a/numpy/core/src/arrayobject.c
++++ b/numpy/core/src/arrayobject.c
+@@ -870,7 +870,7 @@ PyArray_Scalar(void *data, PyArray_Descr *descr, PyObject *base)
+ 			int length = itemsize >> 2;
+ #ifndef Py_UNICODE_WIDE
+ 			char *buffer;
+-			int alloc=1;
++			int alloc=0;
+ 			length *= 2;
+ #endif
+ 			/* Need an extra slot and need to use 
+diff --git a/numpy/core/src/multiarraymodule.c b/numpy/core/src/multiarraymodule.c
+index 252adf9f7..b7db7e3c9 100644
+--- a/numpy/core/src/multiarraymodule.c
++++ b/numpy/core/src/multiarraymodule.c
+@@ -1411,6 +1411,75 @@ PyArray_Repeat(PyArrayObject *aop, PyObject *op, int axis)
+ 	return NULL;
+ }
+ 
++
++static int
++_signbit_set(PyArrayObject *arr)
++{
++	static char bitmask = 0x80;
++	char *ptr;  /* points to the byte to test */
++	char byteorder;
++	int elsize;
++
++	if (arr==NULL) return 0;
++	elsize = arr->descr->elsize;
++	byteorder = arr->descr->byteorder;
++	ptr = arr->data;
++	if (elsize > 1 && \
++	    (byteorder == PyArray_LITTLE ||	\
++	     (byteorder == PyArray_NATIVE &&
++	      PyArray_ISNBO(PyArray_LITTLE))))
++		ptr += elsize-1;
++	
++	return ((*ptr & bitmask) != 0);	
++}
++
++
++/*OBJECT_API*/
++static char
++PyArray_ScalarKind(int typenum, PyArrayObject **arr) 
++{
++	if (PyTypeNum_ISSIGNED(typenum)) {
++		if (_signbit_set(*arr)) return UFUNC_INTNEG_SCALAR;
++		else return UFUNC_INTPOS_SCALAR;
++	}
++	if (PyTypeNum_ISFLOAT(typenum)) return UFUNC_FLOAT_SCALAR;
++	if (PyTypeNum_ISUNSIGNED(typenum)) return UFUNC_INTPOS_SCALAR;
++	if (PyTypeNum_ISCOMPLEX(typenum)) return UFUNC_COMPLEX_SCALAR;
++	if (PyTypeNum_ISBOOL(typenum)) return UFUNC_BOOL_SCALAR;
++
++	return UFUNC_OBJECT_SCALAR;
++}
++
++
++/*OBJECT_API*/
++static int 
++PyArray_CanCoerceScalar(char thistype, char neededtype, char scalar) 
++{
++
++	switch(scalar) {
++	case UFUNC_NOSCALAR:
++	case UFUNC_BOOL_SCALAR:
++	case UFUNC_OBJECT_SCALAR:
++		return PyArray_CanCastSafely(thistype, neededtype);
++	case UFUNC_INTPOS_SCALAR:
++		return (neededtype >= PyArray_UBYTE);
++	case UFUNC_INTNEG_SCALAR:
++		return (neededtype >= PyArray_BYTE) &&		\
++			!(PyTypeNum_ISUNSIGNED(neededtype));
++	case UFUNC_FLOAT_SCALAR:
++		return (neededtype >= PyArray_FLOAT);
++	case UFUNC_COMPLEX_SCALAR:
++		return (neededtype >= PyArray_CFLOAT);
++	}
++	fprintf(stderr, "\n**Error** coerce fall through: %d %d %d\n\n", 
++		thistype, neededtype, scalar);
++	return 1; /* should never get here... */   
++}
++
++
++/* This needs to change to allow scalars of a different "kind" to alter the input type
++ */
++
+ /*OBJECT_API*/
+ static PyArrayObject **
+ PyArray_ConvertToCommonType(PyObject *op, int *retn)
+@@ -1420,6 +1489,7 @@ PyArray_ConvertToCommonType(PyObject *op, int *retn)
+ 	PyObject *otmp;
+ 	PyArray_Descr *intype=NULL, *stype=NULL;
+ 	PyArray_Descr *newtype=NULL;
++	char scalarkind;
+ 
+ 	
+ 	*retn = n = PySequence_Length(op);
+@@ -1443,6 +1513,13 @@ PyArray_ConvertToCommonType(PyObject *op, int *retn)
+ 			newtype = PyArray_DescrFromObject(otmp, stype);
+ 			Py_XDECREF(stype);
+ 			stype = newtype;
++			scalarkind = PyArray_ScalarKind(newtype->type_num, NULL);
++			if (intype && !PyArray_CanCoerceScalar(newtype->type_num,
++							       intype->type_num, 
++							       scalarkind)) {
++				Py_XDECREF(intype);
++				intype = stype;
++			}
+ 			mps[i] = (PyArrayObject *)Py_None;
+ 			Py_INCREF(Py_None);
+ 		}
+@@ -3724,7 +3801,7 @@ _convert_from_dict(PyObject *obj, int align)
+ 		/* Insert into dictionary */
+ 		if (PyDict_GetItem(fields, name) != NULL) {
+ 			PyErr_SetString(PyExc_ValueError,
+-					"two fields with the same name");
++					"name already used as a name or title");
+ 			ret = PY_FAIL;
+ 		}
+ 		PyDict_SetItem(fields, name, tup);
+@@ -3732,7 +3809,8 @@ _convert_from_dict(PyObject *obj, int align)
+ 		if (len == 3) {
+ 			if (PyDict_GetItem(fields, item) != NULL) {
+ 				PyErr_SetString(PyExc_ValueError, 
+-						"titles cannot be the same as names");
++						"title already used as a name or " \
++						" title.");
+ 				ret=PY_FAIL;
+ 			}
+ 			else {
+diff --git a/numpy/core/src/ufuncobject.c b/numpy/core/src/ufuncobject.c
+index 66e8854af..96be93e86 100644
+--- a/numpy/core/src/ufuncobject.c
++++ b/numpy/core/src/ufuncobject.c
+@@ -528,15 +528,6 @@ PyUFunc_clearfperr()
+ 	UFUNC_CHECK_STATUS(retstatus)
+ }
+ 
+-
+-#define UFUNC_NOSCALAR         0
+-#define UFUNC_BOOL_SCALAR      1
+-#define UFUNC_INTPOS_SCALAR    2
+-#define UFUNC_INTNEG_SCALAR    3
+-#define UFUNC_FLOAT_SCALAR     4
+-#define UFUNC_COMPLEX_SCALAR   5
+-#define UFUNC_OBJECT_SCALAR    6
+-
+ #define NO_UFUNCLOOP        0
+ #define ZERODIM_REDUCELOOP  0
+ #define ONE_UFUNCLOOP       1
+@@ -579,31 +570,6 @@ _lowest_type(char intype)
+ /* Called to determine coercion
+  */
+ 
+-static int 
+-_cancoerce(char thistype, char neededtype, char scalar) 
+-{
+-
+-	switch(scalar) {
+-	case UFUNC_NOSCALAR:
+-	case UFUNC_BOOL_SCALAR:
+-	case UFUNC_OBJECT_SCALAR:
+-		return PyArray_CanCastSafely(thistype, neededtype);
+-	case UFUNC_INTPOS_SCALAR:
+-		return (neededtype >= PyArray_UBYTE);
+-	case UFUNC_INTNEG_SCALAR:
+-		return (neededtype >= PyArray_BYTE) &&		\
+-			!(PyTypeNum_ISUNSIGNED(neededtype));
+-	case UFUNC_FLOAT_SCALAR:
+-		return (neededtype >= PyArray_FLOAT);
+-	case UFUNC_COMPLEX_SCALAR:
+-		return (neededtype >= PyArray_CFLOAT);
+-	}
+-	fprintf(stderr, "\n**Error** coerce fall through: %d %d %d\n\n", 
+-		thistype, neededtype, scalar);
+-	return 1; /* should never get here... */   
+-}
+-
+-
+ static int 
+ select_types(PyUFuncObject *self, int *arg_types, 
+              PyUFuncGenericFunction *function, void **data,
+@@ -669,9 +635,9 @@ select_types(PyUFuncObject *self, int *arg_types,
+ 
+ 	for(;i<self->ntypes; i++) {
+ 		for(j=0; j<self->nin; j++) {
+-			if (!_cancoerce(arg_types[j], 
+-					self->types[i*self->nargs+j],
+-					scalars[j]))
++			if (!PyArray_CanCoerceScalar(arg_types[j], 
++						     self->types[i*self->nargs+j],
++						     scalars[j]))
+ 				break;
+ 		}
+ 		if (j == self->nin) break;
+@@ -772,42 +738,6 @@ PyUFunc_GetPyValues(char *name, int *bufsize, int *errmask, PyObject **errobj)
+ 	return 0;
+ }
+ 
+-static int
+-_signbit_set(PyArrayObject *arr)
+-{
+-	static char bitmask = 0x80;
+-	char *ptr;  /* points to the byte to test */
+-	char byteorder;
+-	int elsize;
+-
+-	elsize = arr->descr->elsize;
+-	byteorder = arr->descr->byteorder;
+-	ptr = arr->data;
+-	if (elsize > 1 && \
+-	    (byteorder == PyArray_LITTLE ||	\
+-	     (byteorder == PyArray_NATIVE &&
+-	      PyArray_ISNBO(PyArray_LITTLE))))
+-		ptr += elsize-1;
+-	
+-	return ((*ptr & bitmask) != 0);	
+-}
+-
+-static char
+-_scalar_kind(int typenum, PyArrayObject **arr) 
+-{
+-	if (PyTypeNum_ISSIGNED(typenum)) {
+-		if (_signbit_set(*arr)) return UFUNC_INTNEG_SCALAR;
+-		else return UFUNC_INTPOS_SCALAR;
+-	}
+-	if (PyTypeNum_ISFLOAT(typenum)) return UFUNC_FLOAT_SCALAR;
+-	if (PyTypeNum_ISUNSIGNED(typenum)) return UFUNC_INTPOS_SCALAR;
+-	if (PyTypeNum_ISCOMPLEX(typenum)) return UFUNC_COMPLEX_SCALAR;
+-	if (PyTypeNum_ISBOOL(typenum)) return UFUNC_BOOL_SCALAR;
+-
+-	return UFUNC_OBJECT_SCALAR;
+-}
+-
+-
+ /* Create copies for any arrays that are less than loop->bufsize
+    in total size and are mis-behaved or in need
+    of casting.
+@@ -925,7 +855,7 @@ construct_matrices(PyUFuncLoopObject *loop, PyObject *args, PyArrayObject **mps)
+ 			scalars[i] = UFUNC_NOSCALAR;
+ 			allscalars=FALSE;
+ 		}
+-		else scalars[i] = _scalar_kind(arg_types[i], &(mps[i]));
++		else scalars[i] = PyArray_ScalarKind(arg_types[i], &(mps[i]));
+ 
+ 		/* If any input is a big-array */
+ 		if (!PyType_IsSubtype(mps[i]->ob_type, &PyArray_Type)) {
+

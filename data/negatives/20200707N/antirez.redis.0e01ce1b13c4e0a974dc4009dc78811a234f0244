@@ -1,0 +1,91 @@
+commit 0e01ce1b13c4e0a974dc4009dc78811a234f0244
+Author: Geoff Garside <geoff@geoffgarside.co.uk>
+Date:   Fri Jun 17 01:06:19 2011 +0100
+
+    Use getaddrinfo(3) in anetTcpGenericConnect.
+    
+    Change anetTcpGenericConnect() function to use getaddrinfo(3) to
+    perform address resolution, socket creation and connection. Resolved
+    addresses are limited to those reachable by the AF_INET family.
+
+diff --git a/src/anet.c b/src/anet.c
+index 78c24bf2..bbff3e3e 100644
+--- a/src/anet.c
++++ b/src/anet.c
+@@ -217,38 +217,52 @@ static int anetCreateSocket(char *err, int domain) {
+ #define ANET_CONNECT_NONBLOCK 1
+ static int anetTcpGenericConnect(char *err, char *addr, int port, int flags)
+ {
+-    int s;
+-    struct sockaddr_in sa;
++    int s, rv;
++    char _port[6];  /* strlen("65535"); */
++    struct addrinfo hints, *servinfo, *p;
+ 
+-    if ((s = anetCreateSocket(err,AF_INET)) == ANET_ERR)
++    snprintf(_port,6,"%d",port);
++    memset(&hints,0,sizeof(hints));
++    hints.ai_family = AF_INET;
++    hints.ai_socktype = SOCK_STREAM;
++
++    if ((rv = getaddrinfo(addr,_port,&hints,&servinfo)) != 0) {
++        anetSetError(err, "%s", gai_strerror(rv));
+         return ANET_ERR;
++    }
++    for (p = servinfo; p != NULL; p = p->ai_next) {
++        if ((s = socket(p->ai_family,p->ai_socktype,p->ai_protocol)) == -1)
++            continue;
+ 
+-    sa.sin_family = AF_INET;
+-    sa.sin_port = htons(port);
+-    if (inet_aton(addr, &sa.sin_addr) == 0) {
+-        struct hostent *he;
++        /* if we set err then goto cleanup, otherwise next */
++        if (anetSetReuseAddr(err,s) == ANET_ERR) {
++            goto error;
++        }
++        if (flags & ANET_CONNECT_NONBLOCK) {
++            if (anetNonBlock(err,s) != ANET_OK)
++                goto error;
++        }
++        if (connect(s,p->ai_addr,p->ai_addrlen) == -1) {
++            if (errno == EINPROGRESS &&
++                flags & ANET_CONNECT_NONBLOCK)
++                goto end;
+ 
+-        he = gethostbyname(addr);
+-        if (he == NULL) {
+-            anetSetError(err, "can't resolve: %s", addr);
+             close(s);
+-            return ANET_ERR;
++            continue;
+         }
+-        memcpy(&sa.sin_addr, he->h_addr, sizeof(struct in_addr));
++
++        /* break with the socket */
++        goto end;
+     }
+-    if (flags & ANET_CONNECT_NONBLOCK) {
+-        if (anetNonBlock(err,s) != ANET_OK)
+-            return ANET_ERR;
++    if (p == NULL) {
++        anetSetError(err, "creating socket: %s", strerror(errno));
++        goto error;
+     }
+-    if (connect(s, (struct sockaddr*)&sa, sizeof(sa)) == -1) {
+-        if (errno == EINPROGRESS &&
+-            flags & ANET_CONNECT_NONBLOCK)
+-            return s;
+ 
+-        anetSetError(err, "connect: %s", strerror(errno));
+-        close(s);
+-        return ANET_ERR;
+-    }
++error:
++    s = ANET_ERR;
++end:
++    freeaddrinfo(servinfo);
+     return s;
+ }
+ 
+

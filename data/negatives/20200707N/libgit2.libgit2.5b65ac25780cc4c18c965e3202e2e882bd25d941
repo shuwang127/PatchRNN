@@ -1,0 +1,84 @@
+commit 5b65ac25780cc4c18c965e3202e2e882bd25d941
+Author: Patrick Steinhardt <ps@pks.im>
+Date:   Wed Apr 5 10:43:18 2017 +0200
+
+    refs: implement function to read references from file
+    
+    Currently, we only provide functions to read references directly from a
+    repository's reference store via e.g. `git_reference_lookup`. But in
+    some cases, we may want to read files not connected to the current
+    repository, e.g. when looking up HEAD of connected work trees. This
+    commit implements `git_reference__read_head`, which will read out and
+    allocate a reference at an arbitrary path.
+
+diff --git a/src/refs.c b/src/refs.c
+index 0837dc4a8..a53d094fc 100644
+--- a/src/refs.c
++++ b/src/refs.c
+@@ -249,6 +249,40 @@ int git_reference_lookup_resolved(
+ 	return 0;
+ }
+ 
++int git_reference__read_head(
++	git_reference **out,
++	git_repository *repo,
++	const char *path)
++{
++	git_buf reference = GIT_BUF_INIT;
++	char *name = NULL;
++	int error;
++
++	if ((error = git_futils_readbuffer(&reference, path)) < 0)
++		goto out;
++	git_buf_rtrim(&reference);
++
++	if (git__strncmp(reference.ptr, GIT_SYMREF, strlen(GIT_SYMREF)) == 0) {
++		git_buf_consume(&reference, reference.ptr + strlen(GIT_SYMREF));
++
++		name = git_path_basename(path);
++
++		if ((*out = git_reference__alloc_symbolic(name, reference.ptr)) == NULL) {
++			error = -1;
++			goto out;
++		}
++	} else {
++		if ((error = git_reference_lookup(out, repo, reference.ptr)) < 0)
++			goto out;
++	}
++
++out:
++	free(name);
++	git_buf_clear(&reference);
++
++	return error;
++}
++
+ int git_reference_dwim(git_reference **out, git_repository *repo, const char *refname)
+ {
+ 	int error = 0, i;
+diff --git a/src/refs.h b/src/refs.h
+index 80e655af7..0c90db3af 100644
+--- a/src/refs.h
++++ b/src/refs.h
+@@ -107,6 +107,20 @@ int git_reference_lookup_resolved(
+ 	const char *name,
+ 	int max_deref);
+ 
++/**
++ * Read reference from a file.
++ *
++ * This function will read in the file at `path`. If it is a
++ * symref, it will return a new unresolved symbolic reference
++ * with the given name pointing to the reference pointed to by
++ * the file. If it is not a symbolic reference, it will return
++ * the resolved reference.
++ */
++int git_reference__read_head(
++	git_reference **out,
++	git_repository *repo,
++	const char *path);
++
+ int git_reference__log_signature(git_signature **out, git_repository *repo);
+ 
+ /** Update a reference after a commit. */
+

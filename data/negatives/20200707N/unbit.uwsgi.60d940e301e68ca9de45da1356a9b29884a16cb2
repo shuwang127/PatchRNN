@@ -1,0 +1,243 @@
+commit 60d940e301e68ca9de45da1356a9b29884a16cb2
+Author: Unbit <info@unbit.it>
+Date:   Sun Nov 10 04:27:26 2013 +0100
+
+    added simple math and concat to placeholders
+
+diff --git a/core/config.c b/core/config.c
+index 9023dc4a..86873517 100644
+--- a/core/config.c
++++ b/core/config.c
+@@ -633,3 +633,168 @@ clear:
+ 
+ }
+ 
++char *uwsgi_get_exported_opt(char *key) {
++
++        int i;
++
++        for (i = 0; i < uwsgi.exported_opts_cnt; i++) {
++                if (!strcmp(uwsgi.exported_opts[i]->key, key)) {
++                        return uwsgi.exported_opts[i]->value;
++                }
++        }
++
++        return NULL;
++}
++
++char *uwsgi_get_optname_by_index(int index) {
++
++        struct uwsgi_option *op = uwsgi.options;
++
++        while (op->name) {
++                if (op->shortcut == index) {
++                        return op->name;
++                }
++                op++;
++        }
++
++        return NULL;
++}
++
++/*
++
++	this works as a pipeline
++
++	processes = 2
++	cpu_cores = 8
++	foobar = %(processes cpu_cores + 2)
++
++	translate as:
++
++		step1 = proceses cpu_cores = 2 8 = 28 (string concatenation)
++
++		step1 + = step1_apply_func_plus (func token)
++
++		step1_apply_func_plus 2 = 28 + 2 = 30 (math)
++
++*/
++
++char *uwsgi_manage_placeholder(char *key) {
++	enum {
++		concat = 0,
++		sum,
++		sub,
++		mul,
++		div,
++	} state;
++
++	state = concat;
++	char *current_value = NULL;
++
++	char *space = strchr(key, ' ');
++	if (!space) {
++		return uwsgi_get_exported_opt(key);
++	}
++	// let's start the heavy metal here
++	char *tmp_value = uwsgi_str(key);
++	char *p, *ctx = NULL;
++        uwsgi_foreach_token(tmp_value, " ", p, ctx) {
++		char *value = NULL;
++		if (is_a_number(p)) {
++			value = uwsgi_str(p);
++		}
++		else if (!strcmp(p, "+")) {
++			state = sum;
++			continue;
++		}
++		else if (!strcmp(p, "-")) {
++			state = sub;
++			continue;
++		}
++		else if (!strcmp(p, "*")) {
++			state = mul;
++			continue;
++		}
++		else if (!strcmp(p, "/")) {
++			state = div;
++			continue;
++		}
++		else if (!strcmp(p, "++")) {
++			if (current_value) {
++				int64_t tmp_value = strtoll(current_value, NULL, 10);
++				free(current_value);
++				current_value = uwsgi_64bit2str(tmp_value+1);
++			}
++			state = concat;
++			continue;
++		}
++		else if (!strcmp(p, "--")) {
++			if (current_value) {
++				int64_t tmp_value = strtoll(current_value, NULL, 10);
++				free(current_value);
++				current_value = uwsgi_64bit2str(tmp_value-1);
++			}
++			state = concat;
++			continue;
++		}
++		// find the option
++		else {
++			char *ov = uwsgi_get_exported_opt(p);
++			if (!ov) ov = "";
++			value = uwsgi_str(ov);
++		}
++
++		int64_t arg1n = 0, arg2n = 0;
++		char *arg1 = "", *arg2 = "";	
++
++		switch(state) {
++			case concat:
++				if (current_value) arg1 = current_value;
++				if (value) arg2 = value;
++				char *ret = uwsgi_concat2(arg1, arg2);
++				if (current_value) free(current_value);
++				current_value = ret;	
++				break;
++			case sum:
++				if (current_value) arg1n = strtoll(current_value, NULL, 10);
++				if (value) arg2n = strtoll(value, NULL, 10);
++				if (current_value) free(current_value);
++				current_value = uwsgi_64bit2str(arg1n + arg2n);
++				break;
++			case sub:
++				if (current_value) arg1n = strtoll(current_value, NULL, 10);
++				if (value) arg2n = strtoll(value, NULL, 10);
++				if (current_value) free(current_value);
++				current_value = uwsgi_64bit2str(arg1n - arg2n);
++				break;
++			case mul:
++				if (current_value) arg1n = strtoll(current_value, NULL, 10);
++				if (value) arg2n = strtoll(value, NULL, 10);
++				if (current_value) free(current_value);
++				current_value = uwsgi_64bit2str(arg1n * arg2n);
++				break;
++			case div:
++				if (current_value) arg1n = strtoll(current_value, NULL, 10);
++				if (value) arg2n = strtoll(value, NULL, 10);
++				if (current_value) free(current_value);
++				// avoid division by zero
++				if (arg2n == 0) {
++					current_value = uwsgi_64bit2str(0);
++				}
++				else {
++					current_value = uwsgi_64bit2str(arg1n / arg2n);
++				}
++				break;
++			default:
++				break;
++		}
++
++		// over engineering
++		if (value)
++			free(value);
++
++		// reset state to concat
++		state = concat;
++	}
++
++	return current_value;
++}
+diff --git a/core/utils.c b/core/utils.c
+index 2d3fb361..5aefd856 100644
+--- a/core/utils.c
++++ b/core/utils.c
+@@ -1901,33 +1901,6 @@ void uwsgi_unix_signal(int signum, void (*func) (int)) {
+ 	}
+ }
+ 
+-char *uwsgi_get_exported_opt(char *key) {
+-
+-	int i;
+-
+-	for (i = 0; i < uwsgi.exported_opts_cnt; i++) {
+-		if (!strcmp(uwsgi.exported_opts[i]->key, key)) {
+-			return uwsgi.exported_opts[i]->value;
+-		}
+-	}
+-
+-	return NULL;
+-}
+-
+-char *uwsgi_get_optname_by_index(int index) {
+-
+-	struct uwsgi_option *op = uwsgi.options;
+-
+-	while (op->name) {
+-		if (op->shortcut == index) {
+-			return op->name;
+-		}
+-		op++;
+-	}
+-
+-	return NULL;
+-}
+-
+ int uwsgi_list_has_num(char *list, int num) {
+ 
+ 	char *list2 = uwsgi_concat2(list, "");
+diff --git a/core/uwsgi.c b/core/uwsgi.c
+index fd2da6aa..5d981cda 100644
+--- a/core/uwsgi.c
++++ b/core/uwsgi.c
+@@ -2020,7 +2020,7 @@ int main(int argc, char *argv[], char *envp[]) {
+ 	uwsgi_apply_config_pass('@', uwsgi_simple_file_read);
+ 
+ 	// last pass: REFERENCEs
+-	uwsgi_apply_config_pass('%', uwsgi_get_exported_opt);
++	uwsgi_apply_config_pass('%', uwsgi_manage_placeholder);
+ 
+ 	// ok, the options dictionary is available, lets manage it
+ 	uwsgi_configure();
+diff --git a/uwsgi.h b/uwsgi.h
+index 734ff4e8..1cd719d4 100644
+--- a/uwsgi.h
++++ b/uwsgi.h
+@@ -3147,6 +3147,7 @@ void uwsgi_nuclear_blast();
+ void uwsgi_unix_signal(int, void (*)(int));
+ 
+ char *uwsgi_get_exported_opt(char *);
++char *uwsgi_manage_placeholder(char *);
+ 
+ int uwsgi_signal_add_cron(uint8_t, int, int, int, int, int);
+ int uwsgi_cron_task_needs_execution(struct tm *, int, int, int, int, int);
+

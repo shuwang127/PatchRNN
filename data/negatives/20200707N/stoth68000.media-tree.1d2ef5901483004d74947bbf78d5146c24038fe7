@@ -1,0 +1,57 @@
+commit 1d2ef5901483004d74947bbf78d5146c24038fe7
+Author: Al Viro <viro@ZenIV.linux.org.uk>
+Date:   Wed Sep 14 18:55:41 2011 +0100
+
+    restore pinning the victim dentry in vfs_rmdir()/vfs_rename_dir()
+    
+    We used to get the victim pinned by dentry_unhash() prior to commit
+    64252c75a219 ("vfs: remove dget() from dentry_unhash()") and ->rmdir()
+    and ->rename() instances relied on that; most of them don't care, but
+    ones that used d_delete() themselves do.  As the result, we are getting
+    rmdir() oopses on NFS now.
+    
+    Just grab the reference before locking the victim and drop it explicitly
+    after unlocking, same as vfs_rename_other() does.
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+    Tested-by: Simon Kirby <sim@hostway.ca>
+    Cc: stable@kernel.org (3.0.x)
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/namei.c b/fs/namei.c
+index b52bc685465f..f4788365ea22 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -2616,6 +2616,7 @@ int vfs_rmdir(struct inode *dir, struct dentry *dentry)
+ 	if (!dir->i_op->rmdir)
+ 		return -EPERM;
+ 
++	dget(dentry);
+ 	mutex_lock(&dentry->d_inode->i_mutex);
+ 
+ 	error = -EBUSY;
+@@ -2636,6 +2637,7 @@ int vfs_rmdir(struct inode *dir, struct dentry *dentry)
+ 
+ out:
+ 	mutex_unlock(&dentry->d_inode->i_mutex);
++	dput(dentry);
+ 	if (!error)
+ 		d_delete(dentry);
+ 	return error;
+@@ -3025,6 +3027,7 @@ static int vfs_rename_dir(struct inode *old_dir, struct dentry *old_dentry,
+ 	if (error)
+ 		return error;
+ 
++	dget(new_dentry);
+ 	if (target)
+ 		mutex_lock(&target->i_mutex);
+ 
+@@ -3045,6 +3048,7 @@ static int vfs_rename_dir(struct inode *old_dir, struct dentry *old_dentry,
+ out:
+ 	if (target)
+ 		mutex_unlock(&target->i_mutex);
++	dput(new_dentry);
+ 	if (!error)
+ 		if (!(old_dir->i_sb->s_type->fs_flags & FS_RENAME_DOES_D_MOVE))
+ 			d_move(old_dentry,new_dentry);
+

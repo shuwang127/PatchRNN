@@ -1,0 +1,41 @@
+commit 8547d4cc2b616e4f1dafebe2c673fc986422b506
+Author: Tobias Klauser <tklauser@distanz.ch>
+Date:   Fri Jun 24 15:48:47 2011 +0200
+
+    Staging: usbip: vhci-hcd: Do not kill already dead RX/TX kthread
+    
+    When unbinding a device on the host which was still attached on the
+    client, I got a NULL pointer dereference on the client. This turned out
+    to be due to kthread_stop() being called on an already dead kthread.
+    
+    Here is how I was able to reproduce the problem:
+    
+     server:# usbip bind -b 1-2
+                                    client:# usbip attach -h server -b 1-2
+     server:# usbip unbind -b 1-2
+    
+    This patch fixes the problem by checking the kthread before attempting
+    to kill it, as it is done on the opposite side in
+    stub_shutdown_connection().
+    
+    Signed-off-by: Tobias Klauser <tklauser@distanz.ch>
+    Cc: stable <stable@kernel.org>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/staging/usbip/vhci_hcd.c b/drivers/staging/usbip/vhci_hcd.c
+index 878b5bf3f46c..2ee97e2095b0 100644
+--- a/drivers/staging/usbip/vhci_hcd.c
++++ b/drivers/staging/usbip/vhci_hcd.c
+@@ -860,9 +860,9 @@ static void vhci_shutdown_connection(struct usbip_device *ud)
+ 	}
+ 
+ 	/* kill threads related to this sdev, if v.c. exists */
+-	if (vdev->ud.tcp_rx)
++	if (vdev->ud.tcp_rx && !task_is_dead(vdev->ud.tcp_rx))
+ 		kthread_stop(vdev->ud.tcp_rx);
+-	if (vdev->ud.tcp_tx)
++	if (vdev->ud.tcp_tx && !task_is_dead(vdev->ud.tcp_tx))
+ 		kthread_stop(vdev->ud.tcp_tx);
+ 
+ 	pr_info("stop threads\n");
+

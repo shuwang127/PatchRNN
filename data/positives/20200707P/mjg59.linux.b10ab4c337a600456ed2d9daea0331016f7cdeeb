@@ -1,0 +1,55 @@
+commit b10ab4c337a600456ed2d9daea0331016f7cdeeb
+Author: Frederic Weisbecker <fweisbec@gmail.com>
+Date:   Tue Aug 25 02:44:21 2009 +0200
+
+    kill-the-bkl/reiserfs: fix recursive reiserfs lock in reiserfs_mkdir()
+    
+    reiserfs_mkdir() acquires the reiserfs lock, assuming it has been called
+    from the dir inodes callbacks, without the lock held.
+    
+    But it can also be called from other internal sites such as
+    reiserfs_xattr_init() which already holds the lock. This recursive
+    locking leads to further wrong assumptions. For example, later calls
+    to reiserfs_mutex_lock_safe() won't actually unlock the reiserfs lock
+    the time we acquire a given mutex, creating unexpected lock inversions.
+    
+    Signed-off-by: Frederic Weisbecker <fweisbec@gmail.com>
+    Cc: Jeff Mahoney <jeffm@suse.com>
+    Cc: Chris Mason <chris.mason@oracle.com>
+    Cc: Ingo Molnar <mingo@elte.hu>
+    Cc: Alexander Beregalov <a.beregalov@gmail.com>
+    Cc: Laurent Riffard <laurent.riffard@free.fr>
+
+diff --git a/fs/reiserfs/namei.c b/fs/reiserfs/namei.c
+index b3973c9f0bf1..e296ff72a6cc 100644
+--- a/fs/reiserfs/namei.c
++++ b/fs/reiserfs/namei.c
+@@ -732,6 +732,7 @@ static int reiserfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
+ 	struct inode *inode;
+ 	struct reiserfs_transaction_handle th;
+ 	struct reiserfs_security_handle security;
++	int lock_depth;
+ 	/* We need blocks for transaction + (user+group)*(quotas for new inode + update of quota for directory owner) */
+ 	int jbegin_count =
+ 	    JOURNAL_PER_BALANCE_CNT * 3 +
+@@ -755,7 +756,7 @@ static int reiserfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
+ 		return retval;
+ 	}
+ 	jbegin_count += retval;
+-	reiserfs_write_lock(dir->i_sb);
++	lock_depth = reiserfs_write_lock_once(dir->i_sb);
+ 
+ 	retval = journal_begin(&th, dir->i_sb, jbegin_count);
+ 	if (retval) {
+@@ -805,8 +806,8 @@ static int reiserfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
+ 	d_instantiate(dentry, inode);
+ 	unlock_new_inode(inode);
+ 	retval = journal_end(&th, dir->i_sb, jbegin_count);
+-      out_failed:
+-	reiserfs_write_unlock(dir->i_sb);
++out_failed:
++	reiserfs_write_unlock_once(dir->i_sb, lock_depth);
+ 	return retval;
+ }
+ 
+

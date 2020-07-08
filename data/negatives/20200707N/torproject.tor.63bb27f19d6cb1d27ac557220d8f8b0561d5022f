@@ -1,0 +1,150 @@
+commit 63bb27f19d6cb1d27ac557220d8f8b0561d5022f
+Author: Roger Dingledine <arma@torproject.org>
+Date:   Mon Sep 12 07:36:26 2005 +0000
+
+    be more thorough about noticing when a directory request has failed:
+    it has failed not only when the connection attempt fails, but also
+    if the conn reaches eof before we get a response that we're happy with.
+    
+    
+    svn:r5013
+
+diff --git a/src/or/connection.c b/src/or/connection.c
+index 156bbc0b7..8474ad5c6 100644
+--- a/src/or/connection.c
++++ b/src/or/connection.c
+@@ -319,10 +319,10 @@ connection_about_to_close_connection(connection_t *conn)
+ 
+   switch (conn->type) {
+     case CONN_TYPE_DIR:
+-      if (conn->state == DIR_CONN_STATE_CONNECTING) {
+-        /* it's a directory server and connecting failed: forget about
+-           this router */
+-        connection_dir_connect_failed(conn);
++      if (conn->state < DIR_CONN_STATE_CLIENT_FINISHED) {
++        /* It's a directory connection and connecting or fetching
++         * failed: forget about this router, and maybe try again. */
++        connection_dir_request_failed(conn);
+       }
+       if (conn->purpose == DIR_PURPOSE_FETCH_RENDDESC)
+         rend_client_desc_here(conn->rend_query); /* give it a try */
+diff --git a/src/or/directory.c b/src/or/directory.c
+index 7bcc6f2ed..c386b20d2 100644
+--- a/src/or/directory.c
++++ b/src/or/directory.c
+@@ -263,17 +263,17 @@ directory_initiate_command_trusted_dir(trusted_dir_server_t *dirserv,
+                payload, payload_len);
+ }
+ 
+-/** Called when we are unable to complete our connection to a
++/** Called when we are unable to complete the client's request to a
+  * directory server: Mark the router as down and try again if possible.
+  */
+ void
+-connection_dir_connect_failed(connection_t *conn)
++connection_dir_request_failed(connection_t *conn)
+ {
+   router_mark_as_down(conn->identity_digest); /* don't try him again */
+   if (conn->purpose == DIR_PURPOSE_FETCH_DIR ||
+       conn->purpose == DIR_PURPOSE_FETCH_RUNNING_LIST) {
+-    log_fn(LOG_INFO, "Giving up on directory server at '%s'; retrying",
+-           conn->address);
++    log_fn(LOG_INFO, "Giving up on directory server at '%s:%d'; retrying",
++           conn->address, conn->port);
+     directory_get_from_dirserver(conn->purpose, NULL,
+                                  0 /* don't retry_if_no_servers */);
+   } else if (conn->purpose == DIR_PURPOSE_FETCH_NETWORKSTATUS) {
+@@ -375,7 +375,7 @@ directory_initiate_command(const char *address, uint32_t addr,
+ 
+     switch (connection_connect(conn, conn->address, addr, dir_port)) {
+       case -1:
+-        connection_dir_connect_failed(conn);
++        connection_dir_request_failed(conn); /* retry if we want */
+         connection_free(conn);
+         return;
+       case 1:
+@@ -757,8 +757,11 @@ body_is_plausible(const char *body, size_t len, int purpose)
+ /** We are a client, and we've finished reading the server's
+  * response. Parse and it and act appropriately.
+  *
+- * Return -1 if an error has occurred, or 0 normally. The caller
+- * will take care of marking the connection for close.
++ * If we're happy with the result (we get it and it's useful),
++ * return 0. Otherwise return -1, and the caller should consider
++ * trying the request again.
++ *
++ * The caller will take care of marking the connection for close.
+  */
+ static int
+ connection_dir_client_reached_eof(connection_t *conn)
+@@ -873,7 +876,7 @@ connection_dir_client_reached_eof(connection_t *conn)
+       log_fn(LOG_INFO,"Empty directory; status %d (\"%s\") Ignoring.",
+              status_code, reason);
+       tor_free(body); tor_free(headers); tor_free(reason);
+-      return 0;
++      return -1;
+     }
+     if (status_code != 200) {
+       log_fn(LOG_WARN,"Received http status code %d (\"%s\") from server '%s:%d'. I'll try again soon.",
+@@ -883,9 +886,10 @@ connection_dir_client_reached_eof(connection_t *conn)
+     }
+     if (router_load_routerlist_from_directory(body, NULL, !skewed, 0) < 0) {
+       log_fn(LOG_NOTICE,"I failed to parse the directory I fetched from '%s:%d'. Ignoring.", conn->address, conn->port);
+-    } else {
+-      log_fn(LOG_INFO,"updated routers.");
++      tor_free(body); tor_free(headers); tor_free(reason);
++      return -1;
+     }
++    log_fn(LOG_INFO,"updated routers.");
+     /* do things we've been waiting to do */
+     directory_has_arrived(time(NULL), conn->identity_digest);
+   }
+@@ -980,6 +984,8 @@ connection_dir_client_reached_eof(connection_t *conn)
+         log_fn(LOG_WARN,"http status %d (\"%s\") reason unexpected (server '%s:%d').", status_code, reason, conn->address, conn->port);
+         break;
+     }
++    /* return 0 in all cases, since we don't want to mark any
++     * dirservers down just because they don't like us. */
+   }
+ 
+   if (conn->purpose == DIR_PURPOSE_FETCH_RENDDESC) {
+@@ -1040,6 +1046,8 @@ connection_dir_reached_eof(connection_t *conn)
+   }
+ 
+   retval = connection_dir_client_reached_eof(conn);
++  if (retval == 0) /* success */
++    conn->state = DIR_CONN_STATE_CLIENT_FINISHED;
+   connection_mark_for_close(conn);
+   return retval;
+ }
+diff --git a/src/or/or.h b/src/or/or.h
+index 2669587ec..cd51a0624 100644
+--- a/src/or/or.h
++++ b/src/or/or.h
+@@ -298,11 +298,13 @@ typedef enum {
+ #define DIR_CONN_STATE_CLIENT_SENDING 2
+ /** State for connection to directory server: reading HTTP response. */
+ #define DIR_CONN_STATE_CLIENT_READING 3
++/** State for connection to directory server: happy and finished. */
++#define DIR_CONN_STATE_CLIENT_FINISHED 4
+ /** State for connection at directory server: waiting for HTTP request. */
+-#define DIR_CONN_STATE_SERVER_COMMAND_WAIT 4
++#define DIR_CONN_STATE_SERVER_COMMAND_WAIT 5
+ /** State for connection at directory server: sending HTTP response. */
+-#define DIR_CONN_STATE_SERVER_WRITING 5
+-#define _DIR_CONN_STATE_MAX 5
++#define DIR_CONN_STATE_SERVER_WRITING 6
++#define _DIR_CONN_STATE_MAX 6
+ 
+ #define _CONTROL_CONN_STATE_MIN 1
+ #define CONTROL_CONN_STATE_OPEN_V0 1
+@@ -1697,7 +1699,7 @@ int connection_dir_reached_eof(connection_t *conn);
+ int connection_dir_process_inbuf(connection_t *conn);
+ int connection_dir_finished_flushing(connection_t *conn);
+ int connection_dir_finished_connecting(connection_t *conn);
+-void connection_dir_connect_failed(connection_t *conn);
++void connection_dir_request_failed(connection_t *conn);
+ void parse_dir_policy(void);
+ void free_dir_policy(void);
+ 
+

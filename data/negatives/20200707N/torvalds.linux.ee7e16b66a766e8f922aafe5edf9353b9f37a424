@@ -1,0 +1,63 @@
+commit ee7e16b66a766e8f922aafe5edf9353b9f37a424
+Author: Andrew Lunn <andrew@lunn.ch>
+Date:   Tue Jan 2 17:40:26 2018 +0100
+
+    net: mdio: Only perform gpio reset for PHYs
+    
+    Ethernet switch on the MDIO bus have historically performed their own
+    handling of the GPIO reset line. The resent patch to have the MDIO
+    core handle the reset has broken the switch drivers, in that they
+    cannot claim the GPIO. Some switch drivers need more control over the
+    GPIO line than what the MDIO core provides. So restore the historical
+    behaviour by only performing a reset of PHYs, not switches.
+    
+    Fixes: bafbdd527d56 ("phylib: Add device reset GPIO support")
+    Reported-by: Sean Wang <sean.wang@mediatek.com>
+    Signed-off-by: Andrew Lunn <andrew@lunn.ch>
+    Reviewed-by: Geert Uytterhoeven <geert+renesas@glider.be>
+    Tested-by: Geert Uytterhoeven <geert+renesas@glider.be>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/phy/mdio_bus.c b/drivers/net/phy/mdio_bus.c
+index e2419c792a44..88272b3ac2e2 100644
+--- a/drivers/net/phy/mdio_bus.c
++++ b/drivers/net/phy/mdio_bus.c
+@@ -47,13 +47,10 @@
+ 
+ #include "mdio-boardinfo.h"
+ 
+-int mdiobus_register_device(struct mdio_device *mdiodev)
++static int mdiobus_register_gpiod(struct mdio_device *mdiodev)
+ {
+ 	struct gpio_desc *gpiod = NULL;
+ 
+-	if (mdiodev->bus->mdio_map[mdiodev->addr])
+-		return -EBUSY;
+-
+ 	/* Deassert the optional reset signal */
+ 	if (mdiodev->dev.of_node)
+ 		gpiod = fwnode_get_named_gpiod(&mdiodev->dev.of_node->fwnode,
+@@ -69,6 +66,22 @@ int mdiobus_register_device(struct mdio_device *mdiodev)
+ 	/* Assert the reset signal again */
+ 	mdio_device_reset(mdiodev, 1);
+ 
++	return 0;
++}
++
++int mdiobus_register_device(struct mdio_device *mdiodev)
++{
++	int err;
++
++	if (mdiodev->bus->mdio_map[mdiodev->addr])
++		return -EBUSY;
++
++	if (mdiodev->flags & MDIO_DEVICE_FLAG_PHY) {
++		err = mdiobus_register_gpiod(mdiodev);
++		if (err)
++			return err;
++	}
++
+ 	mdiodev->bus->mdio_map[mdiodev->addr] = mdiodev;
+ 
+ 	return 0;
+

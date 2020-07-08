@@ -1,0 +1,60 @@
+commit 5e85bd057f0cb29881e3d55d29f48bb55bd2f450
+Author: Trent Piepho <xyzzy@speakeasy.org>
+Date:   Thu Mar 30 15:53:32 2006 -0300
+
+    V4L/DVB (3672): Fix memory leak in dvr open
+    
+    The dvr device could be opened multiple times simultaneously in O_RDONLY mode.
+    Each open after the first would allocate a new dvr buffer (1880 KB) and leak
+    the old buffer.  The first close would de-allocate the dvr buffer and cause
+    all other open dvrs to stop working.  This patch allows only a single O_RDONLY
+    open of the drv device, as per the API specification.  Multiple O_WRONLY opens
+    are still allowed and don't appear to cause any problems.
+    
+    Signed-off-by: Trent Piepho <xyzzy@speakeasy.org>
+    Signed-off-by: Andrew de Quincey <adq_dvb@lidskialf.net>
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@infradead.org>
+
+diff --git a/drivers/media/dvb/dvb-core/dmxdev.c b/drivers/media/dvb/dvb-core/dmxdev.c
+index 09e96e9ddbdf..04578df3f249 100644
+--- a/drivers/media/dvb/dvb-core/dmxdev.c
++++ b/drivers/media/dvb/dvb-core/dmxdev.c
+@@ -141,12 +141,18 @@ static int dvb_dvr_open(struct inode *inode, struct file *file)
+ 	}
+ 
+ 	if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
+-		void *mem = vmalloc(DVR_BUFFER_SIZE);
++		void *mem;
++		if (!dvbdev->readers) {
++			mutex_unlock(&dmxdev->mutex);
++			return -EBUSY;
++		}
++		mem = vmalloc(DVR_BUFFER_SIZE);
+ 		if (!mem) {
+ 			mutex_unlock(&dmxdev->mutex);
+ 			return -ENOMEM;
+ 		}
+ 		dvb_ringbuffer_init(&dmxdev->dvr_buffer, mem, DVR_BUFFER_SIZE);
++		dvbdev->readers--;
+ 	}
+ 
+ 	if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
+@@ -184,6 +190,7 @@ static int dvb_dvr_release(struct inode *inode, struct file *file)
+ 						dmxdev->dvr_orig_fe);
+ 	}
+ 	if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
++		dvbdev->readers++;
+ 		if (dmxdev->dvr_buffer.data) {
+ 			void *mem = dmxdev->dvr_buffer.data;
+ 			mb();
+@@ -1029,8 +1036,7 @@ static struct file_operations dvb_dvr_fops = {
+ 
+ static struct dvb_device dvbdev_dvr = {
+ 	.priv = NULL,
+-	.users = 1,
+-	.writers = 1,
++	.readers = 1,
+ 	.fops = &dvb_dvr_fops
+ };
+ 
+

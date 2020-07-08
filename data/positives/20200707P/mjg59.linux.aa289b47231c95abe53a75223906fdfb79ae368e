@@ -1,0 +1,110 @@
+commit aa289b47231c95abe53a75223906fdfb79ae368e
+Author: David Howells <dhowells@redhat.com>
+Date:   Fri Mar 23 00:10:00 2007 -0700
+
+    [PATCH] FDPIC: fix the /proc/pid/stat representation of executable boundaries
+    
+    Fix the /proc/pid/stat representation of executable boundaries.  It should
+    show the bounds of the executable, but instead shows the bounds of the
+    loader.
+    
+    Before the patch is applied, the bug can be seen by examining, say, inetd:
+    
+            # ps | grep inetd
+              610         root          0   S   /usr/sbin/inetd -i
+            # cat /proc/610/maps
+            c0bb0000-c0bba788 r-xs 00000000 00:0b 14582157  /lib/ld-uClibc-0.9.28.so
+            c3180000-c31dede4 r-xs 00000000 00:0b 14582179  /lib/libuClibc-0.9.28.so
+            c328c000-c328ea00 rw-p 00008000 00:0b 14582157  /lib/ld-uClibc-0.9.28.so
+            c3290000-c329b6c0 rw-p 00000000 00:00 0
+            c32a0000-c32c0000 rwxp 00000000 00:00 0
+            c32d4000-c32d8000 rw-p 00000000 00:00 0
+            c3394000-c3398000 rw-p 00000000 00:00 0
+            c3458000-c345f464 r-xs 00000000 00:0b 16384612  /usr/sbin/inetd
+            c3470000-c34748f8 rw-p 00004000 00:0b 16384612  /usr/sbin/inetd
+            c34cc000-c34d0000 rw-p 00000000 00:00 0
+            c34d4000-c34d8000 rw-p 00000000 00:00 0
+            c34d8000-c34dc000 rw-p 00000000 00:00 0
+            # cat /proc/610/stat
+            610 (inetd) S 1 610 610 0 -1 256 0 0 0 0 0 8 0 0 19 0 1 0 94392000718
+            950272 0 4294967295 3233480704 3233523592 3274440352 3274439976
+            3273467584 0 0 4096 90115 3221712796 0 0 17 0 0 0 0
+    
+    The code boundaries are 3233480704 to 3233523592, which are:
+    
+            (gdb) p/x 3233480704
+            $1 = 0xc0bb0000
+            (gdb) p/x 3233523592
+            $2 = 0xc0bba788
+    
+    Which corresponds to this line in the maps file:
+    
+            c0bb0000-c0bba788 r-xs 00000000 00:0b 14582157  /lib/ld-uClibc-0.9.28.so
+    
+    Which is wrong.  After the patch is applied, the maps file is pretty much
+    identical (there's some minor shuffling of the location of some of the
+    anonymous VMAs), but the stat file is now:
+    
+            # cat /proc/610/stat
+            610 (inetd) S 1 610 610 0 -1 256 0 0 0 0 0 7 0 0 18 0 1 0 94392000722
+            950272 0 4294967295 3276111872 3276141668 3274440352 3274439976
+            3273467584 0 0 4096 90115 3221712796 0 0 17 0 0 0 0
+    
+    The code boundaries are then 3276111872 to 3276141668, which are:
+    
+            (gdb) p/x 3276111872
+            $1 = 0xc3458000
+            (gdb) p/x 3276141668
+            $2 = 0xc345f464
+    
+    And these correspond to this line in the maps file instead:
+    
+            c3458000-c345f464 r-xs 00000000 00:0b 16384612  /usr/sbin/inetd
+    
+    Which is now correct.
+    
+    Signed-off-by: David Howells <dhowells@redhat.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/binfmt_elf_fdpic.c b/fs/binfmt_elf_fdpic.c
+index 5810aa1339fd..47d6d49d1fb9 100644
+--- a/fs/binfmt_elf_fdpic.c
++++ b/fs/binfmt_elf_fdpic.c
+@@ -179,6 +179,8 @@ static int load_elf_fdpic_binary(struct linux_binprm *bprm,
+ 	int executable_stack;
+ 	int retval, i;
+ 
++	kdebug("____ LOAD %d ____", current->pid);
++
+ 	memset(&exec_params, 0, sizeof(exec_params));
+ 	memset(&interp_params, 0, sizeof(interp_params));
+ 
+@@ -941,8 +943,11 @@ static int elf_fdpic_map_file_constdisp_on_uclinux(
+ 
+ 		if (mm) {
+ 			if (phdr->p_flags & PF_X) {
+-				mm->start_code = seg->addr;
+-				mm->end_code = seg->addr + phdr->p_memsz;
++				if (!mm->start_code) {
++					mm->start_code = seg->addr;
++					mm->end_code = seg->addr +
++						phdr->p_memsz;
++				}
+ 			} else if (!mm->start_data) {
+ 				mm->start_data = seg->addr;
+ #ifndef CONFIG_MMU
+@@ -1123,8 +1128,10 @@ static int elf_fdpic_map_file_by_direct_mmap(struct elf_fdpic_params *params,
+ 
+ 		if (mm) {
+ 			if (phdr->p_flags & PF_X) {
+-				mm->start_code = maddr;
+-				mm->end_code = maddr + phdr->p_memsz;
++				if (!mm->start_code) {
++					mm->start_code = maddr;
++					mm->end_code = maddr + phdr->p_memsz;
++				}
+ 			} else if (!mm->start_data) {
+ 				mm->start_data = maddr;
+ 				mm->end_data = maddr + phdr->p_memsz;
+

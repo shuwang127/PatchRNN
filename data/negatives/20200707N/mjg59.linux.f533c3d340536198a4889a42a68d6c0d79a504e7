@@ -1,0 +1,161 @@
+commit f533c3d340536198a4889a42a68d6c0d79a504e7
+Author: Paul Mundt <lethal@linux-sh.org>
+Date:   Fri Oct 16 17:20:58 2009 +0900
+
+    sh: Idle loop chainsawing for SMP-based light sleep.
+    
+    This does a bit of chainsawing of the idle loop code to get light sleep
+    working on SMP. Previously this was forcing secondary CPUs in to sleep
+    mode with them not coming back if they didn't have their own local
+    timers. Given that we use clockevents broadcasting by default, the CPU
+    managing the clockevents can't have IRQs disabled before entering its
+    sleep state.
+    
+    This unfortunately leaves us with the age-old need_resched() race in
+    between local_irq_enable() and cpu_sleep(), but at present this is
+    unavoidable. After some more experimentation it may be possible to layer
+    on SR.BL bit manipulation over top of this scheme to inhibit the race
+    condition, but given the current potential for missing wakeups, this is
+    left as a future exercise.
+    
+    Signed-off-by: Paul Mundt <lethal@linux-sh.org>
+
+diff --git a/arch/sh/include/asm/bugs.h b/arch/sh/include/asm/bugs.h
+index 46260fcbdf4b..02a19a1c033a 100644
+--- a/arch/sh/include/asm/bugs.h
++++ b/arch/sh/include/asm/bugs.h
+@@ -14,11 +14,15 @@
+ 
+ #include <asm/processor.h>
+ 
++extern void select_idle_routine(void);
++
+ static void __init check_bugs(void)
+ {
+ 	extern unsigned long loops_per_jiffy;
+ 	char *p = &init_utsname()->machine[2]; /* "sh" */
+ 
++	select_idle_routine();
++
+ 	current_cpu_data.loops_per_jiffy = loops_per_jiffy;
+ 
+ 	switch (current_cpu_data.family) {
+diff --git a/arch/sh/kernel/idle.c b/arch/sh/kernel/idle.c
+index 27ff2dc093c7..8e61241230cb 100644
+--- a/arch/sh/kernel/idle.c
++++ b/arch/sh/kernel/idle.c
+@@ -21,7 +21,7 @@
+ #include <asm/atomic.h>
+ 
+ static int hlt_counter;
+-void (*pm_idle)(void);
++void (*pm_idle)(void) = NULL;
+ void (*pm_power_off)(void);
+ EXPORT_SYMBOL(pm_power_off);
+ 
+@@ -39,41 +39,68 @@ static int __init hlt_setup(char *__unused)
+ }
+ __setup("hlt", hlt_setup);
+ 
++static inline int hlt_works(void)
++{
++	return !hlt_counter;
++}
++
++/*
++ * On SMP it's slightly faster (but much more power-consuming!)
++ * to poll the ->work.need_resched flag instead of waiting for the
++ * cross-CPU IPI to arrive. Use this option with caution.
++ */
++static void poll_idle(void)
++{
++	local_irq_enable();
++	while (!need_resched())
++		cpu_relax();
++}
++
+ void default_idle(void)
+ {
+-	if (!hlt_counter) {
++	if (hlt_works()) {
+ 		clear_thread_flag(TIF_POLLING_NRFLAG);
+ 		smp_mb__after_clear_bit();
+-		set_bl_bit();
+-		stop_critical_timings();
+ 
+-		while (!need_resched())
++		if (!need_resched()) {
++			local_irq_enable();
+ 			cpu_sleep();
++		}
+ 
+-		start_critical_timings();
+-		clear_bl_bit();
+ 		set_thread_flag(TIF_POLLING_NRFLAG);
+ 	} else
+-		while (!need_resched())
+-			cpu_relax();
++		poll_idle();
+ }
+ 
++/*
++ * The idle thread. There's no useful work to be done, so just try to conserve
++ * power and have a low exit latency (ie sit in a loop waiting for somebody to
++ * say that they'd like to reschedule)
++ */
+ void cpu_idle(void)
+ {
++	unsigned int cpu = smp_processor_id();
++
+ 	set_thread_flag(TIF_POLLING_NRFLAG);
+ 
+ 	/* endless idle loop with no priority at all */
+ 	while (1) {
+-		void (*idle)(void) = pm_idle;
++		tick_nohz_stop_sched_tick(1);
+ 
+-		if (!idle)
+-			idle = default_idle;
++		while (!need_resched() && cpu_online(cpu)) {
++			local_irq_disable();
++			/* Don't trace irqs off for idle */
++			stop_critical_timings();
++			pm_idle();
++			/*
++			 * Sanity check to ensure that pm_idle() returns
++			 * with IRQs enabled
++			 */
++			WARN_ON(irqs_disabled());
++			start_critical_timings();
++		}
+ 
+-		tick_nohz_stop_sched_tick(1);
+-		while (!need_resched())
+-			idle();
+ 		tick_nohz_restart_sched_tick();
+-
+ 		preempt_enable_no_resched();
+ 		schedule();
+ 		preempt_disable();
+@@ -81,6 +108,20 @@ void cpu_idle(void)
+ 	}
+ }
+ 
++void __cpuinit select_idle_routine(void)
++{
++	/*
++	 * If a platform has set its own idle routine, leave it alone.
++	 */
++	if (pm_idle)
++		return;
++
++	if (hlt_works())
++		pm_idle = default_idle;
++	else
++		pm_idle = poll_idle;
++}
++
+ static void do_nothing(void *unused)
+ {
+ }
+

@@ -1,0 +1,108 @@
+commit 710ecb0605350391e14a2d470397afb798b1fbf7
+Author: Matt Porter <mporter@linaro.org>
+Date:   Thu Sep 18 15:25:41 2014 -0400
+
+    greybus: update svc_msg_header fields and users to match spec
+    
+    The Greybus spec has been updated to clarify some of the original
+    intent of the SVC message definition. The svc_msg_header was:
+    
+    struct svc_msg_header {
+            __u8 function;
+            __u8 message_type;
+    ...
+    }
+    
+    and is now
+    
+    struct svc_msg_header {
+            __u8 function_id;
+            __u8 message_type;
+    ...
+    }
+    
+    to match the spec. The function_id carries enum svc_function_id values
+    and message_type is now clarified to be a session layer level field
+    that is simply "data" or "error".
+    
+    Change all references of function type to function id. For now, don't
+    parse the message_type field but add the two allowable svc_msg_type enums.
+    
+    Signed-off-by: Matt Porter <mporter@linaro.org>
+    Signed-off-by: Greg Kroah-Hartman <greg@kroah.com>
+
+diff --git a/drivers/staging/greybus/ap.c b/drivers/staging/greybus/ap.c
+index 4293073efe41..c2c5aa654e7e 100644
+--- a/drivers/staging/greybus/ap.c
++++ b/drivers/staging/greybus/ap.c
+@@ -29,7 +29,7 @@ struct ap_msg {
+ 
+ static struct workqueue_struct *ap_workqueue;
+ 
+-static struct svc_msg *svc_msg_alloc(enum svc_function_type type)
++static struct svc_msg *svc_msg_alloc(enum svc_function_id id)
+ {
+ 	struct svc_msg *svc_msg;
+ 
+@@ -37,8 +37,8 @@ static struct svc_msg *svc_msg_alloc(enum svc_function_type type)
+ 	if (!svc_msg)
+ 		return NULL;
+ 
+-	// FIXME - verify we are only sending message types we should be
+-	svc_msg->header.type = type;
++	// FIXME - verify we are only sending function IDs we should be
++	svc_msg->header.function_id = id;
+ 	return svc_msg;
+ }
+ 
+@@ -187,7 +187,7 @@ static void ap_process_event(struct work_struct *work)
+ 	}
+ 
+ 	/* Look at the message to figure out what to do with it */
+-	switch (svc_msg->header.type) {
++	switch (svc_msg->header.function_id) {
+ 	case SVC_FUNCTION_HANDSHAKE:
+ 		svc_handshake(&svc_msg->handshake, hd);
+ 		break;
+@@ -210,8 +210,8 @@ static void ap_process_event(struct work_struct *work)
+ 		svc_suspend(&svc_msg->suspend, hd);
+ 		break;
+ 	default:
+-		dev_err(hd->parent, "received invalid SVC message type %d\n",
+-			svc_msg->header.type);
++		dev_err(hd->parent, "received invalid SVC function ID %d\n",
++			svc_msg->header.function_id);
+ 	}
+ 
+ 	/* clean the message up */
+diff --git a/drivers/staging/greybus/svc_msg.h b/drivers/staging/greybus/svc_msg.h
+index bbc7ef0b6517..3f1a93499aee 100644
+--- a/drivers/staging/greybus/svc_msg.h
++++ b/drivers/staging/greybus/svc_msg.h
+@@ -12,7 +12,7 @@
+ 
+ #pragma pack(push, 1)
+ 
+-enum svc_function_type {
++enum svc_function_id {
+ 	SVC_FUNCTION_HANDSHAKE			= 0x00,
+ 	SVC_FUNCTION_UNIPRO_NETWORK_MANAGEMENT	= 0x01,
+ 	SVC_FUNCTION_HOTPLUG			= 0x02,
+@@ -22,9 +22,14 @@ enum svc_function_type {
+ 	SVC_FUNCTION_SUSPEND			= 0x06,
+ };
+ 
++enum svc_msg_type {
++	SVC_MSG_DATA				= 0x00,
++	SVC_MSG_ERROR				= 0xff,
++};
++
+ struct svc_msg_header {
+-	__u8	function;
+-	__u8	type;		/* enum svc_function_type */
++	__u8	function_id;	/* enum svc_function_id */
++	__u8	message_type;
+ 	__u8	version_major;
+ 	__u8	version_minor;
+ 	__le16	payload_length;
+

@@ -1,0 +1,36 @@
+commit c806dd799bc8f3c578581194d499b50acec44b7d
+Author: antirez <antirez@gmail.com>
+Date:   Tue Apr 28 22:10:23 2015 +0200
+
+    Fix Sentinel memory leak (hiredis bug)
+    
+    This fixes issue #2535, that was actually an hiredis library bug (I
+    submitted an issue and fix to the redis/hiredis repo as well).
+    
+    When an asynchronous hiredis connection subscribes to a Pub/Sub channel
+    and gets an error, and in other related conditions, the function
+    redisProcessCallbacks() enters a code path where the link is
+    disconnected, however the function returns before freeing the allocated
+    reply object. This causes a memory leak. The memory leak was trivial to
+    trigger in Redis Sentinel, which uses hiredis, every time we tried to
+    subscribe to an instance that required a password, in case the Sentinel
+    was configured either with the wrong password or without password at
+    all. In this case, the -AUTH error caused the leaking code path to be
+    executed.
+    
+    It was verified with Valgrind that after this change the leak no longer
+    happens in Sentinel with a misconfigured authentication password.
+
+diff --git a/deps/hiredis/async.c b/deps/hiredis/async.c
+index f7f343be..9cc35638 100644
+--- a/deps/hiredis/async.c
++++ b/deps/hiredis/async.c
+@@ -443,6 +443,7 @@ void redisProcessCallbacks(redisAsyncContext *ac) {
+             if (((redisReply*)reply)->type == REDIS_REPLY_ERROR) {
+                 c->err = REDIS_ERR_OTHER;
+                 snprintf(c->errstr,sizeof(c->errstr),"%s",((redisReply*)reply)->str);
++                c->reader->fn->freeObject(reply);
+                 __redisAsyncDisconnect(ac);
+                 return;
+             }
+

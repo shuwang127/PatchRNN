@@ -1,0 +1,241 @@
+commit 084c17fe0b68d391467fd48a14433443d4fcba81
+Author: Dmitry Stogov <dmitry@zend.com>
+Date:   Thu Nov 30 01:13:39 2017 +0300
+
+    Use zend_string_tolower() where it's possible (to avoid reallocations).
+    Allow zend_string_tolower_ex() to create parsistent strings
+
+diff --git a/Zend/zend_API.c b/Zend/zend_API.c
+index 53eca994a6..179667140b 100644
+--- a/Zend/zend_API.c
++++ b/Zend/zend_API.c
+@@ -2201,8 +2201,7 @@ ZEND_API int zend_register_functions(zend_class_entry *scope, const zend_functio
+ 				return FAILURE;
+ 			}
+ 		}
+-		lowercase_name = zend_string_alloc(fname_len, 1);
+-		zend_str_tolower_copy(ZSTR_VAL(lowercase_name), ptr->fname, fname_len);
++		lowercase_name = zend_string_tolower_ex(internal_function->function_name, 1);
+ 		lowercase_name = zend_new_interned_string(lowercase_name);
+ 		reg_function = malloc(sizeof(zend_internal_function));
+ 		memcpy(reg_function, &function, sizeof(zend_internal_function));
+@@ -2636,7 +2635,7 @@ ZEND_API int zend_next_free_module(void) /* {{{ */
+ static zend_class_entry *do_register_internal_class(zend_class_entry *orig_class_entry, uint32_t ce_flags) /* {{{ */
+ {
+ 	zend_class_entry *class_entry = malloc(sizeof(zend_class_entry));
+-	zend_string *lowercase_name = zend_string_alloc(ZSTR_LEN(orig_class_entry->name), 1);
++	zend_string *lowercase_name;
+ 	*class_entry = *orig_class_entry;
+ 
+ 	class_entry->type = ZEND_INTERNAL_CLASS;
+@@ -2648,7 +2647,7 @@ static zend_class_entry *do_register_internal_class(zend_class_entry *orig_class
+ 		zend_register_functions(class_entry, class_entry->info.internal.builtin_functions, &class_entry->function_table, MODULE_PERSISTENT);
+ 	}
+ 
+-	zend_str_tolower_copy(ZSTR_VAL(lowercase_name), ZSTR_VAL(orig_class_entry->name), ZSTR_LEN(class_entry->name));
++	lowercase_name = zend_string_tolower_ex(orig_class_entry->name, 1);
+ 	lowercase_name = zend_new_interned_string(lowercase_name);
+ 	zend_hash_update_ptr(CG(class_table), lowercase_name, class_entry);
+ 	zend_string_release(lowercase_name);
+diff --git a/Zend/zend_constants.c b/Zend/zend_constants.c
+index 100d0a263b..c24792f7b8 100644
+--- a/Zend/zend_constants.c
++++ b/Zend/zend_constants.c
+@@ -471,8 +471,7 @@ ZEND_API int zend_register_constant(zend_constant *c)
+ 	}
+ 
+ 	if (!(c->flags & CONST_CS)) {
+-		lowercase_name = zend_string_alloc(ZSTR_LEN(c->name), c->flags & CONST_PERSISTENT);
+-		zend_str_tolower_copy(ZSTR_VAL(lowercase_name), ZSTR_VAL(c->name), ZSTR_LEN(c->name));
++		lowercase_name = zend_string_tolower_ex(c->name, c->flags & CONST_PERSISTENT);
+ 		lowercase_name = zend_new_interned_string(lowercase_name);
+ 		name = lowercase_name;
+ 	} else {
+diff --git a/Zend/zend_operators.c b/Zend/zend_operators.c
+index cad8d1dff4..d3f7729fed 100644
+--- a/Zend/zend_operators.c
++++ b/Zend/zend_operators.c
+@@ -2606,14 +2606,14 @@ ZEND_API char* ZEND_FASTCALL zend_str_tolower_dup_ex(const char *source, size_t
+ }
+ /* }}} */
+ 
+-ZEND_API zend_string* ZEND_FASTCALL zend_string_tolower(zend_string *str) /* {{{ */
++ZEND_API zend_string* ZEND_FASTCALL zend_string_tolower_ex(zend_string *str, int persistent) /* {{{ */
+ {
+ 	register unsigned char *p = (unsigned char*)ZSTR_VAL(str);
+ 	register unsigned char *end = p + ZSTR_LEN(str);
+ 
+ 	while (p < end) {
+ 		if (*p != zend_tolower_ascii(*p)) {
+-			zend_string *res = zend_string_alloc(ZSTR_LEN(str), 0);
++			zend_string *res = zend_string_alloc(ZSTR_LEN(str), persistent);
+ 			register unsigned char *r;
+ 
+ 			if (p != (unsigned char*)ZSTR_VAL(str)) {
+diff --git a/Zend/zend_operators.h b/Zend/zend_operators.h
+index 30c758118d..50e1e2dd58 100644
+--- a/Zend/zend_operators.h
++++ b/Zend/zend_operators.h
+@@ -371,7 +371,9 @@ ZEND_API void         ZEND_FASTCALL zend_str_tolower(char *str, size_t length);
+ ZEND_API char*        ZEND_FASTCALL zend_str_tolower_copy(char *dest, const char *source, size_t length);
+ ZEND_API char*        ZEND_FASTCALL zend_str_tolower_dup(const char *source, size_t length);
+ ZEND_API char*        ZEND_FASTCALL zend_str_tolower_dup_ex(const char *source, size_t length);
+-ZEND_API zend_string* ZEND_FASTCALL zend_string_tolower(zend_string *str);
++ZEND_API zend_string* ZEND_FASTCALL zend_string_tolower_ex(zend_string *str, int persistent);
++
++#define zend_string_tolower(str) zend_string_tolower_ex(str, 0)
+ 
+ ZEND_API int ZEND_FASTCALL zend_binary_zval_strcmp(zval *s1, zval *s2);
+ ZEND_API int ZEND_FASTCALL zend_binary_zval_strncmp(zval *s1, zval *s2, zval *s3);
+diff --git a/ext/pdo/pdo_dbh.c b/ext/pdo/pdo_dbh.c
+index 57659967fc..f5b822bd73 100644
+--- a/ext/pdo/pdo_dbh.c
++++ b/ext/pdo/pdo_dbh.c
+@@ -1345,9 +1345,6 @@ static union _zend_function *dbh_method_get(zend_object **object, zend_string *m
+ 	pdo_dbh_object_t *dbh_obj = php_pdo_dbh_fetch_object(*object);
+ 	zend_string *lc_method_name;
+ 
+-	lc_method_name = zend_string_init(ZSTR_VAL(method_name), ZSTR_LEN(method_name), 0);
+-	zend_str_tolower_copy(ZSTR_VAL(lc_method_name), ZSTR_VAL(method_name), ZSTR_LEN(method_name));
+-
+ 	if ((fbc = std_object_handlers.get_method(object, method_name, key)) == NULL) {
+ 		/* not a pre-defined method, nor a user-defined method; check
+ 		 * the driver specific methods */
+@@ -1359,11 +1356,12 @@ static union _zend_function *dbh_method_get(zend_object **object, zend_string *m
+ 			}
+ 		}
+ 
++		lc_method_name = zend_string_tolower(method_name);
+ 		fbc = zend_hash_find_ptr(dbh_obj->inner->cls_methods[PDO_DBH_DRIVER_METHOD_KIND_DBH], lc_method_name);
++		zend_string_release(lc_method_name);
+ 	}
+ 
+ out:
+-	zend_string_release(lc_method_name);
+ 	return fbc;
+ }
+ 
+diff --git a/ext/pdo/pdo_stmt.c b/ext/pdo/pdo_stmt.c
+index 33f99b425a..0a825f052e 100644
+--- a/ext/pdo/pdo_stmt.c
++++ b/ext/pdo/pdo_stmt.c
+@@ -2223,9 +2223,7 @@ static union _zend_function *dbstmt_method_get(zend_object **object_pp, zend_str
+ 	zend_string *lc_method_name;
+ 	zend_object *object = *object_pp;
+ 
+-	lc_method_name = zend_string_alloc(ZSTR_LEN(method_name), 0);
+-	zend_str_tolower_copy(ZSTR_VAL(lc_method_name), ZSTR_VAL(method_name), ZSTR_LEN(method_name));
+-
++	lc_method_name = zend_string_tolower(method_name);
+ 
+ 	if ((fbc = zend_hash_find_ptr(&object->ce->function_table, lc_method_name)) == NULL) {
+ 		pdo_stmt_t *stmt = php_pdo_stmt_fetch_object(object);
+@@ -2637,8 +2635,7 @@ static union _zend_function *row_method_get(
+ 	zend_function *fbc;
+ 	zend_string *lc_method_name;
+ 
+-	lc_method_name = zend_string_alloc(ZSTR_LEN(method_name), 0);
+-	zend_str_tolower_copy(ZSTR_VAL(lc_method_name), ZSTR_VAL(method_name), ZSTR_LEN(method_name));
++	lc_method_name = zend_string_tolower(method_name);
+ 
+ 	if ((fbc = zend_hash_find_ptr(&pdo_row_ce->function_table, lc_method_name)) == NULL) {
+ 		zend_string_release(lc_method_name);
+diff --git a/ext/reflection/php_reflection.c b/ext/reflection/php_reflection.c
+index d6b6d9718e..d5194d08ac 100644
+--- a/ext/reflection/php_reflection.c
++++ b/ext/reflection/php_reflection.c
+@@ -731,7 +731,6 @@ static void _function_string(smart_str *str, zend_function *fptr, zend_class_ent
+ 	smart_str param_indent = {0};
+ 	zend_function *overwrites;
+ 	zend_string *lc_name;
+-	size_t lc_name_len;
+ 
+ 	/* TBD: Repair indenting of doc comment (or is this to be done in the parser?)
+ 	 * What's "wrong" is that any whitespace before the doc comment start is
+@@ -755,15 +754,13 @@ static void _function_string(smart_str *str, zend_function *fptr, zend_class_ent
+ 		if (fptr->common.scope != scope) {
+ 			smart_str_append_printf(str, ", inherits %s", ZSTR_VAL(fptr->common.scope->name));
+ 		} else if (fptr->common.scope->parent) {
+-			lc_name_len = ZSTR_LEN(fptr->common.function_name);
+-			lc_name = zend_string_alloc(lc_name_len, 0);
+-			zend_str_tolower_copy(ZSTR_VAL(lc_name), ZSTR_VAL(fptr->common.function_name), lc_name_len);
++			lc_name = zend_string_tolower(fptr->common.function_name);
+ 			if ((overwrites = zend_hash_find_ptr(&fptr->common.scope->parent->function_table, lc_name)) != NULL) {
+ 				if (fptr->common.scope != overwrites->common.scope) {
+ 					smart_str_append_printf(str, ", overwrites %s", ZSTR_VAL(overwrites->common.scope->name));
+ 				}
+ 			}
+-			efree(lc_name);
++			zend_string_release(lc_name);
+ 		}
+ 	}
+ 	if (fptr->common.prototype && fptr->common.prototype->common.scope) {
+diff --git a/ext/soap/soap.c b/ext/soap/soap.c
+index afaddf717d..db244b9b51 100644
+--- a/ext/soap/soap.c
++++ b/ext/soap/soap.c
+@@ -1423,8 +1423,7 @@ PHP_METHOD(SoapServer, addFunction)
+ 					return;
+ 				}
+ 
+-				key = zend_string_alloc(Z_STRLEN_P(tmp_function), 0);
+-				zend_str_tolower_copy(ZSTR_VAL(key), Z_STRVAL_P(tmp_function), Z_STRLEN_P(tmp_function));
++				key = zend_string_tolower(Z_STR_P(tmp_function));
+ 
+ 				if ((f = zend_hash_find_ptr(EG(function_table), key)) == NULL) {
+ 					php_error_docref(NULL, E_WARNING, "Tried to add a non existent function '%s'", Z_STRVAL_P(tmp_function));
+@@ -1441,8 +1440,7 @@ PHP_METHOD(SoapServer, addFunction)
+ 		zend_string *key;
+ 		zend_function *f;
+ 
+-		key = zend_string_alloc(Z_STRLEN_P(function_name), 0);
+-		zend_str_tolower_copy(ZSTR_VAL(key), Z_STRVAL_P(function_name), Z_STRLEN_P(function_name));
++		key = zend_string_tolower(Z_STR_P(function_name));
+ 
+ 		if ((f = zend_hash_find_ptr(EG(function_table), key)) == NULL) {
+ 			php_error_docref(NULL, E_WARNING, "Tried to add a non existent function '%s'", Z_STRVAL_P(function_name));
+diff --git a/ext/spl/php_spl.c b/ext/spl/php_spl.c
+index 1097a72e98..6b1426e701 100644
+--- a/ext/spl/php_spl.c
++++ b/ext/spl/php_spl.c
+@@ -65,8 +65,7 @@ static zend_class_entry * spl_find_ce_by_name(zend_string *name, zend_bool autol
+ 	zend_class_entry *ce;
+ 
+ 	if (!autoload) {
+-		zend_string *lc_name = zend_string_alloc(ZSTR_LEN(name), 0);
+-		zend_str_tolower_copy(ZSTR_VAL(lc_name), ZSTR_VAL(name), ZSTR_LEN(name));
++		zend_string *lc_name = zend_string_tolower(name);
+ 
+ 		ce = zend_hash_find_ptr(EG(class_table), lc_name);
+ 		zend_string_free(lc_name);
+@@ -321,8 +320,7 @@ PHP_FUNCTION(spl_autoload)
+ 		pos_len = (int)ZSTR_LEN(file_exts);
+ 	}
+ 
+-	lc_name = zend_string_alloc(ZSTR_LEN(class_name), 0);
+-	zend_str_tolower_copy(ZSTR_VAL(lc_name), ZSTR_VAL(class_name), ZSTR_LEN(class_name));
++	lc_name = zend_string_tolower(class_name);
+ 	while (pos && *pos && !EG(exception)) {
+ 		pos1 = strchr(pos, ',');
+ 		if (pos1) {
+@@ -569,8 +567,7 @@ PHP_FUNCTION(spl_autoload_register)
+ 				lc_name = zend_string_alloc(ZSTR_LEN(func_name) - 1, 0);
+ 				zend_str_tolower_copy(ZSTR_VAL(lc_name), ZSTR_VAL(func_name) + 1, ZSTR_LEN(func_name) - 1);
+ 			} else {
+-				lc_name = zend_string_alloc(ZSTR_LEN(func_name), 0);
+-				zend_str_tolower_copy(ZSTR_VAL(lc_name), ZSTR_VAL(func_name), ZSTR_LEN(func_name));
++				lc_name = zend_string_tolower(func_name);
+ 			}
+ 		}
+ 		zend_string_release(func_name);
+@@ -694,8 +691,7 @@ PHP_FUNCTION(spl_autoload_unregister)
+ 			lc_name = zend_string_alloc(ZSTR_LEN(func_name) - 1, 0);
+ 			zend_str_tolower_copy(ZSTR_VAL(lc_name), ZSTR_VAL(func_name) + 1, ZSTR_LEN(func_name) - 1);
+ 		} else {
+-			lc_name = zend_string_alloc(ZSTR_LEN(func_name), 0);
+-			zend_str_tolower_copy(ZSTR_VAL(lc_name), ZSTR_VAL(func_name), ZSTR_LEN(func_name));
++			lc_name = zend_string_tolower(func_name);
+ 		}
+ 	}
+ 	zend_string_release(func_name);
+

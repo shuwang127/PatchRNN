@@ -1,0 +1,329 @@
+commit 441921d5309cfe098747d9840fd71bdc6ca2a93b
+Author: Daniel Vetter <daniel.vetter@ffwll.ch>
+Date:   Fri Feb 18 17:59:16 2011 +0100
+
+    drm/radeon: embed struct drm_gem_object
+    
+    Unconditionally initialize the drm gem object - it's not
+    worth the trouble not to for the few kernel objects.
+    
+    This patch only changes the place of the drm gem object,
+    access is still done via pointers.
+    
+    v2: Uncoditionally align the size in radeon_bo_create. At
+    least the r600/evergreen blit code didn't to this, angering
+    the paranoid gem code.
+    
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+
+diff --git a/drivers/gpu/drm/radeon/evergreen_blit_kms.c b/drivers/gpu/drm/radeon/evergreen_blit_kms.c
+index a1ba4b3053d0..2ed930e02f3a 100644
+--- a/drivers/gpu/drm/radeon/evergreen_blit_kms.c
++++ b/drivers/gpu/drm/radeon/evergreen_blit_kms.c
+@@ -572,7 +572,7 @@ int evergreen_blit_init(struct radeon_device *rdev)
+ 	obj_size += evergreen_ps_size * 4;
+ 	obj_size = ALIGN(obj_size, 256);
+ 
+-	r = radeon_bo_create(rdev, NULL, obj_size, PAGE_SIZE, true, RADEON_GEM_DOMAIN_VRAM,
++	r = radeon_bo_create(rdev, obj_size, PAGE_SIZE, true, RADEON_GEM_DOMAIN_VRAM,
+ 				&rdev->r600_blit.shader_obj);
+ 	if (r) {
+ 		DRM_ERROR("evergreen failed to allocate shader\n");
+diff --git a/drivers/gpu/drm/radeon/r600.c b/drivers/gpu/drm/radeon/r600.c
+index 650672a0f5ad..be780a6b9b1d 100644
+--- a/drivers/gpu/drm/radeon/r600.c
++++ b/drivers/gpu/drm/radeon/r600.c
+@@ -2728,7 +2728,7 @@ static int r600_ih_ring_alloc(struct radeon_device *rdev)
+ 
+ 	/* Allocate ring buffer */
+ 	if (rdev->ih.ring_obj == NULL) {
+-		r = radeon_bo_create(rdev, NULL, rdev->ih.ring_size,
++		r = radeon_bo_create(rdev, rdev->ih.ring_size,
+ 				     PAGE_SIZE, true,
+ 				     RADEON_GEM_DOMAIN_GTT,
+ 				     &rdev->ih.ring_obj);
+diff --git a/drivers/gpu/drm/radeon/r600_blit_kms.c b/drivers/gpu/drm/radeon/r600_blit_kms.c
+index 86e5aa07f0db..16e211a614d7 100644
+--- a/drivers/gpu/drm/radeon/r600_blit_kms.c
++++ b/drivers/gpu/drm/radeon/r600_blit_kms.c
+@@ -501,7 +501,7 @@ int r600_blit_init(struct radeon_device *rdev)
+ 	obj_size += r6xx_ps_size * 4;
+ 	obj_size = ALIGN(obj_size, 256);
+ 
+-	r = radeon_bo_create(rdev, NULL, obj_size, PAGE_SIZE, true, RADEON_GEM_DOMAIN_VRAM,
++	r = radeon_bo_create(rdev, obj_size, PAGE_SIZE, true, RADEON_GEM_DOMAIN_VRAM,
+ 				&rdev->r600_blit.shader_obj);
+ 	if (r) {
+ 		DRM_ERROR("r600 failed to allocate shader\n");
+diff --git a/drivers/gpu/drm/radeon/radeon.h b/drivers/gpu/drm/radeon/radeon.h
+index a4605362c528..f4d194649012 100644
+--- a/drivers/gpu/drm/radeon/radeon.h
++++ b/drivers/gpu/drm/radeon/radeon.h
+@@ -259,6 +259,7 @@ struct radeon_bo {
+ 	/* Constant after initialization */
+ 	struct radeon_device		*rdev;
+ 	struct drm_gem_object		*gobj;
++	struct drm_gem_object		gem_base;
+ };
+ 
+ struct radeon_bo_list {
+diff --git a/drivers/gpu/drm/radeon/radeon_benchmark.c b/drivers/gpu/drm/radeon/radeon_benchmark.c
+index c558685cc637..10191d9372d8 100644
+--- a/drivers/gpu/drm/radeon/radeon_benchmark.c
++++ b/drivers/gpu/drm/radeon/radeon_benchmark.c
+@@ -41,7 +41,7 @@ void radeon_benchmark_move(struct radeon_device *rdev, unsigned bsize,
+ 
+ 	size = bsize;
+ 	n = 1024;
+-	r = radeon_bo_create(rdev, NULL, size, PAGE_SIZE, true, sdomain, &sobj);
++	r = radeon_bo_create(rdev, size, PAGE_SIZE, true, sdomain, &sobj);
+ 	if (r) {
+ 		goto out_cleanup;
+ 	}
+@@ -53,7 +53,7 @@ void radeon_benchmark_move(struct radeon_device *rdev, unsigned bsize,
+ 	if (r) {
+ 		goto out_cleanup;
+ 	}
+-	r = radeon_bo_create(rdev, NULL, size, PAGE_SIZE, true, ddomain, &dobj);
++	r = radeon_bo_create(rdev, size, PAGE_SIZE, true, ddomain, &dobj);
+ 	if (r) {
+ 		goto out_cleanup;
+ 	}
+diff --git a/drivers/gpu/drm/radeon/radeon_device.c b/drivers/gpu/drm/radeon/radeon_device.c
+index 0d478932b1a9..13945bd10461 100644
+--- a/drivers/gpu/drm/radeon/radeon_device.c
++++ b/drivers/gpu/drm/radeon/radeon_device.c
+@@ -184,7 +184,7 @@ int radeon_wb_init(struct radeon_device *rdev)
+ 	int r;
+ 
+ 	if (rdev->wb.wb_obj == NULL) {
+-		r = radeon_bo_create(rdev, NULL, RADEON_GPU_PAGE_SIZE, PAGE_SIZE, true,
++		r = radeon_bo_create(rdev, RADEON_GPU_PAGE_SIZE, PAGE_SIZE, true,
+ 				RADEON_GEM_DOMAIN_GTT, &rdev->wb.wb_obj);
+ 		if (r) {
+ 			dev_warn(rdev->dev, "(%d) create WB bo failed\n", r);
+diff --git a/drivers/gpu/drm/radeon/radeon_gart.c b/drivers/gpu/drm/radeon/radeon_gart.c
+index 65016117d95f..9ac1bf0c41a8 100644
+--- a/drivers/gpu/drm/radeon/radeon_gart.c
++++ b/drivers/gpu/drm/radeon/radeon_gart.c
+@@ -78,7 +78,7 @@ int radeon_gart_table_vram_alloc(struct radeon_device *rdev)
+ 	int r;
+ 
+ 	if (rdev->gart.table.vram.robj == NULL) {
+-		r = radeon_bo_create(rdev, NULL, rdev->gart.table_size,
++		r = radeon_bo_create(rdev, rdev->gart.table_size,
+ 				     PAGE_SIZE, true, RADEON_GEM_DOMAIN_VRAM,
+ 				     &rdev->gart.table.vram.robj);
+ 		if (r) {
+diff --git a/drivers/gpu/drm/radeon/radeon_gem.c b/drivers/gpu/drm/radeon/radeon_gem.c
+index ede5dccdf79f..69d00bf85b13 100644
+--- a/drivers/gpu/drm/radeon/radeon_gem.c
++++ b/drivers/gpu/drm/radeon/radeon_gem.c
+@@ -32,7 +32,8 @@
+ 
+ int radeon_gem_object_init(struct drm_gem_object *obj)
+ {
+-	/* we do nothings here */
++	BUG();
++
+ 	return 0;
+ }
+ 
+@@ -44,9 +45,6 @@ void radeon_gem_object_free(struct drm_gem_object *gobj)
+ 	if (robj) {
+ 		radeon_bo_unref(&robj);
+ 	}
+-
+-	drm_gem_object_release(gobj);
+-	kfree(gobj);
+ }
+ 
+ int radeon_gem_object_create(struct radeon_device *rdev, int size,
+@@ -54,29 +52,27 @@ int radeon_gem_object_create(struct radeon_device *rdev, int size,
+ 				bool discardable, bool kernel,
+ 				struct drm_gem_object **obj)
+ {
+-	struct drm_gem_object *gobj;
+ 	struct radeon_bo *robj;
+ 	int r;
+ 
+ 	*obj = NULL;
+-	gobj = drm_gem_object_alloc(rdev->ddev, size);
+-	if (!gobj) {
+-		return -ENOMEM;
+-	}
+ 	/* At least align on page size */
+ 	if (alignment < PAGE_SIZE) {
+ 		alignment = PAGE_SIZE;
+ 	}
+-	r = radeon_bo_create(rdev, gobj, size, alignment, kernel, initial_domain, &robj);
++	r = radeon_bo_create(rdev, size, alignment, kernel, initial_domain, &robj);
+ 	if (r) {
+ 		if (r != -ERESTARTSYS)
+ 			DRM_ERROR("Failed to allocate GEM object (%d, %d, %u, %d)\n",
+ 				  size, initial_domain, alignment, r);
+-		drm_gem_object_unreference_unlocked(gobj);
+ 		return r;
+ 	}
+-	gobj->driver_private = robj;
+-	*obj = gobj;
++	*obj = &robj->gem_base;
++
++	mutex_lock(&rdev->gem.mutex);
++	list_add_tail(&robj->list, &rdev->gem.objects);
++	mutex_unlock(&rdev->gem.mutex);
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/radeon/radeon_object.c b/drivers/gpu/drm/radeon/radeon_object.c
+index 7d6b8e88f746..9324c881d640 100644
+--- a/drivers/gpu/drm/radeon/radeon_object.c
++++ b/drivers/gpu/drm/radeon/radeon_object.c
+@@ -55,6 +55,7 @@ static void radeon_ttm_bo_destroy(struct ttm_buffer_object *tbo)
+ 	list_del_init(&bo->list);
+ 	mutex_unlock(&bo->rdev->gem.mutex);
+ 	radeon_bo_clear_surface_reg(bo);
++	drm_gem_object_release(&bo->gem_base);
+ 	kfree(bo);
+ }
+ 
+@@ -86,7 +87,7 @@ void radeon_ttm_placement_from_domain(struct radeon_bo *rbo, u32 domain)
+ 	rbo->placement.num_busy_placement = c;
+ }
+ 
+-int radeon_bo_create(struct radeon_device *rdev, struct drm_gem_object *gobj,
++int radeon_bo_create(struct radeon_device *rdev,
+ 		     unsigned long size, int byte_align, bool kernel, u32 domain,
+ 		     struct radeon_bo **bo_ptr)
+ {
+@@ -96,6 +97,8 @@ int radeon_bo_create(struct radeon_device *rdev, struct drm_gem_object *gobj,
+ 	unsigned long max_size = 0;
+ 	int r;
+ 
++	size = ALIGN(size, PAGE_SIZE);
++
+ 	if (unlikely(rdev->mman.bdev.dev_mapping == NULL)) {
+ 		rdev->mman.bdev.dev_mapping = rdev->ddev->dev_mapping;
+ 	}
+@@ -118,8 +121,14 @@ int radeon_bo_create(struct radeon_device *rdev, struct drm_gem_object *gobj,
+ 	bo = kzalloc(sizeof(struct radeon_bo), GFP_KERNEL);
+ 	if (bo == NULL)
+ 		return -ENOMEM;
++	r = drm_gem_object_init(rdev->ddev, &bo->gem_base, size);
++	if (unlikely(r)) {
++		kfree(bo);
++		return r;
++	}
+ 	bo->rdev = rdev;
+-	bo->gobj = gobj;
++	bo->gobj = &bo->gem_base;
++	bo->gem_base.driver_private = bo;
+ 	bo->surface_reg = -1;
+ 	INIT_LIST_HEAD(&bo->list);
+ 	radeon_ttm_placement_from_domain(bo, domain);
+@@ -142,12 +151,9 @@ int radeon_bo_create(struct radeon_device *rdev, struct drm_gem_object *gobj,
+ 		return r;
+ 	}
+ 	*bo_ptr = bo;
+-	if (gobj) {
+-		mutex_lock(&bo->rdev->gem.mutex);
+-		list_add_tail(&bo->list, &rdev->gem.objects);
+-		mutex_unlock(&bo->rdev->gem.mutex);
+-	}
++
+ 	trace_radeon_bo_create(bo);
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/radeon/radeon_object.h b/drivers/gpu/drm/radeon/radeon_object.h
+index 22d4c237dea5..7f8e778dba46 100644
+--- a/drivers/gpu/drm/radeon/radeon_object.h
++++ b/drivers/gpu/drm/radeon/radeon_object.h
+@@ -137,10 +137,9 @@ static inline int radeon_bo_wait(struct radeon_bo *bo, u32 *mem_type,
+ }
+ 
+ extern int radeon_bo_create(struct radeon_device *rdev,
+-			    struct drm_gem_object *gobj, unsigned long size,
+-			    int byte_align,
+-			    bool kernel, u32 domain,
+-			    struct radeon_bo **bo_ptr);
++				unsigned long size, int byte_align,
++				bool kernel, u32 domain,
++				struct radeon_bo **bo_ptr);
+ extern int radeon_bo_kmap(struct radeon_bo *bo, void **ptr);
+ extern void radeon_bo_kunmap(struct radeon_bo *bo);
+ extern void radeon_bo_unref(struct radeon_bo **bo);
+diff --git a/drivers/gpu/drm/radeon/radeon_ring.c b/drivers/gpu/drm/radeon/radeon_ring.c
+index 06e79822a2bf..992d99d13fc5 100644
+--- a/drivers/gpu/drm/radeon/radeon_ring.c
++++ b/drivers/gpu/drm/radeon/radeon_ring.c
+@@ -175,7 +175,7 @@ int radeon_ib_pool_init(struct radeon_device *rdev)
+ 		return 0;
+ 	INIT_LIST_HEAD(&rdev->ib_pool.bogus_ib);
+ 	/* Allocate 1M object buffer */
+-	r = radeon_bo_create(rdev, NULL,  RADEON_IB_POOL_SIZE*64*1024,
++	r = radeon_bo_create(rdev, RADEON_IB_POOL_SIZE*64*1024,
+ 			     PAGE_SIZE, true, RADEON_GEM_DOMAIN_GTT,
+ 			     &rdev->ib_pool.robj);
+ 	if (r) {
+@@ -332,7 +332,7 @@ int radeon_ring_init(struct radeon_device *rdev, unsigned ring_size)
+ 	rdev->cp.ring_size = ring_size;
+ 	/* Allocate ring buffer */
+ 	if (rdev->cp.ring_obj == NULL) {
+-		r = radeon_bo_create(rdev, NULL, rdev->cp.ring_size, PAGE_SIZE, true,
++		r = radeon_bo_create(rdev, rdev->cp.ring_size, PAGE_SIZE, true,
+ 					RADEON_GEM_DOMAIN_GTT,
+ 					&rdev->cp.ring_obj);
+ 		if (r) {
+diff --git a/drivers/gpu/drm/radeon/radeon_test.c b/drivers/gpu/drm/radeon/radeon_test.c
+index 5b44f652145c..dee4a0c1b4b2 100644
+--- a/drivers/gpu/drm/radeon/radeon_test.c
++++ b/drivers/gpu/drm/radeon/radeon_test.c
+@@ -52,7 +52,7 @@ void radeon_test_moves(struct radeon_device *rdev)
+ 		goto out_cleanup;
+ 	}
+ 
+-	r = radeon_bo_create(rdev, NULL, size, PAGE_SIZE, true, RADEON_GEM_DOMAIN_VRAM,
++	r = radeon_bo_create(rdev, size, PAGE_SIZE, true, RADEON_GEM_DOMAIN_VRAM,
+ 				&vram_obj);
+ 	if (r) {
+ 		DRM_ERROR("Failed to create VRAM object\n");
+@@ -71,7 +71,7 @@ void radeon_test_moves(struct radeon_device *rdev)
+ 		void **gtt_start, **gtt_end;
+ 		void **vram_start, **vram_end;
+ 
+-		r = radeon_bo_create(rdev, NULL, size, PAGE_SIZE, true,
++		r = radeon_bo_create(rdev, size, PAGE_SIZE, true,
+ 					 RADEON_GEM_DOMAIN_GTT, gtt_obj + i);
+ 		if (r) {
+ 			DRM_ERROR("Failed to create GTT object %d\n", i);
+diff --git a/drivers/gpu/drm/radeon/radeon_ttm.c b/drivers/gpu/drm/radeon/radeon_ttm.c
+index 1272e4b6a1d4..e17e5958e564 100644
+--- a/drivers/gpu/drm/radeon/radeon_ttm.c
++++ b/drivers/gpu/drm/radeon/radeon_ttm.c
+@@ -529,7 +529,7 @@ int radeon_ttm_init(struct radeon_device *rdev)
+ 		DRM_ERROR("Failed initializing VRAM heap.\n");
+ 		return r;
+ 	}
+-	r = radeon_bo_create(rdev, NULL, 256 * 1024, PAGE_SIZE, true,
++	r = radeon_bo_create(rdev, 256 * 1024, PAGE_SIZE, true,
+ 				RADEON_GEM_DOMAIN_VRAM,
+ 				&rdev->stollen_vga_memory);
+ 	if (r) {
+diff --git a/drivers/gpu/drm/radeon/rv770.c b/drivers/gpu/drm/radeon/rv770.c
+index 2211a323db41..3a95999d2fef 100644
+--- a/drivers/gpu/drm/radeon/rv770.c
++++ b/drivers/gpu/drm/radeon/rv770.c
+@@ -999,7 +999,7 @@ static int rv770_vram_scratch_init(struct radeon_device *rdev)
+ 	u64 gpu_addr;
+ 
+ 	if (rdev->vram_scratch.robj == NULL) {
+-		r = radeon_bo_create(rdev, NULL, RADEON_GPU_PAGE_SIZE,
++		r = radeon_bo_create(rdev, RADEON_GPU_PAGE_SIZE,
+ 				     PAGE_SIZE, true, RADEON_GEM_DOMAIN_VRAM,
+ 				     &rdev->vram_scratch.robj);
+ 		if (r) {
+

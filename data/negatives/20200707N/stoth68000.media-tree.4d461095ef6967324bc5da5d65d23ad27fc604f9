@@ -1,0 +1,53 @@
+commit 4d461095ef6967324bc5da5d65d23ad27fc604f9
+Author: Alan Stern <stern@rowland.harvard.edu>
+Date:   Fri May 4 11:51:25 2007 -0400
+
+    USB: Implement PM FREEZE and PRETHAW
+    
+    This patch (as884) finally implements the time-saving semantics
+    possible with the Power Management FREEZE and PRETHAW events.  Their
+    proper handling requires only that devices be quiesced, with
+    interrupts and DMA turned off; non-root USB devices don't actually
+    need to be put in a suspended state.  The patch checks and avoids
+    doing the suspend call when possible.
+    
+    Signed-off-by: Alan Stern <stern@rowland.harvard.edu>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/usb/core/driver.c b/drivers/usb/core/driver.c
+index 38c3dd2a44e0..63d47946e3db 100644
+--- a/drivers/usb/core/driver.c
++++ b/drivers/usb/core/driver.c
+@@ -1050,8 +1050,15 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
+ 				break;
+ 		}
+ 	}
+-	if (status == 0)
++	if (status == 0) {
++
++		/* Non-root devices don't need to do anything for FREEZE
++		 * or PRETHAW. */
++		if (udev->parent && (msg.event == PM_EVENT_FREEZE ||
++				msg.event == PM_EVENT_PRETHAW))
++			goto done;
+ 		status = usb_suspend_device(udev, msg);
++	}
+ 
+ 	/* If the suspend failed, resume interfaces that did get suspended */
+ 	if (status != 0) {
+diff --git a/drivers/usb/core/generic.c b/drivers/usb/core/generic.c
+index 9bbcb20e2d94..e7ec9b6b7a93 100644
+--- a/drivers/usb/core/generic.c
++++ b/drivers/usb/core/generic.c
+@@ -193,10 +193,6 @@ static void generic_disconnect(struct usb_device *udev)
+ 
+ static int generic_suspend(struct usb_device *udev, pm_message_t msg)
+ {
+-	/* USB devices enter SUSPEND state through their hubs, but can be
+-	 * marked for FREEZE as soon as their children are already idled.
+-	 * But those semantics are useless, so we equate the two (sigh).
+-	 */
+ 	return usb_port_suspend(udev);
+ }
+ 
+

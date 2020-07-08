@@ -1,0 +1,42 @@
+commit 485707116b3949ab41e1aba8d74f45a7551e3a65
+Author: Dan Carpenter <error27@gmail.com>
+Date:   Sun Mar 20 14:09:50 2011 +0300
+
+    usb: pch_udc: unlock on allocation failure
+    
+    There was an unlock missing on the error path.
+    
+    Also I did a small cleanup by changing ep->dev->lock for just dev->lock.
+    They're the same lock, but dev->lock is shorter and that's how it is
+    used for the spin_unlock_irqrestore() call.
+    
+    Signed-off-by: Dan Carpenter <error27@gmail.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/usb/gadget/pch_udc.c b/drivers/usb/gadget/pch_udc.c
+index 3e4b35e50c24..68dbcc3e4cc2 100644
+--- a/drivers/usb/gadget/pch_udc.c
++++ b/drivers/usb/gadget/pch_udc.c
+@@ -1608,7 +1608,7 @@ static int pch_udc_pcd_queue(struct usb_ep *usbep, struct usb_request *usbreq,
+ 		return -EINVAL;
+ 	if (!dev->driver || (dev->gadget.speed == USB_SPEED_UNKNOWN))
+ 		return -ESHUTDOWN;
+-	spin_lock_irqsave(&ep->dev->lock, iflags);
++	spin_lock_irqsave(&dev->lock, iflags);
+ 	/* map the buffer for dma */
+ 	if (usbreq->length &&
+ 	    ((usbreq->dma == DMA_ADDR_INVALID) || !usbreq->dma)) {
+@@ -1625,8 +1625,10 @@ static int pch_udc_pcd_queue(struct usb_ep *usbep, struct usb_request *usbreq,
+ 							     DMA_FROM_DEVICE);
+ 		} else {
+ 			req->buf = kzalloc(usbreq->length, GFP_ATOMIC);
+-			if (!req->buf)
+-				return -ENOMEM;
++			if (!req->buf) {
++				retval = -ENOMEM;
++				goto probe_end;
++			}
+ 			if (ep->in) {
+ 				memcpy(req->buf, usbreq->buf, usbreq->length);
+ 				req->dma = dma_map_single(&dev->pdev->dev,
+

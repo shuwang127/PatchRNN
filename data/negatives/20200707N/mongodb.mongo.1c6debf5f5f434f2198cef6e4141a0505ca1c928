@@ -1,0 +1,47 @@
+commit 1c6debf5f5f434f2198cef6e4141a0505ca1c928
+Author: Spencer T Brody <spencer@mongodb.com>
+Date:   Thu Sep 18 11:49:23 2014 -0400
+
+    SERVER-15257 Return early if calling awaitReplication with an empty optime
+
+diff --git a/src/mongo/db/repl/repl_coordinator_impl.cpp b/src/mongo/db/repl/repl_coordinator_impl.cpp
+index 7d27c54cd4..252f901648 100644
+--- a/src/mongo/db/repl/repl_coordinator_impl.cpp
++++ b/src/mongo/db/repl/repl_coordinator_impl.cpp
+@@ -588,12 +588,17 @@ namespace {
+         const Mode replMode = _getReplicationMode_inlock();
+         if (replMode == modeNone || serverGlobalParams.configsvr) {
+             // no replication check needed (validated above)
+-            return StatusAndDuration(Status::OK(), Milliseconds(0));
++            return StatusAndDuration(Status::OK(), Milliseconds(timer->millis()));
+         }
+ 
+         if (writeConcern.wMode == "majority" && replMode == modeMasterSlave) {
+             // with master/slave, majority is equivalent to w=1
+-            return StatusAndDuration(Status::OK(), Milliseconds(0));
++            return StatusAndDuration(Status::OK(), Milliseconds(timer->millis()));
++        }
++
++        if (opTime.isNull()) {
++            // If waiting for the empty optime, always say it's been replicated.
++            return StatusAndDuration(Status::OK(), Milliseconds(timer->millis()));
+         }
+ 
+         // Must hold _mutex before constructing waitInfo as it will modify _replicationWaiterList
+diff --git a/src/mongo/db/repl/repl_coordinator_legacy.cpp b/src/mongo/db/repl/repl_coordinator_legacy.cpp
+index c6e4aa045f..04ee3f3b33 100644
+--- a/src/mongo/db/repl/repl_coordinator_legacy.cpp
++++ b/src/mongo/db/repl/repl_coordinator_legacy.cpp
+@@ -144,6 +144,11 @@ namespace repl {
+             return StatusAndDuration(Status::OK(), Milliseconds(timeoutTimer.millis()));
+         }
+ 
++        if (ts.isNull()) {
++            // If waiting for the empty optime, always say it's been replicated.
++            return StatusAndDuration(Status::OK(), Milliseconds(timeoutTimer.millis()));
++        }
++
+         try {
+             while (1) {
+                 if (!writeConcern.wMode.empty()) {
+

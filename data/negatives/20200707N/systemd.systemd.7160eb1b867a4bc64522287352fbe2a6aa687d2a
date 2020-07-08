@@ -1,0 +1,36 @@
+commit 7160eb1b867a4bc64522287352fbe2a6aa687d2a
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Wed Jan 13 02:26:23 2016 +0100
+
+    resolved: properly handles RRs in domains beginning in an asterisk label
+    
+    Properly handle RRs that begin with an asterisk label. These are the unexpanded forms of wildcard domains and appear in
+    NSEC RRs for example. We need to make sure we handle the signatures of these RRs properly, since they mostly are
+    considered normal RRs, except that the RRSIG labels counter is one off for them, as the asterisk label is always
+    excluded of the signature.
+
+diff --git a/src/resolve/resolved-dns-dnssec.c b/src/resolve/resolved-dns-dnssec.c
+index 8dfb5edbc..a18ae56b9 100644
+--- a/src/resolve/resolved-dns-dnssec.c
++++ b/src/resolve/resolved-dns-dnssec.c
+@@ -548,7 +548,18 @@ int dnssec_verify_rrset(
+         r = dns_name_suffix(DNS_RESOURCE_KEY_NAME(key), rrsig->rrsig.labels, &source);
+         if (r < 0)
+                 return r;
+-        wildcard = r > 0;
++        if (r == 1) {
++                /* If we stripped a single label, then let's see if that maybe was "*". If so, we are not really
++                 * synthesized from a wildcard, we are the wildcard itself. Treat that like a normal name. */
++                r = dns_name_startswith(DNS_RESOURCE_KEY_NAME(key), "*");
++                if (r < 0)
++                        return r;
++                if (r > 0)
++                        source = DNS_RESOURCE_KEY_NAME(key);
++
++                wildcard = r == 0;
++        } else
++                wildcard = r > 0;
+ 
+         /* Collect all relevant RRs in a single array, so that we can look at the RRset */
+         list = newa(DnsResourceRecord *, dns_answer_size(a));
+

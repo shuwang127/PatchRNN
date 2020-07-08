@@ -1,0 +1,79 @@
+commit e4bfeda96872bfe6015cd360008b77cd3b981b2b
+Author: Thierry Reding <treding@nvidia.com>
+Date:   Fri Oct 18 10:46:24 2013 +0200
+
+    pwm-backlight: Fix brightness adjustment
+    
+    Split adjustment of the brightness (by changing the PWM duty cycle) from
+    the power on sequence. This fixes an issue where the brightness can no
+    longer be updated once the backlight has been enabled.
+    
+    Reported-by: Marc Dietrich <marvin24@gmx.de>
+    Signed-off-by: Thierry Reding <treding@nvidia.com>
+
+diff --git a/drivers/video/backlight/pwm_bl.c b/drivers/video/backlight/pwm_bl.c
+index 32e96e3525a1..f77a7b0ca5e6 100644
+--- a/drivers/video/backlight/pwm_bl.c
++++ b/drivers/video/backlight/pwm_bl.c
+@@ -45,21 +45,11 @@ struct pwm_bl_data {
+ 
+ static void pwm_backlight_power_on(struct pwm_bl_data *pb, int brightness)
+ {
+-	unsigned int lth = pb->lth_brightness;
+ 	int duty_cycle, err;
+ 
+ 	if (pb->enabled)
+ 		return;
+ 
+-	if (pb->levels)
+-		duty_cycle = pb->levels[brightness];
+-	else
+-		duty_cycle = brightness;
+-
+-	duty_cycle = (duty_cycle * (pb->period - lth) / pb->scale) + lth;
+-
+-	pwm_config(pb->pwm, duty_cycle, pb->period);
+-
+ 	err = regulator_enable(pb->power_supply);
+ 	if (err < 0)
+ 		dev_err(pb->dev, "failed to enable power supply\n");
+@@ -94,10 +84,24 @@ static void pwm_backlight_power_off(struct pwm_bl_data *pb)
+ 	pb->enabled = false;
+ }
+ 
++static int compute_duty_cycle(struct pwm_bl_data *pb, int brightness)
++{
++	unsigned int lth = pb->lth_brightness;
++	int duty_cycle;
++
++	if (pb->levels)
++		duty_cycle = pb->levels[brightness];
++	else
++		duty_cycle = brightness;
++
++	return (duty_cycle * (pb->period - lth) / pb->scale) + lth;
++}
++
+ static int pwm_backlight_update_status(struct backlight_device *bl)
+ {
+ 	struct pwm_bl_data *pb = bl_get_data(bl);
+ 	int brightness = bl->props.brightness;
++	int duty_cycle;
+ 
+ 	if (bl->props.power != FB_BLANK_UNBLANK ||
+ 	    bl->props.fb_blank != FB_BLANK_UNBLANK ||
+@@ -107,9 +111,11 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
+ 	if (pb->notify)
+ 		brightness = pb->notify(pb->dev, brightness);
+ 
+-	if (brightness > 0)
++	if (brightness > 0) {
++		duty_cycle = compute_duty_cycle(pb, brightness);
++		pwm_config(pb->pwm, duty_cycle, pb->period);
+ 		pwm_backlight_power_on(pb, brightness);
+-	else
++	} else
+ 		pwm_backlight_power_off(pb);
+ 
+ 	if (pb->notify_after)
+

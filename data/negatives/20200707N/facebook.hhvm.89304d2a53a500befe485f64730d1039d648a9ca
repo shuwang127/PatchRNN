@@ -1,0 +1,59 @@
+commit 89304d2a53a500befe485f64730d1039d648a9ca
+Author: bill fumerola <bill@fb.com>
+Date:   Thu Mar 19 21:48:32 2015 -0700
+
+    fix simplifyCallBuiltin() operating on collections
+    
+    Summary: this started when i tried to implement the same optimization for $collection->count() as count($collection). this seemed trivial since there already was an isEmpty() optimization. except it didn't work because the conditions were never met.
+    
+    the 0th arg to CallBuiltin is FramePtr, the 2nd argument is where the collection could possibly be.
+    
+    Reviewed By: @elgenie
+    
+    Differential Revision: D1930392
+
+diff --git a/hphp/runtime/vm/jit/simplify.cpp b/hphp/runtime/vm/jit/simplify.cpp
+index d887c04219..50c13d7e3b 100644
+--- a/hphp/runtime/vm/jit/simplify.cpp
++++ b/hphp/runtime/vm/jit/simplify.cpp
+@@ -45,6 +45,7 @@ namespace {
+ 
+ const StaticString s_Array("Array");
+ const StaticString s_isEmpty("isEmpty");
++const StaticString s_count("count");
+ const StaticString s_1("1");
+ const StaticString s_empty("");
+ const StaticString s_invoke("__invoke");
+@@ -1878,20 +1879,21 @@ SSATmp* simplifyCallBuiltin(State& env, const IRInstruction* inst) {
+   auto const callee = inst->extra<CallBuiltin>()->callee;
+   auto const args = inst->srcs();
+ 
+-  auto const cls = args[0]->type().clsSpec().cls();
+-  bool const arg0Collection = args.size() >= 1 &&
+-                              args[0]->type() < Type::Obj &&
++  auto const cls = callee->cls();
++  bool const arg2Collection = args.size() == 3 &&
++                              args[2]->type() < Type::Obj &&
+                               cls != nullptr &&
+                               cls->isCollectionClass();
+ 
+-  switch (args.size()) {
+-  case 1:
+-    if (arg0Collection && callee->name()->isame(s_isEmpty.get())) {
+-      return gen(env, ColIsEmpty, args[0]);
++  if (arg2Collection) {
++    if (callee->name()->isame(s_isEmpty.get())) {
++      FTRACE(3, "simplifying collection: {}\n", callee->name()->data());
++      return gen(env, ColIsEmpty, args[2]);
++    }
++    if (callee->name()->isame(s_count.get())) {
++      FTRACE(3, "simplifying collection: {}\n", callee->name()->data());
++      return gen(env, CountCollection, args[2]);
+     }
+-    break;
+-  default:
+-    break;
+   }
+ 
+   return nullptr;
+

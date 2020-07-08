@@ -1,0 +1,327 @@
+commit 2ae8a00b2a0e4bc11fb70f0161be34f1573a2f55
+Author: bell@sanja.is.com.ua <>
+Date:   Wed Jul 2 13:12:18 2003 +0300
+
+    Item tree iterator
+    fixed dependence of items from reduced subquery
+    (SCRUM)
+
+diff --git a/sql/item.cc b/sql/item.cc
+index 5a3016953bf..4a04dc93a54 100644
+--- a/sql/item.cc
++++ b/sql/item.cc
+@@ -85,6 +85,15 @@ Item_ident::Item_ident(THD *thd, Item_ident &item):
+   depended_from(item.depended_from)
+ {}
+ 
++bool Item_ident::remove_dependence_processor(byte * arg)
++{
++  DBUG_ENTER("Item_ident::remove_dependence_processor");
++  if (depended_from == (st_select_lex *) arg)
++    depended_from= 0;
++  DBUG_RETURN(1);
++}
++
++
+ bool Item::check_cols(uint c)
+ {
+   if (c != 1)
+diff --git a/sql/item.h b/sql/item.h
+index 7220db0cd5e..ab65251162c 100644
+--- a/sql/item.h
++++ b/sql/item.h
+@@ -82,6 +82,8 @@ public:
+   }
+ };
+ 
++typedef bool (Item::*Item_processor)(byte *arg);
++
+ class Item {
+   uint loop_id;                         /* Used to find selfrefering loops */
+   Item(const Item &);			/* Prevent use of these */
+@@ -187,6 +189,13 @@ public:
+   }
+   bool binary() const
+   { return charset()->state & MY_CS_BINSORT ? 1 : 0 ; }
++
++  virtual bool walk(Item_processor processor, byte *arg)
++  {
++    return (this->*processor)(arg);
++  }
++
++  virtual bool remove_dependence_processor(byte * arg) { return 0; }
+   
+   // Row emulation
+   virtual uint cols() { return 1; }
+@@ -216,6 +225,8 @@ public:
+   // Constructor used by Item_field & Item_ref (see Item comment)
+   Item_ident(THD *thd, Item_ident &item);
+   const char *full_name() const;
++
++  bool remove_dependence_processor(byte * arg);
+ };
+ 
+ 
+@@ -833,6 +844,12 @@ public:
+     return Item_field::save_in_field(field, no_conversions);
+   }
+   table_map used_tables() const { return (table_map)0L; }
++  
++  bool walk(Item_processor processor, byte *args)
++  {
++    return arg->walk(processor, args) ||
++      (this->*processor)(args);
++  }
+ };
+ 
+ class Item_insert_value : public Item_field
+@@ -850,6 +867,12 @@ public:
+     return Item_field::save_in_field(field, no_conversions);
+   }
+   table_map used_tables() const { return (table_map)0L; }
++
++  bool walk(Item_processor processor, byte *args)
++  {
++    return arg->walk(processor, args) ||
++	    (this->*processor)(args);
++  }
+ };
+ 
+ class Item_cache: public Item
+diff --git a/sql/item_cmpfunc.cc b/sql/item_cmpfunc.cc
+index 3c7b68a1adf..8eb456c6227 100644
+--- a/sql/item_cmpfunc.cc
++++ b/sql/item_cmpfunc.cc
+@@ -1094,6 +1094,13 @@ void Item_func_case::split_sum_func(Item **ref_pointer_array,
+ }
+ 
+ 
++bool Item_func_case::walk (Item_processor processor, byte *arg)
++{
++  return first_expr->walk(processor, arg) ||
++    else_expr->walk(processor, arg) ||
++    Item_func::walk(processor, arg);
++}
++
+ void Item_func_case::update_used_tables()
+ {
+   Item_func::update_used_tables();
+@@ -1662,6 +1669,16 @@ Item_cond::fix_fields(THD *thd, TABLE_LIST *tables, Item **ref)
+   return 0;
+ }
+ 
++bool Item_cond::walk(Item_processor processor, byte *arg)
++{
++  List_iterator_fast<Item> li(list);
++  Item *item;
++  while ((item= li++))
++    if (item->walk(processor, arg))
++      return 1;
++  return Item_func::walk(processor, arg);
++}
++
+ void Item_cond::split_sum_func(Item **ref_pointer_array, List<Item> &fields)
+ {
+   List_iterator<Item> li(list);
+diff --git a/sql/item_cmpfunc.h b/sql/item_cmpfunc.h
+index da6fcc9a84b..59207498ce6 100644
+--- a/sql/item_cmpfunc.h
++++ b/sql/item_cmpfunc.h
+@@ -370,6 +370,8 @@ public:
+   bool fix_fields(THD *thd, struct st_table_list *tlist, Item **ref);
+   void split_sum_func(Item **ref_pointer_array, List<Item> &fields);
+   Item *find_item(String *str);
++
++  bool walk(Item_processor processor, byte *args);
+ };
+ 
+ 
+@@ -632,6 +634,11 @@ class Item_func_in :public Item_int_func
+   void update_used_tables();
+   void split_sum_func(Item **ref_pointer_array, List<Item> &fields);
+   bool nulls_in_row();
++  bool walk(Item_processor processor, byte *arg)
++  {
++    return item->walk(processor, arg) ||
++      Item_int_func::walk(processor, arg);
++  }
+ };
+ 
+ /* Functions used by where clause */
+@@ -790,6 +797,8 @@ public:
+   void split_sum_func(Item **ref_pointer_array, List<Item> &fields);
+   friend int setup_conds(THD *thd,TABLE_LIST *tables,COND **conds);
+   void top_level_item() { abort_on_null=1; }
++
++  bool walk(Item_processor processor, byte *arg);
+ };
+ 
+ 
+diff --git a/sql/item_func.cc b/sql/item_func.cc
+index fc1ea7410e4..0b43cdc1bb8 100644
+--- a/sql/item_func.cc
++++ b/sql/item_func.cc
+@@ -136,6 +136,19 @@ Item_func::fix_fields(THD *thd, TABLE_LIST *tables, Item **ref)
+   return 0;
+ }
+ 
++bool Item_func::walk (Item_processor processor, byte *argument)
++{
++  if (arg_count)
++  {
++    Item **arg,**arg_end;
++    for (arg= args, arg_end= args+arg_count; arg != arg_end; arg++)
++    {
++      if ((*arg)->walk(processor, argument))
++	return 1;
++    }
++  }
++  return (this->*processor)(argument);
++}
+ 
+ void Item_func::split_sum_func(Item **ref_pointer_array, List<Item> &fields)
+ {
+@@ -2434,6 +2447,15 @@ bool Item_func_match::fix_fields(THD *thd, TABLE_LIST *tlist, Item **ref)
+   return 0;
+ }
+ 
++bool Item_func_match::walk(Item_processor processor, byte *arg)
++{
++  List_iterator_fast<Item> li(fields);
++  Item *item;
++  while ((item= li++))
++    if (item->walk(processor, arg))
++      return 1;
++  return Item_func::walk(processor, arg);
++}
+ 
+ bool Item_func_match::fix_index()
+ {
+diff --git a/sql/item_func.h b/sql/item_func.h
+index 096e5779f5e..c0193622348 100644
+--- a/sql/item_func.h
++++ b/sql/item_func.h
+@@ -134,6 +134,8 @@ public:
+   Field *tmp_table_field() { return result_field; }
+   Field *tmp_table_field(TABLE *t_arg);
+   Item *get_tmp_table_item(THD *thd);
++
++  bool walk(Item_processor processor, byte *arg);
+ };
+ 
+ 
+@@ -647,6 +649,11 @@ public:
+     const_item_cache&=  item->const_item();
+     with_sum_func= with_sum_func || item->with_sum_func;
+   }
++  bool walk(Item_processor processor, byte *arg)
++  {
++    return item->walk(processor, arg) ||
++      Item_int_func::walk(processor, arg);
++  }
+ };
+ 
+ 
+@@ -1024,6 +1031,8 @@ public:
+ 
+   bool fix_index();
+   void init_search(bool no_order);
++
++  bool walk(Item_processor processor, byte *arg);
+ };
+ 
+ 
+diff --git a/sql/item_row.cc b/sql/item_row.cc
+index 0eaad42873e..43e38763aa6 100644
+--- a/sql/item_row.cc
++++ b/sql/item_row.cc
+@@ -118,6 +118,16 @@ bool Item_row::check_cols(uint c)
+   return 0;
+ }
+ 
++bool Item_row::walk(Item_processor processor, byte *arg)
++{
++  for (uint i= 0; i < arg_count; i++)
++  {
++    if (items[i]->walk(processor, arg))
++      return 1;
++  }
++  return (this->*processor)(arg);
++}
++
+ void Item_row::bring_value()
+ {
+   for (uint i= 0; i < arg_count; i++)
+diff --git a/sql/item_row.h b/sql/item_row.h
+index 867225ae953..6dd955ed426 100644
+--- a/sql/item_row.h
++++ b/sql/item_row.h
+@@ -69,6 +69,8 @@ public:
+   enum Item_result result_type() const { return ROW_RESULT; }
+   void update_used_tables();
+ 
++  bool walk(Item_processor processor, byte *arg);
++
+   uint cols() { return arg_count; }
+   Item* el(uint i) { return items[i]; }
+   Item** addr(uint i) { return items + i; }
+diff --git a/sql/item_strfunc.h b/sql/item_strfunc.h
+index 0c1cb5a2739..b38c7df4755 100644
+--- a/sql/item_strfunc.h
++++ b/sql/item_strfunc.h
+@@ -107,6 +107,11 @@ public:
+   }
+   void split_sum_func(Item **ref_pointer_array, List<Item> &fields);
+   const char *func_name() const { return "concat_ws"; }
++  bool walk(Item_processor processor, byte *arg)
++  {
++    return separator->walk(processor, arg) ||
++      Item_str_func::walk(processor, arg);
++  }
+ };
+ 
+ class Item_func_reverse :public Item_str_func
+@@ -385,6 +390,11 @@ public:
+   void fix_length_and_dec();
+   void update_used_tables();
+   const char *func_name() const { return "elt"; }
++  bool walk(Item_processor processor, byte *arg)
++  {
++    return item->walk(processor, arg) ||
++      Item_str_func::walk(processor, arg);
++  }
+ };
+ 
+ 
+@@ -407,6 +417,12 @@ public:
+   void fix_length_and_dec();
+   void update_used_tables();
+   const char *func_name() const { return "make_set"; }
++
++  bool walk(Item_processor processor, byte *arg)
++  {
++    return item->walk(processor, arg) ||
++      Item_str_func::walk(processor, arg);
++  }
+ };
+ 
+ 
+diff --git a/sql/item_subselect.cc b/sql/item_subselect.cc
+index 01cebb5fc60..f29ac3b3c9c 100644
+--- a/sql/item_subselect.cc
++++ b/sql/item_subselect.cc
+@@ -193,7 +193,12 @@ Item_singlerow_subselect::select_transformer(JOIN *join)
+ 		   ER_SELECT_REDUCED, warn_buff);
+     }
+     substitution= select_lex->item_list.head();
+-     
++    /*
++      as far as we moved content to upper leven, field which depend of
++      'upper' select is not really dependent => we remove this dependence
++    */
++    substitution->walk(&Item::remove_dependence_processor,
++		       (byte *) select_lex->outer_select());
+     if (select_lex->where || select_lex->having)
+     {
+       Item *cond;
+

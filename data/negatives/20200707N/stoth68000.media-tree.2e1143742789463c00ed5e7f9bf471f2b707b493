@@ -1,0 +1,46 @@
+commit 2e1143742789463c00ed5e7f9bf471f2b707b493
+Author: Oliver Hartkopp <socketcan@hartkopp.net>
+Date:   Wed Sep 28 02:50:11 2011 +0000
+
+    candev: allow SJW user setting for bittiming calculation
+    
+    This patch adds support for SJW user settings to not set the synchronization
+    jump width (SJW) to 1 in any case when using the in-kernel bittiming
+    calculation.
+    
+    The ip-tool from iproute2 already supports to pass the user defined SJW
+    value. The given SJW value is sanitized with the controller specific sjw_max
+    and the calculated tseg2 value. As the SJW can have values up to 4 providing
+    this value will lead to the maximum possible SJW automatically. A higher SJW
+    allows higher controller oscillator tolerances.
+    
+    Signed-off-by: Oliver Hartkopp <socketcan@hartkopp.net>
+    Acked-by: Wolfgang Grandegger <wg@grandegger.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/can/dev.c b/drivers/net/can/dev.c
+index 9bf1116e5b5e..25695bde0549 100644
+--- a/drivers/net/can/dev.c
++++ b/drivers/net/can/dev.c
+@@ -150,7 +150,19 @@ static int can_calc_bittiming(struct net_device *dev, struct can_bittiming *bt)
+ 	bt->prop_seg = tseg1 / 2;
+ 	bt->phase_seg1 = tseg1 - bt->prop_seg;
+ 	bt->phase_seg2 = tseg2;
+-	bt->sjw = 1;
++
++	/* check for sjw user settings */
++	if (!bt->sjw || !btc->sjw_max)
++		bt->sjw = 1;
++	else {
++		/* bt->sjw is at least 1 -> sanitize upper bound to sjw_max */
++		if (bt->sjw > btc->sjw_max)
++			bt->sjw = btc->sjw_max;
++		/* bt->sjw must not be higher than tseg2 */
++		if (tseg2 < bt->sjw)
++			bt->sjw = tseg2;
++	}
++
+ 	bt->brp = best_brp;
+ 	/* real bit-rate */
+ 	bt->bitrate = priv->clock.freq / (bt->brp * (tseg1 + tseg2 + 1));
+

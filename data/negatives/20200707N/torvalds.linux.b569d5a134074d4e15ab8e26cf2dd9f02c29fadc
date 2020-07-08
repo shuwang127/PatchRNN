@@ -1,0 +1,39 @@
+commit b569d5a134074d4e15ab8e26cf2dd9f02c29fadc
+Author: Gerrit Renker <gerrit@erg.abdn.ac.uk>
+Date:   Sat Aug 23 13:28:27 2008 +0200
+
+    dccp: Empty the write queue when disconnecting
+    
+    dccp_disconnect() can be called due to several reasons:
+    
+     1. when the connection setup failed (inet_stream_connect());
+     2. when shutting down (inet_shutdown(), inet_csk_listen_stop());
+     3. when aborting the connection (dccp_close() with 0 linger time).
+    
+    In case (1) the write queue is empty. This patch empties the write queue,
+    if in case (2) or (3) it was not yet empty.
+    
+    This avoids triggering the write-queue BUG_TRAP in sk_stream_kill_queues()
+    later on.
+    
+    It also seems natural to do: when breaking an association, to delete all
+    packets that were originally intended for the soon-disconnected end (compare
+    with call to tcp_write_queue_purge in tcp_disconnect()).
+    
+    Signed-off-by: Gerrit Renker <gerrit@erg.abdn.ac.uk>
+
+diff --git a/net/dccp/proto.c b/net/dccp/proto.c
+index 1ca3b26eed0f..ae66473b11fa 100644
+--- a/net/dccp/proto.c
++++ b/net/dccp/proto.c
+@@ -309,7 +309,9 @@ int dccp_disconnect(struct sock *sk, int flags)
+ 		sk->sk_err = ECONNRESET;
+ 
+ 	dccp_clear_xmit_timers(sk);
++
+ 	__skb_queue_purge(&sk->sk_receive_queue);
++	__skb_queue_purge(&sk->sk_write_queue);
+ 	if (sk->sk_send_head != NULL) {
+ 		__kfree_skb(sk->sk_send_head);
+ 		sk->sk_send_head = NULL;
+

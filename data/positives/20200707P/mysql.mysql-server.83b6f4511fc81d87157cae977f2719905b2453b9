@@ -1,0 +1,94 @@
+commit 83b6f4511fc81d87157cae977f2719905b2453b9
+Author: John David Duncan <john.duncan@oracle.com>
+Date:   Tue Dec 6 16:03:21 2016 -0800
+
+    wl#9819 patch #5: Initialize OwnProcessInfo in MGM and NDB nodes
+
+diff --git a/storage/ndb/src/common/util/SocketServer.cpp b/storage/ndb/src/common/util/SocketServer.cpp
+index 57c997a580b..dd991c7ab5e 100644
+--- a/storage/ndb/src/common/util/SocketServer.cpp
++++ b/storage/ndb/src/common/util/SocketServer.cpp
+@@ -1,5 +1,5 @@
+ /*
+-   Copyright (c) 2003, 2015, Oracle and/or its affiliates. All rights reserved.
++   Copyright (c) 2003, 2016, Oracle and/or its affiliates. All rights reserved.
+ 
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+@@ -25,6 +25,8 @@
+ #include <NdbThread.h>
+ #include <NdbSleep.h>
+ #include <NdbTick.h>
++#include <ndb_socket.h>
++#include <OwnProcessInfo.hpp>
+ 
+ SocketServer::SocketServer(unsigned maxSessions) :
+   m_sessions(10),
+@@ -128,15 +130,19 @@ SocketServer::setup(SocketServer::Service * service,
+     DBUG_RETURN(false);
+   }
+ 
+-  /* Get the port we bound to */
+-  if(my_socket_get_port(sock, port))
++  /* Get the address and port we bound to */
++  struct sockaddr_in serv_addr;
++  socket_len_t addr_len = sizeof(serv_addr);
++  if(ndb_getsockname(sock, (struct sockaddr *) &serv_addr, &addr_len))
+   {
+     ndbout_c("An error occurred while trying to find out what"
+ 	     " port we bound to. Error: %d - %s",
+-             socket_errno, strerror(socket_errno));
++             my_socket_errno(), strerror(my_socket_errno()));
+     my_socket_close(sock);
+     DBUG_RETURN(false);
+   }
++  *port = ntohs(serv_addr.sin_port);
++  setOwnProcessInfoServerAddress(&serv_addr);
+ 
+   DBUG_PRINT("info",("bound to %u", *port));
+ 
+diff --git a/storage/ndb/src/kernel/main.cpp b/storage/ndb/src/kernel/main.cpp
+index f9bc9c29fa3..840c3923961 100644
+--- a/storage/ndb/src/kernel/main.cpp
++++ b/storage/ndb/src/kernel/main.cpp
+@@ -24,6 +24,7 @@
+ #include "angel.hpp"
+ 
+ #include "../common/util/parse_mask.hpp"
++#include "OwnProcessInfo.hpp"
+ 
+ #include <EventLogger.hpp>
+ 
+@@ -195,6 +196,11 @@ real_main(int argc, char** argv)
+     }
+   }
+ 
++ if(opt_angel_pid)
++  {
++    setOwnProcessInfoAngelPid(opt_angel_pid);
++  }
++
+   if (opt_foreground ||
+       opt_allocated_nodeid ||
+       opt_report_fd)
+diff --git a/storage/ndb/src/mgmsrv/MgmtSrvr.cpp b/storage/ndb/src/mgmsrv/MgmtSrvr.cpp
+index e62103cceaa..5079b11661b 100644
+--- a/storage/ndb/src/mgmsrv/MgmtSrvr.cpp
++++ b/storage/ndb/src/mgmsrv/MgmtSrvr.cpp
+@@ -53,6 +53,7 @@
+ #include <logger/SysLogHandler.hpp>
+ #include <DebuggerNames.hpp>
+ #include <ndb_version.h>
++#include <OwnProcessInfo.hpp>
+ 
+ #include <SocketServer.hpp>
+ #include <NdbConfig.h>
+@@ -526,6 +527,7 @@ MgmtSrvr::start_mgm_service(const Config* config)
+       DBUG_RETURN(false);
+     }
+   }
++  setOwnProcessInfoPort(port);
+ 
+   m_socket_server.startServer();
+ 
+

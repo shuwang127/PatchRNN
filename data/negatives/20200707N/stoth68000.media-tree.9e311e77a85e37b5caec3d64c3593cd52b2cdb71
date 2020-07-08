@@ -1,0 +1,143 @@
+commit 9e311e77a85e37b5caec3d64c3593cd52b2cdb71
+Author: Yuval Atias <yuvala@mellanox.com>
+Date:   Mon Jun 9 10:24:39 2014 +0300
+
+    net/mlx4_en: Use affinity hint
+    
+    The “affinity hint” mechanism is used by the user space
+    daemon, irqbalancer, to indicate a preferred CPU mask for irqs.
+    Irqbalancer can use this hint to balance the irqs between the
+    cpus indicated by the mask.
+    
+    We wish the HCA to preferentially map the IRQs it uses to numa cores
+    close to it.  To accomplish this, we use cpumask_set_cpu_local_first(), that
+    sets the affinity hint according the following policy:
+    First it maps IRQs to “close” numa cores.  If these are exhausted, the
+    remaining IRQs are mapped to “far” numa cores.
+    
+    Signed-off-by: Yuval Atias <yuvala@mellanox.com>
+    Signed-off-by: Amir Vadai <amirv@mellanox.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/net/ethernet/mellanox/mlx4/en_cq.c b/drivers/net/ethernet/mellanox/mlx4/en_cq.c
+index 636963db598a..4b2130760eed 100644
+--- a/drivers/net/ethernet/mellanox/mlx4/en_cq.c
++++ b/drivers/net/ethernet/mellanox/mlx4/en_cq.c
+@@ -163,6 +163,13 @@ int mlx4_en_activate_cq(struct mlx4_en_priv *priv, struct mlx4_en_cq *cq,
+ 		netif_napi_add(cq->dev, &cq->napi, mlx4_en_poll_tx_cq,
+ 			       NAPI_POLL_WEIGHT);
+ 	} else {
++		struct mlx4_en_rx_ring *ring = priv->rx_ring[cq->ring];
++
++		err = irq_set_affinity_hint(cq->mcq.irq,
++					    ring->affinity_mask);
++		if (err)
++			mlx4_warn(mdev, "Failed setting affinity hint\n");
++
+ 		netif_napi_add(cq->dev, &cq->napi, mlx4_en_poll_rx_cq, 64);
+ 		napi_hash_add(&cq->napi);
+ 	}
+@@ -179,8 +186,11 @@ void mlx4_en_destroy_cq(struct mlx4_en_priv *priv, struct mlx4_en_cq **pcq)
+ 
+ 	mlx4_en_unmap_buffer(&cq->wqres.buf);
+ 	mlx4_free_hwq_res(mdev->dev, &cq->wqres, cq->buf_size);
+-	if (priv->mdev->dev->caps.comp_pool && cq->vector)
++	if (priv->mdev->dev->caps.comp_pool && cq->vector) {
++		if (!cq->is_tx)
++			irq_set_affinity_hint(cq->mcq.irq, NULL);
+ 		mlx4_release_eq(priv->mdev->dev, cq->vector);
++	}
+ 	cq->vector = 0;
+ 	cq->buf_size = 0;
+ 	cq->buf = NULL;
+diff --git a/drivers/net/ethernet/mellanox/mlx4/en_netdev.c b/drivers/net/ethernet/mellanox/mlx4/en_netdev.c
+index 58209bd0c94c..7d4fb7bf2593 100644
+--- a/drivers/net/ethernet/mellanox/mlx4/en_netdev.c
++++ b/drivers/net/ethernet/mellanox/mlx4/en_netdev.c
+@@ -1526,6 +1526,27 @@ static void mlx4_en_linkstate(struct work_struct *work)
+ 	mutex_unlock(&mdev->state_lock);
+ }
+ 
++static int mlx4_en_init_affinity_hint(struct mlx4_en_priv *priv, int ring_idx)
++{
++	struct mlx4_en_rx_ring *ring = priv->rx_ring[ring_idx];
++	int numa_node = priv->mdev->dev->numa_node;
++	int ret = 0;
++
++	if (!zalloc_cpumask_var(&ring->affinity_mask, GFP_KERNEL))
++		return -ENOMEM;
++
++	ret = cpumask_set_cpu_local_first(ring_idx, numa_node,
++					  ring->affinity_mask);
++	if (ret)
++		free_cpumask_var(ring->affinity_mask);
++
++	return ret;
++}
++
++static void mlx4_en_free_affinity_hint(struct mlx4_en_priv *priv, int ring_idx)
++{
++	free_cpumask_var(priv->rx_ring[ring_idx]->affinity_mask);
++}
+ 
+ int mlx4_en_start_port(struct net_device *dev)
+ {
+@@ -1567,9 +1588,16 @@ int mlx4_en_start_port(struct net_device *dev)
+ 
+ 		mlx4_en_cq_init_lock(cq);
+ 
++		err = mlx4_en_init_affinity_hint(priv, i);
++		if (err) {
++			en_err(priv, "Failed preparing IRQ affinity hint\n");
++			goto cq_err;
++		}
++
+ 		err = mlx4_en_activate_cq(priv, cq, i);
+ 		if (err) {
+ 			en_err(priv, "Failed activating Rx CQ\n");
++			mlx4_en_free_affinity_hint(priv, i);
+ 			goto cq_err;
+ 		}
+ 		for (j = 0; j < cq->size; j++)
+@@ -1578,6 +1606,7 @@ int mlx4_en_start_port(struct net_device *dev)
+ 		if (err) {
+ 			en_err(priv, "Failed setting cq moderation parameters\n");
+ 			mlx4_en_deactivate_cq(priv, cq);
++			mlx4_en_free_affinity_hint(priv, i);
+ 			goto cq_err;
+ 		}
+ 		mlx4_en_arm_cq(priv, cq);
+@@ -1715,8 +1744,10 @@ int mlx4_en_start_port(struct net_device *dev)
+ mac_err:
+ 	mlx4_en_put_qp(priv);
+ cq_err:
+-	while (rx_index--)
++	while (rx_index--) {
+ 		mlx4_en_deactivate_cq(priv, priv->rx_cq[rx_index]);
++		mlx4_en_free_affinity_hint(priv, i);
++	}
+ 	for (i = 0; i < priv->rx_ring_num; i++)
+ 		mlx4_en_deactivate_rx_ring(priv, priv->rx_ring[i]);
+ 
+@@ -1847,6 +1878,8 @@ void mlx4_en_stop_port(struct net_device *dev, int detach)
+ 			msleep(1);
+ 		mlx4_en_deactivate_rx_ring(priv, priv->rx_ring[i]);
+ 		mlx4_en_deactivate_cq(priv, cq);
++
++		mlx4_en_free_affinity_hint(priv, i);
+ 	}
+ }
+ 
+diff --git a/drivers/net/ethernet/mellanox/mlx4/mlx4_en.h b/drivers/net/ethernet/mellanox/mlx4/mlx4_en.h
+index b5db1bf361dc..0e15295bedd6 100644
+--- a/drivers/net/ethernet/mellanox/mlx4/mlx4_en.h
++++ b/drivers/net/ethernet/mellanox/mlx4/mlx4_en.h
+@@ -313,6 +313,7 @@ struct mlx4_en_rx_ring {
+ 	unsigned long csum_ok;
+ 	unsigned long csum_none;
+ 	int hwtstamp_rx_filter;
++	cpumask_var_t affinity_mask;
+ };
+ 
+ struct mlx4_en_cq {
+

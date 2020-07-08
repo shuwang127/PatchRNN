@@ -1,0 +1,104 @@
+commit 8ed179c937830143dc0e03daac30a55272ed89e3
+Author: Halil Pasic <pasic@linux.vnet.ibm.com>
+Date:   Thu May 18 13:14:05 2017 +0200
+
+    s390x/css: catch section mismatch on load
+    
+    Prior to the virtio-ccw-2.7 machine (and commit 2a79eb1a), our virtio
+    devices residing under the virtual-css bus do not have qdev_path based
+    migration stream identifiers (because their qdev_path is NULL). The ids
+    are instead generated when the device is registered as a composition of
+    the so called idstr, which takes the vmsd name as its value, and an
+    instance_id, which is which is calculated as a maximal instance_id
+    registered with the same idstr plus one, or zero (if none was registered
+    previously).
+    
+    That means, under certain circumstances, one device might try, and even
+    succeed, to load the state of a different device. This can lead to
+    trouble.
+    
+    Let us fail the migration if the above problem is detected during load.
+    
+    How to reproduce the problem:
+    1) start qemu-system-s390x making sure you have the following devices
+       defined on your command line:
+         -device virtio-rng-ccw,id=rng1,devno=fe.0.0001
+         -device virtio-rng-ccw,id=rng2,devno=fe.0.0002
+    2) detach the devices and reattach in reverse order using the monitor:
+         (qemu) device_del rng1
+         (qemu) device_del rng2
+         (qemu) device_add virtio-rng-ccw,id=rng2,devno=fe.0.0002
+         (qemu) device_add virtio-rng-ccw,id=rng1,devno=fe.0.0001
+    3) save the state of the vm into a temporary file and quit QEMU:
+         (qemu) migrate "exec:gzip -c > /tmp/tmp_vmstate.gz"
+         (qemu) q
+    4) use your command line from step 1 with
+         -incoming "exec:gzip -c -d /tmp/tmp_vmstate.gz"
+       appended to reproduce the problem (while trying to to load the saved vm)
+    
+    CC: qemu-stable@nongnu.org
+    Signed-off-by: Halil Pasic <pasic@linux.vnet.ibm.com>
+    Reviewed-by: Dong Jia Shi <bjsdjshi@linux.vnet.ibm.com>
+    Reviewed-by: Cornelia Huck <cornelia.huck@de.ibm.com>
+    Message-Id: <20170518111405.56947-1-pasic@linux.vnet.ibm.com>
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/hw/s390x/css.c b/hw/s390x/css.c
+index 1e2f26b65a..cc76c537da 100644
+--- a/hw/s390x/css.c
++++ b/hw/s390x/css.c
+@@ -15,6 +15,7 @@
+ #include "hw/qdev.h"
+ #include "qemu/error-report.h"
+ #include "qemu/bitops.h"
++#include "qemu/error-report.h"
+ #include "exec/address-spaces.h"
+ #include "cpu.h"
+ #include "hw/s390x/ioinst.h"
+@@ -1800,13 +1801,26 @@ void subch_device_save(SubchDev *s, QEMUFile *f)
+ int subch_device_load(SubchDev *s, QEMUFile *f)
+ {
+     SubchDev *old_s;
++    Error *err = NULL;
+     uint16_t old_schid = s->schid;
++    uint16_t old_devno = s->devno;
+     int i;
+ 
+     s->cssid = qemu_get_byte(f);
+     s->ssid = qemu_get_byte(f);
+     s->schid = qemu_get_be16(f);
+     s->devno = qemu_get_be16(f);
++    if (s->devno != old_devno) {
++        /* Only possible if machine < 2.7 (no css_dev_path) */
++
++        error_setg(&err, "%x != %x", old_devno,  s->devno);
++        error_append_hint(&err, "Devno mismatch, tried to load wrong section!"
++                          " Likely reason: some sequences of plug and unplug"
++                          " can break migration for machine versions prior to"
++                          " 2.7 (known design flaw).\n");
++        error_report_err(err);
++        return -EINVAL;
++    }
+     /* Re-assign subch. */
+     if (old_schid != s->schid) {
+         old_s = channel_subsys.css[s->cssid]->sch_set[s->ssid]->sch[old_schid];
+diff --git a/hw/s390x/virtio-ccw.c b/hw/s390x/virtio-ccw.c
+index e6a6f74be3..90d37cb9ff 100644
+--- a/hw/s390x/virtio-ccw.c
++++ b/hw/s390x/virtio-ccw.c
+@@ -1279,9 +1279,13 @@ static int virtio_ccw_load_config(DeviceState *d, QEMUFile *f)
+     SubchDev *s = ccw_dev->sch;
+     VirtIODevice *vdev = virtio_ccw_get_vdev(s);
+     int len;
++    int ret;
+ 
+     s->driver_data = dev;
+-    subch_device_load(s, f);
++    ret = subch_device_load(s, f);
++    if (ret) {
++        return ret;
++    }
+     /* Re-fill subch_id after loading the subchannel states.*/
+     if (ck->refill_ids) {
+         ck->refill_ids(ccw_dev);
+

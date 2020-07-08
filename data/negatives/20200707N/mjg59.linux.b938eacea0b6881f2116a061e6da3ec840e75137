@@ -1,0 +1,40 @@
+commit b938eacea0b6881f2116a061e6da3ec840e75137
+Author: David Hildenbrand <dahi@linux.vnet.ibm.com>
+Date:   Thu Apr 30 13:33:59 2015 +0200
+
+    KVM: s390: fix external call injection without sigp interpretation
+    
+    Commit ea5f49692575 ("KVM: s390: only one external call may be pending
+    at a time") introduced a bug on machines that don't have SIGP
+    interpretation facility installed.
+    The injection of an external call will now always fail with -EBUSY
+    (if none is already pending).
+    
+    This leads to the following symptoms:
+    - An external call will be injected but with the wrong "src cpu id",
+      as this id will not be remembered.
+    - The target vcpu will not be woken up, therefore the guest will hang if
+      it cannot deal with unexpected failures of the SIGP EXTERNAL CALL
+      instruction.
+    - If an external call is already pending, -EBUSY will not be reported.
+    
+    Reviewed-by: Christian Borntraeger <borntraeger@de.ibm.com>
+    Reviewed-by: Jens Freimann <jfrei@linux.vnet.ibm.com>
+    Signed-off-by: David Hildenbrand <dahi@linux.vnet.ibm.com>
+    Cc: stable@vger.kernel.org # v4.0
+    Signed-off-by: Christian Borntraeger <borntraeger@de.ibm.com>
+
+diff --git a/arch/s390/kvm/interrupt.c b/arch/s390/kvm/interrupt.c
+index 9de47265ef73..2836b25f63d3 100644
+--- a/arch/s390/kvm/interrupt.c
++++ b/arch/s390/kvm/interrupt.c
+@@ -1061,7 +1061,7 @@ static int __inject_extcall(struct kvm_vcpu *vcpu, struct kvm_s390_irq *irq)
+ 	if (sclp_has_sigpif())
+ 		return __inject_extcall_sigpif(vcpu, src_id);
+ 
+-	if (!test_and_set_bit(IRQ_PEND_EXT_EXTERNAL, &li->pending_irqs))
++	if (test_and_set_bit(IRQ_PEND_EXT_EXTERNAL, &li->pending_irqs))
+ 		return -EBUSY;
+ 	*extcall = irq->u.extcall;
+ 	atomic_set_mask(CPUSTAT_EXT_INT, li->cpuflags);
+

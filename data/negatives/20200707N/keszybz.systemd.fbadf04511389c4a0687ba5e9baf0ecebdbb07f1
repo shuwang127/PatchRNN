@@ -1,0 +1,107 @@
+commit fbadf04511389c4a0687ba5e9baf0ecebdbb07f1
+Author: Lennart Poettering <lennart@poettering.net>
+Date:   Mon Dec 23 19:10:11 2013 +0100
+
+    bus: when getting a kdbus connection into a container wait first for child, then read message
+    
+    There's no EOF generated for AF_UNIX/SOCK_DGRAM sockets, hence let's
+    wait for the child first to see if it succeeded, only then read the socket.
+
+diff --git a/src/libsystemd-bus/bus-container.c b/src/libsystemd-bus/bus-container.c
+index 1989afa82..d330363b6 100644
+--- a/src/libsystemd-bus/bus-container.c
++++ b/src/libsystemd-bus/bus-container.c
+@@ -205,6 +205,16 @@ int bus_container_connect_kernel(sd_bus *b) {
+         close_nointr_nofail(pair[1]);
+         pair[1] = -1;
+ 
++        r = wait_for_terminate(child, &si);
++        if (r < 0)
++                return r;
++
++        if (si.si_code != CLD_EXITED)
++                return -EIO;
++
++        if (si.si_status != EXIT_SUCCESS)
++                return -EIO;
++
+         if (recvmsg(pair[0], &mh, MSG_NOSIGNAL|MSG_CMSG_CLOEXEC) < 0)
+                 return -errno;
+ 
+@@ -224,16 +234,6 @@ int bus_container_connect_kernel(sd_bus *b) {
+                         fd = fds[0];
+                 }
+ 
+-        r = wait_for_terminate(child, &si);
+-        if (r < 0)
+-                return r;
+-
+-        if (si.si_code != CLD_EXITED)
+-                return -EIO;
+-
+-        if (si.si_status != EXIT_SUCCESS)
+-                return -EIO;
+-
+         b->input_fd = b->output_fd = fd;
+         fd = -1;
+ 
+diff --git a/src/machine/machinectl.c b/src/machine/machinectl.c
+index a2af87c17..ab9060ab9 100644
+--- a/src/machine/machinectl.c
++++ b/src/machine/machinectl.c
+@@ -451,6 +451,15 @@ static int openpt_in_namespace(pid_t pid, int flags) {
+         close_nointr_nofail(pair[1]);
+         pair[1] = -1;
+ 
++        r = wait_for_terminate(child, &si);
++        if (r < 0 || si.si_code != CLD_EXITED || si.si_status != EXIT_SUCCESS || master < 0) {
++
++                if (master >= 0)
++                        close_nointr_nofail(master);
++
++                return r < 0 ? r : -EIO;
++        }
++
+         if (recvmsg(pair[0], &mh, MSG_NOSIGNAL|MSG_CMSG_CLOEXEC) < 0)
+                 return -errno;
+ 
+@@ -470,15 +479,6 @@ static int openpt_in_namespace(pid_t pid, int flags) {
+                         master = fds[0];
+                 }
+ 
+-        r = wait_for_terminate(child, &si);
+-        if (r < 0 || si.si_code != CLD_EXITED || si.si_status != EXIT_SUCCESS || master < 0) {
+-
+-                if (master >= 0)
+-                        close_nointr_nofail(master);
+-
+-                return r < 0 ? r : -EIO;
+-        }
+-
+         return master;
+ }
+ 
+diff --git a/src/shared/logs-show.c b/src/shared/logs-show.c
+index 0f27c4ee4..61c3652bd 100644
+--- a/src/shared/logs-show.c
++++ b/src/shared/logs-show.c
+@@ -1174,14 +1174,14 @@ static int get_boot_id_for_machine(const char *machine, sd_id128_t *boot_id) {
+         close_nointr_nofail(pair[1]);
+         pair[1] = -1;
+ 
+-        k = recv(pair[0], buf, 36, 0);
+-        if (k != 36)
+-                return -EIO;
+-
+         r = wait_for_terminate(child, &si);
+         if (r < 0 || si.si_code != CLD_EXITED || si.si_status != EXIT_SUCCESS)
+                 return r < 0 ? r : -EIO;
+ 
++        k = recv(pair[0], buf, 36, 0);
++        if (k != 36)
++                return -EIO;
++
+         buf[36] = 0;
+         r = sd_id128_from_string(buf, boot_id);
+         if (r < 0)
+

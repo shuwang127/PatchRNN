@@ -1,0 +1,44 @@
+commit 45fc387e16fb9ee1ab2f9104d4d3cdcb3055299f
+Author: runsisi <runsisi@hust.edu.cn>
+Date:   Sun Oct 23 15:04:09 2016 +0800
+
+    auth: fix NULL pointer access when trying to delete CryptoAESKeyHandler instance
+    
+    the caller needs to check the nullity of the parameter before calling
+    PK11_FreeSymKey or PK11_FreeSlot, otherwise if CryptoAESKeyHandler::init
+    failed, we will hit a segfault as follows:
+      #0  0x00007f76844f5a95 in PK11_FreeSymKey () from /lib64/libnss3.so
+      #1  0x00007f76586b6e49 in CryptoAESKeyHandler::~CryptoAESKeyHandler() () from /lib64/librados.so.2
+      #2  0x00007f76586b5eea in CryptoAES::get_key_handler(ceph::buffer::ptr const&, std::string&) () from /lib64/librados.so.2
+      #3  0x00007f76586b4b9c in CryptoKey::_set_secret(int, ceph::buffer::ptr const&) () from /lib64/librados.so.2
+      #4  0x00007f76586b4e95 in CryptoKey::decode(ceph::buffer::list::iterator&) () from /lib64/librados.so.2
+      #5  0x00007f76586b7ee6 in KeyRing::set_modifier(char const*, char const*, EntityName&, std::map<std::string, ceph::buffer::list, std::less<std::string>, std::allocator<std::pair<std::string const, ceph::buffer::list> > >&) () from /lib64/librados.so.2
+      #6  0x00007f76586b8882 in KeyRing::decode_plaintext(ceph::buffer::list::iterator&) () from /lib64/librados.so.2
+      #7  0x00007f76586b9803 in KeyRing::decode(ceph::buffer::list::iterator&) () from /lib64/librados.so.2
+      #8  0x00007f76586b9a1f in KeyRing::load(CephContext*, std::string const&) () from /lib64/librados.so.2
+      #9  0x00007f76586ba04b in KeyRing::from_ceph_context(CephContext*) () from /lib64/librados.so.2
+      #10 0x00007f765852d0cd in MonClient::init() () from /lib64/librados.so.2
+      #11 0x00007f76583c15f5 in librados::RadosClient::connect() () from /lib64/librados.so.2
+      #12 0x00007f765838cb1c in rados_connect () from /lib64/librados.so.2
+      ...
+    
+    Signed-off-by: runsisi <runsisi@zte.com.cn>
+
+diff --git a/src/auth/Crypto.cc b/src/auth/Crypto.cc
+index 4b758711e6..032dc2d494 100644
+--- a/src/auth/Crypto.cc
++++ b/src/auth/Crypto.cc
+@@ -269,8 +269,10 @@ public:
+       param(NULL) {}
+   ~CryptoAESKeyHandler() {
+     SECITEM_FreeItem(param, PR_TRUE);
+-    PK11_FreeSymKey(key);
+-    PK11_FreeSlot(slot);
++    if (key)
++      PK11_FreeSymKey(key);
++    if (slot)
++      PK11_FreeSlot(slot);
+   }
+ 
+   int init(const bufferptr& s, ostringstream& err) {
+

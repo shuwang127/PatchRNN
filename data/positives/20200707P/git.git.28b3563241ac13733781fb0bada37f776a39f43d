@@ -1,0 +1,58 @@
+commit 28b3563241ac13733781fb0bada37f776a39f43d
+Author: Jeff King <peff@peff.net>
+Date:   Thu Jul 24 00:41:11 2014 -0400
+
+    free ref string returned by dwim_ref
+    
+    A call to "dwim_ref(name, len, flags, &ref)" will allocate a
+    new string in "ref" to return the exact ref we found. We do
+    not consistently free it in all code paths, leading to small
+    leaks. The worst is in get_sha1_basic, which may be called
+    many times (e.g., by "cat-file --batch"), though it is
+    relatively unlikely, as it only triggers on a bogus reflog
+    specification.
+    
+    Signed-off-by: Jeff King <peff@peff.net>
+    Signed-off-by: Junio C Hamano <gitster@pobox.com>
+
+diff --git a/builtin/rev-parse.c b/builtin/rev-parse.c
+index 1a6122d3a..0bce2a63d 100644
+--- a/builtin/rev-parse.c
++++ b/builtin/rev-parse.c
+@@ -150,6 +150,7 @@ static void show_rev(int type, const unsigned char *sha1, const char *name)
+ 				error("refname '%s' is ambiguous", name);
+ 				break;
+ 			}
++			free(full);
+ 		} else {
+ 			show_with_type(type, name);
+ 		}
+diff --git a/builtin/show-branch.c b/builtin/show-branch.c
+index d87317290..b29309019 100644
+--- a/builtin/show-branch.c
++++ b/builtin/show-branch.c
+@@ -779,6 +779,7 @@ int cmd_show_branch(int ac, const char **av, const char *prefix)
+ 			sprintf(nth_desc, "%s@{%d}", *av, base+i);
+ 			append_ref(nth_desc, sha1, 1);
+ 		}
++		free(ref);
+ 	}
+ 	else if (all_heads + all_remotes)
+ 		snarf_refs(all_heads, all_remotes);
+diff --git a/sha1_name.c b/sha1_name.c
+index 2b6322fad..cc3941eb0 100644
+--- a/sha1_name.c
++++ b/sha1_name.c
+@@ -540,8 +540,10 @@ static int get_sha1_basic(const char *str, int len, unsigned char *sha1)
+ 			char *tmp = xstrndup(str + at + 2, reflog_len);
+ 			at_time = approxidate_careful(tmp, &errors);
+ 			free(tmp);
+-			if (errors)
++			if (errors) {
++				free(real_ref);
+ 				return -1;
++			}
+ 		}
+ 		if (read_ref_at(real_ref, at_time, nth, sha1, NULL,
+ 				&co_time, &co_tz, &co_cnt)) {
+

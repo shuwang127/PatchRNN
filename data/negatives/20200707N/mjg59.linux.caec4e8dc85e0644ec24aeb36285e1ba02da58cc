@@ -1,0 +1,35 @@
+commit caec4e8dc85e0644ec24aeb36285e1ba02da58cc
+Author: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Date:   Tue Jun 12 08:16:18 2007 +1000
+
+    Fix signalfd interaction with thread-private signals
+    
+    Don't let signalfd dequeue private signals off other threads (in the
+    case of things like SIGILL or SIGSEGV, trying to do so would result
+    in undefined behaviour on who actually gets the signal, since they
+    are force unblocked).
+    
+    Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    Acked-by: Davide Libenzi <davidel@xmailserver.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/kernel/signal.c b/kernel/signal.c
+index fe590e00db8d..f9405609774e 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -363,7 +363,13 @@ static int __dequeue_signal(struct sigpending *pending, sigset_t *mask,
+  */
+ int dequeue_signal(struct task_struct *tsk, sigset_t *mask, siginfo_t *info)
+ {
+-	int signr = __dequeue_signal(&tsk->pending, mask, info);
++	int signr = 0;
++
++	/* We only dequeue private signals from ourselves, we don't let
++	 * signalfd steal them
++	 */
++	if (tsk == current)
++		signr = __dequeue_signal(&tsk->pending, mask, info);
+ 	if (!signr) {
+ 		signr = __dequeue_signal(&tsk->signal->shared_pending,
+ 					 mask, info);
+

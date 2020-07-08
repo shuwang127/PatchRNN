@@ -1,0 +1,53 @@
+commit f16b613ca8b3e4960cdc5575e9b8e1dbdd7d54d5
+Author: Wenwen Wang <wang6495@umn.edu>
+Date:   Fri May 18 14:55:35 2018 -0500
+
+    crypto: chtls - fix a missing-check bug
+    
+    In do_chtls_setsockopt(), the tls crypto info is first copied from the
+    poiner 'optval' in userspace and saved to 'tmp_crypto_info'. Then the
+    'version' of the crypto info is checked. If the version is not as expected,
+    i.e., TLS_1_2_VERSION, error code -ENOTSUPP is returned to indicate that
+    the provided crypto info is not supported yet. Then, the 'cipher_type'
+    field of the 'tmp_crypto_info' is also checked to see if it is
+    TLS_CIPHER_AES_GCM_128. If it is, the whole struct of
+    tls12_crypto_info_aes_gcm_128 is copied from the pointer 'optval' and then
+    the function chtls_setkey() is invoked to set the key.
+    
+    Given that the 'optval' pointer resides in userspace, a malicious userspace
+    process can race to change the data pointed by 'optval' between the two
+    copies. For example, a user can provide a crypto info with TLS_1_2_VERSION
+    and TLS_CIPHER_AES_GCM_128. After the first copy, the user can modify the
+    'version' and the 'cipher_type' fields to any versions and/or cipher types
+    that are not allowed. This way, the user can bypass the checks, inject
+    bad data to the kernel, cause chtls_setkey() to set a wrong key or other
+    issues.
+    
+    This patch reuses the data copied in the first try so as to ensure these
+    checks will not be bypassed.
+    
+    Signed-off-by: Wenwen Wang <wang6495@umn.edu>
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+
+diff --git a/drivers/crypto/chelsio/chtls/chtls_main.c b/drivers/crypto/chelsio/chtls/chtls_main.c
+index 5b9dd582aac0..53ffb00d45bf 100644
+--- a/drivers/crypto/chelsio/chtls/chtls_main.c
++++ b/drivers/crypto/chelsio/chtls/chtls_main.c
+@@ -490,9 +490,13 @@ static int do_chtls_setsockopt(struct sock *sk, int optname,
+ 
+ 	switch (tmp_crypto_info.cipher_type) {
+ 	case TLS_CIPHER_AES_GCM_128: {
+-		rc = copy_from_user(crypto_info, optval,
+-				    sizeof(struct
+-					   tls12_crypto_info_aes_gcm_128));
++		/* Obtain version and type from previous copy */
++		crypto_info[0] = tmp_crypto_info;
++		/* Now copy the following data */
++		rc = copy_from_user((char *)crypto_info + sizeof(*crypto_info),
++				optval + sizeof(*crypto_info),
++				sizeof(struct tls12_crypto_info_aes_gcm_128)
++				- sizeof(*crypto_info));
+ 
+ 		if (rc) {
+ 			rc = -EFAULT;
+

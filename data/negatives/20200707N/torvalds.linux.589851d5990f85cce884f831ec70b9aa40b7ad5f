@@ -1,0 +1,128 @@
+commit 589851d5990f85cce884f831ec70b9aa40b7ad5f
+Author: Mauro Carvalho Chehab <mchehab@redhat.com>
+Date:   Tue Oct 12 12:11:55 2010 -0300
+
+    [media] V4L-DVB: tm6000: Move VBI init to a separate function
+    
+    While here, documment that VBI may need changes, based on video STD, and
+    do some cleanup at device init, to be sure that VBI init will happen
+    all the times, and to remove a duplicated video standard call.
+    
+    Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+
+diff --git a/drivers/staging/tm6000/tm6000-core.c b/drivers/staging/tm6000/tm6000-core.c
+index 1bce43acd3d9..0912639369d9 100644
+--- a/drivers/staging/tm6000/tm6000-core.c
++++ b/drivers/staging/tm6000/tm6000-core.c
+@@ -186,27 +186,17 @@ void tm6000_set_fourcc_format(struct tm6000_core *dev)
+ 	}
+ }
+ 
+-int tm6000_init_analog_mode(struct tm6000_core *dev)
++static void tm6000_set_vbi(struct tm6000_core *dev)
+ {
+-	struct v4l2_frequency f;
++	/*
++	 * FIXME:
++	 * VBI lines and start/end are different between 60Hz and 50Hz
++	 * So, it is very likely that we need to change the config to
++	 * something that takes it into account, doing something different
++	 * if (dev->norm & V4L2_STD_525_60)
++	 */
+ 
+ 	if (dev->dev_type == TM6010) {
+-		int val;
+-
+-		/* Enable video */
+-		val = tm6000_get_reg(dev, TM6010_REQ07_RCC_ACTIVE_VIDEO_IF, 0);
+-		val |= 0x60;
+-		tm6000_set_reg(dev, TM6010_REQ07_RCC_ACTIVE_VIDEO_IF, val);
+-		val = tm6000_get_reg(dev,
+-			TM6010_REQ07_RC0_ACTIVE_VIDEO_SOURCE, 0);
+-		val &= ~0x40;
+-		tm6000_set_reg(dev, TM6010_REQ07_RC0_ACTIVE_VIDEO_SOURCE, val);
+-
+-		tm6000_set_reg(dev, TM6010_REQ08_RF1_AADC_POWER_DOWN, 0xfc);
+-
+-#if 0		/* FIXME: VBI is standard-dependent */
+-
+-		/* Init teletext */
+ 		tm6000_set_reg(dev, TM6010_REQ07_R3F_RESET, 0x01);
+ 		tm6000_set_reg(dev, TM6010_REQ07_R41_TELETEXT_VBI_CODE1, 0x27);
+ 		tm6000_set_reg(dev, TM6010_REQ07_R42_VBI_DATA_HIGH_LEVEL, 0x55);
+@@ -255,7 +245,27 @@ int tm6000_init_analog_mode(struct tm6000_core *dev)
+ 		tm6000_set_reg(dev, TM6010_REQ07_R5B_VBI_TELETEXT_DTO0, 0x4c);
+ 		tm6000_set_reg(dev, TM6010_REQ07_R40_TELETEXT_VBI_CODE0, 0x01);
+ 		tm6000_set_reg(dev, TM6010_REQ07_R3F_RESET, 0x00);
+-#endif
++	}
++}
++
++int tm6000_init_analog_mode(struct tm6000_core *dev)
++{
++	struct v4l2_frequency f;
++
++	if (dev->dev_type == TM6010) {
++		int val;
++
++		/* Enable video */
++		val = tm6000_get_reg(dev, TM6010_REQ07_RCC_ACTIVE_VIDEO_IF, 0);
++		val |= 0x60;
++		tm6000_set_reg(dev, TM6010_REQ07_RCC_ACTIVE_VIDEO_IF, val);
++		val = tm6000_get_reg(dev,
++			TM6010_REQ07_RC0_ACTIVE_VIDEO_SOURCE, 0);
++		val &= ~0x40;
++		tm6000_set_reg(dev, TM6010_REQ07_RC0_ACTIVE_VIDEO_SOURCE, val);
++
++		tm6000_set_reg(dev, TM6010_REQ08_RF1_AADC_POWER_DOWN, 0xfc);
++
+ 	} else {
+ 		/* Enables soft reset */
+ 		tm6000_set_reg(dev, TM6010_REQ07_R3F_RESET, 0x01);
+@@ -310,6 +320,7 @@ int tm6000_init_analog_mode(struct tm6000_core *dev)
+ 
+ 	msleep(100);
+ 	tm6000_set_standard(dev, &dev->norm);
++	tm6000_set_vbi(dev);
+ 	tm6000_set_audio_bitrate(dev, 48000);
+ 
+ 	/* switch dvb led off */
+diff --git a/drivers/staging/tm6000/tm6000-video.c b/drivers/staging/tm6000/tm6000-video.c
+index 9304158db6da..84ab49d1618c 100644
+--- a/drivers/staging/tm6000/tm6000-video.c
++++ b/drivers/staging/tm6000/tm6000-video.c
+@@ -1015,7 +1015,6 @@ static int vidioc_s_std (struct file *file, void *priv, v4l2_std_id *norm)
+ 	struct tm6000_fh   *fh=priv;
+ 	struct tm6000_core *dev = fh->dev;
+ 
+-	rc = tm6000_set_standard(dev, norm);
+ 	rc = tm6000_init_analog_mode(dev);
+ 
+ 	fh->width  = dev->width;
+@@ -1293,18 +1292,17 @@ static int tm6000_open(struct file *file)
+ 				"active=%d\n",list_empty(&dev->vidq.active));
+ 
+ 	/* initialize hardware on analog mode */
+-//	if (dev->mode!=TM6000_MODE_ANALOG) {
+-//		rc = tm6000_set_standard(dev, dev->norm);
+-		rc += tm6000_init_analog_mode(dev);
+-		if (rc < 0)
+-			return rc;
++	rc = tm6000_init_analog_mode(dev);
++	if (rc < 0)
++		return rc;
+ 
++	if (dev->mode != TM6000_MODE_ANALOG) {
+ 		/* Put all controls at a sane state */
+ 		for (i = 0; i < ARRAY_SIZE(tm6000_qctrl); i++)
+-			qctl_regs[i] =tm6000_qctrl[i].default_value;
++			qctl_regs[i] = tm6000_qctrl[i].default_value;
+ 
+-		dev->mode=TM6000_MODE_ANALOG;
+-//	}
++		dev->mode = TM6000_MODE_ANALOG;
++	}
+ 
+ 	videobuf_queue_vmalloc_init(&fh->vb_vidq, &tm6000_video_qops,
+ 			NULL, &dev->slock,
+

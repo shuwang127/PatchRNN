@@ -1,0 +1,94 @@
+commit a8095f7e80fbf3e0efe4ee5cd3f509113c56290f
+Author: J. Bruce Fields <bfields@redhat.com>
+Date:   Tue Mar 11 17:54:34 2014 -0400
+
+    nfsd4: size-checking cleanup
+    
+    Better variable name, some comments, etc.
+    
+    Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+
+diff --git a/fs/nfsd/nfs4proc.c b/fs/nfsd/nfs4proc.c
+index a5b666ca560d..3ce431b9b577 100644
+--- a/fs/nfsd/nfs4proc.c
++++ b/fs/nfsd/nfs4proc.c
+@@ -1279,7 +1279,6 @@ nfsd4_proc_compound(struct svc_rqst *rqstp,
+ 	struct nfsd4_compound_state *cstate = &resp->cstate;
+ 	struct svc_fh *current_fh = &cstate->current_fh;
+ 	struct svc_fh *save_fh = &cstate->save_fh;
+-	u32		plen = 0;
+ 	__be32		status;
+ 
+ 	svcxdr_init_encode(rqstp, resp);
+@@ -1349,9 +1348,13 @@ nfsd4_proc_compound(struct svc_rqst *rqstp,
+ 
+ 		/* If op is non-idempotent */
+ 		if (opdesc->op_flags & OP_MODIFIES_SOMETHING) {
+-			plen = opdesc->op_rsize_bop(rqstp, op);
+ 			/*
+-			 * If there's still another operation, make sure
++			 * Don't execute this op if we couldn't encode a
++			 * succesful reply:
++			 */
++			u32 plen = opdesc->op_rsize_bop(rqstp, op);
++			/*
++			 * Plus if there's another operation, make sure
+ 			 * we'll have space to at least encode an error:
+ 			 */
+ 			if (resp->opcnt < args->opcnt)
+diff --git a/fs/nfsd/nfs4xdr.c b/fs/nfsd/nfs4xdr.c
+index df643e0fb6b3..bd529e523087 100644
+--- a/fs/nfsd/nfs4xdr.c
++++ b/fs/nfsd/nfs4xdr.c
+@@ -3739,35 +3739,36 @@ static nfsd4_enc nfsd4_enc_ops[] = {
+ };
+ 
+ /*
+- * Calculate the total amount of memory that the compound response has taken
+- * after encoding the current operation with pad.
++ * Calculate whether we still have space to encode repsize bytes.
++ * There are two considerations:
++ *     - For NFS versions >=4.1, the size of the reply must stay within
++ *       session limits
++ *     - For all NFS versions, we must stay within limited preallocated
++ *       buffer space.
+  *
+- * pad: if operation is non-idempotent, pad was calculate by op_rsize_bop()
+- *      which was specified at nfsd4_operation, else pad is zero.
+- *
+- * Compare this length to the session se_fmaxresp_sz and se_fmaxresp_cached.
+- *
+- * Our se_fmaxresp_cached will always be a multiple of PAGE_SIZE, and so
+- * will be at least a page and will therefore hold the xdr_buf head.
++ * This is called before the operation is processed, so can only provide
++ * an upper estimate.  For some nonidempotent operations (such as
++ * getattr), it's not necessarily a problem if that estimate is wrong,
++ * as we can fail it after processing without significant side effects.
+  */
+-__be32 nfsd4_check_resp_size(struct nfsd4_compoundres *resp, u32 pad)
++__be32 nfsd4_check_resp_size(struct nfsd4_compoundres *resp, u32 respsize)
+ {
+ 	struct xdr_buf *buf = &resp->rqstp->rq_res;
+ 	struct nfsd4_session *session = resp->cstate.session;
+-	struct nfsd4_slot *slot = resp->cstate.slot;
+ 	int slack_bytes = (char *)resp->xdr.end - (char *)resp->xdr.p;
+ 
+ 	if (nfsd4_has_session(&resp->cstate)) {
++		struct nfsd4_slot *slot = resp->cstate.slot;
+ 
+-		if (buf->len + pad > session->se_fchannel.maxresp_sz)
++		if (buf->len + respsize > session->se_fchannel.maxresp_sz)
+ 			return nfserr_rep_too_big;
+ 
+ 		if ((slot->sl_flags & NFSD4_SLOT_CACHETHIS) &&
+-		    buf->len + pad > session->se_fchannel.maxresp_cached)
++		    buf->len + respsize > session->se_fchannel.maxresp_cached)
+ 			return nfserr_rep_too_big_to_cache;
+ 	}
+ 
+-	if (pad > slack_bytes) {
++	if (respsize > slack_bytes) {
+ 		WARN_ON_ONCE(nfsd4_has_session(&resp->cstate));
+ 		return nfserr_resource;
+ 	}
+

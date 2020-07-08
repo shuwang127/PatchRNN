@@ -1,0 +1,70 @@
+commit b2134bcd2e1bf989e0566dd1b0e59a792722b671
+Author: KAMBAROV, ZAUR <kambarov@berkeley.edu>
+Date:   Fri Jun 24 22:20:35 2005 -0700
+
+    [PATCH] USB: coverity: (desc->bitmap)[] overrun fix
+    
+    The length of the array desc->bitmap is 3, and not 4:
+    
+    Definitions involved:
+    
+    In drivers/usb/core/hcd.h
+    
+    464     #define bitmap  DeviceRemovable
+    
+    In drivers/usb/host/ohci-hub.c
+    
+    395             struct usb_hub_descriptor       *desc
+    
+    In drivers/usb/core/hub.h
+    
+    130     struct usb_hub_descriptor {
+    131             __u8  bDescLength;
+    132             __u8  bDescriptorType;
+    133             __u8  bNbrPorts;
+    134             __u16 wHubCharacteristics;
+    135             __u8  bPwrOn2PwrGood;
+    136             __u8  bHubContrCurrent;
+    137                     /* add 1 bit for hub status change; round to bytes */
+    138             __u8  DeviceRemovable[(USB_MAXCHILDREN + 1 + 7) / 8];
+    139             __u8  PortPwrCtrlMask[(USB_MAXCHILDREN + 1 + 7) / 8];
+    140     } __attribute__ ((packed));
+    
+    In include/linux/usb.h
+    
+    306     #define USB_MAXCHILDREN         (16)
+    
+    This defect was found automatically by Coverity Prevent, a static analysis
+    tool.
+    
+    (akpm: this code should be shot.  Field `bitmap' doesn't exist in struct
+    usb_hub_descriptor.  And this .c file is #included in
+    drivers/usb/host/ohci-hcd.c, and someone somewhere #defines `bitmap' to
+    `DeviceRemovable'.
+    
+    >From a maintainability POV it would be better to memset the whole array
+    beforehand - I changed the patch to do that)
+    
+    Signed-off-by: Zaur Kambarov <zkambarov@coverity.com>
+    Cc: <linux-usb-devel@lists.sourceforge.net?
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/usb/host/ohci-hub.c b/drivers/usb/host/ohci-hub.c
+index e2fc4129dfc6..83ca4549a50e 100644
+--- a/drivers/usb/host/ohci-hub.c
++++ b/drivers/usb/host/ohci-hub.c
+@@ -419,10 +419,11 @@ ohci_hub_descriptor (
+ 
+ 	/* two bitmaps:  ports removable, and usb 1.0 legacy PortPwrCtrlMask */
+ 	rh = roothub_b (ohci);
++	memset(desc->bitmap, 0xff, sizeof(desc->bitmap));
+ 	desc->bitmap [0] = rh & RH_B_DR;
+ 	if (ports > 7) {
+ 		desc->bitmap [1] = (rh & RH_B_DR) >> 8;
+-		desc->bitmap [2] = desc->bitmap [3] = 0xff;
++		desc->bitmap [2] = 0xff;
+ 	} else
+ 		desc->bitmap [1] = 0xff;
+ }
+

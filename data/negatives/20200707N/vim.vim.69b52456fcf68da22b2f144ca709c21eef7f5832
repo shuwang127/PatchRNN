@@ -1,0 +1,107 @@
+commit 69b52456fcf68da22b2f144ca709c21eef7f5832
+Author: Bram Moolenaar <Bram@vim.org>
+Date:   Wed Jul 17 21:10:51 2013 +0200
+
+    updated for version 7.4a.032
+    Problem:    New regexp engine: Does not match shorter alternative. (Ingo
+                Karkat)
+    Solution:   Do not drop a new state when the PIM info is different.
+
+diff --git a/src/regexp_nfa.c b/src/regexp_nfa.c
+index f920e09b5..72e3a74ff 100644
+--- a/src/regexp_nfa.c
++++ b/src/regexp_nfa.c
+@@ -3535,7 +3535,8 @@ static void copy_sub __ARGS((regsub_T *to, regsub_T *from));
+ static void copy_sub_off __ARGS((regsub_T *to, regsub_T *from));
+ static int sub_equal __ARGS((regsub_T *sub1, regsub_T *sub2));
+ static int match_backref __ARGS((regsub_T *sub, int subidx, int *bytelen));
+-static int has_state_with_pos __ARGS((nfa_list_T *l, nfa_state_T *state, regsubs_T *subs));
++static int has_state_with_pos __ARGS((nfa_list_T *l, nfa_state_T *state, regsubs_T *subs, nfa_pim_T *pim));
++static int pim_equal __ARGS((nfa_pim_T *one, nfa_pim_T *two));
+ static int state_in_list __ARGS((nfa_list_T *l, nfa_state_T *state, regsubs_T *subs));
+ static regsubs_T *addstate __ARGS((nfa_list_T *l, nfa_state_T *state, regsubs_T *subs_arg, nfa_pim_T *pim, int off));
+ static void addstate_here __ARGS((nfa_list_T *l, nfa_state_T *state, regsubs_T *subs, nfa_pim_T *pim, int *ip));
+@@ -3701,10 +3702,11 @@ report_state(char *action,
+  * positions as "subs".
+  */
+     static int
+-has_state_with_pos(l, state, subs)
++has_state_with_pos(l, state, subs, pim)
+     nfa_list_T		*l;	/* runtime state list */
+     nfa_state_T		*state;	/* state to update */
+     regsubs_T		*subs;	/* pointers to subexpressions */
++    nfa_pim_T		*pim;	/* postponed match or NULL */
+ {
+     nfa_thread_T	*thread;
+     int			i;
+@@ -3718,12 +3720,37 @@ has_state_with_pos(l, state, subs)
+ 		&& (!nfa_has_zsubexpr
+ 				|| sub_equal(&thread->subs.synt, &subs->synt))
+ #endif
+-			      )
++		&& pim_equal(&thread->pim, pim))
+ 	    return TRUE;
+     }
+     return FALSE;
+ }
+ 
++/*
++ * Return TRUE if "one" and "two" are equal.  That includes when both are not
++ * set.
++ */
++    static int
++pim_equal(one, two)
++    nfa_pim_T *one;
++    nfa_pim_T *two;
++{
++    int one_unused = (one == NULL || one->result == NFA_PIM_UNUSED);
++    int two_unused = (two == NULL || two->result == NFA_PIM_UNUSED);
++
++    if (one_unused)
++	/* one is unused: equal when two is also unused */
++	return two_unused;
++    if (two_unused)
++	/* one is used and two is not: not equal */
++	return FALSE;
++    /* compare the position */
++    if (REG_MULTI)
++	return one->end.pos.lnum == two->end.pos.lnum
++	    && one->end.pos.col == two->end.pos.col;
++    return one->end.ptr == two->end.ptr;
++}
++
+ /*
+  * Return TRUE if "state" leads to a NFA_MATCH without advancing the input.
+  */
+@@ -3825,7 +3852,7 @@ state_in_list(l, state, subs)
+ {
+     if (state->lastlist[nfa_ll_index] == l->id)
+     {
+-	if (!nfa_has_backref || has_state_with_pos(l, state, subs))
++	if (!nfa_has_backref || has_state_with_pos(l, state, subs, NULL))
+ 	    return TRUE;
+     }
+     return FALSE;
+@@ -3952,7 +3979,7 @@ skip_add:
+ 
+ 		/* Do not add the state again when it exists with the same
+ 		 * positions. */
+-		if (has_state_with_pos(l, state, subs))
++		if (has_state_with_pos(l, state, subs, pim))
+ 		    goto skip_add;
+ 	    }
+ 
+diff --git a/src/version.c b/src/version.c
+index e24106693..97ffa7828 100644
+--- a/src/version.c
++++ b/src/version.c
+@@ -727,6 +727,8 @@ static char *(features[]) =
+ 
+ static int included_patches[] =
+ {   /* Add new patch number below this line */
++/**/
++    32,
+ /**/
+     31,
+ /**/
+

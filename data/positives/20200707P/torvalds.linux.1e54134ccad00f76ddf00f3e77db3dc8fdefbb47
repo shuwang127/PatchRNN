@@ -1,0 +1,37 @@
+commit 1e54134ccad00f76ddf00f3e77db3dc8fdefbb47
+Author: Jes Sorensen <Jes.Sorensen@redhat.com>
+Date:   Thu Sep 29 15:40:54 2016 -0400
+
+    rtl8xxxu: Fix memory leak in handling rxdesc16 packets
+    
+    A device running without RX package aggregation could return more data
+    in the USB packet than the actual network packet. In this case we
+    could would clone the skb but then determine that that there was no
+    packet to handle and exit without freeing the cloned skb first.
+    
+    This has so far only been observed with 8188eu devices, but could
+    affect others.
+    
+    Signed-off-by: Jes Sorensen <Jes.Sorensen@redhat.com>
+    Cc: stable@vger.kernel.org # 4.8+
+    Signed-off-by: Kalle Valo <kvalo@codeaurora.org>
+
+diff --git a/drivers/net/wireless/realtek/rtl8xxxu/rtl8xxxu_core.c b/drivers/net/wireless/realtek/rtl8xxxu/rtl8xxxu_core.c
+index b2d7f6e69667..a96ff17759e4 100644
+--- a/drivers/net/wireless/realtek/rtl8xxxu/rtl8xxxu_core.c
++++ b/drivers/net/wireless/realtek/rtl8xxxu/rtl8xxxu_core.c
+@@ -5197,7 +5197,12 @@ int rtl8xxxu_parse_rxdesc16(struct rtl8xxxu_priv *priv, struct sk_buff *skb)
+ 		pkt_offset = roundup(pkt_len + drvinfo_sz + desc_shift +
+ 				     sizeof(struct rtl8xxxu_rxdesc16), 128);
+ 
+-		if (pkt_cnt > 1)
++		/*
++		 * Only clone the skb if there's enough data at the end to
++		 * at least cover the rx descriptor
++		 */
++		if (pkt_cnt > 1 &&
++		    urb_len > (pkt_offset + sizeof(struct rtl8xxxu_rxdesc16)))
+ 			next_skb = skb_clone(skb, GFP_ATOMIC);
+ 
+ 		rx_status = IEEE80211_SKB_RXCB(skb);
+

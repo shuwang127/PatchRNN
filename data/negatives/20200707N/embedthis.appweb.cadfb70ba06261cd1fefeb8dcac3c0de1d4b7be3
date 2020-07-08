@@ -1,0 +1,148 @@
+commit cadfb70ba06261cd1fefeb8dcac3c0de1d4b7be3
+Author: Embedthis Software <dev@embedthis.com>
+Date:   Mon Nov 18 14:20:39 2013 -0800
+
+    FIX: Locking primitives fail on Windows single core systems
+    
+    https://github.com/embedthis/appweb-4/issues/248
+
+diff --git a/src/deps/mpr/mpr.h b/src/deps/mpr/mpr.h
+index 3e34ad7f6..ec52b11ec 100644
+--- a/src/deps/mpr/mpr.h
++++ b/src/deps/mpr/mpr.h
+@@ -408,6 +408,10 @@ PUBLIC void assert(bool cond);
+  */
+ typedef struct MprSynch { int dummy; } MprSynch;
+ 
++#ifndef BIT_MPR_SPIN_COUNT
++    #define BIT_MPR_SPIN_COUNT 5000 /* Windows lock spin count */
++#endif
++
+ /**
+     Condition variable for single and multi-thread synchronization. Condition variables can be used to coordinate 
+     activities. These variables are level triggered in that a condition can be signalled prior to another thread 
+@@ -504,6 +508,7 @@ PUBLIC int mprWaitForMultiCond(MprCond *cond, MprTicks timeout);
+ typedef struct MprMutex {
+     #if BIT_WIN_LIKE
+         CRITICAL_SECTION cs;            /**< Internal mutex critical section */
++        bool             freed;
+     #elif VXWORKS
+         SEM_ID      cs;
+     #elif BIT_UNIX_LIKE
+@@ -526,6 +531,7 @@ typedef struct MprSpin {
+         MprMutex                cs;
+     #elif BIT_WIN_LIKE
+         CRITICAL_SECTION        cs;            /**< Internal mutex critical section */
++        bool                    freed;
+     #elif VXWORKS
+         #if FUTURE && SPIN_LOCK_TASK_INIT
+             spinlockTask_t      cs;
+@@ -641,7 +647,7 @@ PUBLIC void mprManageSpinLock(MprSpin *lock, int flags);
+         #define mprSpinLock(lock)   if (lock) pthread_mutex_lock(&((lock)->cs))
+         #define mprSpinUnlock(lock) if (lock) pthread_mutex_unlock(&((lock)->cs))
+     #elif BIT_WIN_LIKE
+-        #define mprSpinLock(lock)   if (lock && (((MprSpin*)(lock))->cs.SpinCount)) EnterCriticalSection(&((lock)->cs))
++        #define mprSpinLock(lock)   if (lock && (!((MprSpin*)(lock))->freed)) EnterCriticalSection(&((lock)->cs))
+         #define mprSpinUnlock(lock) if (lock) LeaveCriticalSection(&((lock)->cs))
+     #elif VXWORKS
+         #define mprSpinLock(lock)   if (lock) semTake((lock)->cs, WAIT_FOREVER)
+@@ -655,7 +661,7 @@ PUBLIC void mprManageSpinLock(MprSpin *lock, int flags);
+         #define mprLock(lock)       if (lock) pthread_mutex_lock(&((lock)->cs))
+         #define mprUnlock(lock)     if (lock) pthread_mutex_unlock(&((lock)->cs))
+     #elif BIT_WIN_LIKE
+-        #define mprLock(lock)       if (lock && (((MprSpin*)(lock))->cs.SpinCount)) EnterCriticalSection(&((lock)->cs))
++        #define mprLock(lock)       if (lock && !(((MprSpin*)(lock))->freed)) EnterCriticalSection(&((lock)->cs))
+         #define mprUnlock(lock)     if (lock) LeaveCriticalSection(&((lock)->cs))
+     #elif VXWORKS
+         #define mprLock(lock)       if (lock) semTake((lock)->cs, WAIT_FOREVER)
+diff --git a/src/deps/mpr/mprLib.c b/src/deps/mpr/mprLib.c
+index f0d7293f5..5e57ce8d4 100644
+--- a/src/deps/mpr/mprLib.c
++++ b/src/deps/mpr/mprLib.c
+@@ -14283,7 +14283,7 @@ PUBLIC MprMutex *mprCreateLock()
+ #elif WINCE
+     InitializeCriticalSection(&lock->cs);
+ #elif BIT_WIN_LIKE
+-    InitializeCriticalSectionAndSpinCount(&lock->cs, 5000);
++    InitializeCriticalSectionAndSpinCount(&lock->cs, BIT_MPR_SPIN_COUNT);
+ #elif VXWORKS
+     /* Removed SEM_INVERSION_SAFE */
+     lock->cs = semMCreate(SEM_Q_PRIORITY | SEM_DELETE_SAFE);
+@@ -14303,8 +14303,8 @@ static void manageLock(MprMutex *lock, int flags)
+ #if BIT_UNIX_LIKE
+         pthread_mutex_destroy(&lock->cs);
+ #elif BIT_WIN_LIKE
++        lock->freed = 1;
+         DeleteCriticalSection(&lock->cs);
+-        lock->cs.SpinCount = 0;
+ #elif VXWORKS
+         semDelete(lock->cs);
+ #endif
+@@ -14325,7 +14325,7 @@ PUBLIC MprMutex *mprInitLock(MprMutex *lock)
+     InitializeCriticalSection(&lock->cs);
+ 
+ #elif BIT_WIN_LIKE
+-    InitializeCriticalSectionAndSpinCount(&lock->cs, 5000);
++    InitializeCriticalSectionAndSpinCount(&lock->cs, BIT_MPR_SPIN_COUNT);
+ 
+ #elif VXWORKS
+     /* Removed SEM_INVERSION_SAFE */
+@@ -14351,8 +14351,7 @@ PUBLIC bool mprTryLock(MprMutex *lock)
+ #if BIT_UNIX_LIKE
+     rc = pthread_mutex_trylock(&lock->cs) != 0;
+ #elif BIT_WIN_LIKE
+-    /* Rely on SpinCount being non-zero */
+-    if (lock->cs.SpinCount) {
++    if (!lock->freed) {
+         rc = TryEnterCriticalSection(&lock->cs) == 0;
+     } else {
+         rc = 0;
+@@ -14389,8 +14388,8 @@ PUBLIC void mprManageSpinLock(MprSpin *lock, int flags)
+ #elif BIT_UNIX_LIKE
+         pthread_mutex_destroy(&lock->cs);
+ #elif BIT_WIN_LIKE
++        lock->freed = 1;
+         DeleteCriticalSection(&lock->cs);
+-        lock->cs.SpinCount = 0;
+ #elif VXWORKS
+         semDelete(lock->cs);
+ #endif
+@@ -14421,7 +14420,7 @@ PUBLIC MprSpin *mprInitSpinLock(MprSpin *lock)
+ #elif WINCE
+     InitializeCriticalSection(&lock->cs);
+ #elif BIT_WIN_LIKE
+-    InitializeCriticalSectionAndSpinCount(&lock->cs, 5000);
++    InitializeCriticalSectionAndSpinCount(&lock->cs, BIT_MPR_SPIN_COUNT);
+ #elif VXWORKS
+     #if FUTURE
+         spinLockTaskInit(&lock->cs, 0);
+@@ -14459,8 +14458,7 @@ PUBLIC bool mprTrySpinLock(MprSpin *lock)
+ #elif BIT_UNIX_LIKE
+     rc = pthread_mutex_trylock(&lock->cs) != 0;
+ #elif BIT_WIN_LIKE
+-    /* Rely on SpinCount being non-zero */
+-    if (lock->cs.SpinCount) {
++    if (!lock->freed) {
+         rc = TryEnterCriticalSection(&lock->cs) == 0;
+     } else {
+         rc = 0;
+@@ -14516,8 +14514,7 @@ PUBLIC void mprLock(MprMutex *lock)
+ #if BIT_UNIX_LIKE
+     pthread_mutex_lock(&lock->cs);
+ #elif BIT_WIN_LIKE
+-    /* Rely on SpinCount being non-zero */
+-    if (lock->cs.SpinCount) {
++    if (!lock->freed) {
+         EnterCriticalSection(&lock->cs);
+     }
+ #elif VXWORKS
+@@ -14569,7 +14566,7 @@ PUBLIC void mprSpinLock(MprSpin *lock)
+ #elif BIT_UNIX_LIKE
+     pthread_mutex_lock(&lock->cs);
+ #elif BIT_WIN_LIKE
+-    if (lock->cs.SpinCount) {
++    if (!lock->freed) {
+         EnterCriticalSection(&lock->cs);
+     }
+ #elif VXWORKS
+

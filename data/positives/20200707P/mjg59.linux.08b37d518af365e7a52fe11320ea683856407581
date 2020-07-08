@@ -1,0 +1,61 @@
+commit 08b37d518af365e7a52fe11320ea683856407581
+Author: Jeff Layton <jlayton@poochiereds.net>
+Date:   Fri May 23 06:53:10 2014 -0400
+
+    cifs: ensure that vol->username is not NULL before running strlen on it
+    
+    Dan Carpenter says:
+    
+    The patch 04febabcf55b: "cifs: sanitize username handling" from Jan
+    17, 2012, leads to the following static checker warning:
+    
+            fs/cifs/connect.c:2231 match_session()
+            error: we previously assumed 'vol->username' could be null (see line 2228)
+    
+    fs/cifs/connect.c
+      2219                  /* NULL username means anonymous session */
+      2220                  if (ses->user_name == NULL) {
+      2221                          if (!vol->nullauth)
+      2222                                  return 0;
+      2223                          break;
+      2224                  }
+      2225
+      2226                  /* anything else takes username/password */
+      2227                  if (strncmp(ses->user_name,
+      2228                              vol->username ? vol->username : "",
+                                        ^^^^^^^^^^^^^
+    We added this check for vol->username here.
+    
+      2229                              CIFS_MAX_USERNAME_LEN))
+      2230                          return 0;
+      2231                  if (strlen(vol->username) != 0 &&
+                                       ^^^^^^^^^^^^^
+    But this dereference is not checked.
+    
+      2232                      ses->password != NULL &&
+      2233                      strncmp(ses->password,
+      2234                              vol->password ? vol->password : "",
+      2235                              CIFS_MAX_PASSWORD_LEN))
+      2236                          return 0;
+    
+    ...fix this by ensuring that vol->username is not NULL before running
+    strlen on it.
+    
+    Signed-off-by: Jeff Layton <jlayton@poochiereds.net>
+    Reported-by: Dan Carpenter <dan.carpenter@oracle.com>
+    Signed-off-by: Steve French <smfrench@gmail.com>
+
+diff --git a/fs/cifs/connect.c b/fs/cifs/connect.c
+index 8b8fe9b373f2..20d75b8ddb26 100644
+--- a/fs/cifs/connect.c
++++ b/fs/cifs/connect.c
+@@ -2228,7 +2228,7 @@ static int match_session(struct cifs_ses *ses, struct smb_vol *vol)
+ 			    vol->username ? vol->username : "",
+ 			    CIFS_MAX_USERNAME_LEN))
+ 			return 0;
+-		if (strlen(vol->username) != 0 &&
++		if ((vol->username && strlen(vol->username) != 0) &&
+ 		    ses->password != NULL &&
+ 		    strncmp(ses->password,
+ 			    vol->password ? vol->password : "",
+

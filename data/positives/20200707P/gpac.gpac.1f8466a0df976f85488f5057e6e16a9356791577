@@ -1,0 +1,187 @@
+commit 1f8466a0df976f85488f5057e6e16a9356791577
+Author: Romain Bouqueau <romain.bouqueau.pro@gmail.com>
+Date:   Thu Sep 10 16:44:21 2015 +0200
+
+    when tmp file are created by GPAC, we need to store the filename to avoid leaks
+    fix #61
+
+diff --git a/applications/mp4client/main.c b/applications/mp4client/main.c
+index 361d3da84..a5d3ee299 100644
+--- a/applications/mp4client/main.c
++++ b/applications/mp4client/main.c
+@@ -856,7 +856,7 @@ Bool GPAC_EventProc(void *ptr, GF_Event *evt)
+ 		readonly_playlist = 0;
+ 		if (!playlist) {
+ 			readonly_playlist = 0;
+-			playlist = gf_temp_file_new();
++			playlist = gf_temp_file_new(NULL);
+ 		}
+ 		pos = ftell(playlist);
+ 		i=0;
+diff --git a/include/gpac/tools.h b/include/gpac/tools.h
+index 38ce238e8..4c702a3ec 100644
+--- a/include/gpac/tools.h
++++ b/include/gpac/tools.h
+@@ -596,9 +596,10 @@ GF_Err gf_move_file(const char *fileName, const char *newFileName);
+  *	\brief Temporary File Creation
+  *
+  *	Creates a new temporary file in binary mode
++ *	\param fileName if not NULL, strdup() of the temporary filename when created by GPAC (NULL otherwise as the system automatically removes its own tmp files)
+  *	\return stream handle to the new file ressoucre
+  */
+-FILE *gf_temp_file_new();
++FILE *gf_temp_file_new(char ** const fileName);
+ 
+ 
+ /*!
+diff --git a/include/gpac/version.h b/include/gpac/version.h
+index 17d9626a6..956e08fad 100644
+--- a/include/gpac/version.h
++++ b/include/gpac/version.h
+@@ -36,8 +36,8 @@
+  * SONAME versions must be digits (not strings)
+  */
+ #define GPAC_VERSION          "0.5.2-DEV"
+-#define GPAC_VERSION_MAJOR 5
+-#define GPAC_VERSION_MINOR 5
++#define GPAC_VERSION_MAJOR 6
++#define GPAC_VERSION_MINOR 0
+ #define GPAC_VERSION_MICRO 0
+ 
+ #include <gpac/revision.h>
+diff --git a/src/ietf/rtp_streamer.c b/src/ietf/rtp_streamer.c
+index 02b0420a0..a1826130b 100644
+--- a/src/ietf/rtp_streamer.c
++++ b/src/ietf/rtp_streamer.c
+@@ -767,8 +767,8 @@ GF_EXPORT
+ char *gf_rtp_streamer_format_sdp_header(char *app_name, char *ip_dest, char *session_name, char *iod64)
+ {
+ 	u64 size;
+-	char *sdp;
+-	FILE *tmp = gf_temp_file_new();
++	char *sdp, *tmp_fn = NULL;
++	FILE *tmp = gf_temp_file_new(&tmp_fn);
+ 	if (!tmp) return NULL;
+ 
+ 	/* write SDP header*/
+@@ -787,6 +787,8 @@ char *gf_rtp_streamer_format_sdp_header(char *app_name, char *ip_dest, char *ses
+ 	size = fread(sdp, 1, (size_t)size, tmp);
+ 	sdp[size] = 0;
+ 	gf_fclose(tmp);
++	gf_delete_file(tmp_fn);
++	gf_free(tmp_fn);
+ 	return sdp;
+ }
+ 
+diff --git a/src/isomedia/data_map.c b/src/isomedia/data_map.c
+index 547ae557c..7363c4cc7 100644
+--- a/src/isomedia/data_map.c
++++ b/src/isomedia/data_map.c
+@@ -344,7 +344,7 @@ GF_DataMap *gf_isom_fdm_new_temp(const char *sPath)
+ 	tmp->mode = GF_ISOM_DATA_MAP_WRITE;
+ 
+ 	if (!sPath) {
+-		tmp->stream = gf_temp_file_new();
++		tmp->stream = gf_temp_file_new(&tmp->temp_file);
+ 	} else {
+ 		char szPath[GF_MAX_PATH];
+ 		if ((sPath[strlen(sPath)-1] != '\\') && (sPath[strlen(sPath)-1] != '/')) {
+@@ -391,8 +391,8 @@ GF_DataMap *gf_isom_fdm_new(const char *sPath, u8 mode)
+ #ifndef GPAC_DISABLE_ISOM_WRITE
+ 	//open a temp file
+ 	if (!strcmp(sPath, "mp4_tmp_edit")) {
+-		//create  a temp file (that only occurs in EDIT/WRITE mode)
+-		tmp->stream = gf_temp_file_new();
++		//create a temp file (that only occurs in EDIT/WRITE mode)
++		tmp->stream = gf_temp_file_new(&tmp->temp_file);
+ 		bs_mode = GF_BITSTREAM_READ;
+ 	}
+ #endif
+diff --git a/src/utils/downloader.c b/src/utils/downloader.c
+index 0b498463a..f59a59996 100644
+--- a/src/utils/downloader.c
++++ b/src/utils/downloader.c
+@@ -3290,12 +3290,13 @@ GF_Err gf_dm_get_file_memory(const char *url, char **out_data, u32 *out_size, ch
+ {
+ 	GF_Err e;
+ 	FILE * f;
++	char * f_fn = NULL;
+ 	GF_DownloadSession *dnload;
+ 	GF_DownloadManager *dm;
+ 
+ 	if (!url || !out_data || !out_size)
+ 		return GF_BAD_PARAM;
+-	f = gf_temp_file_new();
++	f = gf_temp_file_new(&f_fn);
+ 	if (!f) {
+ 		GF_LOG(GF_LOG_ERROR, GF_LOG_NETWORK, ("[WGET] Failed to create temp file for write.\n"));
+ 		return GF_IO_ERR;
+@@ -3304,12 +3305,15 @@ GF_Err gf_dm_get_file_memory(const char *url, char **out_data, u32 *out_size, ch
+ 	dm = gf_dm_new(NULL);
+ 	if (!dm) {
+ 		gf_fclose(f);
++		gf_delete_file(f_fn);
+ 		return GF_OUT_OF_MEM;
+ 	}
+ 
+ 	dnload = gf_dm_sess_new_simple(dm, (char *)url, GF_NETIO_SESSION_NOT_THREADED, &wget_NetIO, f, &e);
+ 	if (!dnload) {
+ 		gf_dm_del(dm);
++		gf_fclose(f);
++		gf_delete_file(f_fn);
+ 		return GF_BAD_PARAM;
+ 	}
+ 	dnload->use_cache_file = GF_FALSE;
+@@ -3338,6 +3342,8 @@ GF_Err gf_dm_get_file_memory(const char *url, char **out_data, u32 *out_size, ch
+ 		}
+ 	}
+ 	gf_fclose(f);
++	gf_delete_file(f_fn);
++	gf_free(f_fn);
+ 	gf_dm_sess_del(dnload);
+ 	gf_dm_del(dm);
+ 	return e;
+diff --git a/src/utils/os_file.c b/src/utils/os_file.c
+index c01543625..0c1b197c9 100644
+--- a/src/utils/os_file.c
++++ b/src/utils/os_file.c
+@@ -162,6 +162,10 @@ GF_Err gf_cleanup_dir(char* DirPathName)
+ GF_EXPORT
+ GF_Err gf_delete_file(const char *fileName)
+ {
++	if (!fileName) {
++		GF_LOG(GF_LOG_WARNING, GF_LOG_CORE, ("gf_delete_file deletes nothing - ignoring\n"));
++		return GF_OK;
++	}
+ #if defined(_WIN32_WCE)
+ 	TCHAR swzName[MAX_PATH];
+ 	CE_CharToWide((char*)fileName, swzName);
+@@ -267,9 +271,9 @@ u32 gf_file_handles_count()
+ }
+ 
+ GF_EXPORT
+-FILE *gf_temp_file_new()
++FILE *gf_temp_file_new(char ** const fileName)
+ {
+-	FILE *res=NULL;
++	FILE *res = NULL;
+ #if defined(_WIN32_WCE)
+ 	TCHAR pPath[MAX_PATH+1];
+ 	TCHAR pTemp[MAX_PATH+1];
+@@ -292,7 +296,14 @@ FILE *gf_temp_file_new()
+ 			sprintf(tmp2, "gpac_%08x_", gf_rand());
+ 			t_file = tempnam(tmp, tmp2);
+ 			res = gf_fopen(t_file, "w+b");
+-			gpac_file_handles--;
++			if (res) {
++				gpac_file_handles--;
++				if (fileName) {
++					*fileName = gf_strdup(t_file);
++				} else {
++					GF_LOG(GF_LOG_WARNING, GF_LOG_CORE, ("[Win32] temporary file %s won't be deleted - contact the GPAC team\n", t_file));
++				}
++			}
+ 			free(t_file);
+ 		}
+ 	}
+

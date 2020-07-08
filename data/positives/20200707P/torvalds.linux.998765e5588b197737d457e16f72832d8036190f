@@ -1,0 +1,67 @@
+commit 998765e5588b197737d457e16f72832d8036190f
+Author: Zach Brown <zach.brown@oracle.com>
+Date:   Fri Sep 30 11:58:54 2005 -0700
+
+    [PATCH] aio: lock around kiocbTryKick()
+    
+    Only one of the run or kick path is supposed to put an iocb on the run
+    list.  If both of them do it than one of them can end up referencing a
+    freed iocb.  The kick patch could set the Kicked bit before acquiring the
+    ctx_lock and putting the iocb on the run list.  The run path, while holding
+    the ctx_lock, could see this partial kick and mistake it for a kick that
+    was deferred while it was doing work with the run_list NULLed out.  It
+    would then race with the kick thread to add the iocb to the run list.
+    
+    This patch moves the kick setting under the ctx_lock so that only one of
+    the kick or run path queues the iocb on the run list, as intended.
+    
+    Signed-off-by: Zach Brown <zach.brown@oracle.com>
+    Signed-off-by: Benjamin LaHaise <bcrl@linux.intel.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/fs/aio.c b/fs/aio.c
+index 0e11e31dbb77..b8f296999c04 100644
+--- a/fs/aio.c
++++ b/fs/aio.c
+@@ -899,16 +899,24 @@ static void aio_kick_handler(void *data)
+  * and if required activate the aio work queue to process
+  * it
+  */
+-static void queue_kicked_iocb(struct kiocb *iocb)
++static void try_queue_kicked_iocb(struct kiocb *iocb)
+ {
+  	struct kioctx	*ctx = iocb->ki_ctx;
+ 	unsigned long flags;
+ 	int run = 0;
+ 
+-	WARN_ON((!list_empty(&iocb->ki_wait.task_list)));
++	/* We're supposed to be the only path putting the iocb back on the run
++	 * list.  If we find that the iocb is *back* on a wait queue already
++	 * than retry has happened before we could queue the iocb.  This also
++	 * means that the retry could have completed and freed our iocb, no
++	 * good. */
++	BUG_ON((!list_empty(&iocb->ki_wait.task_list)));
+ 
+ 	spin_lock_irqsave(&ctx->ctx_lock, flags);
+-	run = __queue_kicked_iocb(iocb);
++	/* set this inside the lock so that we can't race with aio_run_iocb()
++	 * testing it and putting the iocb on the run list under the lock */
++	if (!kiocbTryKick(iocb))
++		run = __queue_kicked_iocb(iocb);
+ 	spin_unlock_irqrestore(&ctx->ctx_lock, flags);
+ 	if (run)
+ 		aio_queue_work(ctx);
+@@ -931,10 +939,7 @@ void fastcall kick_iocb(struct kiocb *iocb)
+ 		return;
+ 	}
+ 
+-	/* If its already kicked we shouldn't queue it again */
+-	if (!kiocbTryKick(iocb)) {
+-		queue_kicked_iocb(iocb);
+-	}
++	try_queue_kicked_iocb(iocb);
+ }
+ EXPORT_SYMBOL(kick_iocb);
+ 
+

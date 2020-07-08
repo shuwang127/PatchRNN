@@ -1,0 +1,68 @@
+commit b083916638eee513be501f53b42a4be0b9851db0
+Author: Julia Lawall <julia@diku.dk>
+Date:   Sat May 14 07:10:51 2011 +0000
+
+    fs/btrfs: Add missing btrfs_free_path
+    
+    Btrfs_alloc_path should be matched with btrfs_free_path in error-handling code.
+    
+    A simplified version of the semantic match that finds this problem is as
+    follows: (http://coccinelle.lip6.fr/)
+    
+    // <smpl>
+    @r exists@
+    local idexpression struct btrfs_path * x;
+    expression ra,rb;
+    position p1,p2;
+    @@
+    
+    x = btrfs_alloc_path@p1(...)
+    ...  when != btrfs_free_path(x,...)
+         when != if (...) { ... btrfs_free_path(x,...) ...}
+         when != x = ra
+    if(...) { ... when != x = rb
+         when forall
+         when != btrfs_free_path(x,...)
+     \(return <+...x...+>; \| return@p2...; \) }
+    
+    @script:python@
+    p1 << r.p1;
+    p2 << r.p2;
+    @@
+    
+    cocci.print_main("alloc",p1)
+    cocci.print_secs("return",p2)
+    // </smpl>
+    
+    Signed-off-by: Julia Lawall <julia@diku.dk>
+    Signed-off-by: Chris Mason <chris.mason@oracle.com>
+
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index e9e2b4778279..80fcd5177731 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -7314,6 +7314,7 @@ static int btrfs_symlink(struct inode *dir, struct dentry *dentry,
+ 				      datasize);
+ 	if (err) {
+ 		drop_inode = 1;
++		btrfs_free_path(path);
+ 		goto out_unlock;
+ 	}
+ 	leaf = path->nodes[0];
+diff --git a/fs/btrfs/super.c b/fs/btrfs/super.c
+index 0ac712efcdf2..46d7eed7e965 100644
+--- a/fs/btrfs/super.c
++++ b/fs/btrfs/super.c
+@@ -506,8 +506,10 @@ static struct dentry *get_default_root(struct super_block *sb,
+ 	 */
+ 	dir_id = btrfs_super_root_dir(&root->fs_info->super_copy);
+ 	di = btrfs_lookup_dir_item(NULL, root, path, dir_id, "default", 7, 0);
+-	if (IS_ERR(di))
++	if (IS_ERR(di)) {
++		btrfs_free_path(path);
+ 		return ERR_CAST(di);
++	}
+ 	if (!di) {
+ 		/*
+ 		 * Ok the default dir item isn't there.  This is weird since
+

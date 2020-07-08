@@ -1,0 +1,128 @@
+commit 7f7e4129c23f0419257184dff6fec89d2d5a8964
+Author: Ulf Hansson <ulf.hansson@stericsson.com>
+Date:   Wed Sep 21 14:08:13 2011 -0400
+
+    mmc: core: Fix hangs related to insert/remove of cards
+    
+    During a rescan operation mmc_attach(sd|mmc|sdio) functions are
+    called. The error handling in these function can trigger a detach
+    of the bus, which also meant a power off. This is not notified by
+    the rescan operation which then continues to the next attach function.
+    
+    If a power off has been done, the framework must never send any
+    new commands to the host driver, without first doing a new power up.
+    This will most likely trigger any host driver to hang.
+    
+    Moving power off out of detach and instead handle power off
+    separately when it is actually needed, solves the issue.
+    
+    Signed-off-by: Ulf Hansson <ulf.hansson@stericsson.com>
+    Acked-by: Linus Walleij <linus.walleij@linaro.org>
+    Cc: <stable@kernel.org>
+    Signed-off-by: Chris Ball <cjb@laptop.org>
+
+diff --git a/drivers/mmc/core/core.c b/drivers/mmc/core/core.c
+index 7289e999d1fc..5ae6b159dbea 100644
+--- a/drivers/mmc/core/core.c
++++ b/drivers/mmc/core/core.c
+@@ -1192,7 +1192,7 @@ static void mmc_power_up(struct mmc_host *host)
+ 	mmc_host_clk_release(host);
+ }
+ 
+-static void mmc_power_off(struct mmc_host *host)
++void mmc_power_off(struct mmc_host *host)
+ {
+ 	mmc_host_clk_hold(host);
+ 
+@@ -1289,8 +1289,7 @@ void mmc_attach_bus(struct mmc_host *host, const struct mmc_bus_ops *ops)
+ }
+ 
+ /*
+- * Remove the current bus handler from a host. Assumes that there are
+- * no interesting cards left, so the bus is powered down.
++ * Remove the current bus handler from a host.
+  */
+ void mmc_detach_bus(struct mmc_host *host)
+ {
+@@ -1307,8 +1306,6 @@ void mmc_detach_bus(struct mmc_host *host)
+ 
+ 	spin_unlock_irqrestore(&host->lock, flags);
+ 
+-	mmc_power_off(host);
+-
+ 	mmc_bus_put(host);
+ }
+ 
+@@ -1893,6 +1890,7 @@ void mmc_stop_host(struct mmc_host *host)
+ 
+ 		mmc_claim_host(host);
+ 		mmc_detach_bus(host);
++		mmc_power_off(host);
+ 		mmc_release_host(host);
+ 		mmc_bus_put(host);
+ 		return;
+@@ -2022,6 +2020,7 @@ int mmc_suspend_host(struct mmc_host *host)
+ 				host->bus_ops->remove(host);
+ 			mmc_claim_host(host);
+ 			mmc_detach_bus(host);
++			mmc_power_off(host);
+ 			mmc_release_host(host);
+ 			host->pm_flags = 0;
+ 			err = 0;
+@@ -2109,6 +2108,7 @@ int mmc_pm_notify(struct notifier_block *notify_block,
+ 			host->bus_ops->remove(host);
+ 
+ 		mmc_detach_bus(host);
++		mmc_power_off(host);
+ 		mmc_release_host(host);
+ 		host->pm_flags = 0;
+ 		break;
+diff --git a/drivers/mmc/core/core.h b/drivers/mmc/core/core.h
+index d9411ed2a39b..14664f1fb16f 100644
+--- a/drivers/mmc/core/core.h
++++ b/drivers/mmc/core/core.h
+@@ -43,6 +43,7 @@ int mmc_set_signal_voltage(struct mmc_host *host, int signal_voltage,
+ 			   bool cmd11);
+ void mmc_set_timing(struct mmc_host *host, unsigned int timing);
+ void mmc_set_driver_type(struct mmc_host *host, unsigned int drv_type);
++void mmc_power_off(struct mmc_host *host);
+ 
+ static inline void mmc_delay(unsigned int ms)
+ {
+diff --git a/drivers/mmc/core/mmc.c b/drivers/mmc/core/mmc.c
+index f73fceea5dbd..3b7c069a4ea6 100644
+--- a/drivers/mmc/core/mmc.c
++++ b/drivers/mmc/core/mmc.c
+@@ -892,6 +892,7 @@ static void mmc_detect(struct mmc_host *host)
+ 
+ 		mmc_claim_host(host);
+ 		mmc_detach_bus(host);
++		mmc_power_off(host);
+ 		mmc_release_host(host);
+ 	}
+ }
+diff --git a/drivers/mmc/core/sd.c b/drivers/mmc/core/sd.c
+index 0370e03e3142..4c281a4bf058 100644
+--- a/drivers/mmc/core/sd.c
++++ b/drivers/mmc/core/sd.c
+@@ -1043,6 +1043,7 @@ static void mmc_sd_detect(struct mmc_host *host)
+ 
+ 		mmc_claim_host(host);
+ 		mmc_detach_bus(host);
++		mmc_power_off(host);
+ 		mmc_release_host(host);
+ 	}
+ }
+diff --git a/drivers/mmc/core/sdio.c b/drivers/mmc/core/sdio.c
+index 262fff019177..ac492ac974e1 100644
+--- a/drivers/mmc/core/sdio.c
++++ b/drivers/mmc/core/sdio.c
+@@ -597,6 +597,7 @@ static void mmc_sdio_detect(struct mmc_host *host)
+ 
+ 		mmc_claim_host(host);
+ 		mmc_detach_bus(host);
++		mmc_power_off(host);
+ 		mmc_release_host(host);
+ 	}
+ }
+

@@ -1,0 +1,67 @@
+commit 6c3ab757896ba646a072265e9311c16873e95f61
+Author: Love Hörnquist Åstrand <lha@kth.se>
+Date:   Tue May 17 11:48:06 2005 +0000
+
+    Remove expired credentials, based on patches and comments from Anders
+    Magnusson <ragge@ltu.se> and Wynn Wilkes <wwilkes@vintela.com>
+    
+    
+    git-svn-id: svn://svn.h5l.se/heimdal/trunk/heimdal@15160 ec53bebd-3082-4978-b11e-865c3cabbd6b
+
+diff --git a/lib/krb5/get_cred.c b/lib/krb5/get_cred.c
+index 38c4ef748..3bfa226f5 100644
+--- a/lib/krb5/get_cred.c
++++ b/lib/krb5/get_cred.c
+@@ -841,16 +841,44 @@ krb5_get_credentials_with_flags(krb5_context context,
+ 				ccache,
+ 				options,
+ 				in_creds, res_creds);
+-    if(ret == 0) {
+-	*out_creds = res_creds;
+-	return 0;
++    /* 
++     * If we got a credential, check if credential is expired before
++     * returning it.
++     */
++    ret = krb5_cc_retrieve_cred(context,
++                                ccache,
++                                in_creds->session.keytype ?
++                                KRB5_TC_MATCH_KEYTYPE : 0,
++                                in_creds, res_creds);
++    /* 
++     * If we got a credential, check if credential is expired before
++     * returning it, but only if KRB5_GC_EXPIRED_OK is not set.
++     */
++    if (ret == 0) {
++	krb5_timestamp timeret;
++
++	/* If expired ok, don't bother checking */
++        if(options & KRB5_GC_EXPIRED_OK) {
++            *out_creds = res_creds;
++            return 0;
++        }
++	    
++	krb5_timeofday(context, &timeret);
++	if(res_creds->times.endtime > timeret) {
++	    *out_creds = res_creds;
++	    return 0;
++	}
++	if(options & KRB5_GC_CACHED)
++	    krb5_cc_remove_cred(context, ccache, 0, res_creds);
++
++    } else if(ret != KRB5_CC_END) {
++        free(res_creds);
++        return ret;
+     }
+     free(res_creds);
+-    if(ret != KRB5_CC_END)
+-	return ret;
+     if(options & KRB5_GC_CACHED) {
+-	krb5_clear_error_string (context);
+-	return KRB5_CC_NOTFOUND;
++        krb5_clear_error_string (context);        
++        return KRB5_CC_NOTFOUND;
+     }
+     if(options & KRB5_GC_USER_USER)
+ 	flags.b.enc_tkt_in_skey = 1;
+

@@ -1,0 +1,89 @@
+commit 53391fa20cab6df6b476a5a0ad6be653c9de0c46
+Author: Yi Yang <yi.y.yang@intel.com>
+Date:   Wed Jan 30 13:33:34 2008 +0100
+
+    cpufreq: fix obvious condition statement error
+    
+    The function __cpufreq_set_policy in file drivers/cpufreq/cpufreq.c
+    has a very obvious error:
+    
+            if (policy->min > data->min && policy->min > policy->max) {
+                    ret = -EINVAL;
+                    goto error_out;
+            }
+    
+    This condtion statement is wrong because it returns -EINVAL only if
+    policy->min is greater than policy->max (in this case,
+    "policy->min > data->min" is true for ever.). In fact, it should
+    return -EINVAL as well if policy->max is less than data->min.
+    
+    The correct condition should be:
+    
+            if (policy->min > data->max || policy->max < data->min) {
+    
+    The following test result testifies the above conclusion:
+    
+    Before applying this patch:
+    
+    [root@yangyi-dev /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies
+    2394000 1596000
+    [root@yangyi-dev /]# echo 1596000 > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    [root@yangyi-dev /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    1596000
+    [root@yangyi-dev /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
+    1596000
+    [root@yangyi-dev /]# echo "2000000" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
+    -bash: echo: write error: Invalid argument
+    [root@yangyi-dev /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
+    1596000
+    [root@yangyi-dev /]# echo "0" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    [root@yangyi-dev /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    1596000
+    [root@yangyi-dev /]# echo "1595000" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    [root@yangyi-dev /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    1596000
+    [root@yangyi-dev /]#
+    
+    After applying this patch:
+    
+    [root@yangyi-dev /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies
+    2394000 1596000
+    [root@yangyi-dev /]# echo 1596000 > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    [root@yangyi-dev /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    1596000
+    [root@yangyi-dev /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
+    1596000
+    [root@localhost /]# echo "2000000" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
+    -bash: echo: write error: Invalid argument
+    [root@localhost /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
+    1596000
+    [root@localhost /]# echo "0" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    -bash: echo: write error: Invalid argument
+    [root@localhost /]# echo "1595000" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    -bash: echo: write error: Invalid argument
+    [root@localhost /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    1596000
+    [root@localhost /]# echo "1596000" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    [root@localhost /]# echo "2394000" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    [root@localhost /]# cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    2394000
+    [root@localhost /]
+    
+    Signed-off-by: Yi Yang <yi.y.yang@intel.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+    Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+
+diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
+index 5efd5550f4ca..b730d6709529 100644
+--- a/drivers/cpufreq/cpufreq.c
++++ b/drivers/cpufreq/cpufreq.c
+@@ -1604,7 +1604,7 @@ static int __cpufreq_set_policy(struct cpufreq_policy *data,
+ 	memcpy(&policy->cpuinfo, &data->cpuinfo,
+ 				sizeof(struct cpufreq_cpuinfo));
+ 
+-	if (policy->min > data->min && policy->min > policy->max) {
++	if (policy->min > data->max || policy->max < data->min) {
+ 		ret = -EINVAL;
+ 		goto error_out;
+ 	}
+

@@ -1,0 +1,26 @@
+commit 8d96bcda72df224f7a656cbcc1535a027bada75f
+Author: Guilhem Bichot <guilhem@mysql.com>
+Date:   Thu Nov 20 15:11:00 2008 +0100
+
+    During Maria's checkpoint, use the proper mutex to read transaction's short_id
+    
+    storage/maria/trnman.c:
+      During Maria's checkpoint, we walk the list of active transactions; in this list we may find a transaction with a short_id of 0 which means "uninitialized" (is being created right now) and want to ignore this transaction. Such short_id is set under trn->state_lock, so use this mutex to reliably read short_id during checkpoint.
+
+diff --git a/storage/maria/trnman.c b/storage/maria/trnman.c
+index 6367d3653b1..538dc75b663 100644
+--- a/storage/maria/trnman.c
++++ b/storage/maria/trnman.c
+@@ -682,7 +682,10 @@ my_bool trnman_collect_transactions(LEX_STRING *str_act, LEX_STRING *str_com,
+     */
+     uint sid;
+     LSN rec_lsn, undo_lsn, first_undo_lsn;
+-    if ((sid= trn->short_id) == 0)
++    pthread_mutex_lock(&trn->state_lock);
++    sid= trn->short_id;
++    pthread_mutex_unlock(&trn->state_lock);
++    if (sid == 0)
+     {
+       /*
+         Not even inited, has done nothing. Or it is the
+

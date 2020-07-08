@@ -1,0 +1,322 @@
+commit 790255cf8e21fb4f984cb40b943e0ffcf14ef05a
+Author: Christian Brauner <christian.brauner@ubuntu.com>
+Date:   Fri Sep 1 15:30:28 2017 +0200
+
+    network: retrieve correct names and ifindices
+    
+    On privileged network creation we only retrieved the names and ifindeces of
+    network devices in the host's network namespace. This meant that the monitor
+    process was acting on possibly incorrect information. With this commit we have
+    the child send back the correct device names and ifindeces in the container's
+    network namespace.
+    
+    Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+
+diff --git a/src/lxc/conf.c b/src/lxc/conf.c
+index d51f287e..211f5d31 100644
+--- a/src/lxc/conf.c
++++ b/src/lxc/conf.c
+@@ -3106,6 +3106,43 @@ static int lxc_send_ttys_to_parent(struct lxc_handler *handler)
+ 	return ret;
+ }
+ 
++static int lxc_network_send_name_and_ifindex_to_parent(struct lxc_handler *handler)
++{
++	struct lxc_list *iterator, *network;
++	int data_sock = handler->data_sock[0];
++
++	if (!handler->root)
++		return 0;
++
++	network = &handler->conf->network;
++	lxc_list_for_each(iterator, network) {
++		int ret;
++		struct lxc_netdev *netdev = iterator->elem;
++
++		/* Send network device name in the child's namespace to parent. */
++		ret = lxc_abstract_unix_send_credential(data_sock, netdev->name,
++							IFNAMSIZ);
++		if (ret < 0)
++			goto on_error;
++
++		/* Send network device ifindex in the child's namespace to
++		 * parent.
++		 */
++		ret = lxc_abstract_unix_send_credential(data_sock, &netdev->ifindex,
++							sizeof(netdev->ifindex));
++		if (ret < 0)
++			goto on_error;
++	}
++
++	TRACE("Sent network device names and ifindeces to parent");
++	return 0;
++
++on_error:
++	close(handler->data_sock[0]);
++	close(handler->data_sock[1]);
++	return -1;
++}
++
+ int lxc_setup(struct lxc_handler *handler)
+ {
+ 	const char *name = handler->name;
+@@ -3129,6 +3166,11 @@ int lxc_setup(struct lxc_handler *handler)
+ 		return -1;
+ 	}
+ 
++	if (lxc_network_send_name_and_ifindex_to_parent(handler) < 0) {
++		ERROR("Failed to network device names and ifindices to parent");
++		return -1;
++	}
++
+ 	if (lxc_conf->autodev > 0) {
+ 		if (mount_autodev(name, &lxc_conf->rootfs, lxcpath)) {
+ 			ERROR("failed to mount /dev in the container");
+diff --git a/src/lxc/network.c b/src/lxc/network.c
+index 4a5a3cc5..ef307035 100644
+--- a/src/lxc/network.c
++++ b/src/lxc/network.c
+@@ -330,12 +330,24 @@ static int instantiate_phys(struct lxc_handler *handler, struct lxc_netdev *netd
+ 		return -1;
+ 	}
+ 
++	/* Note that we're retrieving the container's ifindex in the host's
++	 * network namespace because we need it to move the device from the
++	 * host's network namespace to the container's network namespace later
++	 * on.
++	 * Note that netdev->link will contain the name of the physical network
++	 * device in the host's namespace.
++	 */
+ 	netdev->ifindex = if_nametoindex(netdev->link);
+ 	if (!netdev->ifindex) {
+ 		ERROR("Failed to retrieve ifindex for \"%s\"", netdev->link);
+ 		return -1;
+ 	}
+ 
++	/* Store the ifindex of the host's network device in the host's
++	 * namespace.
++	 */
++	netdev->priv.phys_attr.ifindex = netdev->ifindex;
++
+ 	if (netdev->upscript) {
+ 		int err;
+ 		err = run_script(handler->name, "net", netdev->upscript,
+@@ -2421,7 +2433,7 @@ int lxc_network_move_created_netdev_priv(const char *lxcpath, char *lxcname,
+ 		}
+ 
+ 		DEBUG("Moved network device \"%s\"/\"%s\" to network namespace "
+-		      "of %d:",
++		      "of %d",
+ 		      ifname, netdev->name[0] != '\0' ? netdev->name : "(null)",
+ 		      pid);
+ 	}
+@@ -2791,6 +2803,12 @@ static int lxc_setup_netdev_in_child_namespaces(struct lxc_netdev *netdev)
+ 		return -1;
+ 	}
+ 
++	/* Now update the recorded name of the network device to reflect the
++	 * name of the network device in the child's network namespace. We will
++	 * later on send this information back to the parent.
++	 */
++	strcpy(netdev->name, current_ifname);
++
+ 	/* set a mac address */
+ 	if (netdev->hwaddr) {
+ 		if (setup_hw_addr(netdev->hwaddr, current_ifname)) {
+diff --git a/src/lxc/network.h b/src/lxc/network.h
+index 099ed22c..7c89c521 100644
+--- a/src/lxc/network.h
++++ b/src/lxc/network.h
+@@ -107,10 +107,19 @@ struct ifla_macvlan {
+ 	int mode; /* private, vepa, bridge, passthru */
+ };
+ 
++/* Contains information about the physical network device as seen from the host.
++ * @ifindex : The ifindex of the physical network device in the host's network
++ *            namespace.
++ */
++struct ifla_phys {
++	int ifindex;
++};
++
+ union netdev_p {
++	struct ifla_macvlan macvlan_attr;
++	struct ifla_phys phys_attr;
+ 	struct ifla_veth veth_attr;
+ 	struct ifla_vlan vlan_attr;
+-	struct ifla_macvlan macvlan_attr;
+ };
+ 
+ /*
+diff --git a/src/lxc/start.c b/src/lxc/start.c
+index 27f6e964..131f43c2 100644
+--- a/src/lxc/start.c
++++ b/src/lxc/start.c
+@@ -89,7 +89,7 @@
+ lxc_log_define(lxc_start, lxc);
+ 
+ extern void mod_all_rdeps(struct lxc_container *c, bool inc);
+-static bool do_destroy_container(struct lxc_conf *conf);
++static bool do_destroy_container(struct lxc_handler *handler);
+ static int lxc_rmdir_onedev_wrapper(void *data);
+ static void lxc_destroy_container_on_signal(struct lxc_handler *handler,
+ 					    const char *name);
+@@ -535,6 +535,11 @@ struct lxc_handler *lxc_init_handler(const char *name, struct lxc_conf *conf,
+ 
+ 	memset(handler, 0, sizeof(*handler));
+ 
++	/* Note that am_unpriv() checks the effective uid. We probably don't
++	 * care if we are real root only if we are running as root so this
++	 * should be fine.
++	 */
++	handler->root = !am_unpriv();
+ 	handler->data_sock[0] = handler->data_sock[1] = -1;
+ 	handler->conf = conf;
+ 	handler->lxcpath = lxcpath;
+@@ -1122,6 +1127,43 @@ static int save_phys_nics(struct lxc_conf *conf)
+ 	return 0;
+ }
+ 
++static int lxc_network_recv_name_and_ifindex_from_child(struct lxc_handler *handler)
++{
++	struct lxc_list *iterator, *network;
++	int data_sock = handler->data_sock[1];
++
++	if (!handler->root)
++		return 0;
++
++	network = &handler->conf->network;
++	lxc_list_for_each(iterator, network) {
++		int ret;
++		struct lxc_netdev *netdev = iterator->elem;
++
++		/* Receive network device name in the child's namespace to
++		 * parent.
++		 */
++		ret = lxc_abstract_unix_rcv_credential(data_sock, netdev->name, IFNAMSIZ);
++		if (ret < 0)
++			goto on_error;
++
++		/* Receive network device ifindex in the child's namespace to
++		 * parent.
++		 */
++		ret = lxc_abstract_unix_rcv_credential(data_sock, &netdev->ifindex,
++						       sizeof(netdev->ifindex));
++		if (ret < 0)
++			goto on_error;
++	}
++
++	return 0;
++
++on_error:
++	close(handler->data_sock[0]);
++	close(handler->data_sock[1]);
++	return -1;
++}
++
+ static int lxc_recv_ttys_from_child(struct lxc_handler *handler)
+ {
+ 	int i;
+@@ -1220,7 +1262,8 @@ static int lxc_spawn(struct lxc_handler *handler)
+ 	if (lxc_sync_init(handler))
+ 		return -1;
+ 
+-	ret = socketpair(AF_UNIX, SOCK_DGRAM, 0, handler->data_sock);
++	ret = socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0,
++			 handler->data_sock);
+ 	if (ret < 0) {
+ 		lxc_sync_fini(handler);
+ 		return -1;
+@@ -1286,7 +1329,7 @@ static int lxc_spawn(struct lxc_handler *handler)
+ 	if (attach_ns(handler->conf->inherit_ns_fd) < 0)
+ 		goto out_delete_net;
+ 
+-	if (am_unpriv() && (nveths = count_veths(&handler->conf->network))) {
++	if (!handler->root && (nveths = count_veths(&handler->conf->network))) {
+ 		if (pipe(netpipepair) < 0) {
+ 			SYSERROR("Failed to create pipe.");
+ 			goto out_delete_net;
+@@ -1384,12 +1427,6 @@ static int lxc_spawn(struct lxc_handler *handler)
+ 			ERROR("Failed to create the configured network.");
+ 			goto out_delete_net;
+ 		}
+-
+-		/* Now all networks are created and moved into place. The
+-		 * corresponding structs have now all been filled. So log them
+-		 * for debugging purposes.
+-		 */
+-		lxc_log_configured_netdevs(handler->conf);
+ 	}
+ 
+ 	if (netpipe != -1) {
+@@ -1441,6 +1478,19 @@ static int lxc_spawn(struct lxc_handler *handler)
+ 	if (lxc_sync_barrier_child(handler, LXC_SYNC_POST_CGROUP))
+ 		return -1;
+ 
++	if (lxc_network_recv_name_and_ifindex_from_child(handler) < 0) {
++		ERROR("Failed to receive names and ifindices for network "
++		      "devices from child");
++		goto out_delete_net;
++	}
++
++	/* Now all networks are created, network devices are moved into place,
++	 * and the correct names and ifindeces in the respective namespaces have
++	 * been recorded. The corresponding structs have now all been filled. So
++	 * log them for debugging purposes.
++	 */
++	lxc_log_configured_netdevs(handler->conf);
++
+ 	/* Read tty fds allocated by child. */
+ 	if (lxc_recv_ttys_from_child(handler) < 0) {
+ 		ERROR("Failed to receive tty info from child process.");
+@@ -1650,7 +1700,7 @@ static void lxc_destroy_container_on_signal(struct lxc_handler *handler,
+ 	int ret = 0;
+ 	struct lxc_container *c;
+ 	if (handler->conf->rootfs.path && handler->conf->rootfs.mount) {
+-		bret = do_destroy_container(handler->conf);
++		bret = do_destroy_container(handler);
+ 		if (!bret) {
+ 			ERROR("Error destroying rootfs for container \"%s\".", name);
+ 			return;
+@@ -1676,7 +1726,7 @@ static void lxc_destroy_container_on_signal(struct lxc_handler *handler,
+ 		}
+ 	}
+ 
+-	if (am_unpriv())
++	if (!handler->root)
+ 		ret = userns_exec_1(handler->conf, lxc_rmdir_onedev_wrapper,
+ 				    destroy, "lxc_rmdir_onedev_wrapper");
+ 	else
+@@ -1695,14 +1745,14 @@ static int lxc_rmdir_onedev_wrapper(void *data)
+ 	return lxc_rmdir_onedev(arg, NULL);
+ }
+ 
+-static bool do_destroy_container(struct lxc_conf *conf) {
+-	if (am_unpriv()) {
+-		if (userns_exec_1(conf, storage_destroy_wrapper, conf,
+-				  "storage_destroy_wrapper") < 0)
++static bool do_destroy_container(struct lxc_handler *handler) {
++	if (!handler->root) {
++		if (userns_exec_1(handler->conf, storage_destroy_wrapper,
++				  handler->conf, "storage_destroy_wrapper") < 0)
+ 			return false;
+ 
+ 		return true;
+ 	}
+ 
+-	return storage_destroy(conf);
++	return storage_destroy(handler->conf);
+ }
+diff --git a/src/lxc/start.h b/src/lxc/start.h
+index 2485d862..fd7e9782 100644
+--- a/src/lxc/start.h
++++ b/src/lxc/start.h
+@@ -35,6 +35,7 @@
+ #include "namespace.h"
+ 
+ struct lxc_handler {
++	bool root;
+ 	pid_t pid;
+ 	char *name;
+ 	lxc_state_t state;
+

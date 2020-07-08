@@ -1,0 +1,59 @@
+commit 4c5a84421c7d1c259c3883a404f9a67a2f55b003
+Author: Michael S. Tsirkin <mst@redhat.com>
+Date:   Wed Feb 25 15:19:28 2015 +0100
+
+    vhost: cleanup iterator update logic
+    
+    Recent iterator-related changes in vhost made it
+    harder to follow the logic fixing up the header.
+    In fact, the fixup always happens at the same
+    offset: sizeof(virtio_net_hdr): sometimes the
+    fixup iterator is updated by copy_to_iter,
+    sometimes-by iov_iter_advance.
+    
+    Rearrange code to make this obvious.
+    
+    Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/drivers/vhost/net.c b/drivers/vhost/net.c
+index afa06d28725d..ca7043459e2c 100644
+--- a/drivers/vhost/net.c
++++ b/drivers/vhost/net.c
+@@ -591,11 +591,6 @@ static void handle_rx(struct vhost_net *net)
+ 			 * TODO: support TSO.
+ 			 */
+ 			iov_iter_advance(&msg.msg_iter, vhost_hlen);
+-		} else {
+-			/* It'll come from socket; we'll need to patch
+-			 * ->num_buffers over if VIRTIO_NET_F_MRG_RXBUF
+-			 */
+-			iov_iter_advance(&fixup, sizeof(hdr));
+ 		}
+ 		err = sock->ops->recvmsg(NULL, sock, &msg,
+ 					 sock_len, MSG_DONTWAIT | MSG_TRUNC);
+@@ -609,11 +604,18 @@ static void handle_rx(struct vhost_net *net)
+ 			continue;
+ 		}
+ 		/* Supply virtio_net_hdr if VHOST_NET_F_VIRTIO_NET_HDR */
+-		if (unlikely(vhost_hlen) &&
+-		    copy_to_iter(&hdr, sizeof(hdr), &fixup) != sizeof(hdr)) {
+-			vq_err(vq, "Unable to write vnet_hdr at addr %p\n",
+-			       vq->iov->iov_base);
+-			break;
++		if (unlikely(vhost_hlen)) {
++			if (copy_to_iter(&hdr, sizeof(hdr),
++					 &fixup) != sizeof(hdr)) {
++				vq_err(vq, "Unable to write vnet_hdr "
++				       "at addr %p\n", vq->iov->iov_base);
++				break;
++			}
++		} else {
++			/* Header came from socket; we'll need to patch
++			 * ->num_buffers over if VIRTIO_NET_F_MRG_RXBUF
++			 */
++			iov_iter_advance(&fixup, sizeof(hdr));
+ 		}
+ 		/* TODO: Should check and handle checksum. */
+ 
+

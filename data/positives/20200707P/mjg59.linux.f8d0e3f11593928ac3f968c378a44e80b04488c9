@@ -1,0 +1,101 @@
+commit f8d0e3f11593928ac3f968c378a44e80b04488c9
+Author: Jamal Hadi Salim <hadi@cyberus.ca>
+Date:   Thu Feb 23 16:18:01 2006 -0800
+
+    [NET] ethernet: Fix first packet goes out with MAC 00:00:00:00:00:00
+    
+    When you turn off ARP on a netdevice then the first packet always goes
+    out with a dstMAC of all zeroes. This is because the first packet is
+    used to resolve ARP entries. Even though the ARP entry may be resolved
+    (I tried by setting a static ARP entry for a host i was pinging from),
+    it gets overwritten by virtue of having the netdevice disabling ARP.
+    
+    Subsequent packets go out fine with correct dstMAC address (which may
+    be why people have ignored reporting this issue).
+    
+    To cut the story short:
+    
+    the culprit code is in net/ethernet/eth.c::eth_header()
+    
+    ----
+            /*
+             *      Anyway, the loopback-device should never use this
+    function...
+             */
+    
+            if (dev->flags & (IFF_LOOPBACK|IFF_NOARP))
+            {
+                    memset(eth->h_dest, 0, dev->addr_len);
+                    return ETH_HLEN;
+            }
+    
+            if(daddr)
+            {
+                    memcpy(eth->h_dest,daddr,dev->addr_len);
+                    return ETH_HLEN;
+            }
+    
+    ----
+    
+    Note how the h_dest is being reset when device has IFF_NOARP.
+    
+    As a note:
+    All devices including loopback pass a daddr. loopback in fact passes
+    a 0 all the time ;->
+    This means i can delete the check totaly or i can remove the IFF_NOARP
+    
+    Alexey says:
+    --------------------
+    I think, it was me who did this crap. It was so long ago I do not remember
+    why it was made.
+    
+    I remember some troubles with dummy device. It tried to resolve
+    addresses, apparently, without success and generated errors instead of
+    blackholing. I think the problem was eventually solved at neighbour
+    level.
+    
+    After some thinking I suspect the deletion of this chunk could change
+    behaviour of some parts which do not use neighbour cache f.e. packet
+    socket.
+    
+    I think safer approach would be to move this chunk after if (daddr).
+    And the possibility to remove this completely could be analyzed later.
+    --------------------
+    
+    Patch updated with Alexey's safer suggestions.
+    
+    Signed-off-by: Jamal Hadi Salim <hadi@cyberus.ca>
+    Acked-by: Alexey Kuznetsov <kuznet@ms2.inr.ac.ru>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/ethernet/eth.c b/net/ethernet/eth.c
+index 9890fd97e538..c971f14712ec 100644
+--- a/net/ethernet/eth.c
++++ b/net/ethernet/eth.c
+@@ -95,6 +95,12 @@ int eth_header(struct sk_buff *skb, struct net_device *dev, unsigned short type,
+ 		saddr = dev->dev_addr;
+ 	memcpy(eth->h_source,saddr,dev->addr_len);
+ 
++	if(daddr)
++	{
++		memcpy(eth->h_dest,daddr,dev->addr_len);
++		return ETH_HLEN;
++	}
++	
+ 	/*
+ 	 *	Anyway, the loopback-device should never use this function... 
+ 	 */
+@@ -105,12 +111,6 @@ int eth_header(struct sk_buff *skb, struct net_device *dev, unsigned short type,
+ 		return ETH_HLEN;
+ 	}
+ 	
+-	if(daddr)
+-	{
+-		memcpy(eth->h_dest,daddr,dev->addr_len);
+-		return ETH_HLEN;
+-	}
+-	
+ 	return -ETH_HLEN;
+ }
+ 
+

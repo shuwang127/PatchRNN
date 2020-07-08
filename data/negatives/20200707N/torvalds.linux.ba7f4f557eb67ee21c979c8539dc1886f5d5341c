@@ -1,0 +1,59 @@
+commit ba7f4f557eb67ee21c979c8539dc1886f5d5341c
+Author: Anson Huang <b20788@freescale.com>
+Date:   Wed Jun 8 22:33:31 2016 +0800
+
+    clk: imx: correct AV PLL rate formula
+    
+    The audio/video PLL's rate calculation is as below in RM:
+    
+    Fref * (DIV_SELECT + NUM / DENOM), in origin clk-pllv3's
+    code, below code is used:
+    
+    (parent_rate * div) + ((parent_rate / mfd) * mfn
+    
+    as it does NOT consider the float data using div, so below
+    formula should be used as a decent method:
+    
+    (parent_rate * div) + ((parent_rate * mfn) / mfd)
+    
+    and we also need to consider parent_rate * mfd may overflow
+    a 32 bit value, 64 bit value should be used.
+    
+    After updating this formula, the dram PLL's rate is
+    1066MHz, which is correct, while the old formula gets
+    1056MHz.
+    
+    [Aisheng: fix clk_pllv3_av_round_rate too]
+    
+    Signed-off-by: Anson Huang <b20788@freescale.com>
+    Signed-off-by: Dong Aisheng <aisheng.dong@nxp.com>
+    Signed-off-by: Shawn Guo <shawnguo@kernel.org>
+
+diff --git a/drivers/clk/imx/clk-pllv3.c b/drivers/clk/imx/clk-pllv3.c
+index 4826b3c9e19e..2afc677979a3 100644
+--- a/drivers/clk/imx/clk-pllv3.c
++++ b/drivers/clk/imx/clk-pllv3.c
+@@ -218,8 +218,12 @@ static unsigned long clk_pllv3_av_recalc_rate(struct clk_hw *hw,
+ 	u32 mfn = readl_relaxed(pll->base + PLL_NUM_OFFSET);
+ 	u32 mfd = readl_relaxed(pll->base + PLL_DENOM_OFFSET);
+ 	u32 div = readl_relaxed(pll->base) & pll->div_mask;
++	u64 temp64 = (u64)parent_rate;
+ 
+-	return (parent_rate * div) + ((parent_rate / mfd) * mfn);
++	temp64 *= mfn;
++	do_div(temp64, mfd);
++
++	return (parent_rate * div) + (u32)temp64;
+ }
+ 
+ static long clk_pllv3_av_round_rate(struct clk_hw *hw, unsigned long rate,
+@@ -243,7 +247,7 @@ static long clk_pllv3_av_round_rate(struct clk_hw *hw, unsigned long rate,
+ 	do_div(temp64, parent_rate);
+ 	mfn = temp64;
+ 
+-	return parent_rate * div + parent_rate / mfd * mfn;
++	return parent_rate * div + parent_rate * mfn / mfd;
+ }
+ 
+ static int clk_pllv3_av_set_rate(struct clk_hw *hw, unsigned long rate,
+

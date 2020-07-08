@@ -1,0 +1,55 @@
+commit cc6c2127f2316c2b2ad1e8919b45cde5e03f65aa
+Author: J. Bruce Fields <bfields@redhat.com>
+Date:   Mon Feb 14 15:03:35 2011 -0500
+
+    svcrpc: close connection if client sends short packet
+    
+    If the client sents a record too short to contain even the beginning of
+    the rpc header, then just close the connection.
+    
+    The current code drops the record data and continues.  I don't see the
+    point.  It's a hopeless situation and simpler just to cut off the
+    connection completely.
+    
+    Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+
+diff --git a/net/sunrpc/svcsock.c b/net/sunrpc/svcsock.c
+index 1955e1a1e390..62ff7c5c09c2 100644
+--- a/net/sunrpc/svcsock.c
++++ b/net/sunrpc/svcsock.c
+@@ -955,6 +955,9 @@ static int svc_tcp_recv_record(struct svc_sock *svsk, struct svc_rqst *rqstp)
+ 		}
+ 	}
+ 
++	if (svsk->sk_reclen < 8)
++		goto err_delete; /* client is nuts. */
++
+ 	/* Check whether enough data is available */
+ 	len = svc_recv_available(svsk);
+ 	if (len < 0)
+@@ -1058,20 +1061,10 @@ static int svc_tcp_recvfrom(struct svc_rqst *rqstp)
+ 	vec[0] = rqstp->rq_arg.head[0];
+ 	vlen = PAGE_SIZE;
+ 
+-	/*
+-	 * We have enough data for the whole tcp record. Let's try and read the
+-	 * first 8 bytes to get the xid and the call direction. We can use this
+-	 * to figure out if this is a call or a reply to a callback. If
+-	 * sk_reclen is < 8 (xid and calldir), then this is a malformed packet.
+-	 * In that case, don't bother with the calldir and just read the data.
+-	 * It will be rejected in svc_process.
+-	 */
+-	if (len >= 8) {
+-		len = svc_process_calldir(svsk, rqstp, &req, vec);
+-		if (len < 0)
+-			goto err_again;
+-		vlen -= 8;
+-	}
++	len = svc_process_calldir(svsk, rqstp, &req, vec);
++	if (len < 0)
++		goto err_again;
++	vlen -= 8;
+ 
+ 	pnum = 1;
+ 	while (vlen < svsk->sk_reclen - 8) {
+

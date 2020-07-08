@@ -1,0 +1,474 @@
+commit de489efc6ea7796b2df8d1048a612e2b5a82c720
+Author: Johannes Schultz <saga-games@users.sourceforge.net>
+Date:   Sat Mar 17 19:06:05 2012 +0000
+
+    [Fix] Approx real BPM was broken for classic tempo mode since a while (http://bugs.openmpt.org/view.php?id=237)
+    [Fix] Pattern delays are now handled correctly in IT format, and almost correctly in the S3M format. Files made with old versions of OpenMPT are upgraded automatically so they are not affected by the behaviour change.
+    
+    git-svn-id: https://source.openmpt.org/svn/openmpt/trunk/OpenMPT@1221 56274372-70c3-4bfc-bfc3-4c3a0b034d27
+
+diff --git a/soundlib/Snd_fx.cpp b/soundlib/Snd_fx.cpp
+index 8b4daef17..6b70a93f0 100644
+--- a/soundlib/Snd_fx.cpp
++++ b/soundlib/Snd_fx.cpp
+@@ -163,7 +163,7 @@ GetLengthType CSoundFile::GetLength(enmGetLengthResetMode adjustMode, ORDERINDEX
+ 
+ 	for (;;)
+ 	{
+-		UINT nSpeedCount = 0;
++		UINT rowDelay = 0, tickDelay = 0;
+ 		nRow = nNextRow;
+ 		nCurrentOrder = nNextOrder;
+ 
+@@ -356,15 +356,42 @@ GetLengthType CSoundFile::GetLength(enmGetLengthResetMode adjustMode, ORDERINDEX
+ 					memory.musicTempo = CLAMP(memory.musicTempo, GetModSpecifications().tempoMin, GetModSpecifications().tempoMax);
+ // -! NEW_FEATURE#0010
+ 				break;
+-			// Pattern Delay
++
+ 			case CMD_S3MCMDEX:	
+-				if ((param & 0xF0) == 0x60) { nSpeedCount = param & 0x0F; break; } else
+-				if ((param & 0xF0) == 0xA0) { pChn->nOldHiOffset = param & 0x0F; break; } else
+-				if ((param & 0xF0) == 0xB0) { param &= 0x0F; param |= 0x60; }
++				if((param & 0xF0) == 0x60)
++				{
++					// Fine Pattern Delay
++					tickDelay += (param & 0x0F);
++				} else if((param & 0xF0) == 0xE0 && !rowDelay)
++				{
++					// Pattern Delay
++					rowDelay = (param & 0x0F);
++				} else if((param & 0xF0) == 0xA0)
++				{
++					// High sample offset
++					pChn->nOldHiOffset = param & 0x0F;
++				} else if((param & 0xF0) == 0xB0)
++				{
++					// Pattern Loop
++					if (param & 0x0F)
++					{
++						memory.elapsedTime += (memory.elapsedTime - memory.patLoop[nChn]) * (double)(param & 0x0F);
++					} else
++					{
++						memory.patLoop[nChn] = memory.elapsedTime;
++						memory.patLoopStart[nChn] = nRow;
++					}
++				}
++				break;
++
+ 			case CMD_MODCMDEX:
+-				if ((param & 0xF0) == 0xE0) nSpeedCount = (param & 0x0F) * memory.musicSpeed; else
+-				if ((param & 0xF0) == 0x60)
++				if((param & 0xF0) == 0xE0)
++				{
++					// Pattern Delay
++					rowDelay = (param & 0x0F);
++				} else if ((param & 0xF0) == 0x60)
+ 				{
++					// Pattern Loop
+ 					if (param & 0x0F)
+ 					{
+ 						memory.elapsedTime += (memory.elapsedTime - memory.patLoop[nChn]) * (double)(param & 0x0F);
+@@ -376,6 +403,7 @@ GetLengthType CSoundFile::GetLength(enmGetLengthResetMode adjustMode, ORDERINDEX
+ 					}
+ 				}
+ 				break;
++
+ 			case CMD_XFINEPORTAUPDOWN:
+ 				// ignore high offset in compatible mode
+ 				if (((param & 0xF0) == 0xA0) && !IsCompatibleMode(TRK_FASTTRACKER2)) pChn->nOldHiOffset = param & 0x0F;
+@@ -428,11 +456,9 @@ GetLengthType CSoundFile::GetLength(enmGetLengthResetMode adjustMode, ORDERINDEX
+ 				{
+ 					//IT compatibility 16. Global volume slide params are stored per channel (FT2/IT)
+ 					if (param) memory.oldGlbVolSlide[nChn] = param; else param = memory.oldGlbVolSlide[nChn];
+-				}
+-				else
++				} else
+ 				{
+ 					if (param) memory.oldGlbVolSlide[0] = param; else param = memory.oldGlbVolSlide[0];
+-
+ 				}
+ 				if (((param & 0x0F) == 0x0F) && (param & 0xF0))
+ 				{
+@@ -495,7 +521,7 @@ GetLengthType CSoundFile::GetLength(enmGetLengthResetMode adjustMode, ORDERINDEX
+ 		}
+ 
+ 		// XXX this does not take per-pattern time signatures into consideration!
+-		memory.elapsedTime += GetRowDuration(memory.musicTempo, memory.musicSpeed, nSpeedCount);
++		memory.elapsedTime += GetRowDuration(memory.musicTempo, memory.musicSpeed, (memory.musicSpeed + tickDelay) * (1 + rowDelay));
+ 	}
+ 
+ 	if(retval.targetReached || endOrder == ORDERINDEX_INVALID || endRow == ROWINDEX_INVALID)
+@@ -926,7 +952,8 @@ void CSoundFile::NoteChange(CHANNELINDEX nChn, int note, bool bPorta, bool bRese
+ 	if (GetType() & (MOD_TYPE_XM|MOD_TYPE_MT2|MOD_TYPE_MED))
+ 	{
+ 		note += pChn->nTranspose;
+-		Limit(note, NOTE_MIN + 11, NOTE_MIN + 130);	// why 131? 120+11, how does this make sense?
++		// RealNote = PatternNote + RelativeTone; (0..118, 0 = C-0, 118 = A#9)
++		Limit(note, NOTE_MIN + 11, NOTE_MIN + 130);	// 119 possible notes
+ 	} else
+ 	{
+ 		Limit(note, NOTE_MIN, NOTE_MAX);
+@@ -1415,12 +1442,13 @@ BOOL CSoundFile::ProcessEffects()
+ //-------------------------------
+ {
+ 	ModChannel *pChn = Chn;
+-	ROWINDEX nBreakRow = ROWINDEX_INVALID, nPatLoopRow = ROWINDEX_INVALID;
++	ROWINDEX nBreakRow = ROWINDEX_INVALID;		// Is changed if a break to row command is encountere.d
++	ROWINDEX nPatLoopRow = ROWINDEX_INVALID;	// Is changed if a pattern loop jump-back is executed
+ 	ORDERINDEX nPosJump = ORDERINDEX_INVALID;
+ 
+ // -> CODE#0010
+ // -> DESC="add extended parameter mechanism to pattern effects"
+-	ModCommand* m = nullptr;
++	ModCommand *m = nullptr;
+ // -! NEW_FEATURE#0010
+ 	for (CHANNELINDEX nChn = 0; nChn < m_nChannels; nChn++, pChn++)
+ 	{
+@@ -1502,8 +1530,7 @@ BOOL CSoundFile::ProcessEffects()
+ 			nStartTick = (param & 0xF0) >> 4;
+ 			const UINT cutAtTick = nStartTick + (param & 0x0F);
+ 			NoteCut(nChn, cutAtTick);
+-		} else
+-		if ((cmd == CMD_MODCMDEX) || (cmd == CMD_S3MCMDEX))
++		} else if ((cmd == CMD_MODCMDEX) || (cmd == CMD_S3MCMDEX))
+ 		{
+ 			if ((!param) && (m_nType & (MOD_TYPE_S3M|MOD_TYPE_IT|MOD_TYPE_MPT))) param = pChn->nOldCmdEx; else pChn->nOldCmdEx = param;
+ 			// Note Delay ?
+@@ -1536,8 +1563,7 @@ BOOL CSoundFile::ProcessEffects()
+ 					}
+ 					continue;
+ 				}
+-			} else
+-			if(m_dwSongFlags & SONG_FIRSTTICK)
++			} else if(m_dwSongFlags & SONG_FIRSTTICK)
+ 			{
+ 				// Pattern Loop ?
+ 				if ((((param & 0xF0) == 0x60) && (cmd == CMD_MODCMDEX))
+@@ -1566,11 +1592,16 @@ BOOL CSoundFile::ProcessEffects()
+ 							Chn[i].nPatternLoopCount = pChn->nPatternLoopCount;
+ 						}
+ 					}
+-				} else
+-				// Pattern Delay
+-				if ((param & 0xF0) == 0xE0)
++				} else if ((param & 0xF0) == 0xE0)
+ 				{
+-					m_nPatternDelay = param & 0x0F;
++					// Pattern Delay
++					// In Scream Tracker 3 / Impulse Tracker, only the first delay command on this row is considered.
++					// Test cases: PatternDelays.it, PatternDelays.s3m, PatternDelays.xm
++					// XXX In Scream Tracker 3, the "left" channels are evaluated before the "right" channels, which is not emulated here!
++					if(!(GetType() & (MOD_TYPE_S3M | MOD_TYPE_IT | MOD_TYPE_MPT)) || !m_nPatternDelay)
++					{
++						m_nPatternDelay = param & 0x0F;
++					}
+ 				}
+ 			}
+ 		}
+@@ -1657,7 +1688,7 @@ BOOL CSoundFile::ProcessEffects()
+ 				const ModSample *oldSample = nullptr;
+ 				// Reset default volume when retriggering envelopes
+ 
+-				if (GetNumInstruments())
++				if(GetNumInstruments())
+ 				{
+ 					oldSample = pChn->pModSample;
+ 				} else if (instr <= GetNumSamples())
+@@ -1682,13 +1713,14 @@ BOOL CSoundFile::ProcessEffects()
+ 				//IT compatibility: Instrument with no note.
+ 				if(IsCompatibleMode(TRK_IMPULSETRACKER) || (m_dwSongFlags & SONG_PT1XMODE))
+ 				{
+-					if(m_nInstruments)
++					if(GetNumInstruments())
+ 					{
++						// Instrument mode
+ 						if(instr < MAX_INSTRUMENTS && pChn->pModInstrument != Instruments[instr])
+ 							note = pChn->nNote;
+-					}
+-					else //Case: Only samples used
++					} else
+ 					{
++						// Sample mode
+ 						if(instr < MAX_SAMPLES && pChn->pSample != Samples[instr].pSample)
+ 							note = pChn->nNote;
+ 					}
+@@ -1809,7 +1841,7 @@ BOOL CSoundFile::ProcessEffects()
+ 			so... hxx = (hx | (oldhxx & 0xf0))  ???
+ 			TODO is this done correctly?
+ 		*/
+-      	if ((volcmd > VOLCMD_PANNING) && (m_nTickCount >= nStartTick))
++		if ((volcmd > VOLCMD_PANNING) && (m_nTickCount >= nStartTick))
+ 		{
+ 			if (volcmd == VOLCMD_TONEPORTAMENTO)
+ 			{
+@@ -1977,7 +2009,7 @@ BOOL CSoundFile::ProcessEffects()
+ 				{ 
+ 					if ((GetType() & MOD_TYPE_XM))
+ 					{
+-                        param -= 0x20; //with XM, 0x20 is the lowest tempo. Anything below changes ticks per row.
++						param -= 0x20; //with XM, 0x20 is the lowest tempo. Anything below changes ticks per row.
+ 					}
+ 					param = (param << 8) + m->param;
+ 				}
+@@ -2324,11 +2356,15 @@ BOOL CSoundFile::ProcessEffects()
+ 		const bool doPatternLoop = (nPatLoopRow != ROWINDEX_INVALID);
+ 
+ 		// Pattern Loop
+-		if (doPatternLoop)
++		if(doPatternLoop)
+ 		{
+ 			m_nNextOrder = m_nCurrentOrder;
+ 			m_nNextRow = nPatLoopRow;
+-			if (m_nPatternDelay) m_nNextRow++;
++			if(m_nPatternDelay)
++			{
++				m_nNextRow++;
++			}
++
+ 			// As long as the pattern loop is running, mark the looped rows as not visited yet
+ 			for(ROWINDEX nRow = nPatLoopRow; nRow <= m_nRow; nRow++)
+ 			{
+@@ -2338,23 +2374,23 @@ BOOL CSoundFile::ProcessEffects()
+ 
+ 		// Pattern Break / Position Jump only if no loop running
+ 		// Test case for FT2 exception: PatLoop-Jumps.xm, PatLoop-Various.xm
+-		if ((nBreakRow != ROWINDEX_INVALID || nPosJump != ORDERINDEX_INVALID)
++		if((nBreakRow != ROWINDEX_INVALID || nPosJump != ORDERINDEX_INVALID)
+ 			&& (!doPatternLoop || IsCompatibleMode(TRK_FASTTRACKER2)))
+ 		{
+-			if (nPosJump == ORDERINDEX_INVALID) nPosJump = m_nCurrentOrder + 1;
+-			if (nBreakRow == ROWINDEX_INVALID) nBreakRow = 0;
++			if(nPosJump == ORDERINDEX_INVALID) nPosJump = m_nCurrentOrder + 1;
++			if(nBreakRow == ROWINDEX_INVALID) nBreakRow = 0;
+ 			m_dwSongFlags |= SONG_BREAKTOROW;
+ 
+-			if (nPosJump >= Order.size()) 
++			if(nPosJump >= Order.size()) 
+ 			{
+ 				nPosJump = 0;
+ 			}
+ 
+ 			// IT / FT2 compatibility: don't reset loop count on pattern break.
+ 			// Test case: gm-trippy01.it, PatLoop-Break.xm, PatLoop-Weird.xm
+-			if (nPosJump != m_nCurrentOrder && !IsCompatibleMode(TRK_IMPULSETRACKER | TRK_FASTTRACKER2))
++			if(nPosJump != m_nCurrentOrder && !IsCompatibleMode(TRK_IMPULSETRACKER | TRK_FASTTRACKER2))
+ 			{
+-				for (CHANNELINDEX i = 0; i < GetNumChannels(); i++)
++				for(CHANNELINDEX i = 0; i < GetNumChannels(); i++)
+ 				{
+ 					Chn[i].nPatternLoopCount = 0;
+ 				}
+@@ -3068,15 +3104,17 @@ void CSoundFile::ExtendedS3MCommands(CHANNELINDEX nChn, UINT param)
+ 				break;
+ 	// S6x: Pattern Delay for x frames
+ 	case 0x60:
+-				if(IsCompatibleMode(TRK_IMPULSETRACKER))
++				if((m_dwSongFlags & SONG_FIRSTTICK) && m_nTickCount == 0)
+ 				{
+-					if(!(m_dwSongFlags & SONG_FIRSTTICK) || m_nTickCount > 0) break;
++					// Tick delays are added up.
++					// Scream Tracker 3 does actually not support this command.
++					// We'll use the same behaviour as for Impulse Tracker, as we can assume that
++					// most S3Ms that make use of this command were made with Impulse Tracker.
++					// MPT added this command to the XM format through the X6x effect, so we will use
++					// the same behaviour here as well.
++					// Test cases: PatternDelays.it, PatternDelays.s3m, PatternDelays.xm
+ 					m_nFrameDelay += param;
+ 				}
+-				else
+-				{
+-					m_nFrameDelay = param;
+-				}
+ 				break;
+ 	// S7x: Envelope Control / Instrument Control
+ 	case 0x70:	if(!(m_dwSongFlags & SONG_FIRSTTICK)) break;
+@@ -4101,7 +4139,7 @@ void CSoundFile::GlobalVolSlide(UINT param, UINT &nOldGlobalVolSlide)
+ 	}
+ 	if (nGlbSlide)
+ 	{
+-		if (!(m_nType & (MOD_TYPE_IT|MOD_TYPE_MPT))) nGlbSlide *= 2;
++		if (!(GetType() & (MOD_TYPE_IT | MOD_TYPE_MPT))) nGlbSlide *= 2;
+ 		nGlbSlide += m_nGlobalVolume;
+ 		Limit(nGlbSlide, 0, 256);
+ 		m_nGlobalVolume = nGlbSlide;
+diff --git a/soundlib/Sndfile.cpp b/soundlib/Sndfile.cpp
+index 0194ea220..cc32e8afa 100644
+--- a/soundlib/Sndfile.cpp
++++ b/soundlib/Sndfile.cpp
+@@ -2658,14 +2658,16 @@ void CSoundFile::RecalculateSamplesPerTick()
+ {
+ 	switch(m_nTempoMode)
+ 	{
+-	case tempo_mode_classic: default:
++	case tempo_mode_classic:
++	default:
+ 		m_nSamplesPerTick = (gdwMixingFreq * 5 * m_nTempoFactor) / (m_nMusicTempo << 8);
++		break;
+ 
+-	case tempo_mode_modern: 
++	case tempo_mode_modern:
+ 		m_nSamplesPerTick = gdwMixingFreq * (60 / m_nMusicTempo / (m_nMusicSpeed * m_nCurrentRowsPerBeat));
+ 		break;
+ 
+-	case tempo_mode_alternative: 
++	case tempo_mode_alternative:
+ 		m_nSamplesPerTick = gdwMixingFreq / m_nMusicTempo;
+ 		break;
+ 	}
+@@ -2673,25 +2675,29 @@ void CSoundFile::RecalculateSamplesPerTick()
+ 
+ 
+ // Get the duration of a row in milliseconds, based on the current rows per beat and given speed and tempo settings.
+-// "additionalTicks" are ticks that are derived from Row Delay effects.
+-double CSoundFile::GetRowDuration(UINT tempo, UINT speed, UINT additionalTicks) const
+-//-----------------------------------------------------------------------------------
++// "speedIncludingPatternDelays" is the total row length, including the ticks from Row Delay effects.
++// It is required because modern tempo mode normally doesn't consider  "speed", so "speedIncludingPatternDelays" is
++// used as a ratio.
++double CSoundFile::GetRowDuration(UINT tempo, UINT speed, UINT speedIncludingPatternDelays) const
++//-----------------------------------------------------------------------------------------------
+ {
++	speedIncludingPatternDelays = Util::Max(speedIncludingPatternDelays, speed);
++
+ 	switch(m_nTempoMode)
+ 	{
+ 	case tempo_mode_classic:
+ 	default:
+-		return static_cast<double>(2500 * (speed + additionalTicks)) / static_cast<double>(tempo);
++		return static_cast<double>(2500 * speedIncludingPatternDelays) / static_cast<double>(tempo);
+ 
+ 	case tempo_mode_modern:
+ 		{
+ 			// If there are any row delay effects, the row length factor compensates for those.
+-			const double rowLength = static_cast<double>(speed + additionalTicks) / static_cast<double>(speed);
++			const double rowLength = static_cast<double>(speedIncludingPatternDelays) / static_cast<double>(speed);
+ 			return 60000.0 * rowLength / static_cast<double>(tempo) / static_cast<double>(m_nCurrentRowsPerBeat);
+ 		}
+ 
+ 	case tempo_mode_alternative:
+-		return static_cast<double>(1000 * (speed + additionalTicks)) / static_cast<double>(tempo);
++		return static_cast<double>(1000 * speedIncludingPatternDelays) / static_cast<double>(tempo);
+ 	}
+ }
+ 
+@@ -2855,6 +2861,7 @@ struct UpgradePatternData
+ 	UpgradePatternData(CSoundFile *pSndFile)
+ 	{
+ 		this->pSndFile = pSndFile;
++		chn = 0;
+ 	}
+ 
+ 	void operator()(ModCommand& m)
+@@ -2909,6 +2916,46 @@ struct UpgradePatternData
+ 			}
+ 		}
+ 
++		if(pSndFile->m_dwLastSavedWithVersion < MAKE_VERSION_NUMERIC(1, 20, 00, 00))
++		{
++			// Pattern Delay fixes
++
++			const bool fixS6x = (m.command == CMD_S3MCMDEX && (m.param & 0xF0) == 0x60);
++			// We also fix X6x commands in hacked XM files, since they are treated identically to the S6x command in IT/S3M files.
++			// We don't treat them in files made with OpenMPT 1.18+ that have compatible play enabled, though, since they are ignored there anyway.
++			const bool fixX6x = (m.command == CMD_XFINEPORTAUPDOWN && (m.param & 0xF0) == 0x60
++				&& (!pSndFile->IsCompatibleMode(TRK_FASTTRACKER2) || pSndFile->m_dwLastSavedWithVersion < MAKE_VERSION_NUMERIC(1, 18, 00, 00)));
++
++			if(fixS6x || fixX6x)
++			{
++				// OpenMPT 1.20 fixes multiple fine pattern delays on the same row. Previously, only the last command was considered,
++				// but all commands should be added up. Since Scream Tracker 3 itself doesn't support S6x, we also use Impulse Tracker's behaviour here,
++				// since we can assume that most S3Ms that make use of S6x were composed with Impulse Tracker.
++				ModCommand *fixCmd = (&m) - chn;
++				for(CHANNELINDEX i = 0; i < chn; i++, fixCmd++)
++				{
++					if(fixCmd->command == CMD_S3MCMDEX && (fixCmd->param & 0xF0) == 0x60)
++					{
++						fixCmd->command = CMD_NONE;
++					}
++				}
++			}
++
++			if(m.command == CMD_S3MCMDEX && (m.param & 0xF0) == 0xE0)
++			{
++				// OpenMPT 1.20 fixes multiple pattern delays on the same row. Previously, only the *last* command was considered,
++				// but Scream Tracker 3 and Impulse Tracker only consider the *first* command.
++				ModCommand *fixCmd = (&m) - chn;
++				for(CHANNELINDEX i = 0; i < chn; i++, fixCmd++)
++				{
++					if(fixCmd->command == CMD_S3MCMDEX && (fixCmd->param & 0xF0) == 0xE0)
++					{
++						fixCmd->command = CMD_NONE;
++					}
++				}
++			}
++		}
++
+ 		if(pSndFile->GetType() == MOD_TYPE_XM)
+ 		{
+ 			if(pSndFile->m_dwLastSavedWithVersion < MAKE_VERSION_NUMERIC(1, 19, 00, 00) ||
+@@ -2923,9 +2970,16 @@ struct UpgradePatternData
+ 			}
+ 		}
+ 
++		chn++;
++		if(chn >= pSndFile->GetNumChannels())
++		{
++			chn = 0;
++		}
++
+ 	}
+ 
+ 	CSoundFile *pSndFile;
++	CHANNELINDEX chn;
+ };
+ 
+ 
+diff --git a/soundlib/Sndfile.h b/soundlib/Sndfile.h
+index a2efdf7ed..862649f25 100644
+--- a/soundlib/Sndfile.h
++++ b/soundlib/Sndfile.h
+@@ -348,7 +348,7 @@ public:
+ 	DWORD GetSongTime() { return static_cast<DWORD>(GetLength(eNoAdjust).duration + 0.5); }
+ 
+ 	void RecalculateSamplesPerTick();
+-	double GetRowDuration(UINT tempo, UINT speed, UINT additionalTicks = 0) const;
++	double GetRowDuration(UINT tempo, UINT speed, UINT speedIncludingPatternDelays = 0) const;
+ 
+ 	// A repeat count value of -1 means infinite loop
+ 	void SetRepeatCount(int n) { m_nRepeatCount = n; }
+@@ -574,7 +574,11 @@ protected:
+ 	DWORD IsSongFinished(UINT nOrder, UINT nRow) const;
+ 	void UpdateTimeSignature();
+ 
+-	UINT GetNumTicksOnCurrentRow() const { return m_nMusicSpeed * (m_nPatternDelay + 1) + m_nFrameDelay; };
++	UINT GetNumTicksOnCurrentRow() const
++	{
++		return (m_nMusicSpeed  + m_nFrameDelay) * (m_nPatternDelay + 1);
++	}
++
+ public:
+ 	// Write pattern effect functions
+ 	bool TryWriteEffect(PATTERNINDEX nPat, ROWINDEX nRow, BYTE nEffect, BYTE nParam, bool bIsVolumeEffect, CHANNELINDEX nChn = CHANNELINDEX_INVALID, bool bAllowMultipleEffects = true, writeEffectAllowRowChange allowRowChange = weIgnore, bool bRetry = true);
+diff --git a/soundlib/Sndmix.cpp b/soundlib/Sndmix.cpp
+index 2bac7b616..4b390c37a 100644
+--- a/soundlib/Sndmix.cpp
++++ b/soundlib/Sndmix.cpp
+@@ -897,9 +897,14 @@ BOOL CSoundFile::ProcessRow()
+ 	if (m_nTickCount)
+ 	{
+ 		m_dwSongFlags &= ~SONG_FIRSTTICK;
+-		if ((!(m_nType & MOD_TYPE_XM)) && (m_nTickCount < GetNumTicksOnCurrentRow()))
++		if(!(GetType() & MOD_TYPE_XM) && m_nTickCount < GetNumTicksOnCurrentRow())
+ 		{
+-			if (!(m_nTickCount % m_nMusicSpeed)) m_dwSongFlags |= SONG_FIRSTTICK;
++			// Emulate first tick behaviour if Row Delay is set.
++			// Test cases: PatternDelaysRetrig.it, PatternDelaysRetrig.s3m, PatternDelaysRetrig.xm
++			if(!(m_nTickCount % (m_nMusicSpeed + m_nFrameDelay)))
++			{
++				m_dwSongFlags |= SONG_FIRSTTICK;
++			}
+ 		}
+ 	}
+ 
+

@@ -1,0 +1,51 @@
+commit 68b5382a60b15821431f1516156e6a1d15c2b3b3
+Author: jonas@perch.ndb.mysql.com <>
+Date:   Wed Jan 23 12:56:27 2008 +0100
+
+    ndb - bug#34005
+      make sure whole send buffer is flushed, even when wrapping around end
+
+diff --git a/ndb/src/common/transporter/TCP_Transporter.cpp b/ndb/src/common/transporter/TCP_Transporter.cpp
+index 91a5fb50c57..8e09c9d90c8 100644
+--- a/ndb/src/common/transporter/TCP_Transporter.cpp
++++ b/ndb/src/common/transporter/TCP_Transporter.cpp
+@@ -330,22 +330,32 @@ TCP_Transporter::doSend() {
+ 
+   // Empty the SendBuffers
+   
+-  const char * const sendPtr = m_sendBuffer.sendPtr;
+-  const Uint32 sizeToSend    = m_sendBuffer.sendDataSize;
+-  if (sizeToSend > 0){
++  bool sent_any = true;
++  while (m_sendBuffer.dataSize > 0)
++  {
++    const char * const sendPtr = m_sendBuffer.sendPtr;
++    const Uint32 sizeToSend    = m_sendBuffer.sendDataSize;
+     const int nBytesSent = inet_send(theSocket, sendPtr, sizeToSend, 0);
+     
+-    if (nBytesSent > 0) {
++    if (nBytesSent > 0) 
++    {
++      sent_any = true;
+       m_sendBuffer.bytesSent(nBytesSent);
+       
+       sendCount ++;
+       sendSize  += nBytesSent;
+-      if(sendCount == reportFreq){
++      if(sendCount == reportFreq)
++      {
+ 	reportSendLen(get_callback_obj(), remoteNodeId, sendCount, sendSize);
+ 	sendCount = 0;
+ 	sendSize  = 0;
+       }
+-    } else {
++    } 
++    else 
++    {
++      if (nBytesSent < 0 && InetErrno == EAGAIN && sent_any)
++        break;
++
+       // Send failed
+ #if defined DEBUG_TRANSPORTER
+       ndbout_c("Send Failure(disconnect==%d) to node = %d nBytesSent = %d "
+

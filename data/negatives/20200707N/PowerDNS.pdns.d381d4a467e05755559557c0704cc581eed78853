@@ -1,0 +1,52 @@
+commit d381d4a467e05755559557c0704cc581eed78853
+Author: Ori Markovitch <ori@redislabs.com>
+Date:   Tue May 23 07:42:41 2017 -0700
+
+    See #3602, made requests always return to sender, for usage in multi master slave zones. Also - made sure that the master that is questioned for updates will be selected randomly, to prevent repeatidally asking a dead master for updates
+    
+    (cherry picked from commit 86e9686baad04d9f21af1a18180ef6cd2f483086)
+
+diff --git a/pdns/slavecommunicator.cc b/pdns/slavecommunicator.cc
+index 4b6da4dbf..f065bba08 100644
+--- a/pdns/slavecommunicator.cc
++++ b/pdns/slavecommunicator.cc
+@@ -710,6 +710,19 @@ void CommunicatorClass::addSlaveCheckRequest(const DomainInfo& di, const ComboAd
+   Lock l(&d_lock);
+   DomainInfo ours = di;
+   ours.backend = 0;
++  string remote_address = remote.toString();
++
++  // When adding a check, if the remote addr from which notification was
++  // received is a master, clear all other masters so we can be sure the
++  // query goes to that one.
++  for (const auto& master : ours.masters) {
++    if (master == remote_address) {
++      ours.masters.clear();
++      ours.masters.push_back(remote_address);
++      break;
++    }
++  }
++  d_tocheck.erase(di);
+   d_tocheck.insert(ours);
+   d_any_sem.post(); // kick the loop!
+ }
+@@ -856,10 +869,17 @@ void CommunicatorClass::slaveRefresh(PacketHandler *P)
+   time_t now = time(0);
+   for(val_t& val :  sdomains) {
+     DomainInfo& di(val.di);
++    DomainInfo tempdi;
+     // might've come from the packethandler
+-    if(!di.backend && !B->getDomainInfo(di.zone, di)) {
++    // Please do not overwrite received DI just to make sure it exists in backend.
++    if(!di.backend) {
++      if (!B->getDomainInfo(di.zone, tempdi)) {
+         L<<Logger::Warning<<"Ignore domain "<< di.zone<<" since it has been removed from our backend"<<endl;
+         continue;
++      }
++      // Backend for di still doesn't exist and this might cause us to
++      // SEGFAULT on the setFresh command later on
++      di.backend = tempdi.backend;
+     }
+ 
+     if(!ssr.d_freshness.count(di.id)) { // If we don't have an answer for the domain
+

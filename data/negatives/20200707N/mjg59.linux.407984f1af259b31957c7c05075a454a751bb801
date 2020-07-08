@@ -1,0 +1,200 @@
+commit 407984f1af259b31957c7c05075a454a751bb801
+Author: Don Zickus <dzickus@redhat.com>
+Date:   Tue Sep 26 10:52:27 2006 +0200
+
+    [PATCH] x86: Add abilty to enable/disable nmi watchdog with sysctl
+    
+    Adds a new /proc/sys/kernel/nmi call that will enable/disable the nmi
+    watchdog.
+    
+    Signed-off-by:  Don Zickus <dzickus@redhat.com>
+    Signed-off-by: Andi Kleen <ak@suse.de>
+
+diff --git a/arch/i386/kernel/nmi.c b/arch/i386/kernel/nmi.c
+index acd3fdea2a21..28065d0b71a9 100644
+--- a/arch/i386/kernel/nmi.c
++++ b/arch/i386/kernel/nmi.c
+@@ -846,6 +846,58 @@ static int unknown_nmi_panic_callback(struct pt_regs *regs, int cpu)
+ 	return 0;
+ }
+ 
++/*
++ * proc handler for /proc/sys/kernel/nmi_watchdog
++ */
++int proc_nmi_enabled(struct ctl_table *table, int write, struct file *file,
++			void __user *buffer, size_t *length, loff_t *ppos)
++{
++	int old_state;
++
++	nmi_watchdog_enabled = (atomic_read(&nmi_active) > 0) ? 1 : 0;
++	old_state = nmi_watchdog_enabled;
++	proc_dointvec(table, write, file, buffer, length, ppos);
++	if (!!old_state == !!nmi_watchdog_enabled)
++		return 0;
++
++	if (atomic_read(&nmi_active) < 0) {
++		printk(KERN_WARNING "NMI watchdog is permanently disabled\n");
++		return -EINVAL;
++	}
++
++	if (nmi_watchdog == NMI_DEFAULT) {
++		if (nmi_known_cpu() > 0)
++			nmi_watchdog = NMI_LOCAL_APIC;
++		else
++			nmi_watchdog = NMI_IO_APIC;
++	}
++
++	if (nmi_watchdog == NMI_LOCAL_APIC)
++	{
++		if (nmi_watchdog_enabled)
++			enable_lapic_nmi_watchdog();
++		else
++			disable_lapic_nmi_watchdog();
++	} else if (nmi_watchdog == NMI_IO_APIC) {
++		/* FIXME
++		 * for some reason these functions don't work
++		 */
++		printk("Can not enable/disable NMI on IO APIC\n");
++		return -EINVAL;
++#if 0
++		if (nmi_watchdog_enabled)
++			enable_timer_nmi_watchdog();
++		else
++			disable_timer_nmi_watchdog();
++#endif
++	} else {
++		printk( KERN_WARNING
++			"NMI watchdog doesn't know what hardware to touch\n");
++		return -EIO;
++	}
++	return 0;
++}
++
+ #endif
+ 
+ EXPORT_SYMBOL(nmi_active);
+diff --git a/arch/x86_64/kernel/nmi.c b/arch/x86_64/kernel/nmi.c
+index 9d175dcf3a2d..3a17411a9a19 100644
+--- a/arch/x86_64/kernel/nmi.c
++++ b/arch/x86_64/kernel/nmi.c
+@@ -750,6 +750,54 @@ static int unknown_nmi_panic_callback(struct pt_regs *regs, int cpu)
+ 	return 0;
+ }
+ 
++/*
++ * proc handler for /proc/sys/kernel/nmi
++ */
++int proc_nmi_enabled(struct ctl_table *table, int write, struct file *file,
++			void __user *buffer, size_t *length, loff_t *ppos)
++{
++	int old_state;
++
++	nmi_watchdog_enabled = (atomic_read(&nmi_active) > 0) ? 1 : 0;
++	old_state = nmi_watchdog_enabled;
++	proc_dointvec(table, write, file, buffer, length, ppos);
++	if (!!old_state == !!nmi_watchdog_enabled)
++		return 0;
++
++	if (atomic_read(&nmi_active) < 0) {
++		printk( KERN_WARNING "NMI watchdog is permanently disabled\n");
++		return -EINVAL;
++	}
++
++	/* if nmi_watchdog is not set yet, then set it */
++	nmi_watchdog_default();
++
++	if (nmi_watchdog == NMI_LOCAL_APIC)
++	{
++		if (nmi_watchdog_enabled)
++			enable_lapic_nmi_watchdog();
++		else
++			disable_lapic_nmi_watchdog();
++	} else if (nmi_watchdog == NMI_IO_APIC) {
++		/* FIXME
++		 * for some reason these functions don't work
++		 */
++		printk("Can not enable/disable NMI on IO APIC\n");
++		return -EIO;
++#if 0
++		if (nmi_watchdog_enabled)
++			enable_timer_nmi_watchdog();
++		else
++			disable_timer_nmi_watchdog();
++#endif
++	} else {
++		printk(KERN_WARNING
++			"NMI watchdog doesn't know what hardware to touch\n");
++		return -EIO;
++	}
++	return 0;
++}
++
+ #endif
+ 
+ EXPORT_SYMBOL(nmi_active);
+diff --git a/include/asm-i386/nmi.h b/include/asm-i386/nmi.h
+index 34d6bf063b6e..13b5d8311bf7 100644
+--- a/include/asm-i386/nmi.h
++++ b/include/asm-i386/nmi.h
+@@ -14,6 +14,7 @@
+  */
+ int do_nmi_callback(struct pt_regs *regs, int cpu);
+ 
++extern int nmi_watchdog_enabled;
+ extern int avail_to_resrv_perfctr_nmi_bit(unsigned int);
+ extern int avail_to_resrv_perfctr_nmi(unsigned int);
+ extern int reserve_perfctr_nmi(unsigned int);
+diff --git a/include/asm-x86_64/nmi.h b/include/asm-x86_64/nmi.h
+index 8818c39d34e0..2c23b0df87d2 100644
+--- a/include/asm-x86_64/nmi.h
++++ b/include/asm-x86_64/nmi.h
+@@ -43,6 +43,7 @@ extern void die_nmi(char *str, struct pt_regs *regs);
+ 
+ extern int panic_on_timeout;
+ extern int unknown_nmi_panic;
++extern int nmi_watchdog_enabled;
+ 
+ extern int check_nmi_watchdog(void);
+ extern int avail_to_resrv_perfctr_nmi_bit(unsigned int);
+diff --git a/include/linux/sysctl.h b/include/linux/sysctl.h
+index 736ed917a4f8..ecb79ba52ae1 100644
+--- a/include/linux/sysctl.h
++++ b/include/linux/sysctl.h
+@@ -150,6 +150,7 @@ enum
+ 	KERN_IA64_UNALIGNED=72, /* int: ia64 unaligned userland trap enable */
+ 	KERN_COMPAT_LOG=73,	/* int: print compat layer  messages */
+ 	KERN_MAX_LOCK_DEPTH=74,
++	KERN_NMI_WATCHDOG=75, /* int: enable/disable nmi watchdog */
+ };
+ 
+ 
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index 83f168361624..040de6bd74dd 100644
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -76,6 +76,9 @@ extern int compat_log;
+ 
+ #if defined(CONFIG_X86_LOCAL_APIC) && defined(CONFIG_X86)
+ int unknown_nmi_panic;
++int nmi_watchdog_enabled;
++extern int proc_nmi_enabled(struct ctl_table *, int , struct file *,
++			void __user *, size_t *, loff_t *);
+ #endif
+ 
+ /* this is needed for the proc_dointvec_minmax for [fs_]overflow UID and GID */
+@@ -628,6 +631,14 @@ static ctl_table kern_table[] = {
+ 		.mode           = 0644,
+ 		.proc_handler   = &proc_dointvec,
+ 	},
++	{
++		.ctl_name       = KERN_NMI_WATCHDOG,
++		.procname       = "nmi_watchdog",
++		.data           = &nmi_watchdog_enabled,
++		.maxlen         = sizeof (int),
++		.mode           = 0644,
++		.proc_handler   = &proc_nmi_enabled,
++	},
+ #endif
+ #if defined(CONFIG_X86)
+ 	{
+

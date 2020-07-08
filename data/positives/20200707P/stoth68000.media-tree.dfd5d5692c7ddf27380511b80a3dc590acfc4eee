@@ -1,0 +1,40 @@
+commit dfd5d5692c7ddf27380511b80a3dc590acfc4eee
+Author: Asias He <asias@redhat.com>
+Date:   Wed Apr 3 14:17:38 2013 +0800
+
+    tcm_vhost: Initialize vq->last_used_idx when set endpoint
+    
+    This patch fixes guest hang when booting seabios and guest.
+    
+      [    0.576238] scsi0 : Virtio SCSI HBA
+      [    0.616754] virtio_scsi virtio1: request:id 0 is not a head!
+    
+    vq->last_used_idx is initialized only when /dev/vhost-scsi is
+    opened or closed.
+    
+       vhost_scsi_open -> vhost_dev_init() -> vhost_vq_reset()
+       vhost_scsi_release() -> vhost_dev_cleanup -> vhost_vq_reset()
+    
+    So, when guest talks to tcm_vhost after seabios does, vq->last_used_idx
+    still contains the old valule for seabios. This confuses guest.
+    
+    Fix this by calling vhost_init_used() to init vq->last_used_idx when
+    we set endpoint.
+    
+    Signed-off-by: Asias He <asias@redhat.com>
+    Acked-by: Michael S. Tsirkin <mst@redhat.com>
+    Signed-off-by: Nicholas Bellinger <nab@linux-iscsi.org>
+
+diff --git a/drivers/vhost/tcm_vhost.c b/drivers/vhost/tcm_vhost.c
+index 6cda137bb208..c127731b4230 100644
+--- a/drivers/vhost/tcm_vhost.c
++++ b/drivers/vhost/tcm_vhost.c
+@@ -874,6 +874,7 @@ static int vhost_scsi_set_endpoint(
+ 			/* Flushing the vhost_work acts as synchronize_rcu */
+ 			mutex_lock(&vq->mutex);
+ 			rcu_assign_pointer(vq->private_data, vs_tpg);
++			vhost_init_used(vq);
+ 			mutex_unlock(&vq->mutex);
+ 		}
+ 		ret = 0;
+

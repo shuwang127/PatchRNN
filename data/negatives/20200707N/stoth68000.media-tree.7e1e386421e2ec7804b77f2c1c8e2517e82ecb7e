@@ -1,0 +1,96 @@
+commit 7e1e386421e2ec7804b77f2c1c8e2517e82ecb7e
+Author: Ben Greear <greearb@candelatech.com>
+Date:   Thu Nov 3 11:33:13 2011 -0700
+
+    ath9k: Improve debugfs printout for stations.
+    
+    Add interface address so it can be mapped to a local
+    interface.  Add max-ampdu and mpdu-density.
+    
+    Print out the tid->baw_size
+    
+    Signed-off-by: Ben Greear <greearb@candelatech.com>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+diff --git a/drivers/net/wireless/ath/ath9k/ath9k.h b/drivers/net/wireless/ath/ath9k/ath9k.h
+index 4415e89bd3d9..93b45b4b3033 100644
+--- a/drivers/net/wireless/ath/ath9k/ath9k.h
++++ b/drivers/net/wireless/ath/ath9k/ath9k.h
+@@ -253,6 +253,7 @@ struct ath_node {
+ #ifdef CONFIG_ATH9K_DEBUGFS
+ 	struct list_head list; /* for sc->nodes */
+ 	struct ieee80211_sta *sta; /* station struct we're part of */
++	struct ieee80211_vif *vif; /* interface with which we're associated */
+ #endif
+ 	struct ath_atx_tid tid[WME_NUM_TID];
+ 	struct ath_atx_ac ac[WME_NUM_AC];
+diff --git a/drivers/net/wireless/ath/ath9k/debug.c b/drivers/net/wireless/ath/ath9k/debug.c
+index 327aa28f6030..8e7e57ccbe9a 100644
+--- a/drivers/net/wireless/ath/ath9k/debug.c
++++ b/drivers/net/wireless/ath/ath9k/debug.c
+@@ -708,24 +708,29 @@ static ssize_t read_file_stations(struct file *file, char __user *user_buf,
+ 
+ 	len += snprintf(buf + len, size - len,
+ 			"Stations:\n"
+-			" tid: addr sched paused buf_q-empty an ac\n"
++			" tid: addr sched paused buf_q-empty an ac baw\n"
+ 			" ac: addr sched tid_q-empty txq\n");
+ 
+ 	spin_lock(&sc->nodes_lock);
+ 	list_for_each_entry(an, &sc->nodes, list) {
++		unsigned short ma = an->maxampdu;
++		if (ma == 0)
++			ma = 65535; /* see ath_lookup_rate */
+ 		len += snprintf(buf + len, size - len,
+-				"%pM\n", an->sta->addr);
++				"iface: %pM  sta: %pM max-ampdu: %hu mpdu-density: %uus\n",
++				an->vif->addr, an->sta->addr, ma,
++				(unsigned int)(an->mpdudensity));
+ 		if (len >= size)
+ 			goto done;
+ 
+ 		for (q = 0; q < WME_NUM_TID; q++) {
+ 			struct ath_atx_tid *tid = &(an->tid[q]);
+ 			len += snprintf(buf + len, size - len,
+-					" tid: %p %s %s %i %p %p\n",
++					" tid: %p %s %s %i %p %p %hu\n",
+ 					tid, tid->sched ? "sched" : "idle",
+ 					tid->paused ? "paused" : "running",
+ 					skb_queue_empty(&tid->buf_q),
+-					tid->an, tid->ac);
++					tid->an, tid->ac, tid->baw_size);
+ 			if (len >= size)
+ 				goto done;
+ 		}
+diff --git a/drivers/net/wireless/ath/ath9k/main.c b/drivers/net/wireless/ath/ath9k/main.c
+index e1e006d81f73..e43c41cff25b 100644
+--- a/drivers/net/wireless/ath/ath9k/main.c
++++ b/drivers/net/wireless/ath/ath9k/main.c
+@@ -630,7 +630,8 @@ void ath_ani_calibrate(unsigned long data)
+ 	}
+ }
+ 
+-static void ath_node_attach(struct ath_softc *sc, struct ieee80211_sta *sta)
++static void ath_node_attach(struct ath_softc *sc, struct ieee80211_sta *sta,
++			    struct ieee80211_vif *vif)
+ {
+ 	struct ath_node *an;
+ 	an = (struct ath_node *)sta->drv_priv;
+@@ -640,6 +641,7 @@ static void ath_node_attach(struct ath_softc *sc, struct ieee80211_sta *sta)
+ 	list_add(&an->list, &sc->nodes);
+ 	spin_unlock(&sc->nodes_lock);
+ 	an->sta = sta;
++	an->vif = vif;
+ #endif
+ 	if (sc->sc_flags & SC_OP_TXAGGR) {
+ 		ath_tx_node_init(sc, an);
+@@ -1800,7 +1802,7 @@ static int ath9k_sta_add(struct ieee80211_hw *hw,
+ 	struct ath_node *an = (struct ath_node *) sta->drv_priv;
+ 	struct ieee80211_key_conf ps_key = { };
+ 
+-	ath_node_attach(sc, sta);
++	ath_node_attach(sc, sta, vif);
+ 
+ 	if (vif->type != NL80211_IFTYPE_AP &&
+ 	    vif->type != NL80211_IFTYPE_AP_VLAN)
+

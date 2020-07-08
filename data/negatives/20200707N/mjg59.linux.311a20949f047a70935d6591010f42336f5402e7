@@ -1,0 +1,115 @@
+commit 311a20949f047a70935d6591010f42336f5402e7
+Author: Paulo Zanoni <paulo.r.zanoni@intel.com>
+Date:   Thu Sep 12 17:12:18 2013 -0300
+
+    drm/i915: don't init DP or HDMI when not supported by DDI port
+    
+    There's no reason to init a DP connector if the encoder just supports
+    HDMI: we'll just waste hundreds and hundreds of cycles trying to do DP
+    AUX transactions to detect if there's something there. Same goes for a
+    DP connector that doesn't support HDMI, but I'm not sure these
+    actually exist.
+    
+    v2: - Use bit fields
+        - Remove useless identation level
+        - Replace DRM_ERROR with DRM_DEBUG_KMS
+    
+    Signed-off-by: Paulo Zanoni <paulo.r.zanoni@intel.com>
+    Reviewed-by: Rodrigo Vivi <rodrigo.vivi@gmail.com> (v1)
+    Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 2eca286b57ff..b1485a008b04 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -1059,6 +1059,10 @@ enum modeset_restore {
+ 
+ struct ddi_vbt_port_info {
+ 	uint8_t hdmi_level_shift;
++
++	uint8_t supports_dvi:1;
++	uint8_t supports_hdmi:1;
++	uint8_t supports_dp:1;
+ };
+ 
+ struct intel_vbt_data {
+diff --git a/drivers/gpu/drm/i915/intel_bios.c b/drivers/gpu/drm/i915/intel_bios.c
+index 7ce1c3c2f0f1..0492b6fff10d 100644
+--- a/drivers/gpu/drm/i915/intel_bios.c
++++ b/drivers/gpu/drm/i915/intel_bios.c
+@@ -632,6 +632,10 @@ static void parse_ddi_port(struct drm_i915_private *dev_priv, enum port port,
+ 	is_hdmi = is_dvi && (child->common.device_type & (1 << 11)) == 0;
+ 	is_edp = is_dp && (child->common.device_type & (1 << 12));
+ 
++	info->supports_dvi = is_dvi;
++	info->supports_hdmi = is_hdmi;
++	info->supports_dp = is_dp;
++
+ 	DRM_DEBUG_KMS("Port %c VBT info: DP:%d HDMI:%d DVI:%d EDP:%d CRT:%d\n",
+ 		      port_name(port), is_dp, is_hdmi, is_dvi, is_edp, is_crt);
+ 
+@@ -792,8 +796,15 @@ init_vbt_defaults(struct drm_i915_private *dev_priv)
+ 	DRM_DEBUG_KMS("Set default to SSC at %dMHz\n", dev_priv->vbt.lvds_ssc_freq);
+ 
+ 	for (port = PORT_A; port < I915_MAX_PORTS; port++) {
++		struct ddi_vbt_port_info *info =
++			&dev_priv->vbt.ddi_port_info[port];
++
+ 		/* Recommended BSpec default: 800mV 0dB. */
+-		dev_priv->vbt.ddi_port_info[port].hdmi_level_shift = 6;
++		info->hdmi_level_shift = 6;
++
++		info->supports_dvi = (port != PORT_A && port != PORT_E);
++		info->supports_hdmi = info->supports_dvi;
++		info->supports_dp = (port != PORT_E);
+ 	}
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_ddi.c b/drivers/gpu/drm/i915/intel_ddi.c
+index 963245a104e4..7e9fa53a1477 100644
+--- a/drivers/gpu/drm/i915/intel_ddi.c
++++ b/drivers/gpu/drm/i915/intel_ddi.c
+@@ -1356,6 +1356,17 @@ void intel_ddi_init(struct drm_device *dev, enum port port)
+ 	struct drm_encoder *encoder;
+ 	struct intel_connector *hdmi_connector = NULL;
+ 	struct intel_connector *dp_connector = NULL;
++	bool init_hdmi, init_dp;
++
++	init_hdmi = (dev_priv->vbt.ddi_port_info[port].supports_dvi ||
++		     dev_priv->vbt.ddi_port_info[port].supports_hdmi);
++	init_dp = dev_priv->vbt.ddi_port_info[port].supports_dp;
++	if (!init_dp && !init_hdmi) {
++		DRM_DEBUG_KMS("VBT says port %c is not DVI/HDMI/DP compatible\n",
++			      port_name(port));
++		init_hdmi = true;
++		init_dp = true;
++	}
+ 
+ 	intel_dig_port = kzalloc(sizeof(*intel_dig_port), GFP_KERNEL);
+ 	if (!intel_dig_port)
+@@ -1393,19 +1404,20 @@ void intel_ddi_init(struct drm_device *dev, enum port port)
+ 	intel_encoder->cloneable = false;
+ 	intel_encoder->hot_plug = intel_ddi_hot_plug;
+ 
+-	if (!intel_dp_init_connector(intel_dig_port, dp_connector)) {
++	if (init_dp && !intel_dp_init_connector(intel_dig_port, dp_connector)) {
+ 		drm_encoder_cleanup(encoder);
+ 		kfree(intel_dig_port);
+ 		kfree(dp_connector);
+ 		return;
+ 	}
+ 
+-	if (intel_encoder->type != INTEL_OUTPUT_EDP) {
++	/* In theory we don't need the encoder->type check, but leave it just in
++	 * case we have some really bad VBTs... */
++	if (intel_encoder->type != INTEL_OUTPUT_EDP && init_hdmi) {
+ 		hdmi_connector = kzalloc(sizeof(*hdmi_connector),
+ 					 GFP_KERNEL);
+-		if (!hdmi_connector) {
++		if (!hdmi_connector)
+ 			return;
+-		}
+ 
+ 		intel_dig_port->hdmi.hdmi_reg = DDI_BUF_CTL(port);
+ 		intel_hdmi_init_connector(intel_dig_port, hdmi_connector);
+

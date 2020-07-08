@@ -1,0 +1,303 @@
+commit f164169fa3a171bfcc8711fa79c23a77c1ce9480
+Author: Rob Siemborski <rjs3@andrew.cmu.edu>
+Date:   Wed Jan 8 17:40:16 2003 +0000
+
+    make mailbox_hash_quota take a size for its dest buffer
+
+diff --git a/imap/imapd.c b/imap/imapd.c
+index 99cfc222d..a246b0aa5 100644
+--- a/imap/imapd.c
++++ b/imap/imapd.c
+@@ -38,7 +38,7 @@
+  * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+  */
+ 
+-/* $Id: imapd.c,v 1.419 2003/01/07 23:41:44 rjs3 Exp $ */
++/* $Id: imapd.c,v 1.420 2003/01/08 17:40:16 rjs3 Exp $ */
+ 
+ #include <config.h>
+ 
+@@ -4365,7 +4365,7 @@ char *name;
+ {
+     int r;
+     struct quota quota;
+-    char buf[MAX_MAILBOX_PATH];
++    char buf[MAX_MAILBOX_PATH+1];
+     char mailboxname[MAX_MAILBOX_NAME+1];
+ 
+     quota.fd = -1;
+@@ -4376,7 +4376,7 @@ char *name;
+ 						   imapd_userid, mailboxname);
+ 	if (!r) {
+ 	    quota.root = mailboxname;
+-	    mailbox_hash_quota(buf, quota.root);
++	    mailbox_hash_quota(buf, sizeof(buf), quota.root);
+ 	    quota.fd = open(buf, O_RDWR, 0);
+ 	    if (quota.fd == -1) {
+ 		r = IMAP_QUOTAROOT_NONEXISTENT;
+@@ -6390,7 +6390,7 @@ void cmd_xfer(char *tag, char *name, char *toserver, char *topart)
+ 	    
+ 	    quota.fd = -1;
+ 	    quota.root = mailboxname;
+-	    mailbox_hash_quota(buf,quota.root);
++	    mailbox_hash_quota(buf,sizeof(buf),quota.root);
+ 	    quota.fd = open(buf, O_RDWR, 0);
+ 	    if(quota.fd != -1) {	    
+ 		r = mailbox_read_quota(&quota);
+diff --git a/imap/mailbox.c b/imap/mailbox.c
+index 877be916d..4971dd748 100644
+--- a/imap/mailbox.c
++++ b/imap/mailbox.c
+@@ -1,5 +1,5 @@
+ /* mailbox.c -- Mailbox manipulation routines
+- $Id: mailbox.c,v 1.139 2002/12/02 17:35:07 rjs3 Exp $
++ $Id: mailbox.c,v 1.140 2003/01/08 17:40:17 rjs3 Exp $
+  
+  * Copyright (c) 1998-2000 Carnegie Mellon University.  All rights reserved.
+  *
+@@ -798,7 +798,7 @@ mailbox_read_quota(quota)
+ struct quota *quota;
+ {
+     const char *p, *eol;
+-    char buf[4096];
++    char buf[MAX_MAILBOX_PATH+1];
+     const char *quota_base = 0;
+     unsigned long quota_len = 0;
+ 
+@@ -810,7 +810,7 @@ struct quota *quota;
+     }
+ 
+     if (quota->fd == -1) {
+-	mailbox_hash_quota(buf, quota->root);
++	mailbox_hash_quota(buf, sizeof(buf), quota->root);
+ 	quota->fd = open(buf, O_RDWR, 0);
+ 	if (quota->fd == -1) {
+ 	    syslog(LOG_ERR, "IOERROR: opening quota file %s: %m", buf);
+@@ -971,7 +971,7 @@ int
+ mailbox_lock_quota(quota)
+ struct quota *quota;
+ {
+-    char quota_path[MAX_MAILBOX_PATH];
++    char quota_path[MAX_MAILBOX_PATH+1];
+     struct stat sbuf;
+     const char *lockfailaction;
+     int r;
+@@ -987,7 +987,7 @@ struct quota *quota;
+ 	quota->limit = -1;
+ 	return 0;
+     }
+-    mailbox_hash_quota(quota_path, quota->root);
++    mailbox_hash_quota(quota_path, sizeof(quota_path), quota->root);
+     if (quota->fd == -1) {
+ 	quota->fd = open(quota_path, O_RDWR, 0);
+ 	if (quota->fd == -1) {
+@@ -1333,15 +1333,15 @@ int mailbox_write_quota(struct quota *quota)
+     int r;
+     int len;
+     char buf[1024];
+-    char quota_path[MAX_MAILBOX_PATH];
+-    char new_quota_path[MAX_MAILBOX_PATH];
++    char quota_path[MAX_MAILBOX_PATH+1];
++    char new_quota_path[MAX_MAILBOX_PATH+1];
+     int newfd;
+ 
+     assert(quota->lock_count != 0);
+ 
+     if (!quota->root) return 0;
+ 
+-    mailbox_hash_quota(quota_path, quota->root);
++    mailbox_hash_quota(quota_path, sizeof(quota_path), quota->root);
+     strcpy(new_quota_path, quota_path);
+     strcat(new_quota_path, ".NEW");
+ 
+@@ -1394,13 +1394,13 @@ int
+ mailbox_delete_quota(quota)
+ struct quota *quota;
+ {
+-    char quota_path[MAX_MAILBOX_PATH];
++    char quota_path[MAX_MAILBOX_PATH+1];
+ 
+     assert(quota->lock_count != 0);
+ 
+     if (!quota->root) return 0;
+ 
+-    mailbox_hash_quota(quota_path, quota->root);
++    mailbox_hash_quota(quota_path, sizeof(quota_path), quota->root);
+ 
+     unlink(quota_path);
+ 
+@@ -1967,18 +1967,18 @@ void *deciderock;
+ */
+ int mailbox_findquota(char *start, const char *name)
+ {
+-    char quota_path[MAX_MAILBOX_PATH];
++    char quota_path[MAX_MAILBOX_PATH+1];
+     char *tail;
+     struct stat sbuf;
+ 
+     strcpy(start, name);
+ 
+-    mailbox_hash_quota(quota_path, start);
++    mailbox_hash_quota(quota_path, sizeof(quota_path), start);
+     while (stat(quota_path, &sbuf) == -1) {
+ 	tail = strrchr(start, '.');
+ 	if (!tail) return 0;
+ 	*tail = '\0';
+-	mailbox_hash_quota(quota_path, start);
++	mailbox_hash_quota(quota_path, sizeof(quota_path), start);
+     }
+     return 1;
+ }
+@@ -2653,18 +2653,20 @@ void mailbox_hash_mbox(char *buf,
+ 
+ /* simple hash so it's easy to find these things in the filesystem;
+    our human time is worth more than efficiency */
+-void mailbox_hash_quota(char *buf, const char *qr)
+-{
++void mailbox_hash_quota(char *buf, unsigned size, const char *qr) {
+     const char *idx;
+     char c;
+ 
+     idx = strchr(qr, '.'); /* skip past user. */
+     if (idx == NULL) {
+-	idx = qr;
++        idx = qr;
+     } else {
+-	idx++;
++        idx++;
+     }
+     c = (char) dir_hash_c(idx);
+ 
+-    sprintf(buf, "%s%s%c/%s", config_dir, FNAME_QUOTADIR, c, qr);
++    if(snprintf(buf, size, "%s%s%c/%s", config_dir, FNAME_QUOTADIR, c, qr)
++       >= size) {
++        fatal("insufficient buffer size in mailbox_hash_quota",EC_TEMPFAIL);
++    }
+ }
+diff --git a/imap/mailbox.h b/imap/mailbox.h
+index 67d6d146e..2362c4a8d 100644
+--- a/imap/mailbox.h
++++ b/imap/mailbox.h
+@@ -1,5 +1,5 @@
+ /* mailbox.h -- Mailbox format definitions
+- $Id: mailbox.h,v 1.70 2002/09/30 19:33:41 rjs3 Exp $
++ $Id: mailbox.h,v 1.71 2003/01/08 17:40:17 rjs3 Exp $
+  *
+  * Copyright (c) 1998-2000 Carnegie Mellon University.  All rights reserved.
+  *
+@@ -262,8 +262,7 @@ extern int mailbox_read_index_record(struct mailbox *mailbox,
+ 				     unsigned msgno,
+ 				     struct index_record *record);
+ extern int mailbox_read_quota(struct quota *quota);
+-extern void mailbox_hash_quota(char *buf, const char *quotaroot);
+-
++extern void mailbox_hash_quota(char *buf, unsigned size, const char *qr);
+ extern int mailbox_lock_header(struct mailbox *mailbox);
+ extern int mailbox_lock_index(struct mailbox *mailbox);
+ extern int mailbox_lock_pop(struct mailbox *mailbox);
+diff --git a/imap/mbdump.c b/imap/mbdump.c
+index 040d9ded6..18d3d4ddb 100644
+--- a/imap/mbdump.c
++++ b/imap/mbdump.c
+@@ -1,5 +1,5 @@
+ /* mbdump.c -- Mailbox dump routines
+- * $Id: mbdump.c,v 1.20 2002/07/21 17:20:26 ken3 Exp $
++ * $Id: mbdump.c,v 1.21 2003/01/08 17:40:17 rjs3 Exp $
+  * Copyright (c) 1998-2000 Carnegie Mellon University.  All rights reserved.
+  *
+  * Redistribution and use in source and binary forms, with or without
+@@ -175,12 +175,12 @@ int dump_mailbox(const char *tag, const char *mbname, const char *mbpath,
+     /* The first member is either a number (if it is a quota root), or NIL
+      * (if it isn't) */
+     {
+-	char buf[MAX_MAILBOX_PATH];
++	char buf[MAX_MAILBOX_PATH+1];
+ 	struct quota quota;
+ 
+ 	quota.fd = -1;
+ 	quota.root = (char *)mbname; /* xxx */
+-	mailbox_hash_quota(buf,quota.root);
++	mailbox_hash_quota(buf,sizeof(buf),quota.root);
+ 	quota.fd = open(buf, O_RDWR, 0);
+ 	if(quota.fd == -1) {
+ 	    prot_printf(pout, "NIL ");
+diff --git a/imap/mboxlist.c b/imap/mboxlist.c
+index ee538b991..7778ed22b 100644
+--- a/imap/mboxlist.c
++++ b/imap/mboxlist.c
+@@ -40,7 +40,7 @@
+  *
+  */
+ /*
+- * $Id: mboxlist.c,v 1.205 2002/11/06 20:43:22 rjs3 Exp $
++ * $Id: mboxlist.c,v 1.206 2003/01/08 17:40:17 rjs3 Exp $
+  */
+ 
+ #include <config.h>
+@@ -1968,8 +1968,8 @@ int mboxlist_findall_alt(struct namespace *namespace,
+  */
+ int mboxlist_setquota(const char *root, int newquota, int force)
+ {
+-    char quota_path[MAX_MAILBOX_PATH];
+-    char pattern[MAX_MAILBOX_PATH];
++    char quota_path[MAX_MAILBOX_PATH+1];
++    char pattern[MAX_MAILBOX_PATH+1];
+     struct quota quota;
+     int have_mailbox = 1;
+     int r, t;
+@@ -1982,7 +1982,7 @@ int mboxlist_setquota(const char *root, int newquota, int force)
+     memset(&quota, 0, sizeof(struct quota));
+ 
+     quota.root = (char *) root;
+-    mailbox_hash_quota(quota_path, root);
++    mailbox_hash_quota(quota_path, sizeof(quota_path), root);
+ 
+     if ((quota.fd = open(quota_path, O_RDWR, 0)) != -1) {
+ 	/* Just lock and change it */
+@@ -2048,8 +2048,8 @@ int mboxlist_setquota(const char *root, int newquota, int force)
+  */
+ int mboxlist_unsetquota(const char *root)
+ {
+-    char quota_path[MAX_MAILBOX_PATH];
+-    char pattern[MAX_MAILBOX_PATH];
++    char quota_path[MAX_MAILBOX_PATH+1];
++    char pattern[MAX_MAILBOX_PATH+1];
+     int fd;
+     int r=0;
+ 
+@@ -2058,7 +2058,7 @@ int mboxlist_unsetquota(const char *root)
+ 	return IMAP_MAILBOX_BADNAME;
+     }
+     
+-    mailbox_hash_quota(quota_path, root);
++    mailbox_hash_quota(quota_path, sizeof(quota_path), root);
+ 
+     if ((fd = open(quota_path, O_RDWR, 0)) == -1) {
+ 	/* already unset */
+diff --git a/imap/quota.c b/imap/quota.c
+index 7d57c7d4f..0f7c048bc 100644
+--- a/imap/quota.c
++++ b/imap/quota.c
+@@ -39,7 +39,7 @@
+  * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+  *
+  */
+-/* $Id: quota.c,v 1.43 2002/11/06 20:43:24 rjs3 Exp $ */
++/* $Id: quota.c,v 1.44 2003/01/08 17:40:17 rjs3 Exp $ */
+ 
+ 
+ #include <config.h>
+@@ -409,10 +409,10 @@ int fixquota_finish(int thisquota)
+ 
+     if (!quota[thisquota].refcount) {
+ 	if (!quota[thisquota].deleted++) {
+-	    char buf[MAX_MAILBOX_PATH];
++	    char buf[MAX_MAILBOX_PATH+1];
+ 	    
+ 	    printf("%s: removed\n", quota[thisquota].quota.root);
+-	    mailbox_hash_quota(buf, quota[thisquota].quota.root);
++	    mailbox_hash_quota(buf, sizeof(buf), quota[thisquota].quota.root);
+ 
+ 	    unlink(buf);
+ 	}
+

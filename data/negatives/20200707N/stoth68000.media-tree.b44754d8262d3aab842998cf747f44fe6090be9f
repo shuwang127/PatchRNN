@@ -1,0 +1,77 @@
+commit b44754d8262d3aab842998cf747f44fe6090be9f
+Author: Petr Mladek <pmladek@suse.cz>
+Date:   Mon Jun 15 15:53:10 2015 +0200
+
+    ring_buffer: Allow to exit the ring buffer benchmark immediately
+    
+    It takes a while until the ring_buffer_benchmark module is removed
+    when the ring buffer hammer is running. It is because it takes
+    few seconds and kthread_should_stop() is not being checked.
+    
+    This patch adds the check for kthread termination into the producer.
+    It uses the existing @kill_test flag to finish the kthreads as
+    cleanly as possible.
+    
+    It disables printing the "ERROR" message when the kthread is going.
+    
+    It makes sure that producer does not go into the 10sec sleep
+    when it is being killed.
+    
+    Finally, it does not call wait_to_die() when kthread_should_stop()
+    already returns true.
+    
+    Link: http://lkml.kernel.org/r/20150615155428.GD3135@pathway.suse.cz
+    
+    Signed-off-by: Petr Mladek <pmladek@suse.cz>
+    Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+
+diff --git a/kernel/trace/ring_buffer_benchmark.c b/kernel/trace/ring_buffer_benchmark.c
+index 2430563cf2bc..5ffbae3d3f86 100644
+--- a/kernel/trace/ring_buffer_benchmark.c
++++ b/kernel/trace/ring_buffer_benchmark.c
+@@ -263,6 +263,8 @@ static void ring_buffer_producer(void)
+ 		if (cnt % wakeup_interval)
+ 			cond_resched();
+ #endif
++		if (kthread_should_stop())
++			kill_test = 1;
+ 
+ 	} while (ktime_before(end_time, timeout) && !kill_test);
+ 	trace_printk("End ring buffer hammer\n");
+@@ -285,7 +287,7 @@ static void ring_buffer_producer(void)
+ 	entries = ring_buffer_entries(buffer);
+ 	overruns = ring_buffer_overruns(buffer);
+ 
+-	if (kill_test)
++	if (kill_test && !kthread_should_stop())
+ 		trace_printk("ERROR!\n");
+ 
+ 	if (!disable_reader) {
+@@ -379,7 +381,7 @@ static int ring_buffer_consumer_thread(void *arg)
+ 	}
+ 	__set_current_state(TASK_RUNNING);
+ 
+-	if (kill_test)
++	if (!kthread_should_stop())
+ 		wait_to_die();
+ 
+ 	return 0;
+@@ -399,13 +401,16 @@ static int ring_buffer_producer_thread(void *arg)
+ 		}
+ 
+ 		ring_buffer_producer();
++		if (kill_test)
++			goto out_kill;
+ 
+ 		trace_printk("Sleeping for 10 secs\n");
+ 		set_current_state(TASK_INTERRUPTIBLE);
+ 		schedule_timeout(HZ * SLEEP_TIME);
+ 	}
+ 
+-	if (kill_test)
++out_kill:
++	if (!kthread_should_stop())
+ 		wait_to_die();
+ 
+ 	return 0;
+

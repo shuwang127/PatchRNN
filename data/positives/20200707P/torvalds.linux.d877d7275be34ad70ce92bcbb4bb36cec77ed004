@@ -1,0 +1,278 @@
+commit d877d7275be34ad70ce92bcbb4bb36cec77ed004
+Author: Bart Van Assche <bart.vanassche@sandisk.com>
+Date:   Tue May 23 16:48:29 2017 -0700
+
+    target: Fix a deadlock between the XCOPY code and iSCSI session shutdown
+    
+    Move the code for parsing an XCOPY command from the context of
+    the iSCSI receiver thread to the context of the XCOPY workqueue.
+    Keep the simple XCOPY checks in the context of the iSCSI receiver
+    thread. Move the code for allocating and freeing struct xcopy_op
+    from the code that parses an XCOPY command to its caller.
+    
+    This patch fixes the following deadlock:
+    
+    ======================================================
+    [ INFO: possible circular locking dependency detected ]
+    4.10.0-rc7-dbg+ #1 Not tainted
+    -------------------------------------------------------
+    rmdir/13321 is trying to acquire lock:
+     (&sess->cmdsn_mutex){+.+.+.}, at: [<ffffffffa02cb47d>] iscsit_free_all_ooo_cmdsns+0x2d/0xb0 [iscsi_target_mod]
+    
+    but task is already holding lock:
+     (&sb->s_type->i_mutex_key#14){++++++}, at: [<ffffffff811c6e20>] vfs_rmdir+0x50/0x140
+    
+    which lock already depends on the new lock.
+    
+    the existing dependency chain (in reverse order) is:
+    -> #1 (&sb->s_type->i_mutex_key#14){++++++}:
+     lock_acquire+0x71/0x90
+     down_write+0x3f/0x70
+     configfs_depend_item+0x3a/0xb0 [configfs]
+     target_depend_item+0x13/0x20 [target_core_mod]
+     target_xcopy_locate_se_dev_e4+0xdd/0x1a0 [target_core_mod]
+     target_do_xcopy+0x34b/0x970 [target_core_mod]
+     __target_execute_cmd+0x22/0xa0 [target_core_mod]
+     target_execute_cmd+0x233/0x2c0 [target_core_mod]
+     iscsit_execute_cmd+0x208/0x270 [iscsi_target_mod]
+     iscsit_sequence_cmd+0x10b/0x190 [iscsi_target_mod]
+     iscsit_get_rx_pdu+0x37d/0xcd0 [iscsi_target_mod]
+     iscsi_target_rx_thread+0x6e/0xa0 [iscsi_target_mod]
+     kthread+0x102/0x140
+     ret_from_fork+0x31/0x40
+    
+    -> #0 (&sess->cmdsn_mutex){+.+.+.}:
+     __lock_acquire+0x10e6/0x1260
+     lock_acquire+0x71/0x90
+     mutex_lock_nested+0x5f/0x670
+     iscsit_free_all_ooo_cmdsns+0x2d/0xb0 [iscsi_target_mod]
+     iscsit_close_session+0xac/0x200 [iscsi_target_mod]
+     lio_tpg_close_session+0x9f/0xb0 [iscsi_target_mod]
+     target_shutdown_sessions+0xc3/0xd0 [target_core_mod]
+     core_tpg_del_initiator_node_acl+0x91/0x140 [target_core_mod]
+     target_fabric_nacl_base_release+0x20/0x30 [target_core_mod]
+     config_item_release+0x5a/0xc0 [configfs]
+     config_item_put+0x1d/0x1f [configfs]
+     configfs_rmdir+0x1a6/0x300 [configfs]
+     vfs_rmdir+0xb7/0x140
+     do_rmdir+0x1f4/0x200
+     SyS_rmdir+0x11/0x20
+     entry_SYSCALL_64_fastpath+0x23/0xc6
+    
+    other info that might help us debug this:
+    
+     Possible unsafe locking scenario:
+           CPU0                    CPU1
+           ----                    ----
+      lock(&sb->s_type->i_mutex_key#14);
+                                   lock(&sess->cmdsn_mutex);
+                                   lock(&sb->s_type->i_mutex_key#14);
+      lock(&sess->cmdsn_mutex);
+    
+     *** DEADLOCK ***
+    
+    3 locks held by rmdir/13321:
+     #0:  (sb_writers#10){.+.+.+}, at: [<ffffffff811e1aff>] mnt_want_write+0x1f/0x50
+     #1:  (&default_group_class[depth - 1]#2/1){+.+.+.}, at: [<ffffffff811cc8ce>] do_rmdir+0x15e/0x200
+     #2:  (&sb->s_type->i_mutex_key#14){++++++}, at: [<ffffffff811c6e20>] vfs_rmdir+0x50/0x140
+    
+    stack backtrace:
+    CPU: 2 PID: 13321 Comm: rmdir Not tainted 4.10.0-rc7-dbg+ #1
+    Hardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS 1.0.0-prebuilt.qemu-project.org 04/01/2014
+    Call Trace:
+     dump_stack+0x86/0xc3
+     print_circular_bug+0x1c7/0x220
+     __lock_acquire+0x10e6/0x1260
+     lock_acquire+0x71/0x90
+     mutex_lock_nested+0x5f/0x670
+     iscsit_free_all_ooo_cmdsns+0x2d/0xb0 [iscsi_target_mod]
+     iscsit_close_session+0xac/0x200 [iscsi_target_mod]
+     lio_tpg_close_session+0x9f/0xb0 [iscsi_target_mod]
+     target_shutdown_sessions+0xc3/0xd0 [target_core_mod]
+     core_tpg_del_initiator_node_acl+0x91/0x140 [target_core_mod]
+     target_fabric_nacl_base_release+0x20/0x30 [target_core_mod]
+     config_item_release+0x5a/0xc0 [configfs]
+     config_item_put+0x1d/0x1f [configfs]
+     configfs_rmdir+0x1a6/0x300 [configfs]
+     vfs_rmdir+0xb7/0x140
+     do_rmdir+0x1f4/0x200
+     SyS_rmdir+0x11/0x20
+     entry_SYSCALL_64_fastpath+0x23/0xc6
+    
+    Signed-off-by: Bart Van Assche <bart.vanassche@sandisk.com>
+    Cc: Hannes Reinecke <hare@suse.com>
+    Cc: Christoph Hellwig <hch@lst.de>
+    Cc: Andy Grover <agrover@redhat.com>
+    Cc: David Disseldorp <ddiss@suse.de>
+    Signed-off-by: Nicholas Bellinger <nab@linux-iscsi.org>
+
+diff --git a/drivers/target/target_core_xcopy.c b/drivers/target/target_core_xcopy.c
+index f12cf0c12531..56738a41e346 100644
+--- a/drivers/target/target_core_xcopy.c
++++ b/drivers/target/target_core_xcopy.c
+@@ -40,6 +40,8 @@
+ 
+ static struct workqueue_struct *xcopy_wq = NULL;
+ 
++static sense_reason_t target_parse_xcopy_cmd(struct xcopy_op *xop);
++
+ static int target_xcopy_gen_naa_ieee(struct se_device *dev, unsigned char *buf)
+ {
+ 	int off = 0;
+@@ -779,13 +781,24 @@ static int target_xcopy_write_destination(
+ static void target_xcopy_do_work(struct work_struct *work)
+ {
+ 	struct xcopy_op *xop = container_of(work, struct xcopy_op, xop_work);
+-	struct se_device *src_dev = xop->src_dev, *dst_dev = xop->dst_dev;
+ 	struct se_cmd *ec_cmd = xop->xop_se_cmd;
+-	sector_t src_lba = xop->src_lba, dst_lba = xop->dst_lba, end_lba;
++	struct se_device *src_dev, *dst_dev;
++	sector_t src_lba, dst_lba, end_lba;
+ 	unsigned int max_sectors;
+-	int rc;
+-	unsigned short nolb = xop->nolb, cur_nolb, max_nolb, copied_nolb = 0;
++	int rc = 0;
++	unsigned short nolb, cur_nolb, max_nolb, copied_nolb = 0;
++
++	if (target_parse_xcopy_cmd(xop) != TCM_NO_SENSE)
++		goto err_free;
+ 
++	if (WARN_ON_ONCE(!xop->src_dev) || WARN_ON_ONCE(!xop->dst_dev))
++		goto err_free;
++
++	src_dev = xop->src_dev;
++	dst_dev = xop->dst_dev;
++	src_lba = xop->src_lba;
++	dst_lba = xop->dst_lba;
++	nolb = xop->nolb;
+ 	end_lba = src_lba + nolb;
+ 	/*
+ 	 * Break up XCOPY I/O into hw_max_sectors sized I/O based on the
+@@ -853,6 +866,8 @@ static void target_xcopy_do_work(struct work_struct *work)
+ 
+ out:
+ 	xcopy_pt_undepend_remotedev(xop);
++
++err_free:
+ 	kfree(xop);
+ 	/*
+ 	 * Don't override an error scsi status if it has already been set
+@@ -865,48 +880,22 @@ static void target_xcopy_do_work(struct work_struct *work)
+ 	target_complete_cmd(ec_cmd, ec_cmd->scsi_status);
+ }
+ 
+-sense_reason_t target_do_xcopy(struct se_cmd *se_cmd)
++/*
++ * Returns TCM_NO_SENSE upon success or a sense code != TCM_NO_SENSE if parsing
++ * fails.
++ */
++static sense_reason_t target_parse_xcopy_cmd(struct xcopy_op *xop)
+ {
+-	struct se_device *dev = se_cmd->se_dev;
+-	struct xcopy_op *xop = NULL;
++	struct se_cmd *se_cmd = xop->xop_se_cmd;
+ 	unsigned char *p = NULL, *seg_desc;
+-	unsigned int list_id, list_id_usage, sdll, inline_dl, sa;
++	unsigned int list_id, list_id_usage, sdll, inline_dl;
+ 	sense_reason_t ret = TCM_INVALID_PARAMETER_LIST;
+ 	int rc;
+ 	unsigned short tdll;
+ 
+-	if (!dev->dev_attrib.emulate_3pc) {
+-		pr_err("EXTENDED_COPY operation explicitly disabled\n");
+-		return TCM_UNSUPPORTED_SCSI_OPCODE;
+-	}
+-
+-	sa = se_cmd->t_task_cdb[1] & 0x1f;
+-	if (sa != 0x00) {
+-		pr_err("EXTENDED_COPY(LID4) not supported\n");
+-		return TCM_UNSUPPORTED_SCSI_OPCODE;
+-	}
+-
+-	if (se_cmd->data_length == 0) {
+-		target_complete_cmd(se_cmd, SAM_STAT_GOOD);
+-		return TCM_NO_SENSE;
+-	}
+-	if (se_cmd->data_length < XCOPY_HDR_LEN) {
+-		pr_err("XCOPY parameter truncation: length %u < hdr_len %u\n",
+-				se_cmd->data_length, XCOPY_HDR_LEN);
+-		return TCM_PARAMETER_LIST_LENGTH_ERROR;
+-	}
+-
+-	xop = kzalloc(sizeof(struct xcopy_op), GFP_KERNEL);
+-	if (!xop) {
+-		pr_err("Unable to allocate xcopy_op\n");
+-		return TCM_OUT_OF_RESOURCES;
+-	}
+-	xop->xop_se_cmd = se_cmd;
+-
+ 	p = transport_kmap_data_sg(se_cmd);
+ 	if (!p) {
+ 		pr_err("transport_kmap_data_sg() failed in target_do_xcopy\n");
+-		kfree(xop);
+ 		return TCM_OUT_OF_RESOURCES;
+ 	}
+ 
+@@ -975,18 +964,57 @@ sense_reason_t target_do_xcopy(struct se_cmd *se_cmd)
+ 	pr_debug("XCOPY: Processed %d target descriptors, length: %u\n", rc,
+ 				rc * XCOPY_TARGET_DESC_LEN);
+ 	transport_kunmap_data_sg(se_cmd);
+-
+-	INIT_WORK(&xop->xop_work, target_xcopy_do_work);
+-	queue_work(xcopy_wq, &xop->xop_work);
+ 	return TCM_NO_SENSE;
+ 
+ out:
+ 	if (p)
+ 		transport_kunmap_data_sg(se_cmd);
+-	kfree(xop);
+ 	return ret;
+ }
+ 
++sense_reason_t target_do_xcopy(struct se_cmd *se_cmd)
++{
++	struct se_device *dev = se_cmd->se_dev;
++	struct xcopy_op *xop;
++	unsigned int sa;
++
++	if (!dev->dev_attrib.emulate_3pc) {
++		pr_err("EXTENDED_COPY operation explicitly disabled\n");
++		return TCM_UNSUPPORTED_SCSI_OPCODE;
++	}
++
++	sa = se_cmd->t_task_cdb[1] & 0x1f;
++	if (sa != 0x00) {
++		pr_err("EXTENDED_COPY(LID4) not supported\n");
++		return TCM_UNSUPPORTED_SCSI_OPCODE;
++	}
++
++	if (se_cmd->data_length == 0) {
++		target_complete_cmd(se_cmd, SAM_STAT_GOOD);
++		return TCM_NO_SENSE;
++	}
++	if (se_cmd->data_length < XCOPY_HDR_LEN) {
++		pr_err("XCOPY parameter truncation: length %u < hdr_len %u\n",
++				se_cmd->data_length, XCOPY_HDR_LEN);
++		return TCM_PARAMETER_LIST_LENGTH_ERROR;
++	}
++
++	xop = kzalloc(sizeof(struct xcopy_op), GFP_KERNEL);
++	if (!xop)
++		goto err;
++	xop->xop_se_cmd = se_cmd;
++	INIT_WORK(&xop->xop_work, target_xcopy_do_work);
++	if (WARN_ON_ONCE(!queue_work(xcopy_wq, &xop->xop_work)))
++		goto free;
++	return TCM_NO_SENSE;
++
++free:
++	kfree(xop);
++
++err:
++	return TCM_OUT_OF_RESOURCES;
++}
++
+ static sense_reason_t target_rcr_operating_parameters(struct se_cmd *se_cmd)
+ {
+ 	unsigned char *p;
+

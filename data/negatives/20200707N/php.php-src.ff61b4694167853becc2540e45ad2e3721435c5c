@@ -1,0 +1,195 @@
+commit ff61b4694167853becc2540e45ad2e3721435c5c
+Author: Dmitry Stogov <dmitry@zend.com>
+Date:   Wed Feb 19 16:50:09 2014 +0400
+
+    Use better data structures (incomplete)
+
+diff --git a/Zend/zend_closures.c b/Zend/zend_closures.c
+index d0c0ebb4b3..a654736244 100644
+--- a/Zend/zend_closures.c
++++ b/Zend/zend_closures.c
+@@ -428,7 +428,7 @@ ZEND_API void zend_create_closure(zval *res, zend_function *func, zend_class_ent
+ 	closure->func = *func;
+ 	closure->func.common.prototype = NULL;
+ 
+-	if ((scope == NULL) && (this_ptr != NULL)) {
++	if ((scope == NULL) && (Z_TYPE_P(this_ptr) != IS_UNDEF)) {
+ 		/* use dummy scope if we're binding an object without specifying a scope */
+ 		/* maybe it would be better to create one for this purpose */
+ 		scope = zend_ce_closure;
+diff --git a/Zend/zend_execute.h b/Zend/zend_execute.h
+index 169831c41f..da5029d52b 100644
+--- a/Zend/zend_execute.h
++++ b/Zend/zend_execute.h
+@@ -72,7 +72,8 @@ ZEND_API int zend_verify_arg_error(int error_type, const zend_function *zf, zend
+ 
+ static zend_always_inline void i_zval_ptr_dtor(zval *zval_ptr ZEND_FILE_LINE_DC TSRMLS_DC)
+ {
+-	if (IS_REFCOUNTED(Z_TYPE_P(zval_ptr))) {
++//??? IS_CONSTANT_TYPE_MASK used only for some rare cases
++	if (IS_REFCOUNTED(Z_TYPE_P(zval_ptr) & IS_CONSTANT_TYPE_MASK)) {
+ 		if (!Z_DELREF_P(zval_ptr)) {
+ 			ZEND_ASSERT(zval_ptr != &EG(uninitialized_zval));
+ 			GC_REMOVE_ZVAL_FROM_BUFFER(zval_ptr);
+diff --git a/Zend/zend_variables.c b/Zend/zend_variables.c
+index 2427871a22..a3d768d6d3 100644
+--- a/Zend/zend_variables.c
++++ b/Zend/zend_variables.c
+@@ -299,6 +299,7 @@ ZEND_API int zval_copy_static_var(zval *p TSRMLS_DC, int num_args, va_list args,
+ 		} else {
+ 			if (is_ref) {
+ 				SEPARATE_ZVAL_TO_MAKE_IS_REF(p);
++/*
+ 				if (!Z_ISREF_P(p)) {
+ 					if (IS_REFCOUNTED(Z_TYPE_P(p)) && Z_REFCOUNT_P(p) > 1) {
+ 						Z_DELREF_P(p);
+@@ -309,6 +310,7 @@ ZEND_API int zval_copy_static_var(zval *p TSRMLS_DC, int num_args, va_list args,
+ 						ZVAL_NEW_REF(p, p);
+ 					}
+ 				}
++*/
+ 			} else if (Z_ISREF_P(p)) {
+ 				ZVAL_COPY_VALUE(&tmp, Z_REFVAL_P(p));
+ 				if (Z_REFCOUNTED(tmp) && Z_REFCOUNT(tmp) > 1) {
+diff --git a/Zend/zend_vm_def.h b/Zend/zend_vm_def.h
+index 6a5bad7201..dfb53daa84 100644
+--- a/Zend/zend_vm_def.h
++++ b/Zend/zend_vm_def.h
+@@ -2258,10 +2258,15 @@ ZEND_VM_HANDLER(56, ZEND_ADD_VAR, TMP|UNUSED, TMP|VAR|CV)
+ 	}
+ 
+ 	if (Z_TYPE_P(var) != IS_STRING) {
+-		zend_make_printable_zval(var, &var_copy, &use_copy);
++		if (Z_TYPE_P(var) == IS_REFERENCE) {
++			var = Z_REFVAL_P(var);
++		}
++		if (Z_TYPE_P(var) != IS_STRING) {
++			zend_make_printable_zval(var, &var_copy, &use_copy);
+ 
+-		if (use_copy) {
+-			var = &var_copy;
++			if (use_copy) {
++				var = &var_copy;
++			}
+ 		}
+ 	}
+ 	add_string_to_string(str, str, var);
+diff --git a/Zend/zend_vm_execute.h b/Zend/zend_vm_execute.h
+index 7f4540fdaf..435bba4e0c 100644
+--- a/Zend/zend_vm_execute.h
++++ b/Zend/zend_vm_execute.h
+@@ -9519,10 +9519,15 @@ static int ZEND_FASTCALL  ZEND_ADD_VAR_SPEC_TMP_TMP_HANDLER(ZEND_OPCODE_HANDLER_
+ 	}
+ 
+ 	if (Z_TYPE_P(var) != IS_STRING) {
+-		zend_make_printable_zval(var, &var_copy, &use_copy);
++		if (Z_TYPE_P(var) == IS_REFERENCE) {
++			var = Z_REFVAL_P(var);
++		}
++		if (Z_TYPE_P(var) != IS_STRING) {
++			zend_make_printable_zval(var, &var_copy, &use_copy);
+ 
+-		if (use_copy) {
+-			var = &var_copy;
++			if (use_copy) {
++				var = &var_copy;
++			}
+ 		}
+ 	}
+ 	add_string_to_string(str, str, var);
+@@ -10319,10 +10324,15 @@ static int ZEND_FASTCALL  ZEND_ADD_VAR_SPEC_TMP_VAR_HANDLER(ZEND_OPCODE_HANDLER_
+ 	}
+ 
+ 	if (Z_TYPE_P(var) != IS_STRING) {
+-		zend_make_printable_zval(var, &var_copy, &use_copy);
++		if (Z_TYPE_P(var) == IS_REFERENCE) {
++			var = Z_REFVAL_P(var);
++		}
++		if (Z_TYPE_P(var) != IS_STRING) {
++			zend_make_printable_zval(var, &var_copy, &use_copy);
+ 
+-		if (use_copy) {
+-			var = &var_copy;
++			if (use_copy) {
++				var = &var_copy;
++			}
+ 		}
+ 	}
+ 	add_string_to_string(str, str, var);
+@@ -11664,10 +11674,15 @@ static int ZEND_FASTCALL  ZEND_ADD_VAR_SPEC_TMP_CV_HANDLER(ZEND_OPCODE_HANDLER_A
+ 	}
+ 
+ 	if (Z_TYPE_P(var) != IS_STRING) {
+-		zend_make_printable_zval(var, &var_copy, &use_copy);
++		if (Z_TYPE_P(var) == IS_REFERENCE) {
++			var = Z_REFVAL_P(var);
++		}
++		if (Z_TYPE_P(var) != IS_STRING) {
++			zend_make_printable_zval(var, &var_copy, &use_copy);
+ 
+-		if (use_copy) {
+-			var = &var_copy;
++			if (use_copy) {
++				var = &var_copy;
++			}
+ 		}
+ 	}
+ 	add_string_to_string(str, str, var);
+@@ -25226,10 +25241,15 @@ static int ZEND_FASTCALL  ZEND_ADD_VAR_SPEC_UNUSED_TMP_HANDLER(ZEND_OPCODE_HANDL
+ 	}
+ 
+ 	if (Z_TYPE_P(var) != IS_STRING) {
+-		zend_make_printable_zval(var, &var_copy, &use_copy);
++		if (Z_TYPE_P(var) == IS_REFERENCE) {
++			var = Z_REFVAL_P(var);
++		}
++		if (Z_TYPE_P(var) != IS_STRING) {
++			zend_make_printable_zval(var, &var_copy, &use_copy);
+ 
+-		if (use_copy) {
+-			var = &var_copy;
++			if (use_copy) {
++				var = &var_copy;
++			}
+ 		}
+ 	}
+ 	add_string_to_string(str, str, var);
+@@ -26474,10 +26494,15 @@ static int ZEND_FASTCALL  ZEND_ADD_VAR_SPEC_UNUSED_VAR_HANDLER(ZEND_OPCODE_HANDL
+ 	}
+ 
+ 	if (Z_TYPE_P(var) != IS_STRING) {
+-		zend_make_printable_zval(var, &var_copy, &use_copy);
++		if (Z_TYPE_P(var) == IS_REFERENCE) {
++			var = Z_REFVAL_P(var);
++		}
++		if (Z_TYPE_P(var) != IS_STRING) {
++			zend_make_printable_zval(var, &var_copy, &use_copy);
+ 
+-		if (use_copy) {
+-			var = &var_copy;
++			if (use_copy) {
++				var = &var_copy;
++			}
+ 		}
+ 	}
+ 	add_string_to_string(str, str, var);
+@@ -28121,10 +28146,15 @@ static int ZEND_FASTCALL  ZEND_ADD_VAR_SPEC_UNUSED_CV_HANDLER(ZEND_OPCODE_HANDLE
+ 	}
+ 
+ 	if (Z_TYPE_P(var) != IS_STRING) {
+-		zend_make_printable_zval(var, &var_copy, &use_copy);
++		if (Z_TYPE_P(var) == IS_REFERENCE) {
++			var = Z_REFVAL_P(var);
++		}
++		if (Z_TYPE_P(var) != IS_STRING) {
++			zend_make_printable_zval(var, &var_copy, &use_copy);
+ 
+-		if (use_copy) {
+-			var = &var_copy;
++			if (use_copy) {
++				var = &var_copy;
++			}
+ 		}
+ 	}
+ 	add_string_to_string(str, str, var);
+

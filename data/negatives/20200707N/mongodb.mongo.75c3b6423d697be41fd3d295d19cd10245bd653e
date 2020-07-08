@@ -1,0 +1,124 @@
+commit 75c3b6423d697be41fd3d295d19cd10245bd653e
+Author: Andrew Morrow <acm@10gen.com>
+Date:   Thu Nov 15 17:08:50 2012 -0500
+
+    Minor fixups for mutable bson builder classes
+
+diff --git a/src/mongo/bson/mutable/mutable_bson_builder.cpp b/src/mongo/bson/mutable/mutable_bson_builder.cpp
+index fa43075059..dd94a94c67 100755
+--- a/src/mongo/bson/mutable/mutable_bson_builder.cpp
++++ b/src/mongo/bson/mutable/mutable_bson_builder.cpp
+@@ -31,7 +31,7 @@ namespace mutablebson {
+     // ElementBuilder
+     //
+ 
+-    Status ElementBuilder::parse(Element* dst, const BSONObj& src) {
++    Status ElementBuilder::parse(const BSONObj& src, Element* dst) {
+         Status result(Status::OK());
+         Document& doc = *dst->getDocument();
+ 
+@@ -57,14 +57,14 @@ namespace mutablebson {
+             }
+             case Object: {
+                 Element e0 = doc.makeObjElement(fieldName);
+-                result = ElementBuilder::parse(&e0, bsonElem.Obj());
++                result = ElementBuilder::parse(bsonElem.Obj(), &e0);
+                 if (result.isOK())
+                     result = dst->addChild(e0);
+                 break;
+             }
+             case Array: {
+                 Element e0 = doc.makeArrayElement(fieldName);
+-                result = ElementBuilder::parse(&e0, bsonElem.Obj());
++                result = ElementBuilder::parse(bsonElem.Obj(), &e0);
+                 if (result.isOK())
+                     result = dst->addChild(e0);
+                 break;
+@@ -167,6 +167,7 @@ namespace mutablebson {
+         case Object: {
+             BSONObjBuilder subBuilder(dst->subobjStart(src.fieldName()));
+             BSONBuilder::build(src, &subBuilder);
++            subBuilder.doneFast();
+             break;
+         }
+         case Array: {
+@@ -178,6 +179,7 @@ namespace mutablebson {
+                 e0.rename(oss.str());
+                 BSONBuilder::buildFromElement(e0, &subBuilder);
+             }
++            subBuilder.doneFast();
+             break;
+         }
+         case BinData: {
+@@ -289,7 +291,7 @@ namespace mutablebson {
+ 
+     void BSONBuilder::build(Element src, BSONObjBuilder* dst) {
+ 
+-        SiblingIterator it(src);
++        SiblingIterator it = src.children();
+ 
+         for (; !it.done(); ++it) {
+             Element elem = *it;
+diff --git a/src/mongo/bson/mutable/mutable_bson_builder.h b/src/mongo/bson/mutable/mutable_bson_builder.h
+index 3215832604..7f8c29d857 100755
+--- a/src/mongo/bson/mutable/mutable_bson_builder.h
++++ b/src/mongo/bson/mutable/mutable_bson_builder.h
+@@ -24,7 +24,11 @@ namespace mutablebson {
+     /** static method for creating a MutableBSON tree from a BSONObj. */
+     class ElementBuilder {
+     public:
+-        static Status parse(Element* dst, const BSONObj& src);
++        static Status parse(const BSONObj& src, Element* dst);
++
++        static Status parse(const BSONObj& src, Document* dst) {
++            return parse(src, &dst->root());
++        }
+     };
+ 
+     /** static method for creating BSONObj from MutableBSON */
+@@ -32,6 +36,11 @@ namespace mutablebson {
+     public:
+         static void buildFromElement(Element src, BSONObjBuilder* dst);
+         static void build(Element src, BSONObjBuilder* dst);
++
++        static void build(const Document& src, BSONObjBuilder* dst) {
++            return build(src.root(), dst);
++        }
++
+     };
+ 
+ } // namespace mutablebson
+diff --git a/src/mongo/bson/mutable/mutable_bson_builder_test.cpp b/src/mongo/bson/mutable/mutable_bson_builder_test.cpp
+index 74791e3b40..156ce228b3 100755
+--- a/src/mongo/bson/mutable/mutable_bson_builder_test.cpp
++++ b/src/mongo/bson/mutable/mutable_bson_builder_test.cpp
+@@ -48,12 +48,9 @@ namespace {
+ 
+         int len;
+         mongo::BSONObj obj = mongo::fromjson(jsonSample, &len);
+-        mongo::mutablebson::Element e = doc.makeObjElement("root");
+-        mongo::mutablebson::ElementBuilder::parse(&e, obj); 
+-        mongo::mutablebson::SubtreeIterator it(e);
++        mongo::mutablebson::ElementBuilder::parse(obj, &doc);
++        mongo::mutablebson::SubtreeIterator it(doc.root());
+ 
+-        ASSERT_EQUALS(it.done(), false);
+-        ASSERT_EQUALS("root", mongo::mutablebson::Element(&doc, it.getRep()).fieldName());
+         ASSERT_EQUALS((++it).done(), false);
+         ASSERT_EQUALS("_id", mongo::mutablebson::Element(&doc, it.getRep()).fieldName());
+         ASSERT_EQUALS((++it).done(), false);
+@@ -102,6 +99,13 @@ namespace {
+         ASSERT_EQUALS("lastfield", mongo::mutablebson::Element(&doc, it.getRep()).fieldName());
+ 
+         ASSERT_EQUALS((++it).done(), true);
++
++        mongo::BSONObjBuilder builder;
++        mongo::mutablebson::BSONBuilder::build(doc.root(), &builder);
++        mongo::BSONObj built = builder.done();
++
++        // TODO: When both builders are feature complete, add a an assert
++        // that the round tripped objects are equivalent.
+     }
+ 
+ } // unnamed namespace
+

@@ -1,0 +1,61 @@
+commit 46fc58dacf6e9b00629c57998a8a23f85c262b3f
+Author: Brian Foster <bfoster@redhat.com>
+Date:   Thu Jun 4 13:03:34 2015 +1000
+
+    xfs: check min blks for random debug mode sparse allocations
+    
+    The inode allocator enables random sparse inode chunk allocations in
+    DEBUG mode to facilitate testing. Sparse inode allocations are not
+    always possible, however, depending on the fs geometry. For example,
+    there is no possibility for a sparse inode allocation on filesystems
+    where the block size is large enough to fit one or more inode chunks
+    within a single block.
+    
+    Fix up the DEBUG mode sparse inode allocation logic to trigger random
+    sparse allocations only when the geometry of the fs allows it.
+    
+    Signed-off-by: Brian Foster <bfoster@redhat.com>
+    Reviewed-by: Dave Chinner <dchinner@redhat.com>
+    Signed-off-by: Dave Chinner <david@fromorbit.com>
+
+diff --git a/fs/xfs/libxfs/xfs_ialloc.c b/fs/xfs/libxfs/xfs_ialloc.c
+index c6d684ed84d0..52553b854771 100644
+--- a/fs/xfs/libxfs/xfs_ialloc.c
++++ b/fs/xfs/libxfs/xfs_ialloc.c
+@@ -606,20 +606,20 @@ xfs_ialloc_ag_alloc(
+ 	uint16_t	allocmask = (uint16_t) -1; /* init. to full chunk */
+ 	struct xfs_inobt_rec_incore rec;
+ 	struct xfs_perag *pag;
+-
+ 	int		do_sparse = 0;
+ 
+-#ifdef DEBUG
+-	/* randomly do sparse inode allocations */
+-	if (xfs_sb_version_hassparseinodes(&tp->t_mountp->m_sb))
+-		do_sparse = prandom_u32() & 1;
+-#endif
+-
+ 	memset(&args, 0, sizeof(args));
+ 	args.tp = tp;
+ 	args.mp = tp->t_mountp;
+ 	args.fsbno = NULLFSBLOCK;
+ 
++#ifdef DEBUG
++	/* randomly do sparse inode allocations */
++	if (xfs_sb_version_hassparseinodes(&tp->t_mountp->m_sb) &&
++	    args.mp->m_ialloc_min_blks < args.mp->m_ialloc_blks)
++		do_sparse = prandom_u32() & 1;
++#endif
++
+ 	/*
+ 	 * Locking will ensure that we don't have two callers in here
+ 	 * at one time.
+@@ -768,6 +768,7 @@ xfs_ialloc_ag_alloc(
+ 			return error;
+ 
+ 		newlen = args.len << args.mp->m_sb.sb_inopblog;
++		ASSERT(newlen <= XFS_INODES_PER_CHUNK);
+ 		allocmask = (1 << (newlen / XFS_INODES_PER_HOLEMASK_BIT)) - 1;
+ 	}
+ 
+

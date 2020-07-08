@@ -1,0 +1,82 @@
+commit 0ff6addd92979b9759efa1c0945526e6ac78ce5b
+Author: Paolo Bonzini <pbonzini@redhat.com>
+Date:   Sat Oct 6 00:18:55 2012 +0200
+
+    target-i386: move eflags computation closer to gen_op_set_cc_op
+    
+    This ensures the invariant that cpu_cc_op matches s->cc_op when calling
+    the helpers.  The next patches need this because gen_compute_eflags and
+    gen_compute_eflags_c will take care of setting cpu_cc_op.
+    
+    Always compute EFLAGS first since it is needed whenever the shift is
+    non-zero, i.e. most of the time.  This makes it possible to remove some
+    writes of CC_OP_EFLAGS to cpu_cc_op and more importantly removes cases
+    where s->cc_op becomes CC_OP_DYNAMIC.  These are slow and we want to
+    avoid them: CC_OP_EFLAGS is quite efficient once we paid the initial
+    cost of computing the flags.
+    
+    Finally, always follow gen_compute_eflags(cpu_cc_src) by setting s->cc_op
+    and discarding cpu_cc_dst.
+    
+    Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+    Signed-off-by: Richard Henderson <rth@twiddle.net>
+
+diff --git a/target-i386/translate.c b/target-i386/translate.c
+index ed373c3ad6..0970954217 100644
+--- a/target-i386/translate.c
++++ b/target-i386/translate.c
+@@ -1597,14 +1597,16 @@ static void gen_rot_rm_T1(DisasContext *s, int ot, int op1,
+         gen_op_mov_reg_v(ot, op1, t0);
+     }
+     
+-    /* update eflags */
++    /* update eflags.  It is needed anyway most of the time, do it always.  */
+     if (s->cc_op != CC_OP_DYNAMIC)
+         gen_op_set_cc_op(s->cc_op);
++    gen_compute_eflags(cpu_cc_src);
++    tcg_gen_discard_tl(cpu_cc_dst);
++    s->cc_op = CC_OP_EFLAGS;
+ 
+     label2 = gen_new_label();
+     tcg_gen_brcondi_tl(TCG_COND_EQ, t1, 0, label2);
+ 
+-    gen_compute_eflags(cpu_cc_src);
+     tcg_gen_andi_tl(cpu_cc_src, cpu_cc_src, ~(CC_O | CC_C));
+     tcg_gen_xor_tl(cpu_tmp0, t2, t0);
+     tcg_gen_lshift(cpu_tmp0, cpu_tmp0, 11 - (data_bits - 1));
+@@ -1615,12 +1617,8 @@ static void gen_rot_rm_T1(DisasContext *s, int ot, int op1,
+     }
+     tcg_gen_andi_tl(t0, t0, CC_C);
+     tcg_gen_or_tl(cpu_cc_src, cpu_cc_src, t0);
+-    
+-    tcg_gen_discard_tl(cpu_cc_dst);
+-    tcg_gen_movi_i32(cpu_cc_op, CC_OP_EFLAGS);
+-        
++
+     gen_set_label(label2);
+-    s->cc_op = CC_OP_DYNAMIC; /* cannot predict flags after */
+ 
+     tcg_temp_free(t0);
+     tcg_temp_free(t1);
+@@ -1684,6 +1682,9 @@ static void gen_rot_rm_im(DisasContext *s, int ot, int op1, int op2,
+             gen_op_set_cc_op(s->cc_op);
+ 
+         gen_compute_eflags(cpu_cc_src);
++        tcg_gen_discard_tl(cpu_cc_dst);
++        s->cc_op = CC_OP_EFLAGS;
++
+         tcg_gen_andi_tl(cpu_cc_src, cpu_cc_src, ~(CC_O | CC_C));
+         tcg_gen_xor_tl(cpu_tmp0, t1, t0);
+         tcg_gen_lshift(cpu_tmp0, cpu_tmp0, 11 - (data_bits - 1));
+@@ -1694,10 +1695,6 @@ static void gen_rot_rm_im(DisasContext *s, int ot, int op1, int op2,
+         }
+         tcg_gen_andi_tl(t0, t0, CC_C);
+         tcg_gen_or_tl(cpu_cc_src, cpu_cc_src, t0);
+-
+-        tcg_gen_discard_tl(cpu_cc_dst);
+-        tcg_gen_movi_i32(cpu_cc_op, CC_OP_EFLAGS);
+-        s->cc_op = CC_OP_EFLAGS;
+     }
+ 
+     tcg_temp_free(t0);
+

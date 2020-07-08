@@ -1,0 +1,102 @@
+commit 6fe17da00ba7046db2d3a952a930e127dcd7f06e
+Author: Oder Chiou <oder_chiou@realtek.com>
+Date:   Tue Nov 25 09:51:41 2014 +0800
+
+    ASoC: rt5677: Fix the issue that the regmap_range "rt5677_ranges" cannot be accessed
+    
+    After the patch "ASoC: rt5677: Use specific r/w function for DSP mode", the
+    regmap_range "rt5677_ranges" was not registered in rt5677_regmap_physical, and
+    it caused that the regmap_range "rt5677_ranges" cannot be accessed by the
+    specific r/w function. The patch fixes this issue.
+    
+    Signed-off-by: Oder Chiou <oder_chiou@realtek.com>
+    Signed-off-by: Mark Brown <broonie@kernel.org>
+
+diff --git a/sound/soc/codecs/rt5677.c b/sound/soc/codecs/rt5677.c
+index f2211f14ba41..133010dd9f34 100644
+--- a/sound/soc/codecs/rt5677.c
++++ b/sound/soc/codecs/rt5677.c
+@@ -4287,6 +4287,7 @@ static int rt5677_probe(struct snd_soc_codec *codec)
+ 	}
+ 
+ 	mutex_init(&rt5677->dsp_cmd_lock);
++	mutex_init(&rt5677->dsp_pri_lock);
+ 
+ 	return 0;
+ }
+@@ -4344,10 +4345,19 @@ static int rt5677_read(void *context, unsigned int reg, unsigned int *val)
+ 	struct i2c_client *client = context;
+ 	struct rt5677_priv *rt5677 = i2c_get_clientdata(client);
+ 
+-	if (rt5677->is_dsp_mode)
+-		rt5677_dsp_mode_i2c_read(rt5677, reg, val);
+-	else
++	if (rt5677->is_dsp_mode) {
++		if (reg > 0xff) {
++			mutex_lock(&rt5677->dsp_pri_lock);
++			rt5677_dsp_mode_i2c_write(rt5677, RT5677_PRIV_INDEX,
++				reg & 0xff);
++			rt5677_dsp_mode_i2c_read(rt5677, RT5677_PRIV_DATA, val);
++			mutex_unlock(&rt5677->dsp_pri_lock);
++		} else {
++			rt5677_dsp_mode_i2c_read(rt5677, reg, val);
++		}
++	} else {
+ 		regmap_read(rt5677->regmap_physical, reg, val);
++	}
+ 
+ 	return 0;
+ }
+@@ -4357,10 +4367,20 @@ static int rt5677_write(void *context, unsigned int reg, unsigned int val)
+ 	struct i2c_client *client = context;
+ 	struct rt5677_priv *rt5677 = i2c_get_clientdata(client);
+ 
+-	if (rt5677->is_dsp_mode)
+-		rt5677_dsp_mode_i2c_write(rt5677, reg, val);
+-	else
++	if (rt5677->is_dsp_mode) {
++		if (reg > 0xff) {
++			mutex_lock(&rt5677->dsp_pri_lock);
++			rt5677_dsp_mode_i2c_write(rt5677, RT5677_PRIV_INDEX,
++				reg & 0xff);
++			rt5677_dsp_mode_i2c_write(rt5677, RT5677_PRIV_DATA,
++				val);
++			mutex_unlock(&rt5677->dsp_pri_lock);
++		} else {
++			rt5677_dsp_mode_i2c_write(rt5677, reg, val);
++		}
++	} else {
+ 		regmap_write(rt5677->regmap_physical, reg, val);
++	}
+ 
+ 	return 0;
+ }
+@@ -4495,10 +4515,13 @@ static const struct regmap_config rt5677_regmap_physical = {
+ 	.reg_bits = 8,
+ 	.val_bits = 16,
+ 
+-	.max_register = RT5677_VENDOR_ID2 + 1,
++	.max_register = RT5677_VENDOR_ID2 + 1 + (ARRAY_SIZE(rt5677_ranges) *
++						RT5677_PR_SPACING),
+ 	.readable_reg = rt5677_readable_register,
+ 
+ 	.cache_type = REGCACHE_NONE,
++	.ranges = rt5677_ranges,
++	.num_ranges = ARRAY_SIZE(rt5677_ranges),
+ };
+ 
+ static const struct regmap_config rt5677_regmap = {
+diff --git a/sound/soc/codecs/rt5677.h b/sound/soc/codecs/rt5677.h
+index a02f64c23596..dbd9ffde50dc 100644
+--- a/sound/soc/codecs/rt5677.h
++++ b/sound/soc/codecs/rt5677.h
+@@ -1670,7 +1670,7 @@ struct rt5677_priv {
+ 	struct rt5677_platform_data pdata;
+ 	struct regmap *regmap, *regmap_physical;
+ 	const struct firmware *fw1, *fw2;
+-	struct mutex dsp_cmd_lock;
++	struct mutex dsp_cmd_lock, dsp_pri_lock;
+ 
+ 	int sysclk;
+ 	int sysclk_src;
+

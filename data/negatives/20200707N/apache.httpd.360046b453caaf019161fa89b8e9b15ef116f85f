@@ -1,0 +1,109 @@
+commit 360046b453caaf019161fa89b8e9b15ef116f85f
+Author: Ruediger Pluem <rpluem@apache.org>
+Date:   Tue Apr 8 09:49:13 2008 +0000
+
+    * In the case that we fail to read the response line from the backend and if
+      we are a reverse proxy request shutdown the connection WITHOUT ANY response
+      to trigger a retry by the client if allowed (as for idempotent requests).
+      BUT currently we should not do this if the request is the first request on
+      a keepalive connection as browsers like seamonkey only display an empty page
+      in this case and do not do a retry.
+    
+    Related to PR 37770
+    
+    
+    
+    git-svn-id: https://svn.apache.org/repos/asf/httpd/httpd/trunk@645813 13f79535-47bb-0310-9956-ffa450edef68
+
+diff --git a/modules/http/http_filters.c b/modules/http/http_filters.c
+index 10b2ea2817..cb77bb53d4 100644
+--- a/modules/http/http_filters.c
++++ b/modules/http/http_filters.c
+@@ -38,6 +38,7 @@
+ #include "http_main.h"
+ #include "http_request.h"
+ #include "http_vhost.h"
++#include "http_connection.h"
+ #include "http_log.h"           /* For errors detected in basic auth common
+                                  * support code... */
+ #include "apr_date.h"           /* For apr_date_parse_http and APR_DATE_BAD */
+@@ -1094,6 +1095,7 @@ AP_CORE_DECLARE_NONSTD(apr_status_t) ap_http_header_filter(ap_filter_t *f,
+     header_struct h;
+     header_filter_ctx *ctx = f->ctx;
+     const char *ctype;
++    ap_bucket_error *eb = NULL;
+ 
+     AP_DEBUG_ASSERT(!r->main);
+ 
+@@ -1111,12 +1113,22 @@ AP_CORE_DECLARE_NONSTD(apr_status_t) ap_http_header_filter(ap_filter_t *f,
+          e != APR_BRIGADE_SENTINEL(b);
+          e = APR_BUCKET_NEXT(e))
+     {
+-        if (AP_BUCKET_IS_ERROR(e)) {
+-            ap_bucket_error *eb = e->data;
+-
+-            ap_die(eb->status, r);
+-            return AP_FILTER_ERROR;
++        if (AP_BUCKET_IS_ERROR(e) && !eb) {
++            eb = e->data;
++            continue;
+         }
++        /*
++         * If we see an EOC bucket it is a signal that we should get out
++         * of the way doing nothing.
++         */
++        if (AP_BUCKET_IS_EOC(e)) {
++            ap_remove_output_filter(f);
++            return ap_pass_brigade(f->next, b);
++        }
++    }
++    if (eb) {
++        ap_die(eb->status, r);
++        return AP_FILTER_ERROR;
+     }
+ 
+     if (r->assbackwards) {
+diff --git a/modules/proxy/mod_proxy_http.c b/modules/proxy/mod_proxy_http.c
+index 761cdf2f2e..0d21358fdb 100644
+--- a/modules/proxy/mod_proxy_http.c
++++ b/modules/proxy/mod_proxy_http.c
+@@ -1359,6 +1359,38 @@ apr_status_t ap_proxy_http_process_response(apr_pool_t * p, request_rec *r,
+             ap_log_rerror(APLOG_MARK, APLOG_ERR, rc, r,
+                           "proxy: error reading status line from remote "
+                           "server %s", backend->hostname);
++            /*
++             * If we are a reverse proxy request shutdown the connection
++             * WITHOUT ANY response to trigger a retry by the client
++             * if allowed (as for idempotent requests).
++             * BUT currently we should not do this if the request is the
++             * first request on a keepalive connection as browsers like
++             * seamonkey only display an empty page in this case and do
++             * not do a retry.
++             */
++            if (r->proxyreq == PROXYREQ_REVERSE && c->keepalives) {
++                ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
++                              "proxy: Closing connection to client because"
++                              " reading from backend server %s failed. Number"
++                              " of keepalives %i", backend->hostname, 
++                              c->keepalives);
++                ap_proxy_backend_broke(r, bb);
++                /*
++                 * Add an EOC bucket to signal the ap_http_header_filter
++                 * that it should get out of our way
++                 */
++                e = ap_bucket_eoc_create(c->bucket_alloc);
++                APR_BRIGADE_INSERT_TAIL(bb, e);
++                ap_pass_brigade(r->output_filters, bb);
++                /* Need to return OK to avoid sending an error message */
++                return OK;
++            }
++            else if (!c->keepalives) {
++                     ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
++                                   "proxy: NOT Closing connection to client"
++                                   " although reading from backend server %s"
++                                   " failed.", backend->hostname);
++            }
+             return ap_proxyerror(r, HTTP_BAD_GATEWAY,
+                                  "Error reading from remote server");
+         }
+

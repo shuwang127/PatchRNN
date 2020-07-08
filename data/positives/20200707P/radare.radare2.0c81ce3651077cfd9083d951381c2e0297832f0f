@@ -1,0 +1,63 @@
+commit 0c81ce3651077cfd9083d951381c2e0297832f0f
+Author: pancake <pancake@nopcode.org>
+Date:   Tue Nov 7 11:45:10 2017 +0100
+
+    Fix uninitialized partition type issue in 'mp gpt'
+
+diff --git a/libr/fs/file.c b/libr/fs/file.c
+index 292310436..45a8c8edb 100644
+--- a/libr/fs/file.c
++++ b/libr/fs/file.c
+@@ -55,6 +55,7 @@ R_API RFSPartition* r_fs_partition_new(int num, ut64 start, ut64 length) {
+ 		return NULL;
+ 	}
+ 	p->number = num;
++	p->type = 0; // TODO we need an enum with all the partition types
+ 	p->start = start;
+ 	p->length = length;
+ 	return p;
+diff --git a/libr/fs/fs.c b/libr/fs/fs.c
+index 9acee9136..0f85c78eb 100644
+--- a/libr/fs/fs.c
++++ b/libr/fs/fs.c
+@@ -581,8 +581,9 @@ R_API RList* r_fs_partitions(RFS* fs, const char* ptype, ut64 delta) {
+ 		eprintf ("Unknown partition type '%s'.\n", ptype);
+ 	}
+ 	eprintf ("Supported types:\n");
+-	for (i = 0; partitions[i].name; i++)
++	for (i = 0; partitions[i].name; i++) {
+ 		eprintf (" %s", partitions[i].name);
++	}
+ 	eprintf ("\n");
+ 	return NULL;
+ }
+diff --git a/shlr/grub/partmap/gpt.c b/shlr/grub/partmap/gpt.c
+index 5e241294b..bdfd58e0a 100644
+--- a/shlr/grub/partmap/gpt.c
++++ b/shlr/grub/partmap/gpt.c
+@@ -84,12 +84,14 @@ gpt_partition_map_iterate (grub_disk_t disk,
+ 		       sizeof (grub_gpt_partition_type_empty)))
+ 	{
+ 	  /* Calculate the first block and the size of the partition.  */
++          memset (&part, 0, sizeof (sizeof (struct grub_partition)));
+ 	  part.start = grub_le_to_cpu64 (entry.start);
+ 	  part.len = (grub_le_to_cpu64 (entry.end)
+ 		      - grub_le_to_cpu64 (entry.start) + 1);
+ 	  part.offset = entries;
+ 	  part.number = i;
+ 	  part.index = last_offset;
++	  part.msdostype = 0; // TODO entry.type.data1;
+ 	  part.partmap = &grub_gpt_partition_map;
+ 
+ 	  grub_dprintf ("gpt", "GPT entry %d: start=%"PFMT64d", length=%"PFMT64d"\n", i,
+@@ -100,8 +102,7 @@ gpt_partition_map_iterate (grub_disk_t disk,
+ 	}
+ 
+       last_offset += grub_le_to_cpu32 (gpt.partentry_size);
+-      if (last_offset == GRUB_DISK_SECTOR_SIZE)
+-	{
++      if (last_offset == GRUB_DISK_SECTOR_SIZE) {
+ 	  last_offset = 0;
+ 	  entries++;
+ 	}
+

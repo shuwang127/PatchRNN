@@ -1,0 +1,162 @@
+commit 8da8ba2ea6ad52ea8558384f38586b0c1a516e9d
+Author: Daniel Drake <dsd@laptop.org>
+Date:   Tue Apr 10 22:22:35 2012 +0100
+
+    JFFS2: Add parameter to reserve disk space for root
+    
+    Add a new rp_size= parameter which creates a "reserved pool" of disk
+    space which can only be used by root. Other users are not permitted
+    to write to disk when the available space is less than the pool size.
+    
+    Based on original code by Artem Bityutskiy in
+    https://dev.laptop.org/ticket/5317
+    
+    [dwmw2: use capable(CAP_SYS_RESOURCE) not uid/gid check, fix debug prints]
+    Signed-off-by: Daniel Drake <dsd@laptop.org>
+    Signed-off-by: Artem Bityutskiy <Artem.Bityutskiy@linux.intel.com>
+    Signed-off-by: David Woodhouse <David.Woodhouse@intel.com>
+
+diff --git a/fs/jffs2/jffs2_fs_sb.h b/fs/jffs2/jffs2_fs_sb.h
+index 55a0c1dceadf..0d00bf26923b 100644
+--- a/fs/jffs2/jffs2_fs_sb.h
++++ b/fs/jffs2/jffs2_fs_sb.h
+@@ -32,6 +32,13 @@ struct jffs2_inodirty;
+ struct jffs2_mount_opts {
+ 	bool override_compr;
+ 	unsigned int compr;
++
++	/* The size of the reserved pool. The reserved pool is the JFFS2 flash
++	 * space which may only be used by root cannot be used by the other
++	 * users. This is implemented simply by means of not allowing the
++	 * latter users to write to the file system if the amount if the
++	 * available space is less then 'rp_size'. */
++	unsigned int rp_size;
+ };
+ 
+ /* A struct for the overall file system control.  Pointers to
+diff --git a/fs/jffs2/nodemgmt.c b/fs/jffs2/nodemgmt.c
+index 6784d1e7a7eb..0c96eb52c797 100644
+--- a/fs/jffs2/nodemgmt.c
++++ b/fs/jffs2/nodemgmt.c
+@@ -18,6 +18,37 @@
+ #include "nodelist.h"
+ #include "debug.h"
+ 
++/*
++ * Check whether the user is allowed to write.
++ */
++static int jffs2_rp_can_write(struct jffs2_sb_info *c)
++{
++	uint32_t avail;
++	struct jffs2_mount_opts *opts = &c->mount_opts;
++
++	avail = c->dirty_size + c->free_size + c->unchecked_size +
++		c->erasing_size - c->resv_blocks_write * c->sector_size
++		- c->nospc_dirty_size;
++
++	if (avail < 2 * opts->rp_size)
++		jffs2_dbg(1, "rpsize %u, dirty_size %u, free_size %u, "
++			  "erasing_size %u, unchecked_size %u, "
++			  "nr_erasing_blocks %u, avail %u, resrv %u\n",
++			  opts->rp_size, c->dirty_size, c->free_size,
++			  c->erasing_size, c->unchecked_size,
++			  c->nr_erasing_blocks, avail, c->nospc_dirty_size);
++
++	if (avail > opts->rp_size)
++		return 1;
++
++	/* Always allow root */
++	if (capable(CAP_SYS_RESOURCE))
++		return 1;
++
++	jffs2_dbg(1, "forbid writing\n");
++	return 0;
++}
++
+ /**
+  *	jffs2_reserve_space - request physical space to write nodes to flash
+  *	@c: superblock info
+@@ -55,6 +86,15 @@ int jffs2_reserve_space(struct jffs2_sb_info *c, uint32_t minsize,
+ 
+ 	spin_lock(&c->erase_completion_lock);
+ 
++	/*
++	 * Check if the free space is greater then size of the reserved pool.
++	 * If not, only allow root to proceed with writing.
++	 */
++	if (prio != ALLOC_DELETION && !jffs2_rp_can_write(c)) {
++		ret = -ENOSPC;
++		goto out;
++	}
++
+ 	/* this needs a little more thought (true <tglx> :)) */
+ 	while(ret == -EAGAIN) {
+ 		while(c->nr_free_blocks + c->nr_erasing_blocks < blocksneeded) {
+@@ -158,6 +198,8 @@ int jffs2_reserve_space(struct jffs2_sb_info *c, uint32_t minsize,
+ 			jffs2_dbg(1, "%s(): ret is %d\n", __func__, ret);
+ 		}
+ 	}
++
++out:
+ 	spin_unlock(&c->erase_completion_lock);
+ 	if (!ret)
+ 		ret = jffs2_prealloc_raw_node_refs(c, c->nextblock, 1);
+diff --git a/fs/jffs2/super.c b/fs/jffs2/super.c
+index f9916f312bd8..66d44560f75d 100644
+--- a/fs/jffs2/super.c
++++ b/fs/jffs2/super.c
+@@ -105,6 +105,8 @@ static int jffs2_show_options(struct seq_file *s, struct dentry *root)
+ 
+ 	if (opts->override_compr)
+ 		seq_printf(s, ",compr=%s", jffs2_compr_name(opts->compr));
++	if (opts->rp_size)
++		seq_printf(s, ",rp_size=%u", opts->rp_size / 1024);
+ 
+ 	return 0;
+ }
+@@ -171,15 +173,18 @@ static const struct export_operations jffs2_export_ops = {
+  * JFFS2 mount options.
+  *
+  * Opt_override_compr: override default compressor
++ * Opt_rp_size: size of reserved pool in KiB
+  * Opt_err: just end of array marker
+  */
+ enum {
+ 	Opt_override_compr,
++	Opt_rp_size,
+ 	Opt_err,
+ };
+ 
+ static const match_table_t tokens = {
+ 	{Opt_override_compr, "compr=%s"},
++	{Opt_rp_size, "rp_size=%u"},
+ 	{Opt_err, NULL},
+ };
+ 
+@@ -187,6 +192,7 @@ static int jffs2_parse_options(struct jffs2_sb_info *c, char *data)
+ {
+ 	substring_t args[MAX_OPT_ARGS];
+ 	char *p, *name;
++	unsigned int opt;
+ 
+ 	if (!data)
+ 		return 0;
+@@ -224,6 +230,17 @@ static int jffs2_parse_options(struct jffs2_sb_info *c, char *data)
+ 			kfree(name);
+ 			c->mount_opts.override_compr = true;
+ 			break;
++		case Opt_rp_size:
++			if (match_int(&args[0], &opt))
++				return -EINVAL;
++			opt *= 1024;
++			if (opt > c->mtd->size) {
++				pr_warn("Too large reserve pool specified, max "
++					"is %llu KB\n", c->mtd->size / 1024);
++				return -EINVAL;
++			}
++			c->mount_opts.rp_size = opt;
++			break;
+ 		default:
+ 			pr_err("Error: unrecognized mount option '%s' or missing value\n",
+ 			       p);
+

@@ -1,0 +1,35 @@
+commit acb3a99a65a0fbfd1bb157f6ec98f7f39020718b
+Author: Guilherme Ottoni <ottoni@fb.com>
+Date:   Thu Oct 23 13:13:16 2014 -0700
+
+    Tweak to enable more refcount optimizations
+    
+    Summary: When a value is known to exist in many places, observeValue() will not
+    insert any IncRef before a DecRef. That's bad because it ends up
+    preventing some IncRef/DecRef pairs from being eliminated because the
+    IncRef is pushed down past the DecRef.  This diff makes sure that we
+    always drop an IncRef before a DecRef, which then enables more
+    IncRef/DecRef pairs to be eliminated.
+    
+    Reviewed By: @swtaarrs
+    
+    Differential Revision: D1631498
+
+diff --git a/hphp/runtime/vm/jit/refcount-opts.cpp b/hphp/runtime/vm/jit/refcount-opts.cpp
+index 9f02e5d604..e5325947e8 100644
+--- a/hphp/runtime/vm/jit/refcount-opts.cpp
++++ b/hphp/runtime/vm/jit/refcount-opts.cpp
+@@ -1236,6 +1236,12 @@ struct SinkPointAnalyzer : private LocalStateHook {
+ 
+     assertCanConsume(value);
+ 
++    // Drop one IncRef right before a DecRef, so that we don't end up
++    // missing opportunities because we sunk IncRefs too late.
++    if (m_inst->is(DecRef, DecRefNZ) && valState.optDelta() > 0) {
++      placeSinkPoint(value, valState, sinkPoint);
++    }
++
+     // Note that we're treating consumers and observers the same here, which is
+     // necessary until we have better alias analysis.
+     observeValue(value, valState, sinkPoint);
+

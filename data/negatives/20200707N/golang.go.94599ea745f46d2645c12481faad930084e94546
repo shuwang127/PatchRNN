@@ -1,0 +1,64 @@
+commit 94599ea745f46d2645c12481faad930084e94546
+Author: Dmitriy Vyukov <dvyukov@google.com>
+Date:   Tue Mar 26 20:25:43 2013 +0400
+
+    runtime: does not report duplicate errors in netpoll
+    Prevents storm of error messages if something goes wrong.
+    In the case of issue 5073 the epoll fd was closed by the test.
+    Update #5073.
+    
+    R=golang-dev, r, rsc
+    CC=golang-dev
+    https://golang.org/cl/7966043
+
+diff --git a/src/pkg/runtime/netpoll_epoll.c b/src/pkg/runtime/netpoll_epoll.c
+index d6ef0d1446..9b5980700e 100644
+--- a/src/pkg/runtime/netpoll_epoll.c
++++ b/src/pkg/runtime/netpoll_epoll.c
+@@ -57,6 +57,7 @@ runtime·netpollclose(int32 fd)
+ G*
+ runtime·netpoll(bool block)
+ {
++	static int32 lasterr;
+ 	EpollEvent events[128], *ev;
+ 	int32 n, i, waitms, mode;
+ 	G *gp;
+@@ -69,8 +70,10 @@ runtime·netpoll(bool block)
+ retry:
+ 	n = runtime·epollwait(epfd, events, nelem(events), waitms);
+ 	if(n < 0) {
+-		if(n != -EINTR)
+-			runtime·printf("epollwait failed with %d\n", -n);
++		if(n != -EINTR && n != lasterr) {
++			lasterr = n;
++			runtime·printf("runtime: epollwait on fd %d failed with %d\n", epfd, -n);
++		}
+ 		goto retry;
+ 	}
+ 	gp = nil;
+diff --git a/src/pkg/runtime/netpoll_kqueue.c b/src/pkg/runtime/netpoll_kqueue.c
+index ad721e293e..0ed03d31fa 100644
+--- a/src/pkg/runtime/netpoll_kqueue.c
++++ b/src/pkg/runtime/netpoll_kqueue.c
+@@ -71,6 +71,7 @@ runtime·netpollclose(int32 fd)
+ G*
+ runtime·netpoll(bool block)
+ {
++	static int32 lasterr;
+ 	Kevent events[64], *ev;
+ 	Timespec ts, *tp;
+ 	int32 n, i;
+@@ -88,8 +89,10 @@ runtime·netpoll(bool block)
+ retry:
+ 	n = runtime·kevent(kq, nil, 0, events, nelem(events), tp);
+ 	if(n < 0) {
+-		if(n != -EINTR)
+-			runtime·printf("kqueue failed with %d\n", -n);
++		if(n != -EINTR && n != lasterr) {
++			lasterr = n;
++			runtime·printf("runtime: kevent on fd %d failed with %d\n", kq, -n);
++		}
+ 		goto retry;
+ 	}
+ 	for(i = 0; i < n; i++) {
+

@@ -1,0 +1,496 @@
+commit 194f6725d42a111e31fbdff2707095abd7cd1b05
+Author: unknown <hf@deer.(none)>
+Date:   Wed Sep 17 20:48:53 2003 +0500
+
+    SCRUM:
+    prepared statements in embedded library
+    
+    
+    include/mysql.h:
+      Another 'virtual' method
+    libmysql/client_settings.h:
+      client implementation declared
+    libmysql/libmysql.c:
+      mysql_execute edited to work with embedded implementation
+    libmysqld/lib_sql.cc:
+      one error fixed (we do need parameter's buffer in embedded library)
+      embedded recordset transfer methods implementations added
+    sql-common/client.c:
+      method added to the table
+    sql/client_settings.h:
+      no prepared statements in mimiclient
+    sql/mysql_priv.h:
+      these functions became global
+    sql/protocol.cc:
+      the stub added
+    sql/protocol.h:
+      had to change Protocol's interface for embedded library
+    sql/sql_class.h:
+      i changed this only for embedded case, but i think it's better to do the
+      same for remote server also
+    sql/sql_prepare.cc:
+      parts of code #ifndef-ed
+
+diff --git a/include/mysql.h b/include/mysql.h
+index 6ec64220706..a2da4f353f7 100644
+--- a/include/mysql.h
++++ b/include/mysql.h
+@@ -561,6 +561,8 @@ typedef struct st_mysql_methods
+   MYSQL_FIELD * (STDCALL *list_fields)(MYSQL *mysql);
+   my_bool (STDCALL *read_prepare_result)(MYSQL *mysql, MYSQL_STMT *stmt);
+   int (STDCALL *stmt_execute)(MYSQL_STMT *stmt);
++  MYSQL_DATA *(STDCALL *read_binary_rows)(MYSQL_STMT *stmt);
++
+ } MYSQL_METHODS;
+ 
+ MYSQL_STMT * STDCALL mysql_prepare(MYSQL * mysql, const char *query,
+diff --git a/libmysql/client_settings.h b/libmysql/client_settings.h
+index 9866c772d3a..4fdbab08969 100644
+--- a/libmysql/client_settings.h
++++ b/libmysql/client_settings.h
+@@ -55,3 +55,4 @@ my_bool STDCALL cli_read_prepare_result(MYSQL *mysql, MYSQL_STMT *stmt);
+ MYSQL_DATA *cli_read_rows(MYSQL *mysql,MYSQL_FIELD *mysql_fields,
+ 			  uint fields);
+ int STDCALL cli_stmt_execute(MYSQL_STMT *stmt);
++MYSQL_DATA *cli_read_binary_rows(MYSQL_STMT *stmt);
+diff --git a/libmysql/libmysql.c b/libmysql/libmysql.c
+index bfa7e4e9357..954eae89a2b 100644
+--- a/libmysql/libmysql.c
++++ b/libmysql/libmysql.c
+@@ -1601,15 +1601,6 @@ my_bool STDCALL cli_read_prepare_result(MYSQL *mysql, MYSQL_STMT *stmt)
+   }
+   stmt->field_count=  (uint) field_count;
+   stmt->param_count=  (ulong) param_count;
+-  if (!(stmt->params= (MYSQL_BIND *) alloc_root(&stmt->mem_root,
+-						sizeof(MYSQL_BIND)*
+-                                                (stmt->param_count + 
+-                                                 stmt->field_count))))
+-  {
+-    set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate);
+-    DBUG_RETURN(1);
+-  }
+-  stmt->bind= stmt->params + stmt->param_count;
+ 
+   DBUG_RETURN(0);
+ }
+@@ -1660,6 +1651,15 @@ mysql_prepare(MYSQL  *mysql, const char *query, ulong length)
+     DBUG_RETURN(0);
+   }
+ 
++  if (!(stmt->params= (MYSQL_BIND *) alloc_root(&stmt->mem_root,
++						sizeof(MYSQL_BIND)*
++                                                (stmt->param_count + 
++                                                 stmt->field_count))))
++  {
++    set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate);
++    DBUG_RETURN(0);
++  }
++  stmt->bind= stmt->params + stmt->param_count;
+   stmt->state= MY_ST_PREPARE;
+   stmt->mysql= mysql;
+   mysql->stmts= list_add(mysql->stmts, &stmt->list);
+@@ -3080,7 +3080,7 @@ int STDCALL mysql_fetch_column(MYSQL_STMT *stmt, MYSQL_BIND *bind,
+   Read all rows of data from server  (binary format)
+ */
+ 
+-static MYSQL_DATA *read_binary_rows(MYSQL_STMT *stmt)
++MYSQL_DATA *cli_read_binary_rows(MYSQL_STMT *stmt)
+ {
+   ulong      pkt_len;
+   uchar      *cp;
+@@ -3176,7 +3176,7 @@ int STDCALL mysql_stmt_store_result(MYSQL_STMT *stmt)
+   }
+   result->methods= mysql->methods;
+   stmt->result_buffered= 1;
+-  if (!(result->data= read_binary_rows(stmt)))
++  if (!(result->data= (*stmt->mysql->methods->read_binary_rows)(stmt)))
+   {
+     my_free((gptr) result,MYF(0));
+     DBUG_RETURN(0);
+diff --git a/libmysqld/lib_sql.cc b/libmysqld/lib_sql.cc
+index 16a5b6b769c..68620c922c4 100644
+--- a/libmysqld/lib_sql.cc
++++ b/libmysqld/lib_sql.cc
+@@ -138,15 +138,6 @@ static my_bool STDCALL emb_read_prepare_result(MYSQL *mysql, MYSQL_STMT *stmt)
+     stmt->mem_root= mysql->field_alloc;
+   }
+ 
+-  if (!(stmt->bind= 
+-	(MYSQL_BIND *) alloc_root(&stmt->mem_root,
+-				  sizeof(MYSQL_BIND)*stmt->field_count)))
+-  {
+-    set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate);
+-    return 1;
+-  }
+-  stmt->params= NULL; // we don't need parameter's buffer in embedded library
+-
+   return 0;
+ }
+ 
+@@ -180,7 +171,7 @@ static int STDCALL emb_stmt_execute(MYSQL_STMT *stmt)
+   DBUG_ENTER("emb_stmt_execute");
+   THD *thd= (THD*)stmt->mysql->thd;
+   thd->client_param_count= stmt->param_count;
+-  thd->client_parameters= stmt->params;
++  thd->client_params= stmt->params;
+   if (emb_advanced_command(stmt->mysql, COM_EXECUTE,0,0,
+ 			   (const char*)&stmt->stmt_id,sizeof(stmt->stmt_id),1)
+       || emb_mysql_read_query_result(stmt->mysql))
+@@ -192,6 +183,11 @@ static int STDCALL emb_stmt_execute(MYSQL_STMT *stmt)
+   DBUG_RETURN(0);
+ }
+ 
++MYSQL_DATA *emb_read_binary_rows(MYSQL_STMT *stmt)
++{
++  return emb_read_rows(stmt->mysql, 0, 0);
++}
++
+ MYSQL_METHODS embedded_methods= 
+ {
+   emb_mysql_read_query_result,
+@@ -201,7 +197,8 @@ MYSQL_METHODS embedded_methods=
+   emb_fetch_lengths, 
+   emb_list_fields,
+   emb_read_prepare_result,
+-  emb_stmt_execute
++  emb_stmt_execute,
++  emb_read_binary_rows
+ };
+ 
+ C_MODE_END
+@@ -526,6 +523,43 @@ bool Protocol::write()
+   return false;
+ }
+ 
++bool Protocol_prep::write()
++{
++  MYSQL_ROWS *cur;
++  MYSQL_DATA *data= thd->data;
++
++  if (!data)
++  {
++    if (!(data= (MYSQL_DATA*) my_malloc(sizeof(MYSQL_DATA),
++					MYF(MY_WME | MY_ZEROFILL))))
++      return true;
++    
++    alloc= &data->alloc;
++    init_alloc_root(alloc,8192,0);	/* Assume rowlength < 8192 */
++    alloc->min_malloc=sizeof(MYSQL_ROWS);
++    data->rows=0;
++    data->fields=field_count;
++    data->prev_ptr= &data->data;
++    thd->data= data;
++  }
++
++  data->rows++;
++  if (!(cur= (MYSQL_ROWS *)alloc_root(alloc, sizeof(MYSQL_ROWS)+packet->length())))
++  {
++    my_error(ER_OUT_OF_RESOURCES,MYF(0));
++    return true;
++  }
++  cur->data= (MYSQL_ROW)(((char *)cur) + sizeof(MYSQL_ROWS));
++  memcpy(cur->data, packet->ptr(), packet->length());
++
++  *data->prev_ptr= cur;
++  data->prev_ptr= &cur->next;
++  next_field=cur->data;
++  next_mysql_field= thd->mysql->fields;
++
++  return false;
++}
++
+ void
+ send_ok(THD *thd,ha_rows affected_rows,ulonglong id,const char *message)
+ {
+@@ -623,3 +657,85 @@ bool Protocol::convert_str(const char *from, uint length)
+   return false;
+ }
+ #endif
++
++bool setup_params_data(st_prep_stmt *stmt)
++{                                       
++  THD *thd= stmt->thd;
++  List<Item> &params= thd->lex.param_list;
++  List_iterator<Item> param_iterator(params);
++  Item_param *param;
++  ulong param_no= 0;
++  MYSQL_BIND *client_param= thd->client_params;
++
++  DBUG_ENTER("setup_params_data");
++
++  for (;(param= (Item_param *)param_iterator++); client_param++)
++  {       
++    setup_param_functions(param, client_param->buffer_type);
++    if (!param->long_data_supplied)
++    {
++      if (client_param->is_null)
++        param->maybe_null= param->null_value= 1;
++      else
++      {
++	uchar *buff= (uchar*)client_param->buffer;
++        param->maybe_null= param->null_value= 0;
++        param->setup_param_func(param,&buff);
++      }
++    }
++    param_no++;
++  }
++  DBUG_RETURN(0);
++}
++
++bool setup_params_data_withlog(st_prep_stmt *stmt)
++{                                       
++  THD *thd= stmt->thd;
++  List<Item> &params= thd->lex.param_list;
++  List_iterator<Item> param_iterator(params);
++  Item_param *param;
++  MYSQL_BIND *client_param= thd->client_params;
++
++  DBUG_ENTER("setup_params_data");
++
++  String str, *res, *query= new String(stmt->query->alloced_length());  
++  query->copy(*stmt->query);
++  
++  ulong param_no= 0;  
++  uint32 length= 0;
++
++  for (;(param= (Item_param *)param_iterator++); client_param++)
++  {       
++    setup_param_functions(param, client_param->buffer_type);
++    if (param->long_data_supplied)
++      res= param->query_val_str(&str);       
++    
++    else
++    {
++      if (client_param->is_null)
++      {
++        param->maybe_null= param->null_value= 1;
++        res= &null_string;
++      }
++      else
++      {
++	uchar *buff= (uchar*)client_param->buffer;
++        param->maybe_null= param->null_value= 0;
++        param->setup_param_func(param,&buff);
++        res= param->query_val_str(&str);
++      }
++    }
++    if (query->replace(param->pos_in_query+length, 1, *res))
++      DBUG_RETURN(1);
++    
++    length+= res->length()-1;
++    param_no++;
++  }
++  
++  if (alloc_query(stmt->thd, (char *)query->ptr(), query->length()+1))
++    DBUG_RETURN(1);
++  
++  query->free();
++  DBUG_RETURN(0);
++}
++
+diff --git a/sql-common/client.c b/sql-common/client.c
+index 73fe9e4663c..508ebef2e1e 100644
+--- a/sql-common/client.c
++++ b/sql-common/client.c
+@@ -1408,7 +1408,8 @@ static MYSQL_METHODS client_methods=
+   cli_fetch_lengths,
+   cli_list_fields,
+   cli_read_prepare_result,
+-  cli_stmt_execute
++  cli_stmt_execute,
++  cli_read_binary_rows
+ };
+ 
+ MYSQL * STDCALL 
+diff --git a/sql/client_settings.h b/sql/client_settings.h
+index 266f6807a36..c345021d7f5 100644
+--- a/sql/client_settings.h
++++ b/sql/client_settings.h
+@@ -35,4 +35,5 @@
+ #define cli_list_fields NULL
+ #define cli_read_prepare_result NULL
+ #define cli_stmt_execute NULL
++#define cli_read_binary_rows NULL
+ 
+diff --git a/sql/mysql_priv.h b/sql/mysql_priv.h
+index d4bacb57a38..9737434fa3a 100644
+--- a/sql/mysql_priv.h
++++ b/sql/mysql_priv.h
+@@ -577,6 +577,7 @@ void mysql_stmt_reset(THD *thd, char *packet);
+ void mysql_stmt_get_longdata(THD *thd, char *pos, ulong packet_length);
+ int check_insert_fields(THD *thd,TABLE *table,List<Item> &fields,
+ 			List<Item> &values, ulong counter);
++void setup_param_functions(Item_param *param, uchar param_type);
+ 
+ /* sql_error.cc */
+ MYSQL_ERROR *push_warning(THD *thd, MYSQL_ERROR::enum_warning_level level, uint code,
+@@ -803,6 +804,7 @@ extern SHOW_COMP_OPTION have_berkeley_db;
+ extern struct system_variables global_system_variables;
+ extern struct system_variables max_system_variables;
+ extern struct rand_struct sql_rand;
++extern String null_string;
+ 
+ /* optional things, have_* variables */
+ 
+diff --git a/sql/protocol.cc b/sql/protocol.cc
+index d1eb3460fc8..edf74aee05e 100644
+--- a/sql/protocol.cc
++++ b/sql/protocol.cc
+@@ -1130,3 +1130,12 @@ bool Protocol_prep::store_time(TIME *tm)
+   buff[0]=(char) length;			// Length is stored first
+   return packet->append(buff, length+1, PACKET_BUFFET_EXTRA_ALLOC);
+ }
++
++#ifdef EMBEDDED_LIBRARY
++/* Should be removed when we define the Protocol_cursor's future */
++bool Protocol_cursor::write()
++{
++  return Protocol_simple::write();
++}
++#endif
++
+diff --git a/sql/protocol.h b/sql/protocol.h
+index f32c135ab3c..8986757922e 100644
+--- a/sql/protocol.h
++++ b/sql/protocol.h
+@@ -53,7 +53,11 @@ class Protocol
+   bool store(const char *from, CHARSET_INFO *cs);
+   String *storage_packet() { return packet; }
+   inline void free() { packet->free(); }
++#ifndef EMBEDDED_LIBRARY
+   bool write();
++#else
++  virtual bool write();
++#endif
+   inline  bool store(uint32 from)
+   { return store_long((longlong) from); }
+   inline  bool store(longlong from)
+@@ -121,6 +125,9 @@ class Protocol_prep :public Protocol
+   Protocol_prep(THD *thd) :Protocol(thd) {}
+   virtual bool prepare_for_send(List<Item> *item_list);
+   virtual void prepare_for_resend();
++#ifdef EMBEDDED_LIBRARY
++  virtual bool write();
++#endif
+   virtual bool store_null();
+   virtual bool store_tiny(longlong from);
+   virtual bool store_short(longlong from);
+@@ -170,3 +177,9 @@ char *net_store_length(char *packet,uint length);
+ char *net_store_data(char *to,const char *from, uint length);
+ char *net_store_data(char *to,int32 from);
+ char *net_store_data(char *to,longlong from);
++
++#ifdef EMBEDDED_LIBRARY
++bool setup_params_data(struct st_prep_stmt *stmt);
++bool setup_params_data_withlog(struct st_prep_stmt *stmt);
++#endif
++
+diff --git a/sql/sql_class.h b/sql/sql_class.h
+index da6e47e4ac7..da6aab8d266 100644
+--- a/sql/sql_class.h
++++ b/sql/sql_class.h
+@@ -341,7 +341,11 @@ typedef struct st_prep_stmt
+   char last_error[MYSQL_ERRMSG_SIZE];
+   bool error_in_prepare, long_data_used;
+   bool log_full_query;
++#ifndef EMBEDDED_LIBRARY
+   bool (*setup_params)(st_prep_stmt *stmt, uchar *pos, uchar *read_pos);
++#else
++  bool (*setup_params_data)(st_prep_stmt *stmt);
++#endif
+ } PREP_STMT;
+ 
+ 
+@@ -425,6 +429,7 @@ class THD :public ilink
+   struct st_mysql_data *data;
+   unsigned long	 client_stmt_id;
+   unsigned long  client_param_count;
++  struct st_mysql_bind *client_params;
+ #endif
+   NET	  net;				// client connection descriptor
+   LEX	  lex;				// parse tree descriptor
+diff --git a/sql/sql_prepare.cc b/sql/sql_prepare.cc
+index edbcdce4e43..d16b499815e 100644
+--- a/sql/sql_prepare.cc
++++ b/sql/sql_prepare.cc
+@@ -77,7 +77,7 @@ Long data handling:
+ #define STMT_QUERY_LOG_LENGTH 8192
+ 
+ extern int yyparse(void *thd);
+-static String null_string("NULL", 4, default_charset_info);
++String null_string("NULL", 4, default_charset_info);
+ 
+ /*
+   Find prepared statement in thd
+@@ -353,7 +353,7 @@ static void setup_param_str(Item_param *param, uchar **pos)
+   *pos+= len;        
+ }
+ 
+-static void setup_param_functions(Item_param *param, uchar param_type)
++void setup_param_functions(Item_param *param, uchar param_type)
+ {
+   switch (param_type) {
+   case FIELD_TYPE_TINY:
+@@ -399,6 +399,7 @@ static void setup_param_functions(Item_param *param, uchar param_type)
+   }
+ }
+ 
++#ifndef EMBEDDED_LIBRARY
+ /*
+   Update the parameter markers by reading data from client packet 
+   and if binary/update log is set, generate the valid query.
+@@ -484,11 +485,7 @@ static bool setup_params_data(PREP_STMT *stmt)
+   Item_param *param;
+   DBUG_ENTER("setup_params_data");
+ 
+-#ifndef EMBEDDED_LIBRARY
+   uchar *pos=(uchar*) thd->net.read_pos+1+MYSQL_STMT_HEADER; //skip header
+-#else
+-  uchar *pos= 0; //just to compile TODO code for embedded case
+-#endif
+   uchar *read_pos= pos+(stmt->param_count+7) / 8; //skip null bits   
+ 
+   if (*read_pos++) //types supplied / first execute
+@@ -508,6 +505,8 @@ static bool setup_params_data(PREP_STMT *stmt)
+   DBUG_RETURN(0);
+ }
+ 
++#endif /*!EMBEDDED_LIBRARY*/
++
+ /*
+   Validate the following information for INSERT statement:                         
+     - field existance           
+@@ -792,10 +791,18 @@ static bool init_param_items(PREP_STMT *stmt)
+   if (mysql_bin_log.is_open() || mysql_update_log.is_open())
+   {
+     stmt->log_full_query= 1;
++#ifndef EMBEDDED_LIBRARY
+     stmt->setup_params= insert_params_withlog;
++#else
++    stmt->setup_params_data= setup_params_data_withlog;
++#endif
+   }
+   else
++#ifndef EMBEDDED_LIBRARY
+     stmt->setup_params= insert_params; // not fully qualified query
++#else
++    stmt->setup_params_data= setup_params_data;
++#endif
+    
+   if (!stmt->param_count)
+     stmt->param= (Item_param **)0;
+@@ -949,8 +956,13 @@ void mysql_stmt_execute(THD *thd, char *packet)
+   }
+   init_stmt_execute(stmt);
+ 
++#ifndef EMBEDDED_LIBRARY
+   if (stmt->param_count && setup_params_data(stmt))
+     DBUG_VOID_RETURN;
++#else
++  if (stmt->param_count && (*stmt->setup_params_data)(stmt))
++    DBUG_VOID_RETURN;
++#endif
+ 
+   if (!(specialflag & SPECIAL_NO_PRIOR))
+     my_pthread_setprio(pthread_self(),QUERY_PRIOR);  
+

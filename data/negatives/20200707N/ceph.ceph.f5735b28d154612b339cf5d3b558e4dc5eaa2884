@@ -1,0 +1,75 @@
+commit f5735b28d154612b339cf5d3b558e4dc5eaa2884
+Author: Matt Benjamin <matt@cohortfs.com>
+Date:   Wed Mar 11 13:42:37 2015 -0400
+
+    Fix XioLoopbackConnection Lifecycle.
+    
+    Since XioLoopbackConnection is a RefCountedObject, it can't be
+    an expanded member of XioMessenger.
+    
+    Fixes cleanup/shutdown errors.
+    
+    Signed-off-by: Matt Benjamin <matt@cohortfs.com>
+
+diff --git a/src/msg/xio/XioConnection.h b/src/msg/xio/XioConnection.h
+index 21b19d0980..6ab116dd30 100644
+--- a/src/msg/xio/XioConnection.h
++++ b/src/msg/xio/XioConnection.h
+@@ -352,6 +352,6 @@ public:
+   }
+ };
+ 
+-typedef boost::intrusive_ptr<XioLoopbackConnection> LoopbackConnectionRef;
++typedef boost::intrusive_ptr<XioLoopbackConnection> XioLoopbackConnectionRef;
+ 
+ #endif /* XIO_CONNECTION_H */
+diff --git a/src/msg/xio/XioMessenger.cc b/src/msg/xio/XioMessenger.cc
+index f084cfeb0c..59b1448145 100644
+--- a/src/msg/xio/XioMessenger.cc
++++ b/src/msg/xio/XioMessenger.cc
+@@ -251,7 +251,7 @@ XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
+     shutdown_called(false),
+     portals(this, cct->_conf->xio_portal_threads),
+     dispatch_strategy(ds),
+-    loop_con(this),
++    loop_con(new XioLoopbackConnection(this)),
+     special_handling(0),
+     sh_mtx("XioMessenger session mutex"),
+     sh_cond()
+@@ -726,11 +726,10 @@ static inline XioMsg* pool_alloc_xio_msg(Message *m, XioConnection *xcon,
+ 
+ int XioMessenger::_send_message(Message *m, Connection *con)
+ {
+-  if (con == &loop_con) {
++  if (con == loop_con.get() /* intrusive_ptr get() */) {
+     m->set_connection(con);
+     m->set_src(get_myinst().name);
+-    XioLoopbackConnection *xlcon = static_cast<XioLoopbackConnection*>(con);
+-    m->set_seq(xlcon->next_seq());
++    m->set_seq(loop_con->next_seq());
+     ds_dispatch(m);
+     return 0;
+   }
+diff --git a/src/msg/xio/XioMessenger.h b/src/msg/xio/XioMessenger.h
+index 8cec6d9c63..fe947fa663 100644
+--- a/src/msg/xio/XioMessenger.h
++++ b/src/msg/xio/XioMessenger.h
+@@ -39,7 +39,7 @@ private:
+   XioConnection::EntitySet conns_entity_map;
+   XioPortals portals;
+   DispatchStrategy* dispatch_strategy;
+-  XioLoopbackConnection loop_con;
++  XioLoopbackConnectionRef loop_con;
+   uint32_t special_handling;
+   Mutex sh_mtx;
+   Cond sh_cond;
+@@ -57,7 +57,7 @@ public:
+ 
+   virtual void set_myaddr(const entity_addr_t& a) {
+     Messenger::set_myaddr(a);
+-    loop_con.set_peer_addr(a);
++    loop_con->set_peer_addr(a);
+   }
+ 
+   int _send_message(Message *m, const entity_inst_t &dest);
+

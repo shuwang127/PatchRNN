@@ -1,0 +1,390 @@
+commit c3b0e80432a3fe8cb64276cc8a1337fe61986428
+Author: Dmitry Podgorny <pasis.ua@gmail.com>
+Date:   Sun Nov 11 14:00:21 2012 +0200
+
+    add subscription support
+
+diff --git a/src/command.c b/src/command.c
+index 7621cd9a..5fc59249 100644
+--- a/src/command.c
++++ b/src/command.c
+@@ -199,12 +199,18 @@ static struct cmd_t main_commands[] =
+ 
+     { "/sub",
+         _cmd_sub,
+-        { "/sub user@host", "Subscribe to presence notifications of user.",
+-        { "/sub user@host",
++        { "/sub <add|del|request|show> [jid]", "Manage subscriptions.",
++        { "/sub <add|del|request|show> [jid]",
+           "------------------",
+-          "Send a subscription request to the user to be informed of their presence.",
++          "add     : Approve subscription to a contact.",
++          "del     : Remove subscription for a contact.",
++          "request : Send a subscription request to the user to be informed of their",
++          "        : presence.",
++          "show    : Show subscriprion status for a contact.",
+           "",
+-          "Example: /sub myfriend@jabber.org",
++          "If optional parameter 'jid' isn't set command belongs to the current window.",
++          "",
++          "Example: /sub add myfriend@jabber.org",
+           NULL  } } },
+ 
+     { "/tiny",
+@@ -710,6 +716,8 @@ _cmd_complete_parameters(char *input, int *size)
+         contact_list_find_contact);
+     _parameter_autocomplete(input, size, "/connect",
+         prefs_find_login);
++    _parameter_autocomplete(input, size, "/sub",
++        prefs_autocomplete_sub_cmd);
+     _parameter_autocomplete(input, size, "/help",
+         _cmd_help_complete);
+     _parameter_autocomplete(input, size, "/who",
+@@ -775,13 +783,40 @@ _cmd_sub(const char * const inp, struct cmd_help_t help)
+         cons_show("Usage: %s", help.usage);
+         result = TRUE;
+     } else {
+-        char *user, *lower;
+-        user = strndup(inp+5, strlen(inp)-5);
+-        lower = g_utf8_strdown(user, -1);
++        char *inp_cpy, *subcmd;
++        char *jid, *bare_jid;
+ 
+-        jabber_subscribe(lower);
+-        cons_show("Sent subscription request to %s.", user);
++        inp_cpy = strndup(inp+5, strlen(inp)-5);
++        /* using strtok is bad idea */
++        subcmd = strtok(inp_cpy, " ");
++        jid = strtok(NULL, " ");
+ 
++        if (jid != NULL) {
++            jid = strdup(jid);
++        } else {
++            jid = win_get_recipient();
++        }
++
++        bare_jid = strtok(jid, "/");
++
++        if (strcmp(subcmd, "add") == 0) {
++            jabber_subscription(bare_jid, PRESENCE_SUBSCRIBED);
++            cons_show("Accepted subscription for %s", bare_jid);
++            log_info("Accepted subscription for %s", bare_jid);
++        } else if (strcmp(subcmd, "del") == 0) {
++            jabber_subscription(bare_jid, PRESENCE_UNSUBSCRIBED);
++            cons_show("Deleted subscription for %s", bare_jid);
++            log_info("Deleted subscription for %s", bare_jid);
++        } else if (strcmp(subcmd, "request") == 0) {
++            jabber_subscription(bare_jid, PRESENCE_SUBSCRIBE);
++            cons_show("Sent subscription request to %s.", bare_jid);
++            log_info("Sent subscription request to %s.", bare_jid);
++        } else if (strcmp(subcmd, "show") == 0) {
++            /* TODO: not implemented yet */
++        }
++
++        free(jid);
++        free(inp_cpy);
+         result = TRUE;
+     }
+ 
+diff --git a/src/jabber.c b/src/jabber.c
+index f16a4737..bb691a42 100644
+--- a/src/jabber.c
++++ b/src/jabber.c
+@@ -219,16 +219,31 @@ jabber_send_gone(const char * const recipient)
+ }
+ 
+ void
+-jabber_subscribe(const char * const recipient)
++jabber_subscription(const char * const jid, jabber_subscr_t action)
+ {
+     xmpp_stanza_t *presence;
++    char *type, *jid_cpy, *bare_jid;
++
++    // jid must be a bare JID
++    jid_cpy = strdup(jid);
++    bare_jid = strtok(jid_cpy, "/");
++
++    if (action == PRESENCE_SUBSCRIBE)
++        type = STANZA_TYPE_SUBSCRIBE;
++    else if (action == PRESENCE_SUBSCRIBED)
++        type = STANZA_TYPE_SUBSCRIBED;
++    else if (action == PRESENCE_UNSUBSCRIBED)
++        type = STANZA_TYPE_UNSUBSCRIBED;
++    else // unknown action
++        return;
+ 
+     presence = xmpp_stanza_new(jabber_conn.ctx);
+     xmpp_stanza_set_name(presence, STANZA_NAME_PRESENCE);
+-    xmpp_stanza_set_type(presence, STANZA_TYPE_SUBSCRIBE);
+-    xmpp_stanza_set_attribute(presence, STANZA_ATTR_TO, recipient);
++    xmpp_stanza_set_type(presence, type);
++    xmpp_stanza_set_attribute(presence, STANZA_ATTR_TO, bare_jid);
+     xmpp_send(jabber_conn.conn, presence);
+     xmpp_stanza_release(presence);
++    free(jid_cpy);
+ }
+ 
+ void
+@@ -698,12 +713,7 @@ _presence_handler(xmpp_conn_t * const conn,
+         else
+             status_str = NULL;
+ 
+-        if ((type != NULL) && (strcmp(type, STANZA_TYPE_UNAVAILABLE) == 0)) {
+-            if (strcmp(short_jid, short_from) !=0) {
+-                prof_handle_contact_offline(short_from, "offline", status_str);
+-            }
+-        } else {
+-
++        if (type == NULL) { // available
+             xmpp_stanza_t *show = xmpp_stanza_get_child_by_name(stanza, STANZA_NAME_SHOW);
+             if (show != NULL)
+                 show_str = xmpp_stanza_get_text(show);
+@@ -713,6 +723,18 @@ _presence_handler(xmpp_conn_t * const conn,
+             if (strcmp(short_jid, short_from) !=0) {
+                 prof_handle_contact_online(short_from, show_str, status_str);
+             }
++        } else if (strcmp(type, STANZA_TYPE_UNAVAILABLE) == 0) {
++            if (strcmp(short_jid, short_from) !=0) {
++                prof_handle_contact_offline(short_from, "offline", status_str);
++            }
++        } else if (strcmp(type, STANZA_TYPE_SUBSCRIBE) == 0) {
++            prof_handle_subscription(short_from, PRESENCE_SUBSCRIBE);
++        } else if (strcmp(type, STANZA_TYPE_SUBSCRIBED) == 0) {
++            prof_handle_subscription(short_from, PRESENCE_SUBSCRIBED);
++        } else if (strcmp(type, STANZA_TYPE_UNSUBSCRIBED) == 0) {
++            prof_handle_subscription(short_from, PRESENCE_UNSUBSCRIBED);
++        } else { /* unknown type */
++            log_debug("Received presence with unknown type '%s'", type);
+         }
+     }
+ 
+diff --git a/src/jabber.h b/src/jabber.h
+index e15c6fff..5dea2a06 100644
+--- a/src/jabber.h
++++ b/src/jabber.h
+@@ -40,14 +40,20 @@ typedef enum {
+     PRESENCE_XA
+ } jabber_presence_t;
+ 
++typedef enum {
++    PRESENCE_SUBSCRIBE,
++    PRESENCE_SUBSCRIBED,
++    PRESENCE_UNSUBSCRIBED
++} jabber_subscr_t;
++
+ void jabber_init(const int disable_tls);
+ jabber_conn_status_t jabber_connect(const char * const user,
+     const char * const passwd);
+ void jabber_disconnect(void);
+ void jabber_process_events(void);
+-void jabber_subscribe(const char * const recipient);
+ void jabber_join(const char * const room, const char * const nick);
+ void jabber_leave_chat_room(const char * const room_jid);
++void jabber_subscription(const char * const jid, jabber_subscr_t action);
+ void jabber_send(const char * const msg, const char * const recipient);
+ void jabber_send_groupchat(const char * const msg, const char * const recipient);
+ void jabber_send_inactive(const char * const recipient);
+diff --git a/src/preferences.c b/src/preferences.c
+index 1cde801a..7bf72529 100644
+--- a/src/preferences.c
++++ b/src/preferences.c
+@@ -21,6 +21,7 @@
+  */
+ 
+ #include "config.h"
++#include "preferences.h"
+ 
+ #include <stdlib.h>
+ #include <string.h>
+@@ -41,6 +42,7 @@ static GKeyFile *prefs;
+ 
+ static PAutocomplete login_ac;
+ static PAutocomplete boolean_choice_ac;
++static PAutocomplete sub_cmd_ac;
+ 
+ struct colour_string_t {
+     char *str;
+@@ -116,6 +118,11 @@ prefs_load(void)
+     p_autocomplete_add(boolean_choice_ac, strdup("on"));
+     p_autocomplete_add(boolean_choice_ac, strdup("off"));
+ 
++    sub_cmd_ac = p_autocomplete_new();
++    p_autocomplete_add(sub_cmd_ac, strdup("add"));
++    p_autocomplete_add(sub_cmd_ac, strdup("del"));
++    p_autocomplete_add(sub_cmd_ac, strdup("request"));
++    p_autocomplete_add(sub_cmd_ac, strdup("show"));
+ }
+ 
+ void
+@@ -123,6 +130,7 @@ prefs_close(void)
+ {
+     p_autocomplete_clear(login_ac);
+     p_autocomplete_clear(boolean_choice_ac);
++    p_autocomplete_clear(sub_cmd_ac);
+     g_key_file_free(prefs);
+ }
+ 
+@@ -222,6 +230,22 @@ prefs_reset_boolean_choice(void)
+     p_autocomplete_reset(boolean_choice_ac);
+ }
+ 
++char *
++prefs_autocomplete_sub_cmd(char *prefix)
++{
++    char *result;
++    result = p_autocomplete_complete(sub_cmd_ac, prefix);
++    /* TODO: fix the problem with ac->last_found instead of this hack */
++    prefs_reset_sub_cmd();
++    return result;
++}
++
++void
++prefs_reset_sub_cmd(void)
++{
++    p_autocomplete_reset(sub_cmd_ac);
++}
++
+ gboolean
+ prefs_get_beep(void)
+ {
+diff --git a/src/preferences.h b/src/preferences.h
+index e2975c51..3671e35e 100644
+--- a/src/preferences.h
++++ b/src/preferences.h
+@@ -41,6 +41,8 @@ char * prefs_find_login(char *prefix);
+ void prefs_reset_login_search(void);
+ char * prefs_autocomplete_boolean_choice(char *prefix);
+ void prefs_reset_boolean_choice(void);
++char * prefs_autocomplete_sub_cmd(char *prefix);
++void prefs_reset_sub_cmd(void);
+ 
+ gboolean prefs_get_beep(void);
+ void prefs_set_beep(gboolean value);
+diff --git a/src/profanity.c b/src/profanity.c
+index 2d1561e2..fb25a9f4 100644
+--- a/src/profanity.c
++++ b/src/profanity.c
+@@ -144,6 +144,32 @@ prof_handle_error_message(const char *from, const char *err_msg)
+     win_show_error_msg(from, err_msg);
+ }
+ 
++void
++prof_handle_subscription(const char *from, jabber_subscr_t type)
++{
++    switch (type) {
++    case PRESENCE_SUBSCRIBE:
++        /* TODO: auto-subscribe if needed */
++        cons_show("Received authorization request from %s", from);
++        log_info("Received authorization request from %s", from);
++        win_show_system_msg(from, "Authorization request, type '/sub add' to accept or '/sub del' to reject");
++        break;
++    case PRESENCE_SUBSCRIBED:
++        cons_show("Subscription received from %s", from);
++        log_info("Subscription received from %s", from);
++        win_show_system_msg(from, "Subscribed");
++        break;
++    case PRESENCE_UNSUBSCRIBED:
++        cons_show("%s deleted subscription", from);
++        log_info("%s deleted subscription", from);
++        win_show_system_msg(from, "Unsubscribed");
++        break;
++    default:
++        /* unknown type */
++	break;
++    }
++}
++
+ void
+ prof_handle_login_success(const char *jid)
+ {
+diff --git a/src/profanity.h b/src/profanity.h
+index baf2a6b9..a547ce23 100644
+--- a/src/profanity.h
++++ b/src/profanity.h
+@@ -23,6 +23,8 @@
+ #ifndef PROFANITY_H
+ #define PROFANITY_H
+ 
++#include "jabber.h"
++
+ void prof_run(const int disable_tls, char *log_level);
+ 
+ void prof_handle_login_success(const char *jid);
+@@ -34,6 +36,7 @@ void prof_handle_contact_offline(char *contact, char *show, char *status);
+ void prof_handle_incoming_message(char *from, char *message);
+ void prof_handle_delayed_message(char *from, char *message, GTimeVal tv_stamp);
+ void prof_handle_error_message(const char *from, const char *err_msg);
++void prof_handle_subscription(const char *from, jabber_subscr_t type);
+ void prof_handle_roster(GSList *roster);
+ void prof_handle_gone(const char * const from);
+ void prof_handle_room_history(const char * const room_jid,
+diff --git a/src/stanza.h b/src/stanza.h
+index 6f244327..706307fa 100644
+--- a/src/stanza.h
++++ b/src/stanza.h
+@@ -49,6 +49,8 @@
+ #define STANZA_TYPE_GROUPCHAT "groupchat"
+ #define STANZA_TYPE_UNAVAILABLE "unavailable"
+ #define STANZA_TYPE_SUBSCRIBE "subscribe"
++#define STANZA_TYPE_SUBSCRIBED "subscribed"
++#define STANZA_TYPE_UNSUBSCRIBED "unsubscribed"
+ #define STANZA_TYPE_GET "get"
+ #define STANZA_TYPE_ERROR "error"
+ 
+diff --git a/src/ui.h b/src/ui.h
+index d22afc75..9d958946 100644
+--- a/src/ui.h
++++ b/src/ui.h
+@@ -91,6 +91,7 @@ void win_show_gone(const char * const from);
+ void win_show_incomming_msg(const char * const from, const char * const message,
+     GTimeVal *tv_stamp);
+ void win_show_error_msg(const char * const from, const char *err_msg);
++void win_show_system_msg(const char * const from, const char *message);
+ void win_show_outgoing_msg(const char * const from, const char * const to,
+     const char * const message);
+ void win_handle_special_keys(const int * const ch);
+diff --git a/src/windows.c b/src/windows.c
+index abf8f2fa..c608e0ca 100644
+--- a/src/windows.c
++++ b/src/windows.c
+@@ -433,6 +433,39 @@ win_show_gone(const char * const from)
+     }
+ }
+ 
++void
++win_show_system_msg(const char * const from, const char *message)
++{
++    int win_index;
++    WINDOW *win;
++    char from_cpy[strlen(from) + 1];
++    char *bare_jid;
++
++    if (from == NULL || message == NULL)
++        return;
++
++    strcpy(from_cpy, from);
++    bare_jid = strtok(from_cpy, "/");
++
++    win_index = _find_prof_win_index(bare_jid);
++    if (win_index == NUM_WINS) {
++        win_index = _new_prof_win(bare_jid);
++        status_bar_active(win_index);
++        dirty = TRUE;
++    }
++    win = _wins[win_index].win;
++
++    _win_show_time(win);
++    wattron(win, COLOUR_ONLINE);
++    wprintw(win, "*%s %s\n", bare_jid, message);
++    wattroff(win, COLOUR_ONLINE);
++
++    // this is the current window
++    if (win_index == _curr_prof_win) {
++        dirty = TRUE;
++    }
++}
++
+ #ifdef HAVE_LIBNOTIFY
+ static void
+ _win_notify(const char * const message, int timeout,
+

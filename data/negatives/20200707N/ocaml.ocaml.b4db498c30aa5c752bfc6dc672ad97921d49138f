@@ -1,0 +1,113 @@
+commit b4db498c30aa5c752bfc6dc672ad97921d49138f
+Author: Max Mouratov <mmouratov@gmail.com>
+Date:   Fri Jun 19 19:53:38 2015 +0500
+
+    runtime: allowing for repeated calls to caml_startup and caml_shutdown
+
+diff --git a/asmrun/startup.c b/asmrun/startup.c
+index 834e6cdda..7abec8d11 100644
+--- a/asmrun/startup.c
++++ b/asmrun/startup.c
+@@ -105,7 +105,8 @@ value caml_startup_exn(char **argv)
+   char * exe_name, * proc_self_exe;
+   char tos;
+ 
+-  caml_stat_create_pool();
++  if (!caml_startup_aux())
++    return Val_unit;
+ 
+ #ifdef WITH_SPACETIME
+   caml_spacetime_initialize();
+diff --git a/byterun/caml/startup_aux.h b/byterun/caml/startup_aux.h
+index 203a47d73..80ff2e092 100644
+--- a/byterun/caml/startup_aux.h
++++ b/byterun/caml/startup_aux.h
+@@ -33,6 +33,10 @@ extern uintnat caml_trace_level;
+ 
+ extern void caml_parse_ocamlrunparam (void);
+ 
++/* Common entry point to caml_startup.
++   Returns 0 if the runtime is already initialized. */
++extern int caml_startup_aux (void);
++
+ #endif /* CAML_INTERNALS */
+ 
+ #endif /* CAML_STARTUP_AUX_H */
+diff --git a/byterun/startup.c b/byterun/startup.c
+index 705456492..04032f022 100644
+--- a/byterun/startup.c
++++ b/byterun/startup.c
+@@ -286,7 +286,8 @@ CAMLexport void caml_main(char **argv)
+ 
+   caml_ensure_spacetime_dot_o_is_included++;
+ 
+-  caml_stat_create_pool();
++  if (!caml_startup_aux())
++    return;
+ 
+   /* Machine-dependent initialization of the floating-point hardware
+      so that it behaves as much as possible as specified in IEEE */
+@@ -407,7 +408,9 @@ CAMLexport value caml_startup_code_exn(
+   char * cds_file;
+   char * exe_name;
+ 
+-  caml_stat_create_pool();
++  if (!caml_startup_aux())
++    return Val_unit;
++
+   caml_init_ieee_floats();
+ #if defined(_MSC_VER) && __STDC_SECURE_LIB__ >= 200411L
+   caml_install_invalid_parameter_handler();
+diff --git a/byterun/startup_aux.c b/byterun/startup_aux.c
+index 63bf7f65d..21403e328 100644
+--- a/byterun/startup_aux.c
++++ b/byterun/startup_aux.c
+@@ -108,11 +108,47 @@ void caml_parse_ocamlrunparam(void)
+   }
+ }
+ 
++
++/* The number of outstanding calls to caml_startup */
++static int startup_count = 0;
++
++/* Has the runtime been shut down already? */
++static int shutdown_happened = 0;
++
++
++int caml_startup_aux(void)
++{
++  if (shutdown_happened == 1)
++    caml_fatal_error("Fatal error: caml_startup was called after the runtime "
++                     "was shut down with caml_shutdown");
++
++  /* Second and subsequent calls are ignored,
++     since the runtime has already started */
++  startup_count++;
++  if (startup_count > 1)
++    return 0;
++
++  caml_stat_create_pool();
++
++  return 1;
++}
++
+ CAMLexport void caml_shutdown(void)
+ {
++  if (startup_count <= 0)
++    caml_fatal_error("Fatal error: a call to caml_shutdown has no "
++                     "corresponding call to caml_startup");
++
++  /* Do nothing unless it's the last call remaining */
++  startup_count--;
++  if (startup_count > 0)
++    return;
++
+   caml_finalise_heap();
+ #ifndef NATIVE_CODE
+   caml_free_shared_libs();
+ #endif
+   caml_stat_destroy_pool();
++
++  shutdown_happened = 1;
+ }
+
