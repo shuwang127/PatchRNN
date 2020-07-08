@@ -37,14 +37,15 @@ def main():
         diffProps = np.load(tempPath + '/props.npy', allow_pickle=True)
         print('[INFO] <GetDiffProps> Load the diff property data from ' + tempPath + '/props.npy.')
 
-    # get the diff maxLen, dictionary (vocabulary).
+    # get the diff token vocabulary, the max diff length.
     diffVocab, diffMaxLen = GetDiffVocab(diffProps)
+    # get the diff token dictionary.
     diffDict = GetDiffDict(diffVocab)
-
-    # GetEmbedding
+    # get pre-trained weights for embedding layer.
     diffPreWeights = GetDiffEmbed(diffDict, _DiffEmbedDim_)
-
     # GetMapping
+    #GetDiffMapping(diffProps, diffMaxLen, diffDict)
+
     # TextRNN
 
     return
@@ -302,6 +303,11 @@ def GetDiffProps(data):
     return props
 
 def GetDiffVocab(props):
+    # create temp folder.
+    if not os.path.exists(tempPath):
+        os.mkdir(tempPath)
+    fp = open(tempPath + 'difflen.csv', 'w')
+
     # get the whole tokens and the max diff length.
     tokens = []
     maxLen = 0
@@ -310,6 +316,8 @@ def GetDiffVocab(props):
     for item in props:
         tokens.extend(item[0])
         maxLen = len(item[0]) if (len(item[0]) > maxLen) else maxLen
+        fp.write(str(len(item[0])) + '\n')
+    fp.close()
 
     # remove duplicates and get vocabulary.
     vocab = {}.fromkeys(tokens)
@@ -338,10 +346,54 @@ def GetDiffEmbed(tokenDict, embedSize):
     preWeights = np.zeros((numTokens, embedSize))
     for index in range(numTokens):
         preWeights[index] = np.random.normal(size=(embedSize,))
-    print('[INFO] Create pre-trained embedding weights with ' + str(len(preWeights)) + ' * ' + str(len(preWeights[0])) + '.')
+    print('[INFO] <GetDiffEmbed> Create pre-trained embedding weights with ' + str(len(preWeights)) + ' * ' + str(len(preWeights[0])) + ' matrix.')
 
     return preWeights
 
+def GetDiffMapping(props, maxLen, tokenDict):
+    # initialize the data and labels.
+    data = []
+    labels = []
+
+    cnt = 0
+    # for each sample.
+    for item in props[0:10]:
+        cnt += 1
+        print(cnt)
+        # initialize sample.
+        sample = []
+        # process token.
+        tokens = item[0]
+        tokens.extend('<pad>' for i in range(maxLen - len(tokens)))
+        tokens2index = []
+        for tk in tokens:
+            tokens2index.append(tokenDict[tk])
+        sample.append(tokens2index)
+        # process tokenTypes.
+        tokenTypes = item[1]
+        tokenTypes.extend(0 for i in range(maxLen - len(tokenTypes)))
+        sample.append(tokenTypes)
+        # process diffTypes.
+        diffTypes = item[2]
+        diffTypes.extend(0 for i in range(maxLen - len(diffTypes)))
+        sample.append(diffTypes)
+        # process sample.
+        sample = np.array(sample).T
+        data.append(sample)
+        # process label.
+        label = item[3]
+        labels.append([label])
+
+    print(labels[0:10])
+    print(data[0:10])
+
+    if (not os.path.exists(tempPath + '/ndata.npy')) | (not os.path.exists(tempPath + '/nlabels.npy')):
+        np.save(tempPath + '/ndata.npy', data, allow_pickle=True)
+        print('[INFO] <GetDiffMapping> Save the mapped numpy data to ' + tempPath + '/ndata.npy.')
+        np.save(tempPath + '/nlabels.npy', labels, allow_pickle=True)
+        print('[INFO] <GetDiffMapping> Save the mapped numpy labels to ' + tempPath + '/nlabels.npy.')
+
+    return np.array(data), np.array(labels)
 
 if __name__ == '__main__':
     main()
