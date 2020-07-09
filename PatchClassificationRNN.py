@@ -18,6 +18,7 @@ tempPath = rootPath + '/temp/'
 
 # hyperparameters.
 _DiffEmbedDim_ = 128
+_DiffMaxLen_ = 1000
 
 # control
 _DEBUG_ = 1
@@ -28,25 +29,33 @@ def main():
         dataLoaded = ReadData()
     else:
         dataLoaded = np.load(tempPath + '/data.npy', allow_pickle=True)
-        print('[INFO] <ReadData> Load the raw data from ' + tempPath + '/data.npy.')
+        print('[INFO] <ReadData> Load ' + str(len(dataLoaded)) + ' raw data from ' + tempPath + '/data.npy.')
 
     # get the diff file properties.
     if (not os.path.exists(tempPath + '/props.npy')) | (not _DEBUG_):
         diffProps = GetDiffProps(dataLoaded)
     else:
         diffProps = np.load(tempPath + '/props.npy', allow_pickle=True)
-        print('[INFO] <GetDiffProps> Load the diff property data from ' + tempPath + '/props.npy.')
+        print('[INFO] <GetDiffProps> Load ' + str(len(diffProps)) + ' diff property data from ' + tempPath + '/props.npy.')
 
-    # get the diff token vocabulary, the max diff length.
+    # get the diff token vocabulary.
     diffVocab, diffMaxLen = GetDiffVocab(diffProps)
+    # get the max diff length.
+    diffMaxLen = _DiffMaxLen_ if (diffMaxLen > _DiffMaxLen_) else diffMaxLen
     # get the diff token dictionary.
     diffDict = GetDiffDict(diffVocab)
     # get pre-trained weights for embedding layer.
     diffPreWeights = GetDiffEmbed(diffDict, _DiffEmbedDim_)
-    # GetMapping
-    #GetDiffMapping(diffProps, diffMaxLen, diffDict)
+    # get the mapping for feature data and labels.
+    diffData, diffLabels = GetDiffMapping(diffProps, diffMaxLen, diffDict)
 
-    # TextRNN
+    # UpdateTokenTypes()
+
+    # Splitdata train/test
+    # Splitdata train/valid
+
+    # TextRNNTrain
+    # TextRNNTest
 
     return
 
@@ -181,7 +190,7 @@ def ReadData():
     # save dataLoaded.
     if not os.path.exists(tempPath + '/data.npy'):
         np.save(tempPath + '/data.npy', data, allow_pickle=True)
-        print('[INFO] <ReadData> Save the raw data to ' + tempPath + '/data.npy.')
+        print('[INFO] <ReadData> Save ' + str(len(data)) + ' raw data to ' + tempPath + '/data.npy.')
 
     return data
 
@@ -298,7 +307,7 @@ def GetDiffProps(data):
         os.mkdir(tempPath)
     if not os.path.exists(tempPath + '/props.npy'):
         np.save(tempPath + '/props.npy', props, allow_pickle=True)
-        print('[INFO] <GetDiffProps> Save the diff property data to ' + tempPath + '/props.npy.')
+        print('[INFO] <GetDiffProps> Save ' + str(len(props)) + ' diff property data to ' + tempPath + '/props.npy.')
 
     return props
 
@@ -325,7 +334,7 @@ def GetDiffVocab(props):
 
     # print.
     print('[INFO] <GetDiffVocab> There are ' + str(len(vocab)) + ' diff vocabulary tokens. (except \'<pad>\')')
-    print('[INFO] <GetDiffVocab> The max diff length is ' + str(maxLen) + ' (tokens).')
+    print('[INFO] <GetDiffVocab> The max diff length is ' + str(maxLen) + ' tokens. (hyperparameter: _DiffMaxLen_ = ' + str(_DiffMaxLen_) + ')')
 
     return vocab, maxLen
 
@@ -351,32 +360,39 @@ def GetDiffEmbed(tokenDict, embedSize):
     return preWeights
 
 def GetDiffMapping(props, maxLen, tokenDict):
+
+    def PadList(dList, pad, length):
+        if len(dList) <= length:
+            dList.extend(pad for i in range(length - len(dList)))
+        elif len(dList) > length:
+            dList = dList[0:length]
+        return dList
+
     # initialize the data and labels.
     data = []
     labels = []
 
-    cnt = 0
     # for each sample.
-    for item in props[0:10]:
-        cnt += 1
-        print(cnt)
+    for item in props:
         # initialize sample.
         sample = []
+
         # process token.
         tokens = item[0]
-        tokens.extend('<pad>' for i in range(maxLen - len(tokens)))
+        tokens = PadList(tokens, '<pad>', maxLen)
         tokens2index = []
         for tk in tokens:
             tokens2index.append(tokenDict[tk])
         sample.append(tokens2index)
         # process tokenTypes.
         tokenTypes = item[1]
-        tokenTypes.extend(0 for i in range(maxLen - len(tokenTypes)))
+        tokenTypes = PadList(tokenTypes, 0, maxLen)
         sample.append(tokenTypes)
         # process diffTypes.
         diffTypes = item[2]
-        diffTypes.extend(0 for i in range(maxLen - len(diffTypes)))
+        diffTypes = PadList(diffTypes, 0, maxLen)
         sample.append(diffTypes)
+
         # process sample.
         sample = np.array(sample).T
         data.append(sample)
@@ -384,14 +400,21 @@ def GetDiffMapping(props, maxLen, tokenDict):
         label = item[3]
         labels.append([label])
 
-    print(labels[0:10])
-    print(data[0:10])
+    if _DEBUG_:
+        print(labels[0:5])
+        print(data[0:5])
 
-    if (not os.path.exists(tempPath + '/ndata.npy')) | (not os.path.exists(tempPath + '/nlabels.npy')):
-        np.save(tempPath + '/ndata.npy', data, allow_pickle=True)
-        print('[INFO] <GetDiffMapping> Save the mapped numpy data to ' + tempPath + '/ndata.npy.')
-        np.save(tempPath + '/nlabels.npy', labels, allow_pickle=True)
-        print('[INFO] <GetDiffMapping> Save the mapped numpy labels to ' + tempPath + '/nlabels.npy.')
+    # print.
+    print('[INFO] <GetDiffMapping> Create ' + str(len(data)) + ' feature data with ' + str(len(data[0])) + ' * ' + str(len(data[0][0])) + ' matrix.')
+    print('[INFO] <GetDiffMapping> Create ' + str(len(labels)) + ' labels with 1 * 1 matrix.')
+
+    # save files.
+    if (not os.path.exists(tempPath + '/ndata_' + str(maxLen) + '.npy')) \
+            | (not os.path.exists(tempPath + '/nlabels_' + str(maxLen) + '.npy')):
+        np.save(tempPath + '/ndata_' + str(maxLen) + '.npy', data, allow_pickle=True)
+        print('[INFO] <GetDiffMapping> Save the mapped numpy data to ' + tempPath + '/ndata_' + str(maxLen) + '.npy.')
+        np.save(tempPath + '/nlabels_' + str(maxLen) + '.npy', labels, allow_pickle=True)
+        print('[INFO] <GetDiffMapping> Save the mapped numpy labels to ' + tempPath + '/nlabels_' + str(maxLen) + '.npy.')
 
     return np.array(data), np.array(labels)
 
