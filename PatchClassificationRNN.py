@@ -3,6 +3,8 @@
 '''
 
 import os
+import math
+import random
 import numpy as np
 from nltk.tokenize import TweetTokenizer
 import clang.cindex
@@ -22,6 +24,8 @@ _DiffMaxLen_ = 1000
 
 # control
 _DEBUG_ = 1
+_LOCK_ = 0  # 0 : unlocked - create random split set.
+            # 1 : locked   - use the saved split set.
 
 def main():
     # load data.
@@ -51,12 +55,15 @@ def main():
     # change the tokentypes into one-hot vector.
     diffData = UpdateTokenTypes(diffData)
 
-    print(diffData[0])
+    # split data into rest/test dataset.
+    dataRest, labelRest, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
+    # split data into train/valid dataset.
+    dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
 
-    # Splitdata train/test
-    # Splitdata train/valid
+    print(dataTrain[0], dataValid[0], dataTest[0], dataRest[0])
+    print(labelTrain[0], labelValid[0], labelTest[0], labelRest[0])
 
-    # TextRNNTrain
+    # TextRNNTrain diffPreWeights
     # TextRNNTest
 
     return
@@ -544,11 +551,56 @@ def UpdateTokenTypes(data):
     # print.
     print('[INFO] <UpdateTokenTypes> Update ' + str(len(newData)) + ' feature data with ' + str(len(newData[0])) + ' * ' + str(len(newData[0][0])) + ' matrix.')
 
+    # save files.
+    if (not os.path.exists(tempPath + '/newdata_' + str(len(newData[0])) + '.npy')):
+        np.save(tempPath + '/newdata_' + str(len(newData[0])) + '.npy', newData, allow_pickle=True)
+        print('[INFO] <UpdateTokenTypes> Save the mapped numpy data to ' + tempPath + '/newdata_' + str(len(newData[0])) + '.npy.')
+
     return np.array(newData)
 
+def SplitData(data, labels, setType, rate=0.2):
+    '''
+    Split the data and labels into two sets with a specific rate.
+    :param data: feature data.
+    [[[n, {0~5}, {-1~1}], ...], ...]
+    [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, {-1~1}], ...], ...]
+    :param labels: labels. [[0/1], ...]
+    :param setType: the splited dataset type.
+    :param rate: the split rate. 0 ~ 1
+    :return: dsetRest - the rest dataset.
+             lsetRest - the rest labels.
+             dset - the splited dataset.
+             lset - the splited labels.
+    '''
 
-def SplitData():
-    return
+    # set parameters.
+    setType = setType.upper()
+    numData = len(data)
+    num = math.floor(numData * rate)
+
+    # get the random data list.
+    if (os.path.exists(tempPath + '/split_' + setType + '.npy')) & (_LOCK_):
+        dataList = np.load(tempPath + '/split_' + setType + '.npy')
+    else:
+        dataList = list(range(numData))
+        random.shuffle(dataList)
+        np.save(tempPath + '/split_' + setType + '.npy', dataList, allow_pickle=True)
+
+    # split data.
+    dset = data[dataList[0:num]]
+    lset = labels[dataList[0:num]]
+    dsetRest = data[dataList[num:]]
+    lsetRest = labels[dataList[num:]]
+
+    # print.
+    setTypeRest = 'TRAIN' if (setType == 'VALID') else 'REST'
+    print('[INFO] <SplitData> Split data into ' + str(len(dsetRest)) + ' ' + setTypeRest
+          + ' dataset and ' + str(len(dset)) + ' ' + setType + ' dataset. (Total: '
+          + str(len(dsetRest) + len(dset)) + ', Rate: ' + str(int(rate * 100)) + '%)')
+
+    return dsetRest, lsetRest, dset, lset
 
 if __name__ == '__main__':
     main()
+    #diffData = np.load(tempPath + '/newData_1000.npy')
+    #diffLabels = np.load(tempPath + '/nlabels_1000.npy')
