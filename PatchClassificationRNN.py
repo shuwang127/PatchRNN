@@ -3,12 +3,18 @@
 '''
 
 import os
+import gc
 import math
 import random
 import numpy as np
 from nltk.tokenize import TweetTokenizer
 import clang.cindex
 import clang.enumerations
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.utils.data as torchdata
+from sklearn.metrics import accuracy_score
 
 # file path.
 rootPath = './'
@@ -18,25 +24,35 @@ pDatPath = dataPath + '/positives/'
 nDatPath = dataPath + '/negatives/'
 tempPath = rootPath + '/temp/'
 
-# hyperparameters.
-_DiffEmbedDim_ = 128
-_DiffMaxLen_ = 1000
+# hyper-parameters. (affect GPU memory)
+_DiffEmbedDim_ = 64
+_DiffMaxLen_ = 100
+_TRnnHidSiz_ = 32
+# hyper-parameters. (affect training speed)
+_TRnnBatchSz_ = 16
+_TRnnLearnRt_ = 0.0001
+# hyper-parameters. (unnecessary to modify)
+_DiffExtraDim_ = 2
+_TRnnHidLay_ = 1
+_TRnnMaxEpoch_ = 10 #
+_TRnnPerEpoch_ = 2  #
 
 # control
-_DEBUG_ = 1
+_DEBUG_ = 0 # 0 : release
+            # 1 : debug
 _LOCK_ = 0  # 0 : unlocked - create random split set.
             # 1 : locked   - use the saved split set.
 
 def main():
     # load data.
-    if (not os.path.exists(tempPath + '/data.npy')) | (not _DEBUG_):
+    if (not os.path.exists(tempPath + '/data.npy')): # | (not _DEBUG_)
         dataLoaded = ReadData()
     else:
         dataLoaded = np.load(tempPath + '/data.npy', allow_pickle=True)
         print('[INFO] <ReadData> Load ' + str(len(dataLoaded)) + ' raw data from ' + tempPath + '/data.npy.')
 
     # get the diff file properties.
-    if (not os.path.exists(tempPath + '/props.npy')) | (not _DEBUG_):
+    if (not os.path.exists(tempPath + '/props.npy')):
         diffProps = GetDiffProps(dataLoaded)
     else:
         diffProps = np.load(tempPath + '/props.npy', allow_pickle=True)
@@ -59,11 +75,11 @@ def main():
     dataRest, labelRest, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
     # split data into train/valid dataset.
     dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
+    print('[INFO] <main> Get ' + str(len(dataTrain)) + ' Train data, ' + str(len(dataValid)) + ' VALID data, '
+          + str(len(dataTest)) + ' TEST data. (Total: ' + str(len(dataTrain)+len(dataValid)+len(dataTest)) + ')')
 
-    print(dataTrain[0], dataValid[0], dataTest[0], dataRest[0])
-    print(labelTrain[0], labelValid[0], labelTest[0], labelRest[0])
-
-    # TextRNNTrain diffPreWeights
+    # TextRNNTrain
+    TextRNNTrain(dataTrain, labelTrain, dataValid, labelValid, preWeights=diffPreWeights, batchsize=_TRnnBatchSz_, learnRate=_TRnnLearnRt_)
     # TextRNNTest
 
     return
@@ -434,6 +450,11 @@ def GetDiffEmbed(tokenDict, embedSize):
         preWeights[index] = np.random.normal(size=(embedSize,))
     print('[INFO] <GetDiffEmbed> Create pre-trained embedding weights with ' + str(len(preWeights)) + ' * ' + str(len(preWeights[0])) + ' matrix.')
 
+    # save preWeights.
+    if not os.path.exists(tempPath + '/preWeights.npy'):
+        np.save(tempPath + '/preWeights.npy', preWeights, allow_pickle=True)
+        print('[INFO] <GetDiffEmbed> Save the pre-trained weights of embedding layer to ' + tempPath + '/preWeights.npy.')
+
     return preWeights
 
 def GetDiffMapping(props, maxLen, tokenDict):
@@ -556,6 +577,10 @@ def UpdateTokenTypes(data):
         np.save(tempPath + '/newdata_' + str(len(newData[0])) + '.npy', newData, allow_pickle=True)
         print('[INFO] <UpdateTokenTypes> Save the mapped numpy data to ' + tempPath + '/newdata_' + str(len(newData[0])) + '.npy.')
 
+    # change marco.
+    global _DiffExtraDim_
+    _DiffExtraDim_ = 6
+
     return np.array(newData)
 
 def SplitData(data, labels, setType, rate=0.2):
@@ -600,7 +625,141 @@ def SplitData(data, labels, setType, rate=0.2):
 
     return dsetRest, lsetRest, dset, lset
 
+class TextRNN(nn.Module):
+    def __init__(self, preWeights, hiddenSize=32, hiddenLayers=1):
+        super(TextRNN, self).__init__()
+        # parameters.
+        class_num = 2
+        vocabSize, embedDim = preWeights.size()
+        # Embedding Layer
+        self.embedding = nn.Embedding(num_embeddings=vocabSize, embedding_dim=embedDim)
+        self.embedding.load_state_dict({'weight': preWeights})
+        self.embedding.weight.requires_grad = True
+        # LSTM Layer
+        _DiffExtraDim_ = 6
+        self.lstm = nn.LSTM(input_size=embedDim+_DiffExtraDim_, hidden_size=hiddenSize, num_layers=hiddenLayers, bidirectional=True)
+        # Fully-Connected Layer
+        self.fc = nn.Linear(hiddenSize * hiddenLayers * 2, class_num)
+        # Softmax non-linearity
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        # x             batch_size * diff_length * feature_dim
+        embeds = self.embedding(x[:,:,0])
+        # embeds        batch_size * diff_length * embedding_dim
+        features = x[:, :, 1:]
+        # features      batch_size * diff_length * _DiffExtraDim_
+        inputs = torch.cat((embeds.float(), features.float()), 2)
+        # inputs        batch_size * diff_length * (embedding_dim + _DiffExtraDim_)
+        inputs = inputs.permute(1, 0, 2)
+        # inputs        diff_length * batch_size * (embedding_dim + _DiffExtraDim_)
+        lstm_out, (h_n, c_n) = self.lstm(inputs)
+        # lstm_out      diff_length * batch_size * (hidden_size * direction_num)
+        # h_n           (num_layers * direction_num) * batch_size * hidden_size
+        # h_n           (num_layers * direction_num) * batch_size * hidden_size
+        feature_map = torch.cat([h_n[i, :, :] for i in range(h_n.shape[0])], dim=1)
+        # feature_map   batch_size * (hidden_size * num_layers * direction_num)
+        final_out = self.fc(feature_map)    # batch_size * class_num
+        return self.softmax(final_out)      # batch_size * class_num
+
+def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learnRate=0.001):
+
+    # tensor data processing.
+    xTrain = torch.from_numpy(dTrain).long().cuda()
+    yTrain = torch.from_numpy(lTrain).long().cuda()
+    xValid = torch.from_numpy(dValid).long().cuda()
+    yValid = torch.from_numpy(lValid).long().cuda()
+    # batch size processing.
+    train = torchdata.TensorDataset(xTrain, yTrain)
+    trainloader = torchdata.DataLoader(train, batch_size=batchsize, shuffle=False)
+    valid = torchdata.TensorDataset(xValid, yValid)
+    validloader = torchdata.DataLoader(valid, batch_size=batchsize, shuffle=False)
+
+    # build the model of recurrent neural network.
+    preWeights = torch.from_numpy(preWeights)
+    model = TextRNN(preWeights, hiddenSize=_TRnnHidSiz_, hiddenLayers=_TRnnHidLay_)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    print('[INFO] <TextRNNTrain> ModelType: TextRNN, HiddenNodes: %d, HiddenLayers: %d.' % (_TRnnHidSiz_, _TRnnHidLay_))
+    print('[INFO] <TextRNNTrain> BatchSize: %d, LearningRate: %.4f, MaxEpoch: %d, PerEpoch: %d.' % (batchsize, learnRate, _TRnnMaxEpoch_, _TRnnPerEpoch_))
+    # optimizing with stochastic gradient descent.
+    optimizer = optim.Adam(model.parameters(), lr=learnRate)
+    # seting loss function as mean squared error.
+    criterion = nn.CrossEntropyLoss()
+    # memory
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.enabled = True
+
+    # run on each epoch.
+    accList = [0]
+    for epoch in range(_TRnnMaxEpoch_):
+        # training phase.
+        model.train()
+        lossTrain = 0
+        predictions = []
+        labels = []
+        for iter, (data, label) in enumerate(trainloader):
+            data = data.to(device)
+            label = label.contiguous().view(-1)
+            label = label.to(device)
+            optimizer.zero_grad()  # set the gradients to zero.
+            yhat = model.forward(data)  # get output
+            loss = criterion(yhat, label)
+            loss.backward()
+            optimizer.step()
+            # statistic
+            lossTrain += loss.item() * len(label)
+            preds = yhat.max(1)[1]
+            predictions.extend(preds.int().tolist())
+            labels.extend(label.int().tolist())
+            torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
+        lossTrain /= len(dTrain)
+        # train accuracy.
+        accTrain = accuracy_score(labels, predictions) * 100
+
+        # validation phase.
+        model.eval()
+        predictions = []
+        labels = []
+        with torch.no_grad():
+            for iter, (data, label) in enumerate(validloader):
+                data = data.to(device)
+                label = label.contiguous().view(-1)
+                label = label.to(device)
+                yhat = model.forward(data)  # get output
+                # statistic
+                preds = yhat.max(1)[1]
+                predictions.extend(preds.int().tolist())
+                labels.extend(label.int().tolist())
+                torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
+        # valid accuracy.
+        accValid = accuracy_score(labels, predictions) * 100
+        accList.append(accValid)
+
+        # output information.
+        if 0 == (epoch + 1) % _TRnnPerEpoch_:
+            print('[Epoch %03d] loss: %.3f, train acc: %.3f%%, valid acc: %.3f%%.' % (epoch + 1, lossTrain, accTrain, accValid))
+        # save the best model.
+        if accList[-1] > max(accList[0:-1]):
+            torch.save(model.state_dict(), tempPath + '/model_TextRNN.pth')
+        # stop judgement.
+        if (epoch + 1) >= _TRnnPerEpoch_ and accList[-1] < min(accList[-_TRnnPerEpoch_:-1]):
+            break
+
+    # load best model.
+    model.load_state_dict(torch.load(tempPath + '/model.pth'))
+
+    return model
+
 if __name__ == '__main__':
     main()
-    #diffData = np.load(tempPath + '/newData_1000.npy')
+    #diffData = np.load(tempPath + '/newdata_1000.npy')
     #diffLabels = np.load(tempPath + '/nlabels_1000.npy')
+    #dataRest, labelRest, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
+    #dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
+    #diffPreWeights = np.load(tempPath + '/preWeights.npy')
+    #TextRNNTrain(dataTrain, labelTrain, dataValid, labelValid, preWeights=diffPreWeights, batchsize=_TRnnBatchSz_,learnRate=_TRnnLearnRt_)
