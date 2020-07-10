@@ -48,8 +48,10 @@ def main():
     diffPreWeights = GetDiffEmbed(diffDict, _DiffEmbedDim_)
     # get the mapping for feature data and labels.
     diffData, diffLabels = GetDiffMapping(diffProps, diffMaxLen, diffDict)
+    # change the tokentypes into one-hot vector.
+    diffData = UpdateTokenTypes(diffData)
 
-    # UpdateTokenTypes()
+    print(diffData[0])
 
     # Splitdata train/test
     # Splitdata train/valid
@@ -60,8 +62,19 @@ def main():
     return
 
 def ReadData():
+    '''
+    Read data from the files.
+    :return: data - a set of commit message, diff code, and labels.
+    [[['', ...], [['', ...], ['', ...], ...], 0/1], ...]
+    '''
 
     def ReadCommitMsg(filename):
+        '''
+        Read commit message from a file.
+        :param filename: file name (string).
+        :return: commitMsg - commit message.
+        ['line', 'line', ...]
+        '''
         fp = open(filename, encoding='utf-8', errors='ignore')  # get file point.
         lines = fp.readlines()  # read all lines.
         #numLines = len(lines)   # get the line number.
@@ -105,6 +118,12 @@ def ReadData():
         return commitMsg
 
     def ReadDiffLines(filename):
+        '''
+        Read diff code from a file.
+        :param filename:  file name (string).
+        :return: diffLines - diff code.
+        [['line', ...], ['line', ...], ...]
+        '''
         fp = open(filename, encoding='utf-8', errors='ignore')  # get file point.
         lines = fp.readlines()  # read all lines.
         numLines = len(lines)  # get the line number.
@@ -200,14 +219,22 @@ def GetDiffProps(data):
     :param data: [[[line, , ], [[line, , ], [line, , ], ...], 0/1], ...]
     :return: props - [[[tokens], [nums], [nums], 0/1], ...]
     '''
+
     def RemoveSign(line):
+        '''
+        Remove the sign (+/-) in the first character.
+        :param line: a code line.
+        :return: process line.
+        '''
         return ' ' + line[1:] if (line[0] == '+') or (line[0] == '-') else line
 
     def GetClangTokens(line):
         '''
         Get the tokens of a line with the Clang tool.
-        :param line:
-        :return:
+        :param line: a code line.
+        :return: tokens - ['tk', 'tk', ...] ('tk': string)
+                 tokenTypes - [tkt, tkt, ...] (tkt: 1, 2, 3, 4, 5)
+                 diffTypes - [dft, dft, ...] (dft: -1, 0, 1)
         '''
         # remove non-ascii
         line = line.encode("ascii", "ignore").decode()
@@ -241,11 +268,23 @@ def GetDiffProps(data):
         return tokens, tokenTypes, diffTypes
 
     def GetWordTokens(line):
+        '''
+        Get the word tokens from a code line.
+        :param line: a code line.
+        :return: tokens - ['tk', 'tk', ...] ('tk': string)
+        '''
         tknzr = TweetTokenizer()
         tokens = tknzr.tokenize(RemoveSign(line))
         return tokens
 
     def GetString(lines):
+        '''
+        Get the strings from the diff code
+        :param lines: diff code.
+        :return: lineStr - All the diff lines.
+                 lineStrB - The before-version code lines.
+                 lineStrA - The after-version code lines.
+        '''
         lineStr = ''
         lineStrB = ''
         lineStrA = ''
@@ -261,6 +300,13 @@ def GetDiffProps(data):
         return lineStr, lineStrB, lineStrA
 
     def GetDiffTokens(lines):
+        '''
+        Get the tokens for the diff lines.
+        :param lines: the diff code.
+        :return: tokens - tokens ['tk', 'tk', ...] ('tk': string)
+                 tokenTypes - token types [tkt, tkt, ...] (tkt: 1, 2, 3, 4, 5)
+                 diffTypes - diff types [dft, dft, ...] (dft: -1, 0, 1)
+        '''
         # initialize.
         tokens = []
         tokenTypes = []
@@ -312,6 +358,14 @@ def GetDiffProps(data):
     return props
 
 def GetDiffVocab(props):
+    '''
+    Get the vocabulary of diff tokens
+    :param props - the features of diff code.
+    [[[tokens], [nums], [nums], 0/1], ...]
+    :return: vocab - the vocabulary of diff tokens. ['tk', 'tk', ...]
+             maxLen - the max length of a diff code.
+    '''
+
     # create temp folder.
     if not os.path.exists(tempPath):
         os.mkdir(tempPath)
@@ -339,6 +393,13 @@ def GetDiffVocab(props):
     return vocab, maxLen
 
 def GetDiffDict(vocab):
+    '''
+    Get the dictionary of diff vocabulary.
+    :param vocab: the vocabulary of diff tokens. ['tk', 'tk', ...]
+    :return: tokenDict - the dictionary of diff vocabulary.
+    {'tk': 0, 'tk': 1, ..., '<pad>': N}
+    '''
+
     # get token dict from vocabulary.
     tokenDict = {token: index for index, token in enumerate(vocab)}
     tokenDict['<pad>'] = len(tokenDict)
@@ -349,6 +410,15 @@ def GetDiffDict(vocab):
     return tokenDict
 
 def GetDiffEmbed(tokenDict, embedSize):
+    '''
+    Get the pre-trained weights for embedding layer from the dictionary of diff vocabulary.
+    :param tokenDict: the dictionary of diff vocabulary.
+    {'tk': 0, 'tk': 1, ..., '<pad>': N}
+    :param embedSize: the dimension of the embedding vector.
+    :return: preWeights - the pre-trained weights for embedding layer.
+    [[n, ...], [n, ...], ...]
+    '''
+
     # number of the vocabulary tokens.
     numTokens = len(tokenDict)
     # initialize the pre-trained weights for embedding layer.
@@ -360,8 +430,28 @@ def GetDiffEmbed(tokenDict, embedSize):
     return preWeights
 
 def GetDiffMapping(props, maxLen, tokenDict):
+    '''
+    Map the feature data into indexed data.
+    :param props: the features of diff code.
+    [[[tokens], [nums], [nums], 0/1], ...]
+    :param maxLen: the max length of a diff code.
+    :param tokenDict: the dictionary of diff vocabulary.
+    {'tk': 0, 'tk': 1, ..., '<pad>': N}
+    :return: np.array(data) - feature data.
+             [[[n, {0~5}, {-1~1}], ...], ...]
+             np.array(labels) - labels.
+             [[0/1], ...]
+    '''
 
     def PadList(dList, pad, length):
+        '''
+        Pad the list data to a fixed length.
+        :param dList: the list data - [ , , ...]
+        :param pad: the variable used to pad.
+        :param length: the fixed length.
+        :return: dList - padded list data. [ , , ...]
+        '''
+
         if len(dList) <= length:
             dList.extend(pad for i in range(length - len(dList)))
         elif len(dList) > length:
@@ -401,8 +491,10 @@ def GetDiffMapping(props, maxLen, tokenDict):
         labels.append([label])
 
     if _DEBUG_:
-        print(labels[0:5])
-        print(data[0:5])
+        print('[DEBUG] data:')
+        print(data[0:3])
+        print('[DEBUG] labels:')
+        print(labels[0:3])
 
     # print.
     print('[INFO] <GetDiffMapping> Create ' + str(len(data)) + ' feature data with ' + str(len(data[0])) + ' * ' + str(len(data[0][0])) + ' matrix.')
@@ -417,6 +509,46 @@ def GetDiffMapping(props, maxLen, tokenDict):
         print('[INFO] <GetDiffMapping> Save the mapped numpy labels to ' + tempPath + '/nlabels_' + str(maxLen) + '.npy.')
 
     return np.array(data), np.array(labels)
+
+def UpdateTokenTypes(data):
+    '''
+    Update the token type in the feature data into one-hot vector.
+    :param data: feature data. [[[n, {0~5}, {-1~1}], ...], ...]
+    :return: np.array(newData). [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, {-1~1}], ...], ...]
+    '''
+
+    newData = []
+    # for each sample.
+    for item in data:
+        # get the transpose of props.
+        itemT = item.T
+        # initialize new sample.
+        newItem = []
+        newItem.append(itemT[0])
+        newItem.extend(np.zeros((5, len(item)), dtype=int))
+        newItem.append(itemT[2])
+        # assign the new sample.
+        for i in range(len(item)):
+            tokenType = itemT[1][i]
+            if (tokenType):
+                newItem[tokenType][i] = 1
+        # get the transpose of new sample.
+        newItem = np.array(newItem).T
+        # append new sample.
+        newData.append(newItem)
+
+    if _DEBUG_:
+        print('[DEBUG] newData:')
+        print(newData[0:3])
+
+    # print.
+    print('[INFO] <UpdateTokenTypes> Update ' + str(len(newData)) + ' feature data with ' + str(len(newData[0])) + ' * ' + str(len(newData[0][0])) + ' matrix.')
+
+    return np.array(newData)
+
+
+def SplitData():
+    return
 
 if __name__ == '__main__':
     main()
