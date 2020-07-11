@@ -25,18 +25,18 @@ nDatPath = dataPath + '/negatives/'
 tempPath = rootPath + '/temp/'
 
 # hyper-parameters. (affect GPU memory)
-_DiffEmbedDim_ = 32
-_DiffMaxLen_ = 100
-_TRnnHidSiz_ = 16
+_DiffEmbedDim_  = 32
+_DiffMaxLen_    = 100
+_TRnnHidSiz_    = 16
 # hyper-parameters. (affect training speed)
-_TRnnBatchSz_ = 16
-_TRnnLearnRt_ = 0.0001
+_TRnnBatchSz_   = 16
+_TRnnLearnRt_   = 0.0001
 # hyper-parameters. (unnecessary to modify)
-_DiffExtraDim_ = 2
-_TRnnHidLay_ = 1
-_TRnnMaxEpoch_ = 1000
-_TRnnPerEpoch_ = 1
-_TRnnJudEpoch_ = 1
+_DiffExtraDim_  = 2
+_TRnnHidLay_    = 1
+_TRnnMaxEpoch_  = 1000
+_TRnnPerEpoch_  = 1
+_TRnnJudEpoch_  = 1
 
 # control
 _DEBUG_ = 0 # 0 : release
