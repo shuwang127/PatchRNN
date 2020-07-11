@@ -25,17 +25,18 @@ nDatPath = dataPath + '/negatives/'
 tempPath = rootPath + '/temp/'
 
 # hyper-parameters. (affect GPU memory)
-_DiffEmbedDim_ = 64
+_DiffEmbedDim_ = 32
 _DiffMaxLen_ = 100
-_TRnnHidSiz_ = 32
+_TRnnHidSiz_ = 16
 # hyper-parameters. (affect training speed)
 _TRnnBatchSz_ = 16
 _TRnnLearnRt_ = 0.0001
 # hyper-parameters. (unnecessary to modify)
 _DiffExtraDim_ = 2
 _TRnnHidLay_ = 1
-_TRnnMaxEpoch_ = 10 #
-_TRnnPerEpoch_ = 2  #
+_TRnnMaxEpoch_ = 1000
+_TRnnPerEpoch_ = 1
+_TRnnJudEpoch_ = 1
 
 # control
 _DEBUG_ = 0 # 0 : release
@@ -662,18 +663,29 @@ class TextRNN(nn.Module):
         final_out = self.fc(feature_map)    # batch_size * class_num
         return self.softmax(final_out)      # batch_size * class_num
 
-def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learnRate=0.001):
+def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learnRate=0.001, dTest=None, lTest=None):
+
+    # get the mark of the test dataset.
+    if dTest is None: dTest = []
+    if lTest is None: lTest = []
+    markTest = 1 if (len(dTest)) & (len(lTest)) else 0
 
     # tensor data processing.
     xTrain = torch.from_numpy(dTrain).long().cuda()
     yTrain = torch.from_numpy(lTrain).long().cuda()
     xValid = torch.from_numpy(dValid).long().cuda()
     yValid = torch.from_numpy(lValid).long().cuda()
+    if (markTest):
+        xTest = torch.from_numpy(dTest).long().cuda()
+        yTest = torch.from_numpy(lTest).long().cuda()
     # batch size processing.
     train = torchdata.TensorDataset(xTrain, yTrain)
     trainloader = torchdata.DataLoader(train, batch_size=batchsize, shuffle=False)
     valid = torchdata.TensorDataset(xValid, yValid)
     validloader = torchdata.DataLoader(valid, batch_size=batchsize, shuffle=False)
+    if (markTest):
+        test = torchdata.TensorDataset(xTest, yTest)
+        testloader = torchdata.DataLoader(test, batch_size=batchsize, shuffle=False)
 
     # build the model of recurrent neural network.
     preWeights = torch.from_numpy(preWeights)
@@ -740,26 +752,130 @@ def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learn
         accValid = accuracy_score(labels, predictions) * 100
         accList.append(accValid)
 
+        if (markTest):
+            # testing phase.
+            model.eval()
+            predictions = []
+            labels = []
+            with torch.no_grad():
+                for iter, (data, label) in enumerate(testloader):
+                    data = data.to(device)
+                    label = label.contiguous().view(-1)
+                    label = label.to(device)
+                    yhat = model.forward(data)  # get output
+                    # statistic
+                    preds = yhat.max(1)[1]
+                    predictions.extend(preds.int().tolist())
+                    labels.extend(label.int().tolist())
+                    torch.cuda.empty_cache()
+            gc.collect()
+            torch.cuda.empty_cache()
+            # test accuracy.
+            accTest = accuracy_score(labels, predictions) * 100
+
         # output information.
-        if 0 == (epoch + 1) % _TRnnPerEpoch_:
-            print('[Epoch %03d] loss: %.3f, train acc: %.3f%%, valid acc: %.3f%%.' % (epoch + 1, lossTrain, accTrain, accValid))
+        if (0 == (epoch + 1) % _TRnnPerEpoch_):
+            strAcc = '[Epoch {:03X}] loss: {:.3}, train acc: {:.3f}%, valid acc: {:.3f}%.'.format(epoch + 1, lossTrain, accTrain, accValid)
+            if (markTest):
+                strAcc = strAcc[:-1] + ', test acc: {:.3f}%.'.format(accTest)
+            print(strAcc)
         # save the best model.
-        if accList[-1] > max(accList[0:-1]):
+        if (accList[-1] > max(accList[0:-1])):
             torch.save(model.state_dict(), tempPath + '/model_TextRNN.pth')
         # stop judgement.
-        if (epoch + 1) >= _TRnnPerEpoch_ and accList[-1] < min(accList[-_TRnnPerEpoch_:-1]):
+        if (epoch >= _TRnnJudEpoch_) and (accList[-1] < min(accList[-1-_TRnnJudEpoch_:-1])):
             break
 
     # load best model.
-    model.load_state_dict(torch.load(tempPath + '/model.pth'))
+    model.load_state_dict(torch.load(tempPath + '/model_TextRNN.pth'))
+    print('[INFO] <TextRNNTrain> Finish training TextRNN model. (Best model: ' + tempPath + '/model_TextRNN.pth)')
 
     return model
 
+def TextRNNTest(model, dTest, lTest, batchsize=64):
+    # tensor data processing.
+    xTest = torch.from_numpy(dTest).long().cuda()
+    yTest = torch.from_numpy(lTest).long().cuda()
+    # batch size processing.
+    test = torchdata.TensorDataset(xTest, yTest)
+    testloader = torchdata.DataLoader(test, batch_size=batchsize, shuffle=False)
+    # load the model of recurrent neural network.
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    # testing phase.
+    model.eval()
+    predictions = []
+    labels = []
+    with torch.no_grad():
+        for iter, (data, label) in enumerate(testloader):
+            data = data.to(device)
+            label = label.contiguous().view(-1)
+            label = label.to(device)
+            yhat = model.forward(data)  # get output
+            # statistic
+            preds = yhat.max(1)[1]
+            predictions.extend(preds.int().tolist())
+            labels.extend(label.int().tolist())
+            torch.cuda.empty_cache()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # testing accuracy.
+    accuracy = accuracy_score(labels, predictions) * 100
+    predictions = [[item] for item in predictions]
+
+    return predictions, accuracy
+
+def OutputEval(predictions, labels, method=''):
+
+    # evaluate the predictions with gold labels, and get accuracy and confusion matrix.
+    def Evaluation(predictions, labels):
+
+        # parameter settings.
+        D = len(labels)
+        cls = 2
+
+        # get confusion matrix.
+        confusion = np.zeros((cls, cls))
+        for ind in range(D):
+            nRow = int(predictions[ind][0])
+            nCol = int(labels[ind][0])
+            confusion[nRow][nCol] += 1
+
+        # get accuracy.
+        accuracy = 0
+        for ind in range(cls):
+            accuracy += confusion[ind][ind]
+        accuracy /= D
+
+        return accuracy, confusion
+
+    # get accuracy and confusion matrix.
+    accuracy, confusion = Evaluation(predictions, labels)
+
+    # output on screen and to file.
+    print('       -------------------------------------------')
+    if len(method): print('       method   : ' +  method)
+    print('       accuracy : %.3f%%' % (accuracy * 100))
+    print('       confusion matrix :      (actual)')
+    print('                           Neg         Pos')
+    print('       (predicted) Neg     %-5d(TN)   %-5d(FN)' % (confusion[0][0], confusion[0][1]))
+    print('                   Pos     %-5d(FP)   %-5d(TP)' % (confusion[1][0], confusion[1][1]))
+    print('       -------------------------------------------')
+
+    return accuracy, confusion
+
 if __name__ == '__main__':
-    main()
-    #diffData = np.load(tempPath + '/newdata_1000.npy')
-    #diffLabels = np.load(tempPath + '/nlabels_1000.npy')
-    #dataRest, labelRest, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
-    #dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
-    #diffPreWeights = np.load(tempPath + '/preWeights.npy')
-    #TextRNNTrain(dataTrain, labelTrain, dataValid, labelValid, preWeights=diffPreWeights, batchsize=_TRnnBatchSz_,learnRate=_TRnnLearnRt_)
+    #main()
+    diffData = np.load(tempPath + '/newdata_100.npy')
+    diffLabels = np.load(tempPath + '/nlabels_100.npy')
+    dataRest, labelRest, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
+    dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
+    diffPreWeights = np.load(tempPath + '/preWeights.npy')
+    model = TextRNNTrain(dataTrain, labelTrain, dataValid, labelValid, preWeights=diffPreWeights, batchsize=_TRnnBatchSz_,learnRate=_TRnnLearnRt_)
+    #preWeights = torch.from_numpy(diffPreWeights)
+    #model = TextRNN(preWeights, hiddenSize=_TRnnHidSiz_, hiddenLayers=_TRnnHidLay_)
+    #model.load_state_dict(torch.load(tempPath + '/model_TextRNN.pth'))
+    predictions, accuracy = TextRNNTest(model, dataTest, labelTest)
+    accuracy, confusion = OutputEval(predictions, labelTest, 'TextRNN')
