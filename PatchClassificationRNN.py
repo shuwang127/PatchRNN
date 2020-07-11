@@ -2,7 +2,10 @@
     PatchClassificationRNN
 '''
 
+#!pip install clang
+
 import os
+os.system('pip install clang')
 import gc
 import math
 import random
@@ -18,6 +21,7 @@ from sklearn.metrics import accuracy_score
 
 # file path.
 rootPath = './'
+#rootPath = './drive/My Drive/Colab Notebooks/'
 dataPath = rootPath + '/data/'
 sDatPath = dataPath + '/security_patch/'
 pDatPath = dataPath + '/positives/'
