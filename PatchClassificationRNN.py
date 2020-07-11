@@ -41,10 +41,12 @@ _TRnnJudEpoch_ = 1
 # control
 _DEBUG_ = 0 # 0 : release
             # 1 : debug
-_LOCK_ = 0  # 0 : unlocked - create random split set.
-            # 1 : locked   - use the saved split set.
+_LOCK_ = 0  # 0 : unlocked - create random split sets.
+            # 1 : locked   - use the saved split sets.
+_MODEL_ = 0 # 0 : unlocked - train a new model.
+            # 1 : locked   - load the saved model.
 
-def main():
+def demoTextRNN():
     # load data.
     if (not os.path.exists(tempPath + '/data.npy')): # | (not _DEBUG_)
         dataLoaded = ReadData()
@@ -80,8 +82,17 @@ def main():
           + str(len(dataTest)) + ' TEST data. (Total: ' + str(len(dataTrain)+len(dataValid)+len(dataTest)) + ')')
 
     # TextRNNTrain
-    TextRNNTrain(dataTrain, labelTrain, dataValid, labelValid, preWeights=diffPreWeights, batchsize=_TRnnBatchSz_, learnRate=_TRnnLearnRt_)
+    if (_MODEL_) & (os.path.exists(tempPath + '/model_TextRNN.pth')):
+        preWeights = torch.from_numpy(diffPreWeights)
+        model = TextRNN(preWeights, hiddenSize=_TRnnHidSiz_, hiddenLayers=_TRnnHidLay_)
+        model.load_state_dict(torch.load(tempPath + '/model_TextRNN.pth'))
+    else:
+        model = TextRNNTrain(dataTrain, labelTrain, dataValid, labelValid, preWeights=diffPreWeights,
+                             batchsize=_TRnnBatchSz_, learnRate=_TRnnLearnRt_, dTest=dataTest, lTest=labelTest)
+
     # TextRNNTest
+    predictions, accuracy = TextRNNTest(model, dataTest, labelTest, batchsize=_TRnnBatchSz_)
+    _, confusion = OutputEval(predictions, labelTest, 'TextRNN')
 
     return
 
@@ -867,15 +878,18 @@ def OutputEval(predictions, labels, method=''):
     return accuracy, confusion
 
 if __name__ == '__main__':
-    #main()
-    diffData = np.load(tempPath + '/newdata_100.npy')
-    diffLabels = np.load(tempPath + '/nlabels_100.npy')
-    dataRest, labelRest, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
-    dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
-    diffPreWeights = np.load(tempPath + '/preWeights.npy')
-    model = TextRNNTrain(dataTrain, labelTrain, dataValid, labelValid, preWeights=diffPreWeights, batchsize=_TRnnBatchSz_,learnRate=_TRnnLearnRt_)
-    #preWeights = torch.from_numpy(diffPreWeights)
-    #model = TextRNN(preWeights, hiddenSize=_TRnnHidSiz_, hiddenLayers=_TRnnHidLay_)
-    #model.load_state_dict(torch.load(tempPath + '/model_TextRNN.pth'))
-    predictions, accuracy = TextRNNTest(model, dataTest, labelTest)
-    accuracy, confusion = OutputEval(predictions, labelTest, 'TextRNN')
+    demoTextRNN()
+    #diffData = np.load(tempPath + '/newdata_' + str(_DiffMaxLen_) + '.npy')
+    #diffLabels = np.load(tempPath + '/nlabels_' + str(_DiffMaxLen_) + '.npy')
+    #dataRest, labelRest, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
+    #dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
+    #diffPreWeights = np.load(tempPath + '/preWeights.npy')
+    #if (_MODEL_) & (os.path.exists(tempPath + '/model_TextRNN.pth')):
+    #    preWeights = torch.from_numpy(diffPreWeights)
+    #    model = TextRNN(preWeights, hiddenSize=_TRnnHidSiz_, hiddenLayers=_TRnnHidLay_)
+    #    model.load_state_dict(torch.load(tempPath + '/model_TextRNN.pth'))
+    #else:
+    #    model = TextRNNTrain(dataTrain, labelTrain, dataValid, labelValid, preWeights=diffPreWeights,
+    #                         batchsize=_TRnnBatchSz_, learnRate=_TRnnLearnRt_, dTest=dataTest, lTest=labelTest)
+    #predictions, accuracy = TextRNNTest(model, dataTest, labelTest, batchsize=_TRnnBatchSz_)
+    #_, confusion = OutputEval(predictions, labelTest, 'TextRNN')
