@@ -967,11 +967,17 @@ def OutputEval(predictions, labels, method=''):
 
     # get accuracy and confusion matrix.
     accuracy, confusion = Evaluation(predictions, labels)
+    precision = confusion[1][1] / (confusion[1][0] + confusion[1][1]) if (confusion[1][0] + confusion[1][1]) else 0
+    recall = confusion[1][1] / (confusion[0][1] + confusion[1][1]) if (confusion[0][1] + confusion[1][1]) else 0
+    F1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0
 
     # output on screen and to file.
     print('       -------------------------------------------')
-    if len(method): print('       method   : ' +  method)
-    print('       accuracy : %.3f%%' % (accuracy * 100))
+    if len(method): print('       method    : ' +  method)
+    print('       accuracy  : %.3f%%' % (accuracy * 100))
+    print('       precision : %.3f%%' % (precision * 100))
+    print('       recall    : %.3f%%' % (recall * 100))
+    print('       F1 score  : %.3f' % (F1))
     print('       confusion matrix :      (actual)')
     print('                           Neg         Pos')
     print('       (predicted) Neg     %-5d(TN)   %-5d(FN)' % (confusion[0][0], confusion[0][1]))
