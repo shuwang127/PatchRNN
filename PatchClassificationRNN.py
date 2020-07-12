@@ -973,11 +973,13 @@ def OutputEval(predictions, labels, method=''):
 
     # output on screen and to file.
     print('       -------------------------------------------')
-    if len(method): print('       method    : ' +  method)
-    print('       accuracy  : %.3f%%' % (accuracy * 100))
-    print('       precision : %.3f%%' % (precision * 100))
-    print('       recall    : %.3f%%' % (recall * 100))
-    print('       F1 score  : %.3f' % (F1))
+    print('       method           :  ' +  method) if len(method) else print('', end='')
+    print('       accuracy  (ACC)  :  %.3f%%' % (accuracy * 100))
+    print('       precision (P)    :  %.3f%%' % (precision * 100))
+    print('       recall    (R)    :  %.3f%%' % (recall * 100))
+    print('       F1 score  (F1)   :  %.3f' % (F1))
+    print('       fall-out  (FPR)  :  %.3f%%' % (confusion[1][0] * 100 / (confusion[1][0] + confusion[0][0])))
+    print('       miss rate (FNR)  :  %.3f%%' % (confusion[0][1] * 100 / (confusion[0][1] + confusion[1][1])))
     print('       confusion matrix :      (actual)')
     print('                           Neg         Pos')
     print('       (predicted) Neg     %-5d(TN)   %-5d(FN)' % (confusion[0][0], confusion[0][1]))
