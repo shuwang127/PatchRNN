@@ -52,18 +52,18 @@ nDatPath = dataPath + '/negatives/'
 tempPath = rootPath + '/temp/'
 
 # hyper-parameters. (affect GPU memory)
-_DiffEmbedDim_  = 32
-_DiffMaxLen_    = 100
-_TRnnHidSiz_    = 16
+_DiffEmbedDim_  = 32        # 128
+_DiffMaxLen_    = 100       # 200(0.7), 314(0.8), 609(0.9), 1100(0.95), 2200(0.98), 3289(0.99), 5000(0.995), 10000(0.9997)
+_TRnnHidSiz_    = 16        # 32
 # hyper-parameters. (affect training speed)
-_TRnnBatchSz_   = 16
-_TRnnLearnRt_   = 0.0001
+_TRnnBatchSz_   = 16        # 128
+_TRnnLearnRt_   = 0.0001    # 0.0001
 # hyper-parameters. (unnecessary to modify)
-_DiffExtraDim_  = 2
-_TRnnHidLay_    = 1
-_TRnnMaxEpoch_  = 1000
-_TRnnPerEpoch_  = 1
-_TRnnJudEpoch_  = 1
+_DiffExtraDim_  = 2         # 2
+_TRnnHidLay_    = 1         # 1
+_TRnnMaxEpoch_  = 1000      # 1000
+_TRnnPerEpoch_  = 1         # 1
+_TRnnJudEpoch_  = 10        # 10
 
 # control
 _DEBUG_ = 0 # 0 : release
@@ -137,6 +137,7 @@ def ReadData():
         :return: commitMsg - commit message.
         ['line', 'line', ...]
         '''
+
         fp = open(filename, encoding='utf-8', errors='ignore')  # get file point.
         lines = fp.readlines()  # read all lines.
         #numLines = len(lines)   # get the line number.
@@ -186,6 +187,7 @@ def ReadData():
         :return: diffLines - diff code.
         [['line', ...], ['line', ...], ...]
         '''
+
         fp = open(filename, encoding='utf-8', errors='ignore')  # get file point.
         lines = fp.readlines()  # read all lines.
         numLines = len(lines)  # get the line number.
@@ -288,6 +290,7 @@ def GetDiffProps(data):
         :param line: a code line.
         :return: process line.
         '''
+
         return ' ' + line[1:] if (line[0] == '+') or (line[0] == '-') else line
 
     def GetClangTokens(line):
@@ -298,6 +301,7 @@ def GetDiffProps(data):
                  tokenTypes - [tkt, tkt, ...] (tkt: 1, 2, 3, 4, 5)
                  diffTypes - [dft, dft, ...] (dft: -1, 0, 1)
         '''
+
         # remove non-ascii
         line = line.encode("ascii", "ignore").decode()
 
@@ -335,6 +339,7 @@ def GetDiffProps(data):
         :param line: a code line.
         :return: tokens - ['tk', 'tk', ...] ('tk': string)
         '''
+
         tknzr = TweetTokenizer()
         tokens = tknzr.tokenize(RemoveSign(line))
         return tokens
@@ -347,6 +352,7 @@ def GetDiffProps(data):
                  lineStrB - The before-version code lines.
                  lineStrA - The after-version code lines.
         '''
+
         lineStr = ''
         lineStrB = ''
         lineStrA = ''
@@ -369,6 +375,7 @@ def GetDiffProps(data):
                  tokenTypes - token types [tkt, tkt, ...] (tkt: 1, 2, 3, 4, 5)
                  diffTypes - diff types [dft, dft, ...] (dft: -1, 0, 1)
         '''
+
         # initialize.
         tokens = []
         tokenTypes = []
@@ -483,6 +490,7 @@ def GetDiffEmbed(tokenDict, embedSize):
 
     # number of the vocabulary tokens.
     numTokens = len(tokenDict)
+
     # initialize the pre-trained weights for embedding layer.
     preWeights = np.zeros((numTokens, embedSize))
     for index in range(numTokens):
@@ -523,6 +531,7 @@ def GetDiffMapping(props, maxLen, tokenDict):
             dList.extend(pad for i in range(length - len(dList)))
         elif len(dList) > length:
             dList = dList[0:length]
+
         return dList
 
     # initialize the data and labels.
@@ -668,6 +677,7 @@ class TextRNN(nn.Module):
     '''
     TextRNN : convert a text data into a predicted label.
     '''
+
     def __init__(self, preWeights, hiddenSize=32, hiddenLayers=1):
         '''
         define each layer in the network model.
@@ -675,6 +685,7 @@ class TextRNN(nn.Module):
         :param hiddenSize: node number in the hidden layer.
         :param hiddenLayers: number of hidden layer.
         '''
+
         super(TextRNN, self).__init__()
         # parameters.
         class_num = 2
@@ -698,6 +709,7 @@ class TextRNN(nn.Module):
         :return: self.softmax(final_out) - predictions.
         [[0.3, 0.7], [0.2, 0.8], ...]
         '''
+
         # x             batch_size * diff_length * feature_dim
         embeds = self.embedding(x[:,:,0])
         # embeds        batch_size * diff_length * embedding_dim
@@ -744,6 +756,7 @@ def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learn
     if (markTest):
         xTest = torch.from_numpy(dTest).long().cuda()
         yTest = torch.from_numpy(lTest).long().cuda()
+
     # batch size processing.
     train = torchdata.TensorDataset(xTrain, yTrain)
     trainloader = torchdata.DataLoader(train, batch_size=batchsize, shuffle=False)
@@ -752,6 +765,13 @@ def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learn
     if (markTest):
         test = torchdata.TensorDataset(xTest, yTest)
         testloader = torchdata.DataLoader(test, batch_size=batchsize, shuffle=False)
+
+    # get training weights.
+    lbTrain = [item for sublist in lTrain.tolist() for item in sublist]
+    weights = []
+    for lb in range(2):
+        weights.append(1 - lbTrain.count(lb) / len(lbTrain))
+    lbWeights = torch.FloatTensor(weights).cuda()
 
     # build the model of recurrent neural network.
     preWeights = torch.from_numpy(preWeights)
@@ -763,7 +783,7 @@ def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learn
     # optimizing with stochastic gradient descent.
     optimizer = optim.Adam(model.parameters(), lr=learnRate)
     # seting loss function as mean squared error.
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(weight=lbWeights)
     # memory
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
@@ -878,9 +898,11 @@ def TextRNNTest(model, dTest, lTest, batchsize=64):
     # tensor data processing.
     xTest = torch.from_numpy(dTest).long().cuda()
     yTest = torch.from_numpy(lTest).long().cuda()
+
     # batch size processing.
     test = torchdata.TensorDataset(xTest, yTest)
     testloader = torchdata.DataLoader(test, batch_size=batchsize, shuffle=False)
+
     # load the model of recurrent neural network.
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
