@@ -1,12 +1,12 @@
 # PatchClassificationRNN
 
-Task: Security Patch Classification using RNN model.
+**Task**: Security Patch Classification using RNN model.
 
-Developer: Shu Wang
+**Developer**: Shu Wang
 
-Date: 2020-07-11
+**Date**: 2020-07-11
 
-File Structure:
+**File Structure**:
 
     |-- PatchClearance
         |-- analysis                        # task analysis.
@@ -21,17 +21,14 @@ File Structure:
         |-- PatchClassificationRNN.ipynb    # main entrance. (Google Colaboratory)
         |-- PatchClassificationRNN.py       # main entrance. (Local)
 
-    Dependencies:
-        clang >= 6.0.0.2
-        torch >= 1.2.0+cu92
-        nltk  >= 3.3
+**Dependencies**:
+```shell script
+pip install clang >= 6.0.0.2
+pip install torch == 1.2.0 torchvision == 0.4.0
+pip install nltk  >= 3.3
+```
 
-Usage:
+**Usage**:
 ```shell script
 python PatchClassificationRNN.py
 ```
-    
-
-```shell script
-pip install clang
-``` 
