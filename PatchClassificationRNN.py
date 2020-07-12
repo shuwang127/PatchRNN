@@ -4,17 +4,17 @@
     Date: 2020-07-11
     File Structure:
     PatchClearance
-        |-- analysis                        # found samples need to be judged.
-        |-- data
-                |-- negatives
-                |-- positives
-                |-- security_patch
+        |-- analysis                        # task analysis.
+        |-- data                            # data storage.
+                |-- negatives                   # negative samples.
+                |-- positives                   # positive samples.
+                |-- security_patch              # positive samples. (official)
         |-- temp                            # temporary stored variables.
-                |-- data.npy
-                |-- props.npy
-                |-- ...
-        |-- PatchClassificationRNN.ipynb    # extract features for random_commit and security_patch.
-        |-- PatchClassificationRNN.py       # extract features for random_commit and security_patch.
+                |-- data.npy                    # raw data. (important)
+                |-- props.npy                   # properties of diff code. (important)
+                |-- ...                         # other temporary files. (trivial)
+        |-- PatchClassificationRNN.ipynb    # main entrance. (Google Colaboratory)
+        |-- PatchClassificationRNN.py       # main entrance. (Local)
     Usage:
         python PatchClassificationRNN.py
     Dependencies:
@@ -24,8 +24,8 @@
 '''
 
 # environment settings.
-_COLAB_ = 0 # 0 : local
-            # 1 : Google Colab
+_COLAB_ = 0 # 0 : Local environment.
+            # 1 : Google Colaboratory.
 
 # dependencies.
 import os
