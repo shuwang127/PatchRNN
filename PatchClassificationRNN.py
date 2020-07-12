@@ -1,9 +1,33 @@
 '''
-    PatchClassificationRNN
+    PatchClassificationRNN: Security Patch Classification using RNN model.
+    Developer: Shu Wang
+    Date: 2020-07-11
+    File Structure:
+    PatchClearance
+        |-- analysis                        # found samples need to be judged.
+        |-- data
+                |-- negatives
+                |-- positives
+                |-- security_patch
+        |-- temp                            # temporary stored variables.
+                |-- data.npy
+                |-- props.npy
+                |-- ...
+        |-- PatchClassificationRNN.ipynb    # extract features for random_commit and security_patch.
+        |-- PatchClassificationRNN.py       # extract features for random_commit and security_patch.
+    Usage:
+        python PatchClassificationRNN.py
+    Dependencies:
+        clang >= 6.0.0.2
+        torch >= 1.2.0+cu92
+        nltk  >= 3.3
 '''
 
-#!pip install clang
+# environment settings.
+_COLAB_ = 0 # 0 : local
+            # 1 : Google Colab
 
+# dependencies.
 import os
 os.system('pip install clang')
 import gc
@@ -20,8 +44,7 @@ import torch.utils.data as torchdata
 from sklearn.metrics import accuracy_score
 
 # file path.
-rootPath = './'
-#rootPath = './drive/My Drive/Colab Notebooks/'
+rootPath = './drive/My Drive/Colab Notebooks/' if (_COLAB_) else './'
 dataPath = rootPath + '/data/'
 sDatPath = dataPath + '/security_patch/'
 pDatPath = dataPath + '/positives/'
@@ -642,7 +665,16 @@ def SplitData(data, labels, setType, rate=0.2):
     return dsetRest, lsetRest, dset, lset
 
 class TextRNN(nn.Module):
+    '''
+    TextRNN : convert a text data into a predicted label.
+    '''
     def __init__(self, preWeights, hiddenSize=32, hiddenLayers=1):
+        '''
+        define each layer in the network model.
+        :param preWeights: tensor pre-trained weights for embedding layer.
+        :param hiddenSize: node number in the hidden layer.
+        :param hiddenLayers: number of hidden layer.
+        '''
         super(TextRNN, self).__init__()
         # parameters.
         class_num = 2
@@ -660,6 +692,12 @@ class TextRNN(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x):
+        '''
+        convert inputs to predictions.
+        :param x: input tensor. dimension: batch_size * diff_length * feature_dim.
+        :return: self.softmax(final_out) - predictions.
+        [[0.3, 0.7], [0.2, 0.8], ...]
+        '''
         # x             batch_size * diff_length * feature_dim
         embeds = self.embedding(x[:,:,0])
         # embeds        batch_size * diff_length * embedding_dim
@@ -679,6 +717,19 @@ class TextRNN(nn.Module):
         return self.softmax(final_out)      # batch_size * class_num
 
 def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learnRate=0.001, dTest=None, lTest=None):
+    '''
+    Train the TextRNN model.
+    :param dTrain: training data. [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, {-1~1}], ...], ...]
+    :param lTrain: training label. [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, {-1~1}], ...], ...]
+    :param dValid: validation data. [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, {-1~1}], ...], ...]
+    :param lValid: validation label. [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, {-1~1}], ...], ...]
+    :param preWeights: pre-trained weights for embedding layer.
+    :param batchsize: number of samples in a batch.
+    :param learnRate: learning rate.
+    :param dTest: test data. [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, {-1~1}], ...], ...]
+    :param lTest: test label. [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, {-1~1}], ...], ...]
+    :return: model - the TextRNN model.
+    '''
 
     # get the mark of the test dataset.
     if dTest is None: dTest = []
@@ -726,9 +777,11 @@ def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learn
         predictions = []
         labels = []
         for iter, (data, label) in enumerate(trainloader):
+            # data conversion.
             data = data.to(device)
             label = label.contiguous().view(-1)
             label = label.to(device)
+            # back propagation.
             optimizer.zero_grad()  # set the gradients to zero.
             yhat = model.forward(data)  # get output
             loss = criterion(yhat, label)
@@ -752,9 +805,11 @@ def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learn
         labels = []
         with torch.no_grad():
             for iter, (data, label) in enumerate(validloader):
+                # data conversion.
                 data = data.to(device)
                 label = label.contiguous().view(-1)
                 label = label.to(device)
+                # forward propagation.
                 yhat = model.forward(data)  # get output
                 # statistic
                 preds = yhat.max(1)[1]
@@ -767,16 +822,18 @@ def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learn
         accValid = accuracy_score(labels, predictions) * 100
         accList.append(accValid)
 
+        # testing phase.
         if (markTest):
-            # testing phase.
             model.eval()
             predictions = []
             labels = []
             with torch.no_grad():
                 for iter, (data, label) in enumerate(testloader):
+                    # data conversion.
                     data = data.to(device)
                     label = label.contiguous().view(-1)
                     label = label.to(device)
+                    # forward propagation.
                     yhat = model.forward(data)  # get output
                     # statistic
                     preds = yhat.max(1)[1]
@@ -790,7 +847,7 @@ def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learn
 
         # output information.
         if (0 == (epoch + 1) % _TRnnPerEpoch_):
-            strAcc = '[Epoch {:03X}] loss: {:.3}, train acc: {:.3f}%, valid acc: {:.3f}%.'.format(epoch + 1, lossTrain, accTrain, accValid)
+            strAcc = '[Epoch {:03}] loss: {:.3}, train acc: {:.3f}%, valid acc: {:.3f}%.'.format(epoch + 1, lossTrain, accTrain, accValid)
             if (markTest):
                 strAcc = strAcc[:-1] + ', test acc: {:.3f}%.'.format(accTest)
             print(strAcc)
@@ -808,6 +865,16 @@ def TextRNNTrain(dTrain, lTrain, dValid, lValid, preWeights, batchsize=64, learn
     return model
 
 def TextRNNTest(model, dTest, lTest, batchsize=64):
+    '''
+    Test the TextRNN model.
+    :param model: deep learning model.
+    :param dTest: test data.
+    :param lTest: test label.
+    :param batchsize: number of samples in a batch
+    :return: predictions - predicted labels. [[0], [1], ...]
+             accuracy - the total test accuracy. numeric
+    '''
+
     # tensor data processing.
     xTest = torch.from_numpy(dTest).long().cuda()
     yTest = torch.from_numpy(lTest).long().cuda()
@@ -824,9 +891,11 @@ def TextRNNTest(model, dTest, lTest, batchsize=64):
     labels = []
     with torch.no_grad():
         for iter, (data, label) in enumerate(testloader):
+            # data conversion.
             data = data.to(device)
             label = label.contiguous().view(-1)
             label = label.to(device)
+            # forward propagation.
             yhat = model.forward(data)  # get output
             # statistic
             preds = yhat.max(1)[1]
@@ -843,6 +912,14 @@ def TextRNNTest(model, dTest, lTest, batchsize=64):
     return predictions, accuracy
 
 def OutputEval(predictions, labels, method=''):
+    '''
+    Output the evaluation results.
+    :param predictions: predicted labels. [[0], [1], ...]
+    :param labels: ground truth labels. [[1], [1], ...]
+    :param method: method name. string
+    :return: accuracy - the total accuracy. numeric
+             confusion - confusion matrix [[1000, 23], [12, 500]]
+    '''
 
     # evaluate the predictions with gold labels, and get accuracy and confusion matrix.
     def Evaluation(predictions, labels):
