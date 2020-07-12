@@ -1,6 +1,6 @@
 # PatchClassificationRNN
 
-PatchClassificationRNN: Security Patch Classification using RNN model.
+Task: Security Patch Classification using RNN model.
 
 Developer: Shu Wang
 
@@ -21,8 +21,16 @@ File Structure:
         |-- PatchClassificationRNN.ipynb    # main entrance. (Google Colaboratory)
         |-- PatchClassificationRNN.py       # main entrance. (Local)
 
+    Dependencies:
+        clang >= 6.0.0.2
+        torch >= 1.2.0+cu92
+        nltk  >= 3.3
+
 Usage:
-    python PatchClassificationRNN.py
+```shell script
+python PatchClassificationRNN.py
+```
+    
 
 ```shell script
 pip install clang
