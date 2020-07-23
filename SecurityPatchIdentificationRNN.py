@@ -62,7 +62,7 @@ _DiffMaxLen_    = 100       # 200(0.7), 314(0.8), 609(0.9), 1100(0.95), 2200(0.9
 _TRnnHidSiz_    = 16        # 32
 _MsgEmbedDim_   = 128       # 128
 _MsgMaxLen_     = 200       # 54(0.9), 78(0.95), 130(0.98), 187(0.99), 268(0.995), 356(0.998), 516(0.999), 1434(1)
-_MRnnHidSiz_    = 16        # 32
+_MRnnHidSiz_    = 16        # 16
 # hyper-parameters. (affect training speed)
 _TRnnBatchSz_   = 16        # 128
 _TRnnLearnRt_   = 0.0001    # 0.0001
@@ -1030,9 +1030,16 @@ def demoCommitMsg():
     # split data into rest/test dataset.
     mdataTrain, mlabelTrain, mdataTest, mlabelTest = SplitData(msgData, msgLabels, 'test', rate=0.2)
 
-    model = MsgRNNTrain(mdataTrain, mlabelTrain, mdataTest, mlabelTest, msgPreWeights,
-                batchsize=_MRnnBatchSz_, learnRate=_MRnnLearnRt_, dTest=mdataTest, lTest=mlabelTest)
+    # MsgRNNTrain
+    if (_MODEL_) & (os.path.exists(tempPath + '/model_MsgRNN.pth')):
+        preWeights = torch.from_numpy(msgPreWeights)
+        model = TextRNN(preWeights, hiddenSize=_MRnnHidSiz_, hiddenLayers=_MRnnHidLay_)
+        model.load_state_dict(torch.load(tempPath + '/model_MsgRNN.pth'))
+    else:
+        model = MsgRNNTrain(mdataTrain, mlabelTrain, mdataTest, mlabelTest, msgPreWeights,
+                            batchsize=_MRnnBatchSz_, learnRate=_MRnnLearnRt_, dTest=mdataTest, lTest=mlabelTest)
 
+    # MsgRNNTest
     predictions, accuracy = MsgRNNTest(model, mdataTest, mlabelTest, batchsize=_MRnnBatchSz_)
     _, confusion = OutputEval(predictions, mlabelTest, 'MsgRNN')
 
