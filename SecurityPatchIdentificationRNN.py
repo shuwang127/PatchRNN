@@ -90,6 +90,10 @@ _MODEL_ = 0 # 0 : unlocked - train a new model.
             # 1 : locked   - load the saved model.
 
 def demoTextRNN():
+    '''
+    demo program of using diff code to identify patches.
+    '''
+
     # load data.
     if (not os.path.exists(tempPath + '/data.npy')): # | (not _DEBUG_)
         dataLoaded = ReadData()
@@ -1005,6 +1009,10 @@ def OutputEval(predictions, labels, method=''):
     return accuracy, confusion
 
 def demoCommitMsg():
+    '''
+    demo program of using commit message to identify patches.
+    '''
+
     # load data.
     if (not os.path.exists(tempPath + '/data.npy')):  # | (not _DEBUG_)
         dataLoaded = ReadData()
@@ -1055,6 +1063,12 @@ def GetCommitMsgs(data):
     '''
 
     def GetMsgTokens(lines):
+        '''
+        Get the tokens from a commit message.
+        :param lines: commit message. [line, , ]
+        :return: tokensStem ['tk', , ]
+        '''
+
         # concatenate lines.
         # get the string of commit message.
         msg = ''
