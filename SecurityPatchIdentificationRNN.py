@@ -2,6 +2,8 @@
     SecurityPatchIdentificationRNN: Security Patch Identification using RNN model.
     Developer: Shu Wang
     Date: 2020-07-22
+    Version: S2020.07.22-V2
+    Description: patch identification using commit messages.
     File Structure:
     SecurityPatchIdentificationRNN
         |-- analysis                                # task analysis.
