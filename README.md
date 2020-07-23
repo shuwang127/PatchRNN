@@ -6,6 +6,10 @@
 
 **Date**: 2020-07-11
 
+**Version**: S2020.07.22-V2
+
+**Description**: patch identification using commit messages.
+
 **File Structure**:
 
     |-- SecurityPatchIdentificationRNN
