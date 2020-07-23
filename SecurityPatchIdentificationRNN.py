@@ -37,6 +37,8 @@ import gc
 import math
 import random
 import numpy as np
+import nltk
+nltk.download('stopwords')
 from nltk.tokenize import TweetTokenizer
 from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
@@ -66,7 +68,7 @@ _MRnnHidSiz_    = 16        # 16
 # hyper-parameters. (affect training speed)
 _TRnnBatchSz_   = 16        # 128
 _TRnnLearnRt_   = 0.0001    # 0.0001
-_MRnnBatchSz_   = 16        # 128
+_MRnnBatchSz_   = 128       # 128
 _MRnnLearnRt_   = 0.0001    # 0.0001
 # hyper-parameters. (unnecessary to modify)
 _DiffExtraDim_  = 2         # 2
