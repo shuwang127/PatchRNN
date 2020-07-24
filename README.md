@@ -4,11 +4,11 @@
 
 **Developer**: Shu Wang
 
-**Date**: 2020-07-22
+**Date**: 2020-07-23
 
-**Version**: S2020.07.22-V2
+**Version**: S2020.07.23-V3
 
-**Description**: patch identification using commit messages.
+**Description**: patch identification using both commit messages and normalized diff code.
 
 **File Structure**:
 
@@ -21,6 +21,7 @@
         |-- temp                                    # temporary stored variables.
                 |-- data.npy                            # raw data. (important)
                 |-- props.npy                           # properties of diff code. (important)
+                |-- msgs.npy                            # commit messages. (important)
                 |-- ...                                 # other temporary files. (trivial)
         |-- SecurityPatchIdentificationRNN.ipynb    # main entrance. (Google Colaboratory)
         |-- SecurityPatchIdentificationRNN.py       # main entrance. (Local)
