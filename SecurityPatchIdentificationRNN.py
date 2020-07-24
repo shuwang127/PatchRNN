@@ -59,14 +59,14 @@ nDatPath = dataPath + '/negatives/'
 tempPath = rootPath + '/temp/'
 
 # hyper-parameters. (affect GPU memory)
-_DiffEmbedDim_  = 32        # 128
+_DiffEmbedDim_  = 128        # 128
 _DiffMaxLen_    = 100       # 200(0.7), 314(0.8), 609(0.9), 1100(0.95), 2200(0.98), 3289(0.99), 5000(0.995), 10000(0.9997)
-_TRnnHidSiz_    = 16        # 32
+_TRnnHidSiz_    = 32        # 32
 _MsgEmbedDim_   = 128       # 128
 _MsgMaxLen_     = 200       # 54(0.9), 78(0.95), 130(0.98), 187(0.99), 268(0.995), 356(0.998), 516(0.999), 1434(1)
 _MRnnHidSiz_    = 16        # 16
 # hyper-parameters. (affect training speed)
-_TRnnBatchSz_   = 16        # 128
+_TRnnBatchSz_   = 128       # 128
 _TRnnLearnRt_   = 0.0001    # 0.0001
 _MRnnBatchSz_   = 128       # 128
 _MRnnLearnRt_   = 0.0001    # 0.0001
@@ -131,7 +131,7 @@ def demoTextRNN():
     # TextRNNTrain
     if (_MODEL_) & (os.path.exists(tempPath + '/model_TextRNN.pth')):
         preWeights = torch.from_numpy(diffPreWeights)
-        model = TextRNN(preWeights, hiddenSize=_TRnnHidSiz_, hiddenLayers=_TRnnHidLay_)
+        model = MsgRNN(preWeights, hiddenSize=_TRnnHidSiz_, hiddenLayers=_TRnnHidLay_)
         model.load_state_dict(torch.load(tempPath + '/model_TextRNN.pth'))
     else:
         model = TextRNNTrain(dataTrain, labelTrain, dataValid, labelValid, preWeights=diffPreWeights,
@@ -715,7 +715,8 @@ class TextRNN(nn.Module):
         self.embedding.load_state_dict({'weight': preWeights})
         self.embedding.weight.requires_grad = True
         # LSTM Layer
-        _DiffExtraDim_ = 6
+        #_DiffExtraDim_ = 6
+        if _DEBUG_: print(_DiffExtraDim_)
         self.lstm = nn.LSTM(input_size=embedDim+_DiffExtraDim_, hidden_size=hiddenSize, num_layers=hiddenLayers, bidirectional=True)
         # Fully-Connected Layer
         self.fc = nn.Linear(hiddenSize * hiddenLayers * 2, class_num)
@@ -1546,9 +1547,138 @@ def MsgRNNTest(model, dTest, lTest, batchsize=64):
 
     return predictions, accuracy
 
+def demoPatch():
+    '''
+    demo program of using both commit message and diff code to identify patches.
+    '''
+
+    # load data.
+    if (not os.path.exists(tempPath + '/data.npy')): # | (not _DEBUG_)
+        dataLoaded = ReadData()
+    else:
+        dataLoaded = np.load(tempPath + '/data.npy', allow_pickle=True)
+        print('[INFO] <ReadData> Load ' + str(len(dataLoaded)) + ' raw data from ' + tempPath + '/data.npy.')
+
+    # get the diff file properties.
+    if (not os.path.exists(tempPath + '/props.npy')):
+        diffProps = GetDiffProps(dataLoaded)
+    else:
+        diffProps = np.load(tempPath + '/props.npy', allow_pickle=True)
+        print('[INFO] <GetDiffProps> Load ' + str(len(diffProps)) + ' diff property data from ' + tempPath + '/props.npy.')
+    # normalize the tokens of identifiers, literals, and comments.
+    diffProps = NormalizeTokens(diffProps, normType=0)
+
+    # get the diff token vocabulary.
+    diffVocab, diffMaxLen = GetDiffVocab(diffProps)
+    # get the max diff length.
+    diffMaxLen = _DiffMaxLen_ if (diffMaxLen > _DiffMaxLen_) else diffMaxLen
+    # get the diff token dictionary.
+    diffDict = GetDiffDict(diffVocab)
+    # get pre-trained weights for embedding layer.
+    diffPreWeights = GetDiffEmbed(diffDict, _DiffEmbedDim_)
+    # get the mapping for feature data and labels.
+    diffData, diffLabels = GetDiffMapping(diffProps, diffMaxLen, diffDict)
+    # change the tokentypes into one-hot vector.
+    diffData = UpdateTokenTypes(diffData)
+
+    # split data into rest/test dataset.
+    dataTrain, labelTrain, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
+    # split data into train/valid dataset.
+    #dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
+    #print('[INFO] <main> Get ' + str(len(dataTrain)) + ' Train data, ' + str(len(dataValid)) + ' VALID data, '
+    #      + str(len(dataTest)) + ' TEST data. (Total: ' + str(len(dataTrain)+len(dataValid)+len(dataTest)) + ')')
+
+    # TextRNNTrain
+    if (_MODEL_) & (os.path.exists(tempPath + '/model_TextRNN.pth')):
+        preWeights = torch.from_numpy(diffPreWeights)
+        model = MsgRNN(preWeights, hiddenSize=_TRnnHidSiz_, hiddenLayers=_TRnnHidLay_)
+        model.load_state_dict(torch.load(tempPath + '/model_TextRNN.pth'))
+    else:
+        model = TextRNNTrain(dataTrain, labelTrain, dataTest, labelTest, preWeights=diffPreWeights,
+                             batchsize=_TRnnBatchSz_, learnRate=_TRnnLearnRt_, dTest=dataTest, lTest=labelTest)
+
+    # TextRNNTest
+    predictions, accuracy = TextRNNTest(model, dataTest, labelTest, batchsize=_TRnnBatchSz_)
+    _, confusion = OutputEval(predictions, labelTest, 'TextRNN')
+
+    return
+
+def NormalizeTokens(props, normType=0):
+    '''
+    normalize the tokens of identifiers, literals, and comments.
+    :param props: the features of diff code.
+    [[[tokens], [nums], [nums], 0/1], ...]
+    :param normType: 0 - only identify variable type and function type. VAR / FUNC
+                     1 - identify the identical variable and function.  VAR0, VAR1, ... / FUNC0, FUNC1, ...
+    :return: props - the normalized features of diff code.
+    [[[tokens], [nums], [nums], 0/1], ...]
+    '''
+
+    for item in props:
+        # get tokens and token types.
+        tokens = item[0]
+        tokenTypes = item[1]
+        numTokens = len(tokenTypes)
+        #print(tokens)
+        #print(tokenTypes)
+        #print(numTokens)
+
+
+        # normalize literals and comments, and separate identifiers into variables and functions.
+        markVar = list(np.zeros(numTokens, dtype=int))
+        markFuc = list(np.zeros(numTokens, dtype=int))
+        for n in range(numTokens):
+            # 2: IDENTIFIER, 3: LITERAL, 5: COMMENT
+            if 5 == tokenTypes[n]:
+                tokens[n] = 'COMMENT'
+            elif 3 == tokenTypes[n]:
+                tokens[n] = 'LITERAL'
+            elif 2 == tokenTypes[n]:
+                # separate variable name and function name.
+                if (n < numTokens-1):
+                    if (tokens[n+1] == '('):
+                        markFuc[n] = 1
+                    else:
+                        markVar[n] = 1
+                else:
+                    markVar[n] = 1
+        #print(tokens)
+        #print(markVar)
+        #print(markFuc)
+
+        # normalize variables and functions.
+        if (0 == normType):
+            for n in range(numTokens):
+                if 1 == markVar[n]:
+                    tokens[n] = 'VAR'
+                elif 1 == markFuc[n]:
+                    tokens[n] = 'FUNC'
+        elif (1 == normType):
+            # get variable dictionary.
+            varList = [tokens[idx] for idx, mark in enumerate(markVar) if mark == 1]
+            varVoc  = {}.fromkeys(varList)
+            varVoc  = list(varVoc.keys())
+            varDict = {tk: 'VAR' + str(idx) for idx, tk in enumerate(varVoc)}
+            # get function dictionary.
+            fucList = [tokens[idx] for idx, mark in enumerate(markFuc) if mark == 1]
+            fucVoc  = {}.fromkeys(fucList)
+            fucVoc  = list(fucVoc.keys())
+            fucDict = {tk: 'FUNC' + str(idx) for idx, tk in enumerate(fucVoc)}
+            #print(varDict)
+            #print(fucDict)
+            for n in range(numTokens):
+                if 1 == markVar[n]:
+                    tokens[n] = varDict[tokens[n]]
+                elif 1 == markFuc[n]:
+                    tokens[n] = fucDict[tokens[n]]
+    #print(tokens)
+
+    return props
+
 if __name__ == '__main__':
     #demoTextRNN()
-    demoCommitMsg()
+    #demoCommitMsg()
+    demoPatch()
     #diffData = np.load(tempPath + '/newdata_' + str(_DiffMaxLen_) + '.npy')
     #diffLabels = np.load(tempPath + '/nlabels_' + str(_DiffMaxLen_) + '.npy')
     #dataRest, labelRest, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
