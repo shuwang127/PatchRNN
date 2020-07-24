@@ -1,9 +1,9 @@
 '''
     SecurityPatchIdentificationRNN: Security Patch Identification using RNN model.
     Developer: Shu Wang
-    Date: 2020-07-22
-    Version: S2020.07.22-V2
-    Description: patch identification using commit messages.
+    Date: 2020-07-23
+    Version: S2020.07.23-V3
+    Description: patch identification using both commit messages and normalized diff code.
     File Structure:
     SecurityPatchIdentificationRNN
         |-- analysis                                # task analysis.
@@ -14,6 +14,7 @@
         |-- temp                                    # temporary stored variables.
                 |-- data.npy                            # raw data. (important)
                 |-- props.npy                           # properties of diff code. (important)
+                |-- msgs.npy                            # commit messages. (important)
                 |-- ...                                 # other temporary files. (trivial)
         |-- SecurityPatchIdentificationRNN.ipynb    # main entrance. (Google Colaboratory)
         |-- SecurityPatchIdentificationRNN.py       # main entrance. (Local)
@@ -59,8 +60,8 @@ nDatPath = dataPath + '/negatives/'
 tempPath = rootPath + '/temp/'
 
 # hyper-parameters. (affect GPU memory)
-_DiffEmbedDim_  = 128        # 128
-_DiffMaxLen_    = 100       # 200(0.7), 314(0.8), 609(0.9), 1100(0.95), 2200(0.98), 3289(0.99), 5000(0.995), 10000(0.9997)
+_DiffEmbedDim_  = 128       # 128
+_DiffMaxLen_    = 600       # 200(0.7), 314(0.8), 609(0.9), 1100(0.95), 2200(0.98), 3289(0.99), 5000(0.995), 10000(0.9997)
 _TRnnHidSiz_    = 32        # 32
 _MsgEmbedDim_   = 128       # 128
 _MsgMaxLen_     = 200       # 54(0.9), 78(0.95), 130(0.98), 187(0.99), 268(0.995), 356(0.998), 516(0.999), 1434(1)
