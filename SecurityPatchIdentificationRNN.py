@@ -126,7 +126,7 @@ def demoTextRNN():
     dataRest, labelRest, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
     # split data into train/valid dataset.
     dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
-    print('[INFO] <main> Get ' + str(len(dataTrain)) + ' Train data, ' + str(len(dataValid)) + ' VALID data, '
+    print('[INFO] <main> Get ' + str(len(dataTrain)) + ' TRAIN data, ' + str(len(dataValid)) + ' VALID data, '
           + str(len(dataTest)) + ' TEST data. (Total: ' + str(len(dataTrain)+len(dataValid)+len(dataTest)) + ')')
 
     # TextRNNTrain
@@ -1567,6 +1567,7 @@ def demoPatch():
         diffProps = np.load(tempPath + '/props.npy', allow_pickle=True)
         print('[INFO] <GetDiffProps> Load ' + str(len(diffProps)) + ' diff property data from ' + tempPath + '/props.npy.')
     # normalize the tokens of identifiers, literals, and comments.
+    diffProps = ProcessTokens(diffProps)
     diffProps = NormalizeTokens(diffProps, normType=0)
 
     # get the diff token vocabulary.
@@ -1586,8 +1587,7 @@ def demoPatch():
     dataTrain, labelTrain, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
     # split data into train/valid dataset.
     #dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
-    #print('[INFO] <main> Get ' + str(len(dataTrain)) + ' Train data, ' + str(len(dataValid)) + ' VALID data, '
-    #      + str(len(dataTest)) + ' TEST data. (Total: ' + str(len(dataTrain)+len(dataValid)+len(dataTest)) + ')')
+    print('[INFO] <main> Get ' + str(len(dataTrain)) + ' TRAIN data, ' + str(len(dataTest)) + ' TEST data. (Total: ' + str(len(dataTrain)+len(dataTest)) + ')')
 
     # TextRNNTrain
     if (_MODEL_) & (os.path.exists(tempPath + '/model_TextRNN.pth')):
@@ -1603,6 +1603,31 @@ def demoPatch():
     _, confusion = OutputEval(predictions, labelTest, 'TextRNN')
 
     return
+
+def ProcessTokens(props):
+    '''
+    only maintain the diff parts of the code.
+    :param props: the features of diff code.
+    [[[tokens], [nums], [nums], 0/1], ...]
+    :return: props - the normalized features of diff code.
+    [[[tokens], [nums], [nums], 0/1], ...]
+    '''
+
+    propsNew = []
+    for item in props:
+        # the number of tokens.
+        numTokens = len(item[1])
+        # item[0]: tokens, item[1]: tokenTypes, item[2]: diffTypes, item[3]: label.
+        tokens = [item[0][n] for n in range(numTokens) if (item[2][n])]
+        tokenTypes = [item[1][n] for n in range(numTokens) if (item[2][n])]
+        diffTypes = [item[2][n] for n in range(numTokens) if (item[2][n])]
+        label = item[3]
+        # reconstruct sample.
+        sample = [tokens, tokenTypes, diffTypes, label]
+        propsNew.append(sample)
+    #print(propsNew[0])
+
+    return propsNew
 
 def NormalizeTokens(props, normType=0):
     '''
