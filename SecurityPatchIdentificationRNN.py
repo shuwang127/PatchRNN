@@ -72,11 +72,11 @@ _MRnnBatchSz_   = 128       # 128
 _MRnnLearnRt_   = 0.0001    # 0.0001
 _PRnnBatchSz_   = 256       # 256
 _PRnnLearnRt_   = 0.0001    # 0.0001
-# hyper-parameters. (unnecessary to modify)
+# hyper-parameters. (trivial network parameters, unnecessary to modify)
 _DiffExtraDim_  = 2         # 2
 _DRnnHidLay_    = 1         # 1
 _MRnnHidLay_    = 1         # 1
-# hyper-parameters. (epoch related, unnecessary to modify)
+# hyper-parameters. (epoch related parameters, unnecessary to modify)
 _DRnnMaxEpoch_  = 1000      # 1000
 _DRnnPerEpoch_  = 1         # 1
 _DRnnJudEpoch_  = 10        # 10
@@ -87,14 +87,15 @@ _PRnnMaxEpoch_  = 1000      # 1000
 _PRnnPerEpoch_  = 1         # 1
 _PRnnJudEpoch_  = 10        # 10
 # hyper-parameters. (flow control)
-_DEBUG_ = 0 # 0 : release
-            # 1 : debug
-_LOCK_ =  0 # 0 : unlocked - create random split sets.
-            # 1 : locked   - use the saved split sets.
-_MODEL_ = 0 # 0 : unlocked - train a new model.
-            # 1 : locked   - load the saved model.
-_NORM_ =  0 # 0 : normalize with VAR/FUNC.
-            # 1 : normalize with VARn/FUNCn.
+_DEBUG_ = 0 #  0 : release
+            #  1 : debug
+_LOCK_ =  0 #  0 : unlocked - create random split sets.
+            #  1 : locked   - use the saved split sets.
+_MODEL_ = 0 #  0 : unlocked - train a new model.
+            #  1 : locked   - load the saved model.
+_NORM_ =  1 # -1 : not normalize tokens.
+            #  0 : normalize with VAR/FUNC.
+            #  1 : normalize with VARn/FUNCn.
 
 # print setting.
 pd.options.display.max_columns = None
@@ -1613,7 +1614,6 @@ def demoPatch():
 
     # combine the diff data with the message data.
     data, label = CombinePropsMsgs(diffData, msgData, diffLabels, msgLabels)
-
     # split data into rest/test dataset.
     dataTrain, labelTrain, dataTest, labelTest = SplitData(data, label, 'test', rate=0.2)
     print('[INFO] <main> Get ' + str(len(dataTrain)) + ' TRAIN data, ' + str(len(dataTest))
@@ -1629,7 +1629,7 @@ def demoPatch():
         model = PatchRNNTrain(dataTrain, labelTrain, dataTest, labelTest, preWDiff=diffPreWeights, preWMsg=msgPreWeights,
                              batchsize=_PRnnBatchSz_, learnRate=_PRnnLearnRt_, dTest=dataTest, lTest=labelTest)
 
-    # MsgRNNTest
+    # PatchRNNTest
     predictions, accuracy = PatchRNNTest(model, dataTest, labelTest, batchsize=_PRnnBatchSz_)
     _, confusion = OutputEval(predictions, labelTest, 'PatchRNN')
 
@@ -1667,11 +1667,15 @@ def NormalizeTokens(props, normType=0):
     normalize the tokens of identifiers, literals, and comments.
     :param props: the features of diff code.
     [[[tokens], [nums], [nums], 0/1], ...]
-    :param normType: 0 - only identify variable type and function type. VAR / FUNC
+    :param normType:-1 - not normalize the tokens.
+                     0 - only identify variable type and function type. VAR / FUNC
                      1 - identify the identical variable and function.  VAR0, VAR1, ... / FUNC0, FUNC1, ...
     :return: props - the normalized features of diff code.
     [[[tokens], [nums], [nums], 0/1], ...]
     '''
+
+    if (-1 == normType):
+        return props
 
     for item in props:
         # get tokens and token types.
@@ -1814,7 +1818,7 @@ class PatchRNN(nn.Module):
         if _DEBUG_: print(_DiffExtraDim_)
         self.lstmDiff = nn.LSTM(input_size=emDimDiff+_DiffExtraDim_, hidden_size=hidSizDiff, num_layers=hidLayDiff, bidirectional=True)
         # Fully-Connected Layer for diff.
-        self.fcDiff = nn.Linear(hidSizDiff * hidLayDiff * 2, class_num)
+        self.fcDiff = nn.Linear(hidSizDiff * hidLayDiff * 2, hidSizDiff * hidLayDiff)
     # msg.
         vSizMsg, emDimMsg = preWMsg.size()
         # Embedding Layer for msg.
@@ -1824,10 +1828,12 @@ class PatchRNN(nn.Module):
         # LSTM Layer for msg.
         self.lstmMsg = nn.LSTM(input_size=emDimMsg, hidden_size=hidSizMsg, num_layers=hidLayMsg, bidirectional=True)
         # Fully-Connected Layer for msg.
-        self.fcMsg = nn.Linear(hidSizMsg * hidLayMsg * 2, class_num)
+        self.fcMsg = nn.Linear(hidSizMsg * hidLayMsg * 2, hidSizMsg * hidLayMsg)
     # common.
         # Fully-Connected Layer.
         self.fc = nn.Linear((hidSizDiff * hidLayDiff + hidSizMsg * hidLayMsg) * 2, class_num)
+        self.fc1 = nn.Linear((hidSizDiff * hidLayDiff + hidSizMsg * hidLayMsg) * 2, hidSizDiff * hidLayDiff + hidSizMsg * hidLayMsg)
+        self.fc2 = nn.Linear(hidSizDiff * hidLayDiff + hidSizMsg * hidLayMsg, class_num)
         # Softmax non-linearity.
         self.softmax = nn.Softmax(dim=-1)
 
@@ -1874,9 +1880,18 @@ class PatchRNN(nn.Module):
         # featMapMsg    batch_size * (hidden_size * num_layers * direction_num)
         #print(featMapMsg.size())
     # common.
+        # combine + 1 layer.
         featMap = torch.cat((featMapDiff, featMapMsg), dim=1)
         #print(featMap.size())
-        final_out = self.fc(featMap)        # batch_size * class_num
+        #final_out = self.fc(featMap)        # batch_size * class_num
+        # combine + 2 layers.
+        featMap = self.fc1(featMap)
+        final_out = self.fc2(featMap)
+        # separate + 2 layers.
+        #featMapDiff = self.fcDiff(featMapDiff)
+        #featMapMsg = self.fcMsg(featMapMsg)
+        #featMap = torch.cat((featMapDiff, featMapMsg), dim=1)
+        #final_out = self.fc2(featMap)
         #print(final_out.size())
         return self.softmax(final_out)      # batch_size * class_num
 
@@ -2093,17 +2108,3 @@ if __name__ == '__main__':
     #demoDiffRNN()
     #demoCommitMsg()
     demoPatch()
-    #diffData = np.load(tempPath + '/newdata_' + str(_DiffMaxLen_) + '.npy')
-    #diffLabels = np.load(tempPath + '/nlabels_' + str(_DiffMaxLen_) + '.npy')
-    #dataRest, labelRest, dataTest, labelTest = SplitData(diffData, diffLabels, 'test', rate=0.2)
-    #dataTrain, labelTrain, dataValid, labelValid = SplitData(dataRest, labelRest, 'valid', rate=0.2)
-    #diffPreWeights = np.load(tempPath + '/preWeights.npy')
-    #if (_MODEL_) & (os.path.exists(tempPath + '/model_DiffRNN.pth')):
-    #    preWeights = torch.from_numpy(diffPreWeights)
-    #    model = DiffRNN(preWeights, hiddenSize=_DRnnHidSiz_, hiddenLayers=_DRnnHidLay_)
-    #    model.load_state_dict(torch.load(tempPath + '/model_DiffRNN.pth'))
-    #else:
-    #    model = DiffRNNTrain(dataTrain, labelTrain, dataValid, labelValid, preWeights=diffPreWeights,
-    #                         batchsize=_DRnnBatchSz_, learnRate=_DRnnLearnRt_, dTest=dataTest, lTest=labelTest)
-    #predictions, accuracy = DiffRNNTest(model, dataTest, labelTest, batchsize=_DRnnBatchSz_)
-    #_, confusion = OutputEval(predictions, labelTest, 'DiffRNN')
