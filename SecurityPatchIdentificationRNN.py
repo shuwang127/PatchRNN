@@ -1,8 +1,8 @@
 '''
     SecurityPatchIdentificationRNN: Security Patch Identification using RNN model.
     Developer: Shu Wang
-    Date: 2020-07-23
-    Version: S2020.07.23-V3
+    Date: 2020-07-28
+    Version: S2020.07.28-V3
     Description: patch identification using both commit messages and normalized diff code.
     File Structure:
     SecurityPatchIdentificationRNN
@@ -26,10 +26,6 @@
         nltk  >= 3.3
 '''
 
-# environment settings.
-_COLAB_ = 0 # 0 : Local environment.
-            # 1 : Google Colaboratory.
-
 # dependencies.
 import os
 os.system('pip install clang')
@@ -52,7 +48,9 @@ import torch.optim as optim
 import torch.utils.data as torchdata
 from sklearn.metrics import accuracy_score
 
-# file path.
+# environment settings.
+_COLAB_ = 0 if (os.getenv('COLAB_GPU', 'NONE') == 'NONE') else 1 # 0 : Local environment, 1 : Google Colaboratory.
+# file paths.
 rootPath = './drive/My Drive/Colab Notebooks/' if (_COLAB_) else './'
 dataPath = rootPath + '/data/'
 sDatPath = dataPath + '/security_patch/'
@@ -60,10 +58,10 @@ pDatPath = dataPath + '/positives/'
 nDatPath = dataPath + '/negatives/'
 tempPath = rootPath + '/temp/'
 
-# hyper-parameters. (affect GPU memory)
+# hyper-parameters. (affect GPU memory size)
 _DiffEmbedDim_  = 128       # 128
 _DiffMaxLen_    = 600       # 200(0.7), 314(0.8), 609(0.9), 1100(0.95), 2200(0.98), 3289(0.99), 5000(0.995), 10000(0.9997)
-_DRnnHidSiz_    = 32        # 32
+_DRnnHidSiz_    = 16        # 16
 _MsgEmbedDim_   = 128       # 128
 _MsgMaxLen_     = 200       # 54(0.9), 78(0.95), 130(0.98), 187(0.99), 268(0.995), 356(0.998), 516(0.999), 1434(1)
 _MRnnHidSiz_    = 16        # 16
@@ -72,23 +70,23 @@ _DRnnBatchSz_   = 128       # 128
 _DRnnLearnRt_   = 0.0001    # 0.0001
 _MRnnBatchSz_   = 128       # 128
 _MRnnLearnRt_   = 0.0001    # 0.0001
-_PRnnBatchSz_   = 128       # 128
+_PRnnBatchSz_   = 256       # 256
 _PRnnLearnRt_   = 0.0001    # 0.0001
 # hyper-parameters. (unnecessary to modify)
 _DiffExtraDim_  = 2         # 2
 _DRnnHidLay_    = 1         # 1
+_MRnnHidLay_    = 1         # 1
+# hyper-parameters. (epoch related, unnecessary to modify)
 _DRnnMaxEpoch_  = 1000      # 1000
 _DRnnPerEpoch_  = 1         # 1
 _DRnnJudEpoch_  = 10        # 10
-_MRnnHidLay_    = 1         # 1
 _MRnnMaxEpoch_  = 1000      # 1000
 _MRnnPerEpoch_  = 1         # 1
 _MRnnJudEpoch_  = 10        # 10
 _PRnnMaxEpoch_  = 1000      # 1000
 _PRnnPerEpoch_  = 1         # 1
 _PRnnJudEpoch_  = 10        # 10
-
-# control
+# hyper-parameters. (flow control)
 _DEBUG_ = 0 # 0 : release
             # 1 : debug
 _LOCK_ =  0 # 0 : unlocked - create random split sets.
@@ -1744,8 +1742,8 @@ def CombinePropsMsgs(props, msgs, plabels, mlabels):
     :param msgs: message data. [[n, ...], ...]
     :param plabels: diff labels. [[0/1], ...]
     :param mlabels: message labels. [[0/1], ...]
-    :return: np.array(data) - combined data.
-             np.array(plabels) - combined labels.
+    :return: np.array(data) - combined data. [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, {-1~1}, n], ...], ...]
+             np.array(plabels) - combined labels. [[0/1], ...]
     '''
 
     # check the lengths.
@@ -1789,7 +1787,7 @@ def CombinePropsMsgs(props, msgs, plabels, mlabels):
 
 class PatchRNN(nn.Module):
     '''
-    PatchRNN : convert a diff data into a predicted label.
+    PatchRNN : convert a patch data into a predicted label.
     '''
 
     def __init__(self, preWDiff, preWMsg, hidSizDiff=32, hidSizMsg=32, hidLayDiff=1, hidLayMsg=1):
@@ -1889,7 +1887,8 @@ def PatchRNNTrain(dTrain, lTrain, dValid, lValid, preWDiff, preWMsg, batchsize=6
     :param lTrain: training label. [[n, ...], ...]
     :param dValid: validation data. [[n, ...], ...]
     :param lValid: validation label. [[n, ...], ...]
-    :param preWeights: pre-trained weights for embedding layer.
+    :param preWDiff: pre-trained weights for diff embedding layer.
+    :param preWMsg: pre-trained weights for msg embedding layer.
     :param batchsize: number of samples in a batch.
     :param learnRate: learning rate.
     :param dTest: test data. [[n, ...], ...]
