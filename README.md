@@ -4,9 +4,9 @@
 
 **Developer**: Shu Wang
 
-**Date**: 2020-07-23
+**Date**: 2020-07-28
 
-**Version**: S2020.07.23-V3
+**Version**: S2020.07.28-V3
 
 **Description**: patch identification using both commit messages and normalized diff code.
 
