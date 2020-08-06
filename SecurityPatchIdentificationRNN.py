@@ -1772,8 +1772,10 @@ def AbstractTokens(props, iType=1, lType=1):
                 elif 1 == markFuc[n]:
                     tokens[n] = fucDict[tokens[n]]
     #print(tokens)
-    print('[INFO] <AbstractTokens> Abstract the tokens of identifiers, literals, and comments with iType ' + str(iType), end='')
+    print('[INFO] <AbstractTokens> Abstract the tokens of identifiers with iType ' + str(iType), end='')
     print(' (VAR/FUNC).') if (0 == iType) else print(' (VARn/FUNCn).')
+    print('[INFO] <AbstractTokens> Abstract the tokens of literals, and comments with iType ' + str(lType), end='')
+    print(' (LITERAL/COMMENT).') if (0 == lType) else print(' (LITERAL/n/COMMENT).')
 
     return props
 
