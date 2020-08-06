@@ -89,13 +89,19 @@ _PRnnJudEpoch_  = 10        # 10
 # hyper-parameters. (flow control)
 _DEBUG_ = 0 #  0 : release
             #  1 : debug
-_LOCK_ =  0 #  0 : unlocked - create random split sets.
+_LOCK_  = 0 #  0 : unlocked - create random split sets.
             #  1 : locked   - use the saved split sets.
 _MODEL_ = 0 #  0 : unlocked - train a new model.
             #  1 : locked   - load the saved model.
-_NORM_ =  1 # -1 : not normalize tokens.
-            #  0 : normalize with VAR/FUNC.
-            #  1 : normalize with VARn/FUNCn.
+_DTYP_  = 1 #  0 : maintain both diff code and context code.
+            #  1 : only maintain diff code.
+_CTYP_  = 1 #  0 : maintain both the code and comments.
+            #  1 : only maintain code and delete comments.
+_NIND_ =  1 # -1 : not abstract tokens. (and will disable _NLIT_)
+            #  0 : abstract identifiers with VAR/FUNC.
+            #  1 : abstract identifiers with VARn/FUNCn.
+_NLIT_ =  1 #  0 : abstract literals with LITERAL.
+            #  1 : abstract literals with LITERAL/n.
 
 # print setting.
 pd.options.display.max_columns = None
@@ -1579,9 +1585,9 @@ def demoPatch():
         diffProps = np.load(tempPath + '/props.npy', allow_pickle=True)
         print('[INFO] <GetDiffProps> Load ' + str(len(diffProps)) + ' diff property data from ' + tempPath + '/props.npy.')
     # only maintain the diff parts of the code.
-    diffProps = ProcessTokens(diffProps)
+    diffProps = ProcessTokens(diffProps, dType=_DTYP_, cType=_CTYP_)
     # normalize the tokens of identifiers, literals, and comments.
-    diffProps = NormalizeTokens(diffProps, normType=_NORM_)
+    diffProps = AbstractTokens(diffProps, iType=_NIND_, lType=_NLIT_)
     # get the diff token vocabulary.
     diffVocab, diffMaxLen = GetDiffVocab(diffProps)
     # get the max diff length.
@@ -1635,46 +1641,74 @@ def demoPatch():
 
     return
 
-def ProcessTokens(props):
+def ProcessTokens(props, dType=1, cType=1):
     '''
     only maintain the diff parts of the code.
     :param props: the features of diff code.
     [[[tokens], [nums], [nums], 0/1], ...]
+    :param dType: 0 - maintain both diff code and context code.
+                  1 - only maintain diff code.
+    :param cType: 0 - maintain both the code and comments.
+                  1 - only maintain code and delete comments.
     :return: props - the normalized features of diff code.
     [[[tokens], [nums], [nums], 0/1], ...]
     '''
 
-    propsNew = []
-    for item in props:
-        # the number of tokens.
-        numTokens = len(item[1])
-        # item[0]: tokens, item[1]: tokenTypes, item[2]: diffTypes, item[3]: label.
-        tokens = [item[0][n] for n in range(numTokens) if (item[2][n])]
-        tokenTypes = [item[1][n] for n in range(numTokens) if (item[2][n])]
-        diffTypes = [item[2][n] for n in range(numTokens) if (item[2][n])]
-        label = item[3]
-        # reconstruct sample.
-        sample = [tokens, tokenTypes, diffTypes, label]
-        propsNew.append(sample)
+    # process diff code.
+    if (1 == dType):
+        propsNew = []
+        for item in props:
+            # the number of tokens.
+            numTokens = len(item[1])
+            # item[0]: tokens, item[1]: tokenTypes, item[2]: diffTypes, item[3]: label.
+            tokens = [item[0][n] for n in range(numTokens) if (item[2][n])]
+            tokenTypes = [item[1][n] for n in range(numTokens) if (item[2][n])]
+            diffTypes = [item[2][n] for n in range(numTokens) if (item[2][n])]
+            label = item[3]
+            # reconstruct sample.
+            sample = [tokens, tokenTypes, diffTypes, label]
+            propsNew.append(sample)
+        props = propsNew
+        print('[INFO] <ProcessTokens> Only maintain the diff parts of the code.')
 
-    #print(propsNew[0])
-    print('[INFO] <ProcessTokens> Only maintain the diff parts of the code.')
+    # process comments.
+    if (1 == cType):
+        propsNew = []
+        for item in props:
+            # the number of tokens.
+            numTokens = len(item[1])
+            # item[0]: tokens, item[1]: tokenTypes, item[2]: diffTypes, item[3]: label.
+            tokens = [item[0][n] for n in range(numTokens) if (item[1][n] < 5)]
+            tokenTypes = [item[1][n] for n in range(numTokens) if (item[1][n] < 5)]
+            diffTypes = [item[2][n] for n in range(numTokens) if (item[1][n] < 5)]
+            label = item[3]
+            # reconstruct sample.
+            sample = [tokens, tokenTypes, diffTypes, label]
+            propsNew.append(sample)
+        props = propsNew
+        print('[INFO] <ProcessTokens> Delete the comment parts of the diff code.')
 
-    return propsNew
+    #print(props[0])
 
-def NormalizeTokens(props, normType=0):
+    return props
+
+def AbstractTokens(props, iType=1, lType=1):
     '''
-    normalize the tokens of identifiers, literals, and comments.
+    abstract the tokens of identifiers, literals, and comments.
     :param props: the features of diff code.
     [[[tokens], [nums], [nums], 0/1], ...]
-    :param normType:-1 - not normalize the tokens.
-                     0 - only identify variable type and function type. VAR / FUNC
-                     1 - identify the identical variable and function.  VAR0, VAR1, ... / FUNC0, FUNC1, ...
-    :return: props - the normalized features of diff code.
+    :param iType:   -1 - not abstract tokens.
+                     0 - only abstract variable type and function type. VAR / FUNC
+                     1 - abstract the identical variable names and function names.  VAR0, VAR1, ... / FUNC0, FUNC1, ...
+    :param lType:   -1 - not abstract tokens.
+                     0 - abstract literals with LITERAL.
+                     1 - abstract literals with LITERAL/n.
+    :return: props - the abstracted features of diff code.
     [[[tokens], [nums], [nums], 0/1], ...]
     '''
 
-    if (-1 == normType):
+    if (iType not in [0, 1]) or (lType not in [0, 1]):
+        print('[INFO] <AbstractTokens> Not abstract the tokens of identifiers, literals, and comments.')
         return props
 
     for item in props:
@@ -1686,7 +1720,7 @@ def NormalizeTokens(props, normType=0):
         #print(tokenTypes)
         #print(numTokens)
 
-        # normalize literals and comments, and separate identifiers into variables and functions.
+        # abstract literals and comments, and separate identifiers into variables and functions.
         markVar = list(np.zeros(numTokens, dtype=int))
         markFuc = list(np.zeros(numTokens, dtype=int))
         for n in range(numTokens):
@@ -1694,7 +1728,11 @@ def NormalizeTokens(props, normType=0):
             if 5 == tokenTypes[n]:
                 tokens[n] = 'COMMENT'
             elif 3 == tokenTypes[n]:
-                tokens[n] = 'LITERAL'
+                if (0 == lType):
+                    tokens[n] = 'LITERAL'
+                elif (1 == lType):
+                    if (not tokens[n].isdigit()):
+                        tokens[n] = 'LITERAL'
             elif 2 == tokenTypes[n]:
                 # separate variable name and function name.
                 if (n < numTokens-1):
@@ -1708,14 +1746,14 @@ def NormalizeTokens(props, normType=0):
         #print(markVar)
         #print(markFuc)
 
-        # normalize variables and functions.
-        if (0 == normType):
+        # abstract variables and functions.
+        if (0 == iType):
             for n in range(numTokens):
                 if 1 == markVar[n]:
                     tokens[n] = 'VAR'
                 elif 1 == markFuc[n]:
                     tokens[n] = 'FUNC'
-        elif (1 == normType):
+        elif (1 == iType):
             # get variable dictionary.
             varList = [tokens[idx] for idx, mark in enumerate(markVar) if mark == 1]
             varVoc  = {}.fromkeys(varList)
@@ -1734,8 +1772,8 @@ def NormalizeTokens(props, normType=0):
                 elif 1 == markFuc[n]:
                     tokens[n] = fucDict[tokens[n]]
     #print(tokens)
-    print('[INFO] <NormalizeTokens> Normalize the tokens of identifiers, literals, and comments with type ' + str(normType), end='')
-    print(' (VAR/FUNC).') if (0 == normType) else print(' (VARn/FUNCn).')
+    print('[INFO] <AbstractTokens> Abstract the tokens of identifiers, literals, and comments with iType ' + str(iType), end='')
+    print(' (VAR/FUNC).') if (0 == iType) else print(' (VARn/FUNCn).')
 
     return props
 
