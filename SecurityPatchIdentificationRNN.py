@@ -65,17 +65,24 @@ _DRnnHidSiz_    = 16        # 16
 _MsgEmbedDim_   = 128       # 128
 _MsgMaxLen_     = 200       # 54(0.9), 78(0.95), 130(0.98), 187(0.99), 268(0.995), 356(0.998), 516(0.999), 1434(1)
 _MRnnHidSiz_    = 16        # 16
+_TwinEmbedDim_  = 128       # 128
+_TwinMaxLen_    = 800       # 224(0.8), 425(0.9), 755(0.95), 1448(0.98), 2270(0.99)
+_TRnnHidSiz_    = 16        # 16
 # hyper-parameters. (affect training speed)
 _DRnnBatchSz_   = 128       # 128
 _DRnnLearnRt_   = 0.0001    # 0.0001
 _MRnnBatchSz_   = 128       # 128
 _MRnnLearnRt_   = 0.0001    # 0.0001
 _PRnnBatchSz_   = 256       # 256
-_PRnnLearnRt_   = 0.0001    # 0.0001
+_PRnnLearnRt_   = 0.0005    # 0.0005
+_TRnnBatchSz_   = 256       # 256
+_TRnnLearnRt_   = 0.0005    # 0.0005
 # hyper-parameters. (trivial network parameters, unnecessary to modify)
 _DiffExtraDim_  = 2         # 2
+_TwinExtraDim_  = 1         # 1
 _DRnnHidLay_    = 1         # 1
 _MRnnHidLay_    = 1         # 1
+_TRnnHidLay_    = 1         # 1
 # hyper-parameters. (epoch related parameters, unnecessary to modify)
 _DRnnMaxEpoch_  = 1000      # 1000
 _DRnnPerEpoch_  = 1         # 1
@@ -86,6 +93,9 @@ _MRnnJudEpoch_  = 10        # 10
 _PRnnMaxEpoch_  = 1000      # 1000
 _PRnnPerEpoch_  = 1         # 1
 _PRnnJudEpoch_  = 10        # 10
+_TRnnMaxEpoch_  = 1000      # 1000
+_TRnnPerEpoch_  = 1         # 1
+_TRnnJudEpoch_  = 10        # 10
 # hyper-parameters. (flow control)
 _DEBUG_ = 0 #  0 : release
             #  1 : debug
@@ -127,6 +137,10 @@ def demoDiffRNN():
         diffProps = np.load(tempPath + '/props.npy', allow_pickle=True)
         print('[INFO] <GetDiffProps> Load ' + str(len(diffProps)) + ' diff property data from ' + tempPath + '/props.npy.')
 
+    # only maintain the diff parts of the code.
+    #diffProps = ProcessTokens(diffProps, dType=_DTYP_, cType=_CTYP_)
+    # normalize the tokens of identifiers, literals, and comments.
+    #diffProps = AbstractTokens(diffProps, iType=_NIND_, lType=_NLIT_)
     # get the diff token vocabulary.
     diffVocab, diffMaxLen = GetDiffVocab(diffProps)
     # get the max diff length.
@@ -2144,7 +2158,653 @@ def PatchRNNTest(model, dTest, lTest, batchsize=64):
 
     return predictions, accuracy
 
+def demoTwin():
+    '''
+        demo program of using both commit message and diff code to identify patches.
+        '''
+
+    # load data.
+    if (not os.path.exists(tempPath + '/data.npy')):  # | (not _DEBUG_)
+        dataLoaded = ReadData()
+    else:
+        dataLoaded = np.load(tempPath + '/data.npy', allow_pickle=True)
+        print('[INFO] <ReadData> Load ' + str(len(dataLoaded)) + ' raw data from ' + tempPath + '/data.npy.')
+
+    # get the diff file properties.
+    if (not os.path.exists(tempPath + '/props.npy')):
+        diffProps = GetDiffProps(dataLoaded)
+    else:
+        diffProps = np.load(tempPath + '/props.npy', allow_pickle=True)
+        print('[INFO] <GetDiffProps> Load ' + str(len(diffProps)) + ' diff property data from ' + tempPath + '/props.npy.')
+    # maintain both the context and diff parts. Delete comments.
+    diffProps = ProcessTokens(diffProps, dType=0, cType=_CTYP_)
+    # normalize the tokens of identifiers (VARn/FUNCn), literals (LITERAL/n), and comments (none).
+    diffProps = AbstractTokens(diffProps, iType=_NIND_, lType=_NLIT_)
+    # get the diff token vocabulary.
+    diffVocab, _ = GetDiffVocab(diffProps)
+    # get the diff token dictionary.
+    diffDict = GetDiffDict(diffVocab)
+    # get pre-trained weights for embedding layer.
+    twinPreWeights = GetDiffEmbed(diffDict, _TwinEmbedDim_)
+    # divide diff code into before/after-version code.
+    twinProps, twinMaxLen = DivideBeforeAfter(diffProps)
+    # get the max twin length.
+    twinMaxLen = _TwinMaxLen_ if (twinMaxLen > _DiffMaxLen_) else twinMaxLen
+    # get the mapping for feature data and labels.
+    twinData, twinLabels = GetTwinMapping(twinProps, twinMaxLen, diffDict)
+    # change the tokentypes into one-hot vector.
+    twinData = UpdateTwinTokenTypes(twinData)
+
+    # get the commit messages from data.
+    if (not os.path.exists(tempPath + '/msgs.npy')):
+        commitMsgs = GetCommitMsgs(dataLoaded)
+    else:
+        commitMsgs = np.load(tempPath + '/msgs.npy', allow_pickle=True)
+        print('[INFO] <GetCommitMsg> Load ' + str(len(commitMsgs)) + ' commit messages from ' + tempPath + '/msgs.npy.')
+    # get the message token vocabulary.
+    msgVocab, msgMaxLen = GetMsgVocab(commitMsgs)
+    # get the max msg length.
+    msgMaxLen = _MsgMaxLen_ if (msgMaxLen > _MsgMaxLen_) else msgMaxLen
+    # get the msg token dictionary.
+    msgDict = GetMsgDict(msgVocab)
+    # get pre-trained weights for embedding layer.
+    msgPreWeights = GetMsgEmbed(msgDict, _MsgEmbedDim_)
+    # get the mapping for feature data and labels.
+    msgData, msgLabels = GetMsgMapping(commitMsgs, msgMaxLen, msgDict)
+
+    # combine the twin data with the message data.
+    data, label = CombineTwinMsgs(twinData, msgData, twinLabels, msgLabels)
+    # split data into rest/test dataset.
+    dataTrain, labelTrain, dataTest, labelTest = SplitData(data, label, 'test', rate=0.2)
+    print('[INFO] <demoTwin> Get ' + str(len(dataTrain)) + ' TRAIN data, ' + str(len(dataTest))
+          + ' TEST data. (Total: ' + str(len(dataTrain) + len(dataTest)) + ')')
+
+    # TwinRNNTrain
+    if (_MODEL_) & (os.path.exists(tempPath + '/model_TwinRNN.pth')):
+        preWTwin = torch.from_numpy(twinPreWeights)
+        preWMsg = torch.from_numpy(msgPreWeights)
+        model = TwinRNN(preWTwin, preWMsg, hidSizTwin=_TRnnHidSiz_, hidSizMsg=_MRnnHidSiz_, hidLayTwin=_TRnnHidLay_, hidLayMsg=_MRnnHidLay_)
+        model.load_state_dict(torch.load(tempPath + '/model_TwinRNN.pth'))
+    else:
+        model = TwinRNNTrain(dataTrain, labelTrain, dataTest, labelTest, preWTwin=twinPreWeights, preWMsg=msgPreWeights,
+                             batchsize=_TRnnBatchSz_, learnRate=_TRnnLearnRt_, dTest=dataTest, lTest=labelTest)
+
+    # TwinRNNTest
+    predictions, accuracy = TwinRNNTest(model, dataTest, labelTest, batchsize=_TRnnBatchSz_)
+    _, confusion = OutputEval(predictions, labelTest, 'TwinRNN')
+
+    return
+
+def DivideBeforeAfter(diffProps):
+
+    # create temp folder.
+    if not os.path.exists(tempPath):
+        os.mkdir(tempPath)
+    fp = open(tempPath + 'twinlen.csv', 'w')
+
+    twinProps = []
+    maxLen = 0
+    # for each sample in diffProps.
+    for item in diffProps:
+        # get the tk, tkT, dfT, lb.
+        tokens = item[0]
+        tokenTypes = item[1]
+        diffTypes = item[2]
+        label = item[3]
+        numTokens = len(diffTypes)
+        # reconstruct tkB, tkTB, tkA, tkTA.
+        tokensB = [tokens[i] for i in range(numTokens) if (diffTypes[i] <= 0)]
+        tokenTypesB = [tokenTypes[i] for i in range(numTokens) if (diffTypes[i] <= 0)]
+        tokensA = [tokens[i] for i in range(numTokens) if (diffTypes[i] >= 0)]
+        tokenTypesA = [tokenTypes[i] for i in range(numTokens) if (diffTypes[i] >= 0)]
+        # reconstruct new sample.
+        sample = [tokensB, tokenTypesB, tokensA, tokenTypesA, label]
+        twinProps.append(sample)
+        # get max length.
+        maxLenAB = max(len(tokenTypesB), len(tokenTypesA))
+        maxLen = maxLenAB if (maxLen < maxLenAB) else maxLen
+        fp.write(str(len(tokenTypesB)) + '\n')
+        fp.write(str(len(tokenTypesA)) + '\n')
+    fp.close()
+
+    #print(twinProps[0])
+    #print(maxLen)
+
+    # print.
+    print('[INFO] <DivideBeforeAfter> Divide diff code into BEFORE-version and AFTER-version code.')
+    print('[INFO] <DivideBeforeAfter> The max length in BEFORE/AFTER-version code is ' + str(maxLen) + ' tokens. (hyperparameter: _TwinMaxLen_ = ' + str(_TwinMaxLen_) + ')')
+
+    return twinProps, maxLen
+
+def GetTwinMapping(props, maxLen, tokenDict):
+    '''
+    Map the feature data into indexed data.
+    :param props: the features of diff code.
+    [[[tokens], [nums], [tokens], [nums], 0/1], ...]
+    :param maxLen: the max length of a twin code.
+    :param tokenDict: the dictionary of diff vocabulary.
+    {'tk': 1, 'tk': 2, ..., 'tk': N, '<pad>': 0}
+    :return: np.array(data) - feature data.
+             [[[n, {0~5}, n, {0~5}], ...], ...]
+             np.array(labels) - labels.
+             [[0/1], ...]
+    '''
+
+    def PadList(dList, pad, length):
+        '''
+        Pad the list data to a fixed length.
+        :param dList: the list data - [ , , ...]
+        :param pad: the variable used to pad.
+        :param length: the fixed length.
+        :return: dList - padded list data. [ , , ...]
+        '''
+
+        if len(dList) <= length:
+            dList.extend(pad for i in range(length - len(dList)))
+        elif len(dList) > length:
+            dList = dList[0:length]
+
+        return dList
+
+    # initialize the data and labels.
+    data = []
+    labels = []
+
+    # for each sample.
+    for item in props:
+        # initialize sample.
+        sample = []
+
+        # process tokensB.
+        tokens = item[0]
+        tokens = PadList(tokens, '<pad>', maxLen)
+        tokens2index = []
+        for tk in tokens:
+            tokens2index.append(tokenDict[tk])
+        sample.append(tokens2index)
+        # process tokenTypesB.
+        tokenTypes = item[1]
+        tokenTypes = PadList(tokenTypes, 0, maxLen)
+        sample.append(tokenTypes)
+        # process tokensA.
+        tokens = item[2]
+        tokens = PadList(tokens, '<pad>', maxLen)
+        tokens2index = []
+        for tk in tokens:
+            tokens2index.append(tokenDict[tk])
+        sample.append(tokens2index)
+        # process tokenTypesA.
+        tokenTypes = item[3]
+        tokenTypes = PadList(tokenTypes, 0, maxLen)
+        sample.append(tokenTypes)
+
+        # process sample.
+        sample = np.array(sample).T
+        data.append(sample)
+        # process label.
+        label = item[4]
+        labels.append([label])
+
+    if _DEBUG_:
+        print('[DEBUG] data:')
+        print(data[0:3])
+        print('[DEBUG] labels:')
+        print(labels[0:3])
+
+    # print.
+    print('[INFO] <GetTwinMapping> Create ' + str(len(data)) + ' feature data with ' + str(len(data[0])) + ' * ' + str(len(data[0][0])) + ' matrix.')
+    print('[INFO] <GetTwinMapping> Create ' + str(len(labels)) + ' labels with 1 * 1 matrix.')
+
+    # save files.
+    if (not os.path.exists(tempPath + '/tdata_' + str(maxLen) + '.npy')) \
+            | (not os.path.exists(tempPath + '/tlabels_' + str(maxLen) + '.npy')):
+        np.save(tempPath + '/tdata_' + str(maxLen) + '.npy', data, allow_pickle=True)
+        print('[INFO] <GetTwinMapping> Save the mapped numpy data to ' + tempPath + '/tdata_' + str(maxLen) + '.npy.')
+        np.save(tempPath + '/tlabels_' + str(maxLen) + '.npy', labels, allow_pickle=True)
+        print('[INFO] <GetTwinMapping> Save the mapped numpy labels to ' + tempPath + '/tlabels_' + str(maxLen) + '.npy.')
+
+    return np.array(data), np.array(labels)
+
+def UpdateTwinTokenTypes(data):
+    '''
+    Update the token type in the feature data into one-hot vector.
+    :param data: feature data. [[[n, {0~5}, n, {0~5},], ...], ...]
+    :return: np.array(newData). [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, n, 0/1, 0/1, 0/1, 0/1, 0/1], ...], ...]
+    '''
+
+    newData = []
+    # for each sample.
+    for item in data:
+        # get the transpose of props.
+        itemT = item.T
+        # initialize new sample.
+        newItem = []
+        newItem.append(itemT[0])
+        newItem.extend(np.zeros((5, len(item)), dtype=int))
+        newItem.append(itemT[2])
+        newItem.extend(np.zeros((5, len(item)), dtype=int))
+        # assign the new sample.
+        for i in range(len(item)):
+            tokenType = itemT[1][i]
+            if (tokenType):
+                newItem[tokenType][i] = 1
+            tokenType = itemT[3][i]
+            if (tokenType):
+                newItem[tokenType+6][i] = 1
+        # get the transpose of new sample.
+        newItem = np.array(newItem).T
+        # append new sample.
+        newData.append(newItem)
+
+    if _DEBUG_:
+        print('[DEBUG] newData:')
+        print(newData[0:3])
+
+    # print.
+    print('[INFO] <UpdateTwinTokenTypes> Update ' + str(len(newData)) + ' feature data with ' + str(len(newData[0])) + ' * ' + str(len(newData[0][0])) + ' matrix.')
+
+    # save files.
+    if (not os.path.exists(tempPath + '/newtdata_' + str(len(newData[0])) + '.npy')):
+        np.save(tempPath + '/newtdata_' + str(len(newData[0])) + '.npy', newData, allow_pickle=True)
+        print('[INFO] <UpdateTwinTokenTypes> Save the mapped numpy data to ' + tempPath + '/newtdata_' + str(len(newData[0])) + '.npy.')
+
+    # change marco.
+    global _TwinExtraDim_
+    _TwinExtraDim_ = 5
+
+    return np.array(newData)
+
+def CombineTwinMsgs(props, msgs, plabels, mlabels):
+    '''
+    Combine the twin props with the commit messages.
+    :param props: twin data. [[[n, {0~5}, n, {0~5}], ...], ...] or [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, n, 0/1, 0/1, 0/1, 0/1, 0/1], ...], ...]
+    :param msgs: message data. [[n, ...], ...]
+    :param plabels: twin labels. [[0/1], ...]
+    :param mlabels: message labels. [[0/1], ...]
+    :return: np.array(data) - combined data. [[[n, 0/1, 0/1, 0/1, 0/1, 0/1, n, 0/1, 0/1, 0/1, 0/1, 0/1, n], ...], ...]
+             np.array(plabels) - combined labels. [[0/1], ...]
+    '''
+
+    # check the lengths.
+    if (len(plabels) != len(mlabels)):
+        print('[ERROR] <CombineTwinMsgs> the data lengths are mismatch.')
+        return [[]], [[]]
+
+    # check the labels.
+    cntMatch = 0
+    for n in range(len(plabels)):
+        if (plabels[n][0] == mlabels[n][0]):
+            cntMatch += 1
+    if (cntMatch != len(plabels)):
+        print('[ERROR] <CombineTwinMsgs> the labels are mismatch. ' + str(cntMatch) + '/' + str(len(plabels)) + '.')
+        return [[]], [[]]
+
+    #print(props[1], len(props[1]))
+    #print(msgs[1], len(msgs[1]))
+
+    data = []
+    for n in range(len(plabels)):
+        # get the twin prop and message.
+        prop = props[n]
+        msg = msgs[n]
+        # pad data.
+        if (_TwinMaxLen_ >= _MsgMaxLen_):
+            msg = np.pad(msg, (0, _TwinMaxLen_ - _MsgMaxLen_), 'constant')
+        else:
+            prop = np.pad(prop, ((0, _MsgMaxLen_ - _TwinMaxLen_), (0, 0)), 'constant')
+        #print(msg, len(msg))
+        #print(prop, len(prop))
+        # reconstruct sample.
+        sample = np.vstack((prop.T, msg))
+        # append the sample to data.
+        data.append(sample.T)
+
+    if _DEBUG_:
+        print(np.array(data[0:3]))
+
+    print('[INFO] <CombineTwinMsgs> Combine the twin props with the commit messages.')
+
+    return np.array(data), np.array(plabels)
+
+class TwinRNN(nn.Module):
+    '''
+    TwinRNN : convert a patch data into a predicted label.
+    '''
+
+    def __init__(self, preWTwin, preWMsg, hidSizTwin=32, hidSizMsg=32, hidLayTwin=1, hidLayMsg=1):
+        '''
+        define each layer in the network model.
+        :param preWTwin: tensor pre-trained weights for embedding layer for twin.
+        :param preWMsg: tensor pre-trained weights for embedding layer for msg.
+        :param hidSizTwin: node number in the hidden layer for twin.
+        :param hidSizMsg: node number in the hidden layer for msg.
+        :param hidLayTwin: number of hidden layer for twin.
+        :param hidLayMsg: number of hidden layer for msg.
+        '''
+
+        super(TwinRNN, self).__init__()
+        # parameters.
+        class_num = 2
+    # twin.
+        vSizTwin, emDimTwin = preWTwin.size()
+        # Embedding Layer for twin.
+        self.embedTwin = nn.Embedding(num_embeddings=vSizTwin, embedding_dim=emDimTwin)
+        self.embedTwin.load_state_dict({'weight': preWTwin})
+        self.embedTwin.weight.requires_grad = True
+        # LSTM Layer for twin.
+        if _DEBUG_: print(_TwinExtraDim_)
+        self.lstmTwin = nn.LSTM(input_size=emDimTwin+_TwinExtraDim_, hidden_size=hidSizTwin, num_layers=hidLayTwin, bidirectional=True)
+    # msg.
+        vSizMsg, emDimMsg = preWMsg.size()
+        # Embedding Layer for msg.
+        self.embedMsg = nn.Embedding(num_embeddings=vSizMsg, embedding_dim=emDimMsg)
+        self.embedMsg.load_state_dict({'weight': preWMsg})
+        self.embedMsg.weight.requires_grad = True
+        # LSTM Layer for msg.
+        self.lstmMsg = nn.LSTM(input_size=emDimMsg, hidden_size=hidSizMsg, num_layers=hidLayMsg, bidirectional=True)
+    # common.
+        # Fully-Connected Layer.
+        self.fc1 = nn.Linear(hidSizTwin * hidLayTwin * 4, hidSizTwin * hidLayTwin * 2)
+        self.fc2 = nn.Linear(hidSizTwin * hidLayTwin * 2, class_num)
+        self.fc3 = nn.Linear((hidSizTwin * hidLayTwin + hidSizMsg * hidLayMsg) * 2, hidSizTwin * hidLayTwin + hidSizMsg * hidLayMsg)
+        self.fc4 = nn.Linear(hidSizTwin * hidLayTwin + hidSizMsg * hidLayMsg, class_num)
+        # Softmax non-linearity.
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        '''
+        convert inputs to predictions.
+        :param x: input tensor. dimension: batch_size * twin_length * feature_dim.
+        :return: self.softmax(final_out) - predictions.
+        [[0.3, 0.7], [0.2, 0.8], ...]
+        '''
+
+    # twin 1.
+        xTwin = x[:, :_TwinMaxLen_, :6]
+        # xTwin         batch_size * twin_length * feature_dim
+        #print(xTwin.size())
+        embedsTwin = self.embedTwin(xTwin[:, :, 0])
+        # embedsTwin    batch_size * twin_length * embed_dim_twin
+        features = xTwin[:, :, 1:]
+        # features      batch_size * twin_length * _TwinExtraDim_
+        inputsTwin = torch.cat((embedsTwin.float(), features.float()), 2)
+        #print(inputsTwin.size())
+        # inputsTwin    batch_size * twin_length * (embed_dim_twin + _TwinExtraDim_)
+        inputsTwin = inputsTwin.permute(1, 0, 2)
+        # inputsTwin    twin_length * batch_size * (embed_dim_twin + _TwinExtraDim_)
+        lstm_out, (h_n, c_n) = self.lstmTwin(inputsTwin)
+        # lstm_out      twin_length * batch_size * (hidden_size * direction_num)
+        # h_n           (num_layers * direction_num) * batch_size * hidden_size
+        # h_n           (num_layers * direction_num) * batch_size * hidden_size
+        featMapTwin1 = torch.cat([h_n[i, :, :] for i in range(h_n.shape[0])], dim=1)
+        # featMapTwin1   batch_size * (hidden_size * num_layers * direction_num)
+        #print(featMapTwin1)
+    # twin 2.
+        xTwin = x[:, :_TwinMaxLen_, 6:-1]
+        # xTwin         batch_size * twin_length * feature_dim
+        #print(xTwin.size())
+        embedsTwin = self.embedTwin(xTwin[:, :, 0])
+        # embedsTwin    batch_size * twin_length * embed_dim_twin
+        features = xTwin[:, :, 1:]
+        # features      batch_size * twin_length * _TwinExtraDim_
+        inputsTwin = torch.cat((embedsTwin.float(), features.float()), 2)
+        #print(inputsTwin.size())
+        # inputsTwin    batch_size * twin_length * (embed_dim_twin + _TwinExtraDim_)
+        inputsTwin = inputsTwin.permute(1, 0, 2)
+        # inputsTwin    twin_length * batch_size * (embed_dim_twin + _TwinExtraDim_)
+        lstm_out, (h_n, c_n) = self.lstmTwin(inputsTwin)
+        # lstm_out      twin_length * batch_size * (hidden_size * direction_num)
+        # h_n           (num_layers * direction_num) * batch_size * hidden_size
+        # h_n           (num_layers * direction_num) * batch_size * hidden_size
+        featMapTwin2 = torch.cat([h_n[i, :, :] for i in range(h_n.shape[0])], dim=1)
+        # featMapTwin2   batch_size * (hidden_size * num_layers * direction_num)
+        #print(featMapTwin2)
+    # msg.
+        xMsg = x[:, :_MsgMaxLen_, -1]
+        # xMsg          batch_size * msg_length * 1
+        # print(xMsg.size())
+        embedsMsg = self.embedMsg(xMsg)
+        # embedsMsg     batch_size * msg_length * embed_dim_msg
+        inputsMsg = embedsMsg.permute(1, 0, 2)
+        # inputsMsg     msg_length * batch_size * (embed_dim_msg)
+        lstm_out, (h_n, c_n) = self.lstmMsg(inputsMsg)
+        # lstm_out      msg_length * batch_size * (hidden_size * direction_num)
+        # h_n           (num_layers * direction_num) * batch_size * hidden_size
+        # h_n           (num_layers * direction_num) * batch_size * hidden_size
+        featMapMsg = torch.cat([h_n[i, :, :] for i in range(h_n.shape[0])], dim=1)
+        # featMapMsg    batch_size * (hidden_size * num_layers * direction_num)
+        #print(featMapMsg.size())
+    # common (only twins).
+        # combine twins.
+        #featMap = torch.cat((featMapTwin1, featMapTwin2), dim=1)
+        # fc 2 layers.
+        #featMap = self.fc1(featMap)
+        #final_out = self.fc2(featMap)
+        #print(final_out.size())
+    # common (twins + msg)
+        # combine twins.
+        featMap = torch.cat((featMapTwin1, featMapTwin2), dim=1)
+        # fc 1 layers.
+        featMap = self.fc1(featMap)
+        # combine twins + msg.
+        featMap = torch.cat((featMap, featMapMsg), dim=1)
+        # fc 2 layers.
+        featMap = self.fc3(featMap)
+        final_out = self.fc4(featMap)
+
+        return self.softmax(final_out)      # batch_size * class_num
+
+def TwinRNNTrain(dTrain, lTrain, dValid, lValid, preWTwin, preWMsg, batchsize=64, learnRate=0.001, dTest=None, lTest=None):
+    '''
+    Train the TwinRNN model.
+    :param dTrain: training data. [[n, ...], ...]
+    :param lTrain: training label. [[n, ...], ...]
+    :param dValid: validation data. [[n, ...], ...]
+    :param lValid: validation label. [[n, ...], ...]
+    :param preWDiff: pre-trained weights for diff embedding layer.
+    :param preWMsg: pre-trained weights for msg embedding layer.
+    :param batchsize: number of samples in a batch.
+    :param learnRate: learning rate.
+    :param dTest: test data. [[n, ...], ...]
+    :param lTest: test label. [[n, ...], ...]
+    :return: model - the TwinRNN model.
+    '''
+
+    # get the mark of the test dataset.
+    if dTest is None: dTest = []
+    if lTest is None: lTest = []
+    markTest = 1 if (len(dTest)) & (len(lTest)) else 0
+
+    # tensor data processing.
+    xTrain = torch.from_numpy(dTrain).long().cuda()
+    yTrain = torch.from_numpy(lTrain).long().cuda()
+    xValid = torch.from_numpy(dValid).long().cuda()
+    yValid = torch.from_numpy(lValid).long().cuda()
+    if (markTest):
+        xTest = torch.from_numpy(dTest).long().cuda()
+        yTest = torch.from_numpy(lTest).long().cuda()
+
+    # batch size processing.
+    train = torchdata.TensorDataset(xTrain, yTrain)
+    trainloader = torchdata.DataLoader(train, batch_size=batchsize, shuffle=False)
+    valid = torchdata.TensorDataset(xValid, yValid)
+    validloader = torchdata.DataLoader(valid, batch_size=batchsize, shuffle=False)
+    if (markTest):
+        test = torchdata.TensorDataset(xTest, yTest)
+        testloader = torchdata.DataLoader(test, batch_size=batchsize, shuffle=False)
+
+    # get training weights.
+    lbTrain = [item for sublist in lTrain.tolist() for item in sublist]
+    weights = []
+    for lb in range(2):
+        weights.append(1 - lbTrain.count(lb) / len(lbTrain))
+    lbWeights = torch.FloatTensor(weights).cuda()
+
+    # build the model of recurrent neural network.
+    preWTwin = torch.from_numpy(preWTwin)
+    preWMsg = torch.from_numpy(preWMsg)
+    model = TwinRNN(preWTwin, preWMsg, hidSizTwin=_TRnnHidSiz_, hidSizMsg=_MRnnHidSiz_, hidLayTwin=_TRnnHidLay_, hidLayMsg=_MRnnHidLay_)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    print('[INFO] <TwinRNNTrain> ModelType: TwinRNN.')
+    print('[INFO] <TwinRNNTrain> Code Part: EmbedDim: %d, MaxLen: %d, HidNodes: %d, HidLayers: %d.' % (_TwinEmbedDim_, _TwinMaxLen_, _TRnnHidSiz_, _TRnnHidLay_))
+    print('[INFO] <TwinRNNTrain> Msg  Part: EmbedDim: %d, MaxLen: %d, HidNodes: %d, HidLayers: %d.' % (_MsgEmbedDim_, _MsgMaxLen_, _MRnnHidSiz_, _MRnnHidLay_))
+    print('[INFO] <TwinRNNTrain> BatchSize: %d, LearningRate: %.4f, MaxEpoch: %d, PerEpoch: %d, JudEpoch: %d.' % (batchsize, learnRate, _TRnnMaxEpoch_, _TRnnPerEpoch_, _TRnnJudEpoch_))
+    # optimizing with stochastic gradient descent.
+    optimizer = optim.Adam(model.parameters(), lr=learnRate)
+    # seting loss function as mean squared error.
+    criterion = nn.CrossEntropyLoss(weight=lbWeights)
+    # memory
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.enabled = True
+
+    # run on each epoch.
+    accList = [0]
+    for epoch in range(_TRnnMaxEpoch_):
+        # training phase.
+        model.train()
+        lossTrain = 0
+        predictions = []
+        labels = []
+        for iter, (data, label) in enumerate(trainloader):
+            # data conversion.
+            data = data.to(device)
+            label = label.contiguous().view(-1)
+            label = label.to(device)
+            # back propagation.
+            optimizer.zero_grad()  # set the gradients to zero.
+            yhat = model.forward(data)  # get output
+            loss = criterion(yhat, label)
+            loss.backward()
+            optimizer.step()
+            # statistic
+            lossTrain += loss.item() * len(label)
+            preds = yhat.max(1)[1]
+            predictions.extend(preds.int().tolist())
+            labels.extend(label.int().tolist())
+            torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
+        lossTrain /= len(dTrain)
+        # train accuracy.
+        accTrain = accuracy_score(labels, predictions) * 100
+
+        # validation phase.
+        model.eval()
+        predictions = []
+        labels = []
+        with torch.no_grad():
+            for iter, (data, label) in enumerate(validloader):
+                # data conversion.
+                data = data.to(device)
+                label = label.contiguous().view(-1)
+                label = label.to(device)
+                # forward propagation.
+                yhat = model.forward(data)  # get output
+                # statistic
+                preds = yhat.max(1)[1]
+                predictions.extend(preds.int().tolist())
+                labels.extend(label.int().tolist())
+                torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
+        # valid accuracy.
+        accValid = accuracy_score(labels, predictions) * 100
+        accList.append(accValid)
+
+        # testing phase.
+        if (markTest):
+            model.eval()
+            predictions = []
+            labels = []
+            with torch.no_grad():
+                for iter, (data, label) in enumerate(testloader):
+                    # data conversion.
+                    data = data.to(device)
+                    label = label.contiguous().view(-1)
+                    label = label.to(device)
+                    # forward propagation.
+                    yhat = model.forward(data)  # get output
+                    # statistic
+                    preds = yhat.max(1)[1]
+                    predictions.extend(preds.int().tolist())
+                    labels.extend(label.int().tolist())
+                    torch.cuda.empty_cache()
+            gc.collect()
+            torch.cuda.empty_cache()
+            # test accuracy.
+            accTest = accuracy_score(labels, predictions) * 100
+
+        # output information.
+        if (0 == (epoch + 1) % _TRnnPerEpoch_):
+            strAcc = '[Epoch {:03}] loss: {:.3}, train acc: {:.3f}%, valid acc: {:.3f}%.'.format(epoch + 1, lossTrain, accTrain, accValid)
+            if (markTest):
+                strAcc = strAcc[:-1] + ', test acc: {:.3f}%.'.format(accTest)
+            print(strAcc)
+        # save the best model.
+        if (accList[-1] > max(accList[0:-1])):
+            torch.save(model.state_dict(), tempPath + '/model_TwinRNN.pth')
+        # stop judgement.
+        if (epoch >= _TRnnJudEpoch_) and (accList[-1] < min(accList[-1-_TRnnJudEpoch_:-1])):
+            break
+
+    # load best model.
+    model.load_state_dict(torch.load(tempPath + '/model_TwinRNN.pth'))
+    print('[INFO] <TwinRNNTrain> Finish training TwinRNN model. (Best model: ' + tempPath + '/model_TwinRNN.pth)')
+
+    return model
+
+def TwinRNNTest(model, dTest, lTest, batchsize=64):
+    '''
+    Test the TwinRNN model.
+    :param model: deep learning model.
+    :param dTest: test data.
+    :param lTest: test label.
+    :param batchsize: number of samples in a batch
+    :return: predictions - predicted labels. [[0], [1], ...]
+             accuracy - the total test accuracy. numeric
+    '''
+
+    # tensor data processing.
+    xTest = torch.from_numpy(dTest).long().cuda()
+    yTest = torch.from_numpy(lTest).long().cuda()
+
+    # batch size processing.
+    test = torchdata.TensorDataset(xTest, yTest)
+    testloader = torchdata.DataLoader(test, batch_size=batchsize, shuffle=False)
+
+    # load the model of recurrent neural network.
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    # testing phase.
+    model.eval()
+    predictions = []
+    labels = []
+    with torch.no_grad():
+        for iter, (data, label) in enumerate(testloader):
+            # data conversion.
+            data = data.to(device)
+            label = label.contiguous().view(-1)
+            label = label.to(device)
+            # forward propagation.
+            yhat = model.forward(data)  # get output
+            # statistic
+            preds = yhat.max(1)[1]
+            predictions.extend(preds.int().tolist())
+            labels.extend(label.int().tolist())
+            torch.cuda.empty_cache()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # testing accuracy.
+    accuracy = accuracy_score(labels, predictions) * 100
+    predictions = [[item] for item in predictions]
+
+    return predictions, accuracy
+
 if __name__ == '__main__':
     #demoDiffRNN()
     #demoCommitMsg()
-    demoPatch()
+    #demoPatch()
+    demoTwin()
