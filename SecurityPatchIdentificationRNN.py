@@ -110,8 +110,10 @@ _CTYP_  = 1 #  0 : maintain both the code and comments.
 _NIND_ =  1 # -1 : not abstract tokens. (and will disable _NLIT_)
             #  0 : abstract identifiers with VAR/FUNC.
             #  1 : abstract identifiers with VARn/FUNCn.
-_NLIT_ =  1 #  0 : abstract literals with LITERAL.
+_NLIT_  = 1 #  0 : abstract literals with LITERAL.
             #  1 : abstract literals with LITERAL/n.
+_TWIN_  = 1 #  0 : only twin neural network.
+            #  1 : twins + msg neural network.
 
 # print setting.
 pd.options.display.max_columns = None
@@ -2574,24 +2576,20 @@ class TwinRNN(nn.Module):
         featMapMsg = torch.cat([h_n[i, :, :] for i in range(h_n.shape[0])], dim=1)
         # featMapMsg    batch_size * (hidden_size * num_layers * direction_num)
         #print(featMapMsg.size())
-    # common (only twins).
-        # combine twins.
-        #featMap = torch.cat((featMapTwin1, featMapTwin2), dim=1)
-        # fc 2 layers.
-        #featMap = self.fc1(featMap)
-        #final_out = self.fc2(featMap)
-        #print(final_out.size())
-    # common (twins + msg)
+    # common.
         # combine twins.
         featMap = torch.cat((featMapTwin1, featMapTwin2), dim=1)
-        # fc 1 layers.
+        # fc layers.
         featMap = self.fc1(featMap)
-        # combine twins + msg.
-        featMap = torch.cat((featMap, featMapMsg), dim=1)
-        # fc 2 layers.
-        featMap = self.fc3(featMap)
-        final_out = self.fc4(featMap)
-
+        if (0 == _TWIN_): # (only twins).
+            final_out = self.fc2(featMap)
+        elif (1 == _TWIN_): # (twins + msg).
+            # combine twins + msg.
+            featMap = torch.cat((featMap, featMapMsg), dim=1)
+            # fc 2 layers.
+            featMap = self.fc3(featMap)
+            final_out = self.fc4(featMap)
+        #print(final_out.size())
         return self.softmax(final_out)      # batch_size * class_num
 
 def TwinRNNTrain(dTrain, lTrain, dValid, lValid, preWTwin, preWMsg, batchsize=64, learnRate=0.001, dTest=None, lTest=None):
