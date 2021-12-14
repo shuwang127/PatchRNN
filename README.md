@@ -1,4 +1,15 @@
-# SecurityPatchIdentificationRNN
+# PatchRNN
+
+**If you are using PatchRNN for work that will result in a publication (thesis, dissertation, paper, article), please use the following citation:**
+
+```bibtex
+@article{wang2021patchrnn,
+  title={PatchRNN: A Deep Learning-Based System for Security Patch Identification},
+  author={Wang, Xinda and Wang, Shu and Feng, Pengbin and Sun, Kun and Jajodia, Sushil and Benchaaboun, Sanae and Geck, Frank},
+  journal={arXiv preprint arXiv:2108.03358},
+  year={2021}
+}
+```
 
 **Task**: Security Patch Identification using RNN model.
 
